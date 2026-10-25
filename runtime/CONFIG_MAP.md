@@ -22,6 +22,7 @@
 | `model.*`、`fallback.*` | 随宿主 | 现场重配 | 没有可用模型 → 根本起不来 |
 | 上下文窗口 / `compression.*` / `prompt_caching.*` | 随宿主 | **重测** | 长会话被过早压缩（丢证据）或成本失控 |
 | `tool_loop_guardrails.*` | 通用基座 | 保底值 | 工具自旋烧 token |
+| `agent.verify_on_stop` / `agent.coding_instructions` / `agent.reasoning_effort` | 通用基座 | **模型爱省 token 时必配**：`verify_on_stop=true`（收尾前催验证；chat 类surface 上 "auto" 默认是关的，必须显式 true）、`coding_instructions=[…]`（编码姿态下的常驻指令，**用真列表不要 JSON 字符串**）、`reasoning_effort≥medium` | 该查不查、该跑不跑；交付被截断成"看起来对"，假绿直接漏到线上 |
 | `memory.*`（含嵌入后端与维度） | 引擎通用，**后端随宿主** | 与库同源 | **召回全空但服务看起来正常**（见 MIGRATION ④） |
 | `skills.*` | 通用 + 业务源 | 安装器 + 挂钩 | 技能缺失（业务技能走挂钩） |
 | `platform_toolsets.*` / 各平台段 | 随平台 | 现场重配 | 渠道能力缺失 |
