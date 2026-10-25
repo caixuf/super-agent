@@ -70,6 +70,20 @@ def _pattern(token: str) -> "re.Pattern[str]":
 PATTERNS = [(token, _pattern(token)) for token in BANNED]
 
 
+#: 生成物 / 缓存目录 —— **必须显式排除**，不能只靠 `.gitignore` 和 git：
+#: 门禁在「没有 .git 的导出目录」里跑时（干净室就是这么跑的：`git archive` 不带 `.git`），
+#: `git ls-files` 会失败并退化为**递归遍历工作树**，于是缓存目录被当成「会进版本库的文件」——
+#: 而 pytest 在收集阶段就写出了 `.pytest_cache/v/cache/nodeids`，参数化自检用例名里带词表
+#: 字面量（`[imfl]` / `[R6]` …），门禁因此红在自己身上（实测：本地绿、干净室红）。
+EXCLUDED_DIRS = frozenset({".git", "__pycache__", ".pytest_cache", ".mypy_cache",
+                           ".ruff_cache", "node_modules", ".venv", "venv"})
+
+
+def _is_generated(path: Path) -> bool:
+    """路径落在生成物/缓存目录里 = 不参与扫描（不是我们写的文本）。"""
+    return any(part in EXCLUDED_DIRS or part.endswith(".egg-info") for part in path.parts)
+
+
 def _committable_files():
     """下一次提交会进版本库的全部文件（相对路径）。git 不可用时退化为遍历工作树。"""
     try:
@@ -80,7 +94,7 @@ def _committable_files():
         out = None
     if out is None or out.returncode != 0:
         return sorted(p for p in REPO_ROOT.rglob("*")
-                      if p.is_file() and ".git" not in p.parts)
+                      if p.is_file() and not _is_generated(p))
     return [REPO_ROOT / line for line in out.stdout.splitlines() if line.strip()]
 
 
@@ -113,10 +127,18 @@ def test_allowlist_is_exactly_two_entries():
     assert ALLOWLIST_GLOBS == ("patches/*.patch",), ALLOWLIST_GLOBS
 
 
+def test_generated_dirs_are_excluded():
+    """自检：生成物 / 缓存不参与扫描 —— 否则门禁会被 pytest 自己写的缓存弄红（干净室里实测过）。"""
+    assert _is_generated(REPO_ROOT / ".pytest_cache" / "v" / "cache" / "nodeids")
+    assert _is_generated(REPO_ROOT / "agentcore" / "__pycache__" / "memory_store.cpython-312.pyc")
+    assert _is_generated(REPO_ROOT / "agentcore.egg-info" / "PKG-INFO")
+    assert not _is_generated(REPO_ROOT / "identity" / "SOUL.generic.md")
+
+
 def test_no_business_literals_anywhere_in_repo():
     found = []
     for path in _committable_files():
-        if _is_allowed(path):
+        if _is_generated(path) or _is_allowed(path):
             continue
         if _looks_binary(path):
             continue

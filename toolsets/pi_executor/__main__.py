@@ -39,7 +39,7 @@ def _default_scratch() -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="hermes_bridge.pi_executor", description=__doc__)
+    parser = argparse.ArgumentParser(prog="pi_executor", description=__doc__)
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--workdir", default=None, help="Pi 的工作目录（读写产物的地方）")
     parser.add_argument("--agent-dir", default=None, help="隔离的 PI_CODING_AGENT_DIR")

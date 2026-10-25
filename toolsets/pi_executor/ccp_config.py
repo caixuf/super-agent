@@ -69,16 +69,23 @@ def _litellm_config_path() -> Path:
 
 
 def _load_yaml(path: Path) -> dict:
+    """读 YAML 配置。**解析器缺失时必须响亮失败**——静默返回 {} 会让上层把
+    「解释器没装 PyYAML」误报成「配置里没有凭据」，排障方向直接跑偏（实测踩过：
+    Hermes 自带的解释器就没有 PyYAML，而在它下面跑本模块是最自然的用法）。"""
     if not path.is_file():
         return {}
     text = path.read_text(encoding="utf-8")
-    if yaml is not None:
-        try:
-            data = yaml.safe_load(text)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
-    return {}
+    if yaml is None:
+        raise RuntimeError(
+            "解析 %s 需要 PyYAML，而当前解释器没有它 —— 这会让凭据解析静默失败。"
+            "装 pyyaml、或换带 PyYAML 的解释器；也可用 PI_CCP_API_KEY / "
+            "PI_EXECUTOR_HERMES_CONFIG 显式给出凭据来源。" % path
+        )
+    try:
+        data = yaml.safe_load(text)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def _resolve_interpolation(value: str, env: Mapping[str, str]) -> str:

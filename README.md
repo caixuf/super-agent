@@ -18,7 +18,8 @@
 | 身份与纪律 | `identity/` | `<HERMES_HOME>/agentcore/identity/` | 通用纪律骨架 `SOUL.generic.md`（业务处用 `{{BUSINESS_OVERLAY}}` 占位）+ 派工角色契约 `agents/*.md` |
 | 记忆引擎 | `agentcore/` | pip 包 | 长期记忆：存储 / 双路召回 / 分桶 / 冲突判定 / 置信度衰减；业务约定全部注入式 |
 | 工具面 | `toolsets/` | `<HERMES_HOME>/agentcore/toolsets/` | 外部编码执行器适配器（长任务派出去跑，不用主 agent 逐行磨） |
-| 运行时 | `runtime/` | `<HERMES_HOME>/agentcore/runtime/` | 常驻服务单元骨架（占位符化，profile 名/服务名都不是写死的） |
+| 运行时 | `runtime/` | `<HERMES_HOME>/agentcore/runtime/` | 常驻服务单元骨架（占位符化，profile 名/服务名都不是写死的）+ `BASELINE.md`（能力基线与无人值守档：通用键名 / 地板值）+ `CONFIG_MAP.md`（段归属、并行会话语义、派工协议陷阱） |
+| 文档 | `docs/` | —— | `MIGRATION.md`（八层迁移清单 + 「只在盘上」资产表）、`PLUGINS.md`（插件 / MCP / 工具集注册的边界与验收口径） |
 | 平台适配补丁 | `patches/` | `<HERMES_HOME>/agentcore/patches/` | 消息平台：流式卡片 + 纯文字审批（不依赖卡片回调）；幂等重放/校验 |
 | 安装器 | `install/install.sh` | —— | 幂等、`--dry-run` 零副作用、不启停服务、不碰凭据、不覆盖现场身份 |
 | 干净室验证 | `docker/` | —— | 容器里从一个空 HOME 装一遍，20 项断言 |
@@ -33,6 +34,7 @@ bash install/install.sh --help              # 全部开关
 bash install/install.sh --dry-run           # 只打印计划，**不改系统**
 bash install/install.sh --profile <name>    # 真装（通用资产；示例技能不会被装成生产技能）
 bash install/install.sh --profile <name> --compose-soul <业务叠加层.md>   # 合成生效身份
+bash install/install.sh --profile <name> --apply-baseline                # 显式写入**通用能力基线**（默认不动配置；地板只抬不降）
 ```
 
 安装器**不做**：不启停任何服务（systemd 命令只打印给人执行）、不读写 `.env` / 凭据、
@@ -66,6 +68,39 @@ bash docker/verify.sh <commit>     # 验证某个已发布提交（发布前跑�
 在 `set -u` 下**空机器上会以 `unbound variable` 非 0 退出**（活全干完了却报失败）。
 本机因为恰好导出了那个变量，这个 bug 一直没暴露 —— 这类「只在我机器上能跑」的缺陷，
 就是本目录存在的理由。
+
+---
+
+## 特性验证（宿主侧）
+
+干净室回答「装得上、装完能用」；**特性**是否成立要另跑一套（需要本机有 Hermes / Node）：
+
+```bash
+bash checks/feature_check.sh              # 8 组特性断言（不碰生产 profile：一律用临时 home）
+bash checks/identity_injection_check.sh   # 证明「身份文件真的进了发给模型的 prompt」
+```
+
+| 组 | 测的是什么 |
+| :--- | :--- |
+| F1 | 身份骨架的八节纪律项齐备 |
+| F2 | 合成语义：注入点**唯一**、骨架原样在前、体积等式成立、标记无残留 |
+| F3 | 派工契约：角色文件齐备，且都含「回执字段」与「派工卡」 |
+| F4 | 示例技能规范（name 与目录一致、description 可被触发匹配） |
+| F5 | **业务叠加钩子**：默认不装业务技能；显式开钩子才装得进来 |
+| F6 | 记忆闭环：写入 → 汇合 → 召回 → 改写命中 → 代际隔离 → 空结果语义 → 换目录可用 |
+| F7 | 平台适配补丁：`--check` 幂等在位 + `--config` 读到**生效值**（不是写了配置就完事） |
+| F8 | 外部执行器：真跑一个小任务，**回读产物**（回执说成功不算证据） |
+| F9 | 运行时骨架不写死部署身份 |
+| F10 | 明确打印**未覆盖**清单（别把绿当全能） |
+
+`identity_injection_check.sh` 的判定链值得一提：它把隔离 profile 的模型端点指向一个**死端口**，
+调用必然失败 → Hermes 在 API 出错时会**无条件**写请求转储 → 在转储里找骨架独有句。
+于是「身份是否注入」变成可机械判定的断言，**不需要可用凭据**；同时它备份生产 profile 的
+`config.yaml`，跑完 diff 必须无变化，证明隔离没串到生产。
+
+本轮实测报告：**`docs/reports/2026-10-26_identity_and_feature_verification_report.md`**
+（特性矩阵 31 PASS / 注入判定 14 PASS / 干净室 28 PASS，并列出本轮修掉的 7 个真缺陷 ——
+包括「骨架根本没有叠加层注入点」这种**检查通过但机制是坏的**假绿）。
 
 ---
 

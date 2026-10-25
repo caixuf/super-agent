@@ -175,10 +175,27 @@ if [ -f "$P/SOUL.md" ]; then
   if grep -q '{{BUSINESS_OVERLAY}}' "$P/SOUL.md"; then bad "占位符未被替换干净"; else pass "占位符已全部替换"; fi
   s1="$(wc -c < "$REPO/identity/SOUL.generic.md")"
   s2="$(wc -c < "$P/SOUL.md")"
-  if [ "$s2" -ge "$s1" ]; then
-    pass "合成文件不小于骨架（$s1 -> $s2 字节）"
+  # 语义断言：注入点必须唯一、骨架必须原样在前、体积必须等于「骨架 + 叠加层 - 标记」
+  n_mark="$(grep -c '{{BUSINESS_OVERLAY}}' "$REPO/identity/SOUL.generic.md" || true)"
+  if [ "$n_mark" = "1" ]; then
+    pass "骨架里注入点恰好 1 处（叠加层不可能被塞进散文说明）"
   else
-    bad "合成文件比骨架还小（$s1 -> $s2），疑似截断"
+    bad "骨架注入点出现 $n_mark 处（应恰好 1 处）"
+  fi
+  if head -c 2000 "$REPO/identity/SOUL.generic.md" > /tmp/skel_head && \
+     head -c 2000 "$P/SOUL.md" > /tmp/composed_head && cmp -s /tmp/skel_head /tmp/composed_head; then
+    pass "骨架部分原样保留（前 2000 字节一致）"
+  else
+    bad "骨架开头被改动 —— 叠加层可能注错了位置"
+  fi
+  ov="$(wc -c < /tmp/overlay.md)"
+  mk='{{BUSINESS_OVERLAY}}'
+  mlen="${#mk}"
+  expect=$((s1 + ov - mlen))
+  if [ "$s2" = "$expect" ]; then
+    pass "体积符合预期（骨架 $s1 + 叠加层 $ov − 标记 $mlen = $s2）"
+  else
+    bad "体积异常：实际 $s2，预期 $expect（若差标记长度的整数倍，说明标记被替换了多处）"
   fi
 else
   bad "生效身份未生成"

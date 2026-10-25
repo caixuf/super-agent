@@ -34,6 +34,7 @@ SOUL_COMPOSE_ARG=""
 DO_SOUL_LIVE=0
 DO_SKILLS=1
 DO_PATCH=1
+DO_BASELINE=0
 BUSINESS_SKILLS_SRC="${BUSINESS_SKILLS_SRC:-}"
 INSTALL_BUSINESS_SKILLS="${INSTALL_BUSINESS_SKILLS:-0}"
 
@@ -64,6 +65,9 @@ install.sh — 智能体本体安装器（幂等 / 支持 --dry-run）
   --business-skills-src D   业务技能源目录；等价于 BUSINESS_SKILLS_SRC=D
   --skip-skills             不装技能
   --skip-patch              不打消息平台适配补丁
+  --apply-baseline          写入**通用能力基线**（轮次/派工上限/无人值守档）。默认**不动**配置；
+                            只走官方 `hermes config set`，逐条打印改动与复原口径。
+                            写保护开关（protected_instruction_files）不在此步 —— 另行人工决定并留痕
   -h, --help                显示本帮助
 
 装什么（全部业务无关）:
@@ -99,6 +103,7 @@ while [ $# -gt 0 ]; do
     --business-skills-src) BUSINESS_SKILLS_SRC="${2:?--business-skills-src 需要参数}"; shift ;;
     --skip-skills)         DO_SKILLS=0 ;;
     --skip-patch)          DO_PATCH=0 ;;
+    --apply-baseline)      DO_BASELINE=1 ;;
     -h|--help)             usage; exit 0 ;;
     *) fail "未知参数：$1"; usage; exit 1 ;;
   esac
@@ -228,10 +233,14 @@ import sys, pathlib
 skel, overlay, dest = (pathlib.Path(p) for p in sys.argv[1:4])
 text = skel.read_text(encoding="utf-8")
 placeholder = "{{BUSINESS_OVERLAY}}"
-if placeholder not in text:
-    sys.exit("骨架里找不到 %s 占位符，拒绝合成" % placeholder)
-dest.write_text(text.replace(placeholder, overlay.read_text(encoding="utf-8")), encoding="utf-8")
-print("  合成完成：%s（%d 字节）" % (dest, dest.stat().st_size))
+occ = text.count(placeholder)
+if occ != 1:
+    sys.exit("骨架里 %s 应当恰好出现 1 次（实际 %d 次）—— 拒绝合成：多于一处会把叠加层塞进散文说明里"
+             % (placeholder, occ))
+body = overlay.read_text(encoding="utf-8")
+dest.write_text(text.replace(placeholder, body), encoding="utf-8")
+print("  合成完成：%s（骨架 %d + 叠加层 %d → %d 字节）"
+      % (dest, len(text.encode()), len(body.encode()), dest.stat().st_size))
 PY
   fi
   ok "生效身份已写：$SOUL_DEST"
@@ -308,7 +317,44 @@ else
 fi
 
 # ---------------------------------------------------------------------------- #
-step "⑩ 需要人工执行的步骤（本脚本不启停任何服务）"
+if [ "$DO_BASELINE" = "1" ]; then
+  step "⑩ 能力基线（显式开关；只走官方设置命令）"
+  if ! command -v hermes >/dev/null 2>&1; then
+    warn "没有 hermes CLI，跳过基线写入。装好 Hermes 后重跑：bash install/install.sh --apply-baseline"
+  else
+    HCMD=(hermes)
+    [ -n "$PROFILE" ] && HCMD+=(--profile "$PROFILE")
+    for kv in "agent.max_turns 1000" \
+              "delegation.max_iterations 250" \
+              "delegation.max_concurrent_children 8" \
+              "delegation.max_spawn_depth 3" \
+              "approvals.mode off" \
+              "approvals.timeout 900"; do
+      k="${kv%% *}"; v="${kv#* }"
+      cur="$("${HCMD[@]}" config get "$k" 2>/dev/null | tr -d '"' | head -1 || true)"
+      if [ "$cur" = "$v" ]; then
+        skip "$k 已在基线（$v）"
+      elif [ -n "$cur" ] && [[ "$cur" =~ ^[0-9]+$ ]] && [[ "$v" =~ ^[0-9]+$ ]] && [ "$cur" -ge "$v" ]; then
+        skip "$k 已是 $cur（≥ 地板 $v）—— 地板**只抬不降**，绝不把现场已有的高值改小"
+      elif [ "$DRY_RUN" = "1" ]; then
+        printf '    [plan] hermes%s config set %s %s   （当前：%s）\n' \
+               "${PROFILE:+ -p $PROFILE}" "$k" "$v" "${cur:-<未设>}"
+      elif "${HCMD[@]}" config set "$k" "$v" >/dev/null 2>&1; then
+        ok "$k: ${cur:-<未设>} -> $v"
+      else
+        warn "$k 写入失败 —— 手工执行：hermes${PROFILE:+ -p $PROFILE} config set $k $v"
+      fi
+    done
+    log "  复原口径：逐条 hermes${PROFILE:+ -p $PROFILE} config set <key> <原值>（写进部署记录）"
+  fi
+  warn "写保护开关（security.protected_instruction_files）**不**在本步改动："
+  warn "  它是提示注入的持久化防线，关闭属**安全降级** —— 人工决定 + 留痕，详见 runtime/BASELINE.md"
+else
+  step "⑩ 跳过能力基线（未给 --apply-baseline；默认不动现场配置）"
+fi
+
+# ---------------------------------------------------------------------------- #
+step "⑪ 需要人工执行的步骤（本脚本不启停任何服务）"
 cat <<EOF
 
   当前 profile      : ${PROFILE:-default（未指定 --profile）}

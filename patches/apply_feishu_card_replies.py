@@ -16,7 +16,7 @@
     python3 patches/apply_feishu_card_replies.py --apply     # 不在位就补上（幂等）
     python3 patches/apply_feishu_card_replies.py --config    # 适配器解析出的生效值
 
-退出码：--check / --config 用 0=在位 / 1=不在位；--apply 用 0=成功（含本来就在位）。
+退出码：--check / --config 用 0=在位 / 1=不在位 / 2=**读不到**（解释器缺 PyYAML，或 profile 目录不对）；--apply 用 0=成功（含本来就在位）。
 
 环境变量
     HERMES_AGENT_DIR    宿主安装树，默认 ~/.hermes/hermes-agent
@@ -141,8 +141,15 @@ def config_check() -> int:
         if cfg_path.is_file():
             raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     if not raw:
-        print(f"[SKIP] 读不到 {profile / 'config.yaml'}（换解释器或设 HERMES_PROFILE_DIR）")
-        return 0
+        # 读不到**不能**返回 0：按本脚本自己的约定 0 = 在位，于是「解释器缺 PyYAML」
+        # 或「HERMES_PROFILE_DIR 指错」会被上层读成「配置生效了」—— 假绿的经典来源（实测踩过）。
+        if yaml is None:
+            print(f"[FAIL] 当前解释器没有 PyYAML，读不到 {profile / 'config.yaml'}"
+                  "（换带 PyYAML 的解释器，或设 HERMES_PROFILE_DIR 指向生效 profile）")
+        else:
+            print(f"[FAIL] 读不到 {profile / 'config.yaml'}（文件不存在或为空；"
+                  "设 HERMES_PROFILE_DIR 指向实际生效的 profile）")
+        return 2
     flagged = []
     for key in ("card_replies", "exec_approval_text"):
         value = ((raw.get("platforms") or {}).get("feishu") or {}).get(key)
