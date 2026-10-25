@@ -59,6 +59,9 @@ bash docker/verify.sh <commit>     # 验证某个已发布提交（发布前跑�
 | ⑥ | 合成生效身份：骨架 + 业务叠加层，`{{BUSINESS_OVERLAY}}` 必须被替换干净 |
 | ⑦ | 引擎端到端：写入 → 汇合 → 召回（离线确定性嵌入，不依赖网络/模型） |
 
+**最近一次验证报告**：[`docs/reports/2026-10-25_clean_room_deploy_report.md`](docs/reports/2026-10-25_clean_room_deploy_report.md)
+（同一目录另有 `.html` 单文件版可分享）—— 26 项断言全通过，含当轮修复的缺陷记录与「明确不覆盖」清单。
+
 **它已经抓到过什么**：`install/install.sh` ⑩ 段 heredoc 里的 `$HERMES_HOME` 没做兜底，
 在 `set -u` 下**空机器上会以 `unbound variable` 非 0 退出**（活全干完了却报失败）。
 本机因为恰好导出了那个变量，这个 bug 一直没暴露 —— 这类「只在我机器上能跑」的缺陷，
