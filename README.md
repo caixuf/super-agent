@@ -30,12 +30,20 @@
 ## 快速开始
 
 ```bash
+bash verify.sh                 # ← 先跑这个：静态 + 单测 + 安装 dry-run（约 30 秒，零依赖）
+bash verify.sh --with-docker   # 再加干净室部署验证（建镜像，几分钟）
+bash verify.sh --with-checks   # 再加宿主特性矩阵（需 Hermes 树 / Node；缺依赖的组降级 WARN）
+
 bash install/install.sh --help              # 全部开关
 bash install/install.sh --dry-run           # 只打印计划，**不改系统**
 bash install/install.sh --profile <name>    # 真装（通用资产；示例技能不会被装成生产技能）
 bash install/install.sh --profile <name> --compose-soul <业务叠加层.md>   # 合成生效身份
 bash install/install.sh --profile <name> --apply-baseline                # 显式写入**通用能力基线**（默认不动配置；地板只抬不降）
 ```
+
+`verify.sh` 的退出码 = 失败项数（0 = 全过），缺依赖导致的跳过会在末尾明说 ——
+「环境缺失」不许伪装成「通过」。它会自己挑一个**真的带 pytest 的解释器**（PATH 上的
+`python3` 常常先命中没有 pytest 的沙箱 venv，那会让单测块假红，人会去怀疑代码而不是环境）。
 
 安装器**不做**：不启停任何服务（systemd 命令只打印给人执行）、不读写 `.env` / 凭据、
 不覆盖现场身份（默认不动 `SOUL.md`）、不改部署源（只读）。
