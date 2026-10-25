@@ -56,6 +56,10 @@
   用错协议会报 401「模型不存在」/「No connected db.」—— 那是**协议错配，不是 key 坏**。
 - 子 agent **不知道**父会话的任何上下文：派工时必须把角色契约全文内联进 context；
   工具面是否继承看开关（MCP 工具集继承）。
+  **而且子 agent 的系统提示里 `SOUL.md` 被明确排除** —— 它只拿两样东西：**工作区的项目上下文文件**
+  （`.hermes.md` > AGENTS.md 链 > CLAUDE.md > `.cursorrules`）与父级传入的 `goal`/`context`。
+  推论：**想约束子 agent，就往工作区的 AGENTS.md（或 `.hermes.md`）与派工卡里写**，
+  往 SOUL 里加规则对子 agent 是无效动作。
 - 子 agent 只能做叶子：给「可被回执验证」的单件事，别让它再拆分。
 
 ## 4. 谁负责把这份地图变成现场值
