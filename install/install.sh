@@ -316,8 +316,8 @@ cat <<EOF
 
   # 1) 凭据（不要提交、不要 echo；chmod 600）
   #    由部署方按 runtime/README.md 的口径自建（键名清单，值留空）：
-  #      $HERMES_HOME/<mcp-env-name>.env   （业务 MCP 子进程环境；业务键名由业务叠加层给出）
-  #      $HERMES_HOME/channels.env         （网关的消息平台凭据）
+  #      ${HERMES_HOME:-$TARGET_HOME}/<mcp-env-name>.env   （业务 MCP 子进程环境；业务键名由业务叠加层给出）
+  #      ${HERMES_HOME:-$TARGET_HOME}/channels.env         （网关的消息平台凭据）
   #    业务 provider / 业务 MCP / 业务技能目录按 runtime/README.md 逐键补齐。
 
   # 2) 网关常驻（user 级 —— 系统级无 DBUS/keyring，需凭据的 CLI 会 authenticated:false）
