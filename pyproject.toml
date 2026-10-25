@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentcore"
+version = "0.1.0"
+description = "通用记忆引擎：SQLite 双路召回 + 向量索引，业务约定由宿主注入"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+authors = [{ name = "agentcore" }]
+keywords = ["memory", "sqlite", "vector-search", "agent", "embedding"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://example.invalid/agentcore"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["agentcore*"]
+
+# sqlite-vec 扩展必须随包分发：召回时按包相对路径查找，不依赖 CWD。
+[tool.setuptools.package-data]
+"agentcore.memory" = ["vendor/*.so", "vendor/vec0", "vendor/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
