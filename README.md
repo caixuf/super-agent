@@ -56,13 +56,16 @@ bash docker/verify.sh <commit>     # 验证某个已发布提交（发布前跑�
 | ① | 仓自检：业务无关门禁 + 引擎单测全绿 |
 | ② | 包安装：**离开仓目录**仍可 import（不是靠 cwd 假绿），随包 `.so` 在包里 |
 | ③ | `--dry-run` **一个文件都不建**（名副其实） |
-| ④ | 真实安装：资产字节一致、**绝不覆盖现场身份**、**示例技能不得装成生产技能**、没有 Hermes 时补丁步骤优雅跳过而非报错 |
+| ④ | 真实安装：资产字节一致、**绝不覆盖现场身份**、**`examples/` 只当范本（真通用技能会被正常安装）**、没有 Hermes 时补丁步骤优雅跳过而非报错 |
 | ⑤ | 幂等：重跑识别出 N 处「已一致」、文件集合不变 |
 | ⑥ | 合成生效身份：骨架 + 业务叠加层，`{{BUSINESS_OVERLAY}}` 必须被替换干净 |
 | ⑦ | 引擎端到端：写入 → 汇合 → 召回（离线确定性嵌入，不依赖网络/模型） |
 
-**最近一次验证报告**：[`docs/reports/2026-10-25_clean_room_deploy_report.md`](docs/reports/2026-10-25_clean_room_deploy_report.md)
-（同一目录另有 `.html` 单文件版可分享）—— 26 项断言全通过，含当轮修复的缺陷记录与「明确不覆盖」清单。
+**最近一次验证报告**：[`docs/reports/2026-10-26_release_freeze_report.md`](docs/reports/2026-10-26_release_freeze_report.md)
+（候选提交 `6333c92`，干净室**退出码 0**；同一目录另有 `.html` 单文件版可分享。）
+> 更早的两份报告（`2026-10-25_clean_room_deploy_report.md`、`2026-10-26_identity_and_feature_verification_report.md`）
+> 验证对象停在 `74b13e0` / `2f23720`，**已过期**：其后 8~9 个提交引入的两处红没跟着复验。
+> 引用「通过率」时只认最新这份 —— 报告停在旧提交上，就是仓库自述与事实矛盾。
 
 **它已经抓到过什么**：`install/install.sh` ⑩ 段 heredoc 里的 `$HERMES_HOME` 没做兜底，
 在 `set -u` 下**空机器上会以 `unbound variable` 非 0 退出**（活全干完了却报失败）。
@@ -98,9 +101,11 @@ bash checks/identity_injection_check.sh   # 证明「身份文件真的进了发
 于是「身份是否注入」变成可机械判定的断言，**不需要可用凭据**；同时它备份生产 profile 的
 `config.yaml`，跑完 diff 必须无变化，证明隔离没串到生产。
 
-本轮实测报告：**`docs/reports/2026-10-26_identity_and_feature_verification_report.md`**
-（特性矩阵 31 PASS / 注入判定 14 PASS / 干净室 28 PASS，并列出本轮修掉的 7 个真缺陷 ——
-包括「骨架根本没有叠加层注入点」这种**检查通过但机制是坏的**假绿）。
+特性矩阵与身份注入的**上一轮**实测报告：`docs/reports/2026-10-26_identity_and_feature_verification_report.md`
+（特性矩阵 31 PASS / 注入判定 14 PASS，并列出当轮修掉的 7 个真缺陷）。
+> ⚠️ 该报告的验证对象是 `2f23720`，**本轮未复跑**（F7/F8 需真实 Hermes 树、Node 与可解析凭据）。
+> 最新一次干净室 + 本地结果只认 [`2026-10-26_release_freeze_report.md`](docs/reports/2026-10-26_release_freeze_report.md)；
+> 「特性」侧的未复跑状态记在该报告 §4 缺口。
 
 ---
 
