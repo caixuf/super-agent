@@ -31,8 +31,15 @@ python3 tools/arch_doc.py doc.md --html-only      # 只要 HTML
 ### 验证方式（别只看"文件生成了"）
 
 ```bash
+# 图真的渲成了吗 —— 两条互补，都要过
 chromium --headless=new --virtual-time-budget=15000 --dump-dom out/doc.html \
-  | grep -c 'data-processed="true"'     # 应等于 mermaid 块数
-chromium --headless=new --virtual-time-budget=15000 --dump-dom out/doc.html \
-  | grep -c 'language-mermaid'          # 应为 0
+  | grep -c 'data-processed="true"'          # 应等于 mermaid 块数（这个只有 DOM 里可见）
+grep -o 'class="language-mermaid"' out/doc.html | wc -l    # 应为 0（这个必须在**静态 HTML 文件**上查）
 ```
+
+> 两条口径的边界（都实测踩过）：
+> - 内联的 mermaid.js 源码里带 `language-mermaid` 字符串 → 裸 `grep -c 'language-mermaid'` 假阳性；
+> - `dump-dom` 的输出还会带上 mermaid 运行时的同名类 → 残留判定**只能在静态 HTML 上做**，否则同样是假阳性。
+> 反过来 `data-processed` 只在 DOM 里出现，静态文件里没有 —— 所以这两条不能互相替代。
+> - **自引用陷阱**：把判据串写进一份"随便哪个产物"（比如规划文档把它当验收判据）后，再拿这条判据去查**这份文档自己**，
+>   必然命中自己写的那几个字 —— 实测连续误判两次。**判据串要么只放在 README/脚本里，要么在产物里描述而不写字面量。**

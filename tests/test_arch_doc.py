@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import shutil
 from pathlib import Path
 
@@ -84,12 +85,53 @@ def test_trim_drops_trailing_blank_but_keeps_ink(tmp_path):
     assert Image.open(png).size[1] <= 200, "底部留白没裁掉"
 
 
+def test_cover_toc_and_footer_are_wired_and_anchors_match():
+    body, toc = arch_doc.md_to_html_with_toc(DOC)
+    assert 'class="toc"' in toc and "目录" in toc
+    cover = arch_doc.build_cover("标 < 题", "一句话摘要", ["源文件 a.md", "生成 2026-10-26"])
+    assert "标 &lt; 题" in cover, "标题里的尖括号必须转义"
+    assert cover.count('class="badge') == 2, "两枚徽标（首枚带 first 类）"
+    assert 'class="badge first"' in cover and "一句话摘要" in cover
+    # 目录锚点必须能在正文里找到对应 id —— 否则点过去是死链
+    ids = re.findall(r'href="#([^"]+)"', toc)
+    assert ids, "目录里至少应有一个条目"
+    for i in ids:
+        assert f'id="{i}"' in body, f"目录指向 #{i}，但正文没有这个 id"
+
+
+def test_guess_lede_takes_first_quote():
+    assert arch_doc.guess_lede("> 一句话摘要\n\n正文") == "一句话摘要"
+    assert arch_doc.guess_lede("没有引用") == ""
+
+
+def test_pygments_styles_are_inlined_and_cover_eats_h1():
+    """两个都踩过的坑：① 只给 class 不内联 token 样式 = 没有语法高亮；② 封面吃掉 H1/首引 防三连重复。"""
+    assert ".codehilite" in arch_doc.PYGMENTS_CSS, "Pygments 样式没内联，代码块不会有语法高亮"
+    md = "# 标题\n\n> 摘要一句\n\n## 小节\n"
+    h1 = re.search(r"^#\s+(.+)$", md, flags=re.M)
+    stripped = arch_doc.strip_cover_consumed(md, h1, "摘要一句", lede_was_auto=True)
+    assert "标题" not in stripped and "摘要一句" not in stripped
+    assert "## 小节" in stripped, "只许吃被封面消费的部分，别多删"
+    # 手动给了 --lede 时，正文里的引用**不该**被删（那是作者有意保留的正文）
+    keep = arch_doc.strip_cover_consumed(md, h1, "手工摘要", lede_was_auto=False)
+    assert "摘要一句" in keep
+
+
+def test_inline_md_renders_bold_and_escapes_rest():
+    out = arch_doc.inline_md("**粗** 与 `码` 与 <script>")
+    assert "<strong>粗</strong>" in out and "<code>码</code>" in out
+    assert "&lt;script&gt;" in out and "<script>" not in out
+
+
 @pytest.mark.skipif(_browser() is None, reason="本机没有 chromium/google-chrome")
 def test_render_end_to_end_produces_selfcontained_html_and_png(tmp_path, monkeypatch):
     monkeypatch.setattr(arch_doc, "VIRTUAL_TIME_BUDGET_MS", 8000)
     html, png = tmp_path / "d.html", tmp_path / "d.png"
-    arch_doc.render(html, "T", arch_doc.md_to_html(DOC), min_height=900)
+    body, toc = arch_doc.md_to_html_with_toc(DOC)
+    arch_doc.render(html, "T", body, cover=arch_doc.build_cover("T", "摘要", ["源文件 d.md"]),
+                    toc=toc, footer="由 tools/arch_doc.py 渲染")
     arch_doc.screenshot(html, png, 900, 900)
     arch_doc.trim(png)
     assert html.stat().st_size > 1000
     assert png.exists() and png.stat().st_size > 5000, "PNG 太小 → 大概率是整页空白"
+    assert 'class="footer"' in html.read_text(encoding="utf-8")
