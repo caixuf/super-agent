@@ -120,6 +120,7 @@ HTML_TPL = """<!doctype html>
   if (window.mermaid) {{ mermaid.initialize({{ startOnLoad:true, theme:"neutral", securityLevel:"loose",
     flowchart:{{ htmlLabels:true, curve:"basis", useMaxWidth:true }},
     sequence:{{ useMaxWidth:true, mirrorActors:false, wrap:true, actorMargin:56 }},
+    gantt:{{ useMaxWidth:true, barHeight:22, fontSize:14, topPadding:52, gridLineStartPadding:34 }},
     themeVariables:{{ fontFamily:'-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC", "PingFang SC", sans-serif',
       fontSize:'15.5px',
       primaryColor:'#eef4ff', primaryBorderColor:'#0b5fff', primaryTextColor:'#0b3fa8',
@@ -127,7 +128,12 @@ HTML_TPL = """<!doctype html>
       actorBkg:'#eef4ff', actorBorder:'#0b5fff', actorTextColor:'#0b3fa8',
       signalColor:'#94a3b8', signalTextColor:'#39404a',
       noteBkgColor:'#fff8e6', noteBorderColor:'#ead9a8', noteTextColor:'#6b5733',
-      sequenceNumberColor:'#b6c2cf' }} }}); }}
+      sequenceNumberColor:'#b6c2cf',
+      sectionBkgColor:'#f3f5f8', altSectionBkgColor:'#fbfcfe',
+      taskBkgColor:'#cfe0ff', taskTextColor:'#0b3fa8', taskTextOutsideColor:'#39404a',
+      activeTaskBkgColor:'#0b5fff', activeTaskBorderColor:'#0b5fff',
+      doneTaskBkgColor:'#d7ecdd', doneTaskBorderColor:'#a7d7c0',
+      gridColor:'#e5e7eb', todayLineColor:'#0b5fff' }} }}); }}
 </script>
 </body></html>
 """
