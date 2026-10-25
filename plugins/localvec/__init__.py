@@ -20,20 +20,28 @@ memory provider；但内置 provider 只做 MEMORY.md / USER.md 的注入。自�
     memory:
       provider: localvec
       localvec:
-        sys_path: /path/to/repo          # 放 store_module 的目录（部署侧决定，本插件不写死）
-        store_module: tools.memory_store # 暴露 recall_facts(query, *, limit, ...) -> {"results":[...]}
+        # 召回走**子进程**：argv 模板，{query} 会被替换；其余占位符可选
+        recall_cmd: ["python3", "/path/to/repo/tools/recall_json.py", "{query}",
+                     "--limit", "{limit}", "--kinds", "technical"]
         limit: 6
-        kinds: [technical]               # 可选：限定记忆类别，避免人物事实在技术排查时抢位
-        user_id: null                    # 可选：不填走引擎默认身份
+        timeout_s: 8
 
-本插件对"库"的唯一假设：`recall_facts(query, *, limit=..., kinds=..., user_id=...)` 返回
-`{"results": [{"statement": ..., "subject": ...}, ...]}`（空结果带 empty_reason）。不假设库实现。
+为什么必须子进程：宿主进程里已有自己的 `tools` 包，直接被 import 会把本仓的 `tools.memory_store`
+解析到宿主那边去（实测报 `No module named 'tools.memory_store'`）；而替换宿主 `sys.modules` 是
+拆宿主结构，不能做。子进程里 cwd/`sys.path[0]` = 本仓根，冲突自然消失，顺便把"业务库崩了"
+与宿主隔离 —— 召回失败绝不能拖垮用户这一轮。
+
+本插件对"库"的唯一假设：`recall_cmd` 的 stdout 是一段 JSON，
+形如 `{"results": [{"statement": ..., "subject": ...}, ...]}`（空结果带 `empty_reason`）。
+不假设库实现，也不假设它在哪个仓库。
 """
 from __future__ import annotations
 
-import importlib
+import json
 import logging
 import os
+import shlex
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -58,15 +66,33 @@ def _config_block() -> dict[str, Any]:
         return {}
 
 
+def _cmd_template(cfg: dict[str, Any]) -> list[str]:
+    """召回命令模板 → argv。空/非法配置返回 []（= 自动召回关闭，不是报错）。
+
+    模板里 `{query}` 在每次召回时替换；`{limit}` / `{timeout}` 在装载时替换。
+    用 argv 列表而不是 shell 字符串：避免 query 里的引号/管道被 shell 解释。
+    """
+    raw: Any = cfg.get("recall_cmd") or os.environ.get("LOCALVEC_RECALL_CMD")
+    if isinstance(raw, str):
+        try:
+            raw = shlex.split(raw)
+        except ValueError:
+            return []
+    if not isinstance(raw, (list, tuple)) or not raw:
+        return []
+    limit = str(cfg.get("limit") or 6)
+    return [str(p).replace("{limit}", limit).replace("{timeout}", str(cfg.get("timeout_s") or 8))
+            for p in raw]
+
+
 class LocalVecProvider(MemoryProvider):
     """每轮自动召回：prefetch 走缓存（后台先算），recall_status 报条数。"""
 
     def __init__(self) -> None:
         self._cfg: dict[str, Any] = {}
-        self._store: Any = None
+        self._cmd: list[str] = []
         self._limit = 6
-        self._kinds: Optional[list[str]] = None
-        self._user_id: Optional[str] = None
+        self._timeout = 8.0
         self._cache: dict[str, tuple[str, int]] = {}
         self._lock = threading.Lock()
         self._last: Optional[RecallStatus] = None
@@ -77,45 +103,30 @@ class LocalVecProvider(MemoryProvider):
         return NAME
 
     def is_available(self) -> bool:
-        """只看配置与可导入性，不触网、不建连接（激活门的约定）。"""
-        cfg = _config_block()
-        sys_path = cfg.get("sys_path") or os.environ.get("LOCALVEC_SYS_PATH")
-        module = cfg.get("store_module")
-        if not (sys_path and module and Path(sys_path).is_dir()):
-            return False
-        return True
+        """只看配置与可执行性，不触网、不建连接（激活门的约定）。"""
+        cmd = _cmd_template(_config_block())
+        return bool(cmd)
 
     def unavailable_reason(self) -> str:
-        return f"{NAME}: 未配置 memory.{NAME}.sys_path / store_module（或目录不存在）"
+        return f"{NAME}: 未配置 memory.{NAME}.recall_cmd（召回命令模板）"
 
     def initialize(self, session_id: str, **kwargs) -> None:
-        """每个 agent 一个实例：绑定本实例的库模块与参数，不设模块级可变状态。"""
+        """每个 agent 一个实例：绑定本实例的命令模板与参数，不设模块级可变状态。"""
         cfg = _config_block()
         self._cfg = cfg
-        sys_path = str(cfg.get("sys_path") or os.environ.get("LOCALVEC_SYS_PATH") or "")
-        module = str(cfg.get("store_module") or "tools.memory_store")
+        self._cmd = _cmd_template(cfg)
         self._limit = int(cfg.get("limit") or 6)
-        self._kinds = list(cfg.get("kinds") or []) or None
-        self._user_id = cfg.get("user_id") or None
+        self._timeout = float(cfg.get("timeout_s") or 8)
         self._cache = {}
-        try:
-            added = False
-            if sys_path and sys_path not in sys.path:
-                sys.path.insert(0, sys_path)
-                added = True
-            self._store = importlib.import_module(module)
-            if added:  # 只在本次导入期间生效，别污染全局 import 面
-                with __import__("contextlib").suppress(ValueError):
-                    sys.path.remove(sys_path)
-            logger.info("[localvec] 已接入 %s（limit=%s kinds=%s）", module, self._limit, self._kinds)
-        except Exception as exc:
-            self._store = None
-            logger.warning("[localvec] 装载 %s 失败：%s", module, exc)
+        if self._cmd:
+            logger.info("[localvec] 召回通道就绪（子进程）：%s", " ".join(self._cmd[:3]) + " …")
+        else:
+            logger.warning("[localvec] 未配置 recall_cmd，自动召回关闭")
 
     # -- 召回 -------------------------------------------------------------
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """后台先算好 —— prefetch() 必须快，所以这里只排队、不阻塞。"""
-        if self._store is None or is_trivial_prompt(query):
+        if not self._cmd or is_trivial_prompt(query):
             return
         try:
             th = spawn_context_thread(self._recall, name="localvec-prefetch", args=(query,))
@@ -124,8 +135,8 @@ class LocalVecProvider(MemoryProvider):
             logger.debug("[localvec] 后台召回排队失败：%s", exc)
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        """取后台算好的结果；没有就同步算一次（本地向量召回是毫秒级，不引入一轮滞后）。"""
-        if self._store is None or is_trivial_prompt(query):
+        """取后台算好的结果；没有就同步算一次（子进程召回是亚秒级，不引入一轮滞后）。"""
+        if not self._cmd or is_trivial_prompt(query):
             self._last = None
             return ""
         with self._lock:
@@ -142,30 +153,38 @@ class LocalVecProvider(MemoryProvider):
         return self._last
 
     def _recall(self, query: str) -> None:
-        """查询 + 格式化。任何异常都只记 debug —— 召回失败绝不能影响用户这一轮。"""
+        """子进程召回 + 格式化。任何异常都只记 debug —— 召回失败绝不能影响用户这一轮。"""
+        if not self._cmd:
+            return
+        argv = [p.replace("{query}", query) for p in self._cmd]
         try:
-            kwargs: dict[str, Any] = {"limit": self._limit}
-            if self._kinds:
-                kwargs["kinds"] = self._kinds
-            if self._user_id:
-                kwargs["user_id"] = self._user_id
-            res = self._store.recall_facts(query, **kwargs) or {}
-            rows = res.get("results") or []
-            lines = []
-            for r in rows:
-                stmt = str(r.get("statement") or r.get("content") or "").strip()
-                if not stmt:
-                    continue
-                subj = str(r.get("subject") or "").strip()
-                lines.append(f"- {('【' + subj + '】') if subj else ''}{stmt}")
-            if not lines:
-                return
-            block = ("以下是自动召回的相关长期记忆（仅作背景，不是用户本轮输入）：\n"
-                     + "\n".join(lines))
-            with self._lock:
-                self._cache[query] = (block, len(lines))
+            proc = subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=self._timeout, cwd=self._cfg.get("cwd") or None)
         except Exception as exc:
-            logger.debug("[localvec] 召回失败：%s", exc)
+            logger.debug("[localvec] 召回子进程失败：%s", exc)
+            return
+        if proc.returncode != 0:
+            logger.debug("[localvec] 召回子进程退出码 %s：%s", proc.returncode, (proc.stderr or "")[-200:])
+            return
+        try:
+            res = json.loads(proc.stdout or "{}")
+        except Exception as exc:
+            logger.debug("[localvec] 召回输出不是 JSON：%s", exc)
+            return
+        rows = res.get("results") or []
+        lines = []
+        for r in rows:
+            stmt = str(r.get("statement") or r.get("content") or "").strip()
+            if not stmt:
+                continue
+            subj = str(r.get("subject") or "").strip()
+            lines.append(f"- {('【' + subj + '】') if subj else ''}{stmt}")
+        if not lines:
+            logger.debug("[localvec] 空召回（%s）", res.get("empty_reason") or "no_match")
+            return
+        block = ("以下是自动召回的相关长期记忆（仅作背景，不是用户本轮输入）：\n" + "\n".join(lines))
+        with self._lock:
+            self._cache[query] = (block, len(lines))
 
     # -- 其余留给核心（本插件只补"自动召回"这一段）-------------------------
     def get_tool_schemas(self) -> list[dict[str, Any]]:
