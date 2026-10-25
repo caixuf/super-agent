@@ -22,13 +22,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 _spec = importlib.util.spec_from_file_location("arch_doc", ROOT / "tools" / "arch_doc.py")
 assert _spec and _spec.loader
+# tools/arch_doc.py 的可选依赖是 python-markdown：缺它时相关函数在**调用期**主动退出（不是 import 期）。
+# 所以判定要在模块级、按依赖是否存在整组 skip —— 缺可选依赖 ≠ 渲染链坏了，更不能把干净室带成红。
+if importlib.util.find_spec("markdown") is None:
+    pytest.skip("缺 python-markdown，整组跳过（可选依赖缺失，不是渲染链故障）",
+                allow_module_level=True)
 arch_doc = importlib.util.module_from_spec(_spec)
-try:
-    _spec.loader.exec_module(arch_doc)
-except SystemExit:
-    # arch_doc 缺可选依赖（python-markdown）时会主动退出。**整模块 skip**，而不是让收集期报错：
-    # 否则「本机没装这个可选依赖」会被读成「渲染链坏了」，干净室里也会带崩整轮测试。
-    pytest.skip("tools/arch_doc.py 缺可选依赖（python-markdown），整组跳过", allow_module_level=True)
+_spec.loader.exec_module(arch_doc)
 
 DOC = """# 标题
 
