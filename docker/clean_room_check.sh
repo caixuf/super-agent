@@ -112,11 +112,15 @@ else
   pass "未动现场身份（默认不写 SOUL.md）"
 fi
 
+# 判定要盯的是「examples/ 只当范本」，不是「一个技能都不许装」。
+# 本仓已收录真通用技能（skills/<name>/），安装器把它们装进生产是**正确行为**；
+# 旧断言写死 0，会把正确行为判成失败（曾让干净室在 HEAD 报红）。
+n_ex="$(find "$P/skills" -path '*/examples/*' -name SKILL.md 2>/dev/null | wc -l)"
 n_sk="$(find "$P/skills" -name SKILL.md 2>/dev/null | wc -l)"
-if [ "$n_sk" = "0" ]; then
-  pass "示例技能没有被装成生产技能（0 个）"
+if [ "$n_ex" = "0" ]; then
+  pass "examples/ 只当范本、没被装成生产技能（已装通用技能 $n_sk 个）"
 else
-  bad "意外装成生产技能 $n_sk 个（examples/ 应该只当范本）"
+  bad "examples/ 被当成生产技能装了 $n_ex 个"
 fi
 
 if grep -qE 'Hermes 安装树不存在|跳过补丁' "$LOG"; then
