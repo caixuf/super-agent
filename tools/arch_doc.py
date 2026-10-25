@@ -40,6 +40,10 @@ BROWSERS = [
     "google-chrome",
 ]
 
+# mermaid 是异步渲染：不给虚拟时间预算就会截到「还没画完」的页面。
+# 提成常量是为了让测试把它调小（真出图仍用这个值）。
+VIRTUAL_TIME_BUDGET_MS = 15000
+
 CSS = """
 :root { --fg:#1f2328; --muted:#656d76; --line:#d0d7de; --bg:#fff; --accent:#0969da; --code:#f6f8fa; }
 * { box-sizing: border-box; }
@@ -162,7 +166,7 @@ def screenshot(html_path: Path, png_path: Path, width: int, height: int) -> None
     cmd = [browser, "--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars",
            "--force-device-scale-factor=1.4",  # 高分屏观感，字不糊
            f"--window-size={width},{height}",
-           "--virtual-time-budget=15000",
+           f"--virtual-time-budget={VIRTUAL_TIME_BUDGET_MS}",
            f"--screenshot={png_path}", html_path.as_uri()]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     if not png_path.exists():
