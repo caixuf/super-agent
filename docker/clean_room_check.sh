@@ -125,6 +125,20 @@ else
   bad "补丁步骤没有优雅跳过"
 fi
 
+# ⑩ 段（人工步骤）必须把变量都展开：这里是那个 unbound 缺陷的回归哨兵
+if grep -q '\${HERMES_HOME' "$LOG"; then
+  bad "⑩ 段变量没展开（仍有字面量 \${VAR}）"
+else
+  pass "⑩ 段变量已全部展开（unbound 修复有效）"
+fi
+if grep -q 'channels.env' "$LOG"; then
+  pass "⑩ 段给出了凭据文件落位路径"
+else
+  bad "⑩ 段缺少凭据文件路径"
+fi
+log "  --- ⑩ 段节选（本脚本只打印、不执行）"
+sed -n '/需要人工执行的步骤/,$p' "$LOG" | head -12 | indent
+
 # --------------------------------------------------------------------------- #
 step "⑤ 幂等：同一目标重跑一遍"
 before="$(find "$P" -type f | sort | md5sum | cut -d' ' -f1)"
