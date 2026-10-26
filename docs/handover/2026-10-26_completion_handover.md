@@ -136,3 +136,39 @@ Luna已撤掉仅根据timeout判重的规则，保留timeout/env等包裹器中�
 36项专项测试通过，完整verify.sh为284项通过、9个shell语法通过、安装dry-run通过。实际Hermes3.14 pre_tool_call检查：短sed查询timeout120没有转后台；timeout550 env python3 -m pytest仍转后台。1.0.2已经公开接口热加载，gateway_reloaded=true、restart_required=false；网关PID仍3381565，没有重启。
 
 当前证据只证明误判已修，不把它写成整个并行会话已验通。真实用户第二轮已通过临时子代理得到分析，但尚未证明持久派工被选用，也未证明普通问题在后台仍运行时及时回答。三线计划中A统一处理消息、卡片与常驻同事，B处理记忆，C处理运维和最终发布；最终干净部署仍最后执行。
+
+
+### T6 安装器补齐：插件启用记录
+
+仓库 `/home/emily/code/super-agent-t6`，分支 `t6/redeploy-baseline`；本切片提交 `7884c17`
+（handover 追加本身随后单独提交）。
+
+- **缺口**：⑧ 段只把 `plugins/<snake_case>/` 拷成 `<profile>/plugins/<kebab-case>/`，
+  从不写 `plugins.enabled`。全新 profile 装完文件仍等于“未启用”，必须手改配置。
+- **实现**：
+  - 新增 `install/enable_plugins.py`（仅 stdlib）：文本级最小合并，只增删
+    `plugins.enabled` / `plugins.disabled` 的行；注释、顺序、内联密钥、`plugins.entries`、
+    `platform_toolsets` 等逐字节保留；写入原子化并留 `config.yaml.bak.<ts>-<pid>`；
+    `--check` / `--dry-run` 零写盘。结构不可证明（flow mapping、重复 `plugins:`、tab、
+    非列表值）→ 退出码 2，文件名不动并打印官方命令。
+  - `install.sh` ⑧ 段：先 `--check`；全在位直接 `[--] 已启用`，不触发 CLI/写盘。
+    目标 profile 有身份标记且数据根有 Hermes 安装树 → 官方
+    `HERMES_HOME=<root> hermes --profile <p> plugins enable <name>`，写后复核，仍有缺口才回退合并。
+    全新 profile（`hermes --profile` 拒绝无身份目录）自动走合并。
+  - `--skip-plugins` 同时跳过落位与启用；`PLUGIN_ENABLE_MODE=auto|cli|merge`
+    （`merge` = 严格只落文件，不请求运行中的网关重载）；`cli` 不可用时不偷偷改文件。
+  - `plugins/localvec` 无 manifest，属 `memory.provider`，不进启用列表；
+    `plugins.entries.*.settings`（engine_root / queue_root / allowed_roots）仍由部署配置提供。
+  - 文档：`docs/PLUGINS.md` 第 2/4 节、`README.md` 分层表、`install.sh --help` 同步口径。
+- **命令与证据**：
+  - `bash -n install/install.sh`（verify.sh 静态段：9 个 shell 通过）
+  - `/usr/bin/python3 -m pytest tests/test_install_script.py -q` → `10 passed`
+  - `bash verify.sh` → `262 passed, 9 skipped`，安装器 dry-run 退出码 0；全绿
+  - 覆盖：全新 home 启用列表、二跑配置逐字节不变、既有密钥/注释/entries/platform_toolsets
+    保留、`plugins: null`、缺 `plugins:` 段、`--skip-plugins` 不启用、`cli` 不回退、
+    PATH stub 验证官方入口被调用 3 次且无备份文件。
+- **未覆盖/待验收**：未对真实生产 profile 执行 `hermes plugins enable`（只用 stub 验证调用契约）；
+  官方入口可能请求运行中的网关做插件热重载（不重启进程），生产启用仍需人工验收；
+  Docker 干净室本轮未重跑（最终发布项）。
+- **禁止**：不要手改或整文件重写 `config.yaml` 的启用段；不要删除
+  `install/enable_plugins.py` 的拒绝分支（那是防写坏现场配置的闸门）。
