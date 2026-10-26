@@ -182,14 +182,17 @@ def test_reconnect_retries_an_unknown_delivery_without_marking_it_delivered(tmp_
     del service
 
     failing = Transport(raises=RuntimeError('adapter disconnected'))
-    first = drain(Pool(str(tmp_path / 'queue')), failing, profile='test-profile', lease=0.01)
+    first = drain(Pool(str(tmp_path / 'queue')), failing, profile='test-profile', lease=60)
     assert first['outcomes'][0]['status'] == 'delivery_unknown'
     assert failing.calls and Pool(str(tmp_path / 'queue')).delivery_record(job)['acknowledged'] == 0
-    time.sleep(0.03)
+    # Expire the lease deterministically. A 10 ms lease can expire during the
+    # successful ACK itself on a real fsync-backed filesystem.
+    with Pool(str(tmp_path / 'queue')).db() as db:
+        db.execute('UPDATE outbox SET lease_until=0 WHERE job=?', (job,))
 
     recovered = Transport()
     second = drain(Pool(str(tmp_path / 'queue')), recovered, profile='test-profile',
-                   lease=0.01)
+                   lease=60)
     assert second['delivered'] == 1
     assert len(recovered.calls) == 1
     assert Pool(str(tmp_path / 'queue')).delivery_record(job)['acknowledged'] == 1

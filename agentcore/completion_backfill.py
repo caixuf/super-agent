@@ -98,8 +98,9 @@ def drain(pool: Pool, transport: Any, *, profile: Optional[str] = None,
         outcomes.append(outcome)
         if outcome['status'] == 'delivered':
             continue
-        if outcome['status'] == 'unowned' and isinstance(outcome.get('task_id'), str):
-            # Raced with an origin rewrite after the snapshot; park it for this pass.
+        if outcome['status'] in ('unowned', 'delivery_deferred') and isinstance(outcome.get('task_id'), str):
+            # A changed origin or uncertain direct send stays pending, but must
+            # not hold unrelated completions behind it for this pass.
             skip = skip + (outcome['task_id'],)
             continue
         break

@@ -131,6 +131,9 @@ def deliver_once(pool: Pool, transport: Optional[Transport], *, lease: float = 6
         # and accept that the retry can duplicate: at-least-once is the honest promise.
         return {'status': 'delivery_unknown', 'task_id': job,
                 'error_type': type(exc).__name__}
+    if (isinstance(response, dict) and response.get('accepted') is False
+            and response.get('event_id') == job and response.get('deferred') is True):
+        return {'status': 'delivery_deferred', 'task_id': job}
     outcome, receipt_id = _receipt_status(response, job)
     if outcome == 'rejected':
         return {'status': 'delivery_rejected', 'task_id': job}

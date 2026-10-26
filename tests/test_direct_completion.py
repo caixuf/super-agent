@@ -52,9 +52,9 @@ def test_unknown_file_result_is_not_resent_after_restart(tmp_path):
             raise TimeoutError('may already have reached platform')
         return dict(ok=True, message_id='summary')
     transport, message, _ = make_transport(tmp_path, sender)
-    assert transport.deliver(ADDRESS, message, idempotency_key='job') is None
+    assert transport.deliver(ADDRESS, message, idempotency_key='job')['deferred']
     restarted, _, _ = make_transport(tmp_path, sender)
-    assert restarted.deliver(ADDRESS, message, idempotency_key='job') is None
+    assert restarted.deliver(ADDRESS, message, idempotency_key='job')['deferred']
     assert calls == ['text', 'file']
 
 
@@ -68,7 +68,7 @@ def test_definite_presend_refusal_retries_only_unsent_part_with_staged_bytes(tmp
             assert Path(item['path']).read_text() == 'verified report'
         return dict(ok=True, message_id=str(len(calls)))
     transport, message, file = make_transport(tmp_path, sender)
-    assert transport.deliver(ADDRESS, message, idempotency_key='job') is None
+    assert transport.deliver(ADDRESS, message, idempotency_key='job')['deferred']
     file.write_text('mutated source after partial delivery')
     assert transport.deliver(ADDRESS, message, idempotency_key='job')['accepted']
     assert calls == ['text', 'file', 'file']
@@ -105,7 +105,7 @@ def test_two_consumers_cannot_send_the_same_inflight_operation(tmp_path):
     thread.start()
     try:
         assert entered.wait(3)
-        assert second.deliver(ADDRESS, message, idempotency_key='job') is None
+        assert second.deliver(ADDRESS, message, idempotency_key='job')['deferred']
     finally:
         release.set(); thread.join(3)
     assert calls == ['text', 'file']
@@ -120,3 +120,30 @@ def test_different_profile_and_mutated_plan_cannot_reuse_delivery(tmp_path):
     with pytest.raises(ValueError, match='plan conflict'):
         transport.deliver(ADDRESS, dict(message, summary='different contents'), idempotency_key='job')
     assert len(calls) == 2
+
+
+def test_unknown_delivery_does_not_block_other_jobs(tmp_path):
+    from agentcore.pool import Pool
+    from agentcore.completion_backfill import drain
+    pool = Pool(tmp_path/'queue')
+    jobs = []
+    for summary in ['uncertain', 'ready']:
+        job = pool.submit(summary, {'goal':summary}, origin=ADDRESS)
+        claimed, fd = pool.claim()
+        try:
+            assert pool.finish(job, claimed['attempt'], True, {'summary':summary})
+        finally:
+            os.close(fd)
+        jobs.append(job)
+    sent = []
+    def sender(address, item, **kwargs):
+        sent.append(item['text'])
+        return None if item['text'] == 'uncertain' else dict(ok=True, message_id='confirmed')
+    transport = DirectCompletionTransport(tmp_path/'delivery', profile='owner', sender=sender,
+        render=lambda m:m['summary'], attempt_root=pool.root/'attempts', attempt_provider=lambda j:pool.status(j)['attempt'])
+    outcome = drain(pool, transport, profile='owner')
+    assert outcome['delivered'] == 1 and sent == ['uncertain','ready']
+    assert not pool.delivery_record(jobs[0])['acknowledged']
+    assert pool.delivery_record(jobs[1])['acknowledged']
+    drain(pool, transport, profile='owner')
+    assert sent == ['uncertain','ready']

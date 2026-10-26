@@ -135,7 +135,7 @@ class DirectCompletionTransport:
             key = hashlib.sha256((identity+'\n'+str(i)).encode()).hexdigest()
             receipt = self._operation(address, item, key)
             if receipt is None:
-                return None
+                return dict(accepted=False, event_id=idempotency_key, deferred=True)
             receipts.append(receipt)
         return dict(accepted=True, event_id=idempotency_key,
                     receipt_id='direct:'+hashlib.sha256(json.dumps(receipts).encode()).hexdigest())

@@ -26,7 +26,11 @@ pending without blocking newer ones, so enabling a sender need not flood a
 conversation with historical completions. The cutoff is enforced by the
 canonical queue claim query, not by deleting or acknowledging old receipts.
 
-Verification: the deployment-host verify script passed 766 tests with 9 optional
+An uncertain or temporarily refused direct send is deferred for the current
+drain pass, without acknowledgement. Later independent completions still flow;
+the deferred task cannot block the entire queue.
+
+Verification: the deployment-host verify script passed 767 tests with 9 optional
 native-binding skips, plus shell syntax and installation dry-run checks. A real
 Hermes PluginContext and route resolver with a fake platform adapter sent one
 summary and one file, acknowledged the outbox and started zero model turns.
