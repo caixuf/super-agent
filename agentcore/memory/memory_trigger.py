@@ -207,12 +207,25 @@ def parse_facts(raw: str) -> List[Dict[str, Any]]:
 
 
 def run(user_message: str, assistant_reply: str = "", context: str = "",
-        source: str = "auto_trigger") -> Dict[str, Any]:
-    """端到端：预筛 -> 抽取 -> 写入。返回值永远结构化，调用方不需要 try。"""
+        source: str = "auto_trigger", turn_status: str = "completed") -> Dict[str, Any]:
+    """端到端：预筛 -> 抽取 -> 写入。返回值永远结构化，调用方不需要 try。
+
+    ``turn_status`` is the host's terminal verdict for the turn. Only a completed
+    turn may become a confirmed fact; failed/interrupted turns stay audit-only.
+    """
+    if turn_status != "completed":
+        return {"ok": True, "written": 0, "skipped": True,
+                "reason": "turn_not_completed", "turn_status": turn_status, "facts": []}
     decision = should_consider(user_message, assistant_reply)
     if not decision["consider"]:
         return {"ok": True, "written": 0, "skipped": True,
                 "reason": decision["reason"], "facts": []}
+
+    # 区分「没有可抽取事实」与「抽取器不可用」：后者是失败，不能伪装成空成功。
+    if get_config().resolve_llm() is None:
+        return {"ok": False, "written": 0, "skipped": True, "retryable": True,
+                "reason": "provider_unavailable", "matched": decision["matched"],
+                "facts": []}
 
     facts = extract_facts(user_message, assistant_reply, context)
     if not facts:
