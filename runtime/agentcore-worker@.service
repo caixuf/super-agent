@@ -1,0 +1,19 @@
+[Unit]
+Description=Durable agent worker %i
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/code/agentcore
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+# Set trusted runner argv in this administrator-owned file before enabling.
+ExecStart=/usr/bin/python3 -m agentcore.pool --root %h/.local/state/agent-pool worker --runner-config %h/.config/agent-pool/runner.json
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=15
+Nice=10
+
+[Install]
+WantedBy=default.target
