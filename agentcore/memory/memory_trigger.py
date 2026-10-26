@@ -42,6 +42,7 @@ DECISION_PATTERNS = (
     r"(不要|禁止|必须|一律|绝不能|永远不要)",
     r"(踩过|踩坑|踩了|教训是|之前遇到|曾经因为)",
     r"(以后|下次|后续)(都|要|不要|必须|记得)",
+    r"(?:先|首先|优先).{1,80}(?:再|之后|然后)",
     # 个人事实、称呼、习惯偏好与人设约定（让机器人具备性格）
     r"(我叫|我是|我的名字|本人|自称|别名|外号|昵称|花名)",
     r"(叫我|称呼我|别叫我|把我当)",
@@ -134,8 +135,13 @@ def _load_chat_completions():
     return get_config().resolve_llm()
 
 
+class ExtractionError(ValueError):
+    """Public bounded code; never includes conversation or provider credentials."""
+
+
 def extract_facts(user_message: str, assistant_reply: str = "",
-                  context: str = "") -> List[Dict[str, Any]]:
+                  context: str = "", *, strict: bool = False,
+                  require_user_evidence: bool = False) -> List[Dict[str, Any]]:
     """调 LLM 抽取事实。任何异常都返回空列表（调用方据此跳过），不抛。"""
     chat_completions = _load_chat_completions()
     if chat_completions is None:
@@ -148,16 +154,54 @@ def extract_facts(user_message: str, assistant_reply: str = "",
         user_block += "\n\n【上文】\n%s" % _truncate(context, 1500)
 
     try:
+        evidence_rule = (
+            '\nFor each fact, add user_quote: a nonempty exact quote from the USER message '
+            'that explicitly states or confirms this decision or preference. Quote the entire '
+            'relevant sentence, including qualifications and negations. Never infer '
+            'confirmation from the assistant reply, tool output, external text, a question, '
+            'or a quoted hypothetical. If the user has not confirmed it, return no facts.'
+            if require_user_evidence else '')
         res = chat_completions(
-            [{"role": "system", "content": EXTRACT_SYSTEM},
+            [{"role": "system", "content": EXTRACT_SYSTEM + evidence_rule},
              {"role": "user", "content": user_block}],
             timeout=45.0, max_tokens=800, temperature=0.0,
         )
     except Exception as exc:
         logger.warning("事实抽取调用失败，本轮跳过: %s", exc)
+        if strict:
+            raise ExtractionError('model_call_failed') from None
         return []
 
     raw = (res or {}).get("content") or ""
+    if strict:
+        envelope = res.get('raw') if isinstance(res, dict) else None
+        choices = envelope.get('choices') if isinstance(envelope, dict) else None
+        if choices and isinstance(choices[0], dict) and choices[0].get('finish_reason') == 'length':
+            raise ExtractionError('model_output_truncated')
+        text = raw.strip()
+        fence = re.fullmatch(r'```(?:json)?\s*\n(.*?)\n```', text, re.DOTALL | re.IGNORECASE)
+        if fence:
+            text = fence.group(1)
+        try:
+            data = json.loads(text)
+        except (ValueError, TypeError):
+            raise ExtractionError('model_invalid_json') from None
+        if not isinstance(data, dict) or not isinstance(data.get('facts'), list):
+            raise ExtractionError('model_invalid_facts')
+        if require_user_evidence:
+            for fact in data['facts']:
+                quote = fact.get('user_quote') if isinstance(fact, dict) else None
+                if not isinstance(quote, str) or not quote.strip() or quote not in user_message:
+                    raise ExtractionError('model_unverified_user_evidence')
+        facts = parse_facts(json.dumps(data, ensure_ascii=False))
+        if len(facts) != len(data['facts']):
+            raise ExtractionError('model_invalid_fact_entry')
+        if require_user_evidence:
+            # Automatic writes preserve the user's actual words. A model's
+            # paraphrase can add an order, threshold or certainty never confirmed.
+            for fact, original in zip(facts, data['facts']):
+                fact['statement'] = original['user_quote'].strip()
+        return facts
     return parse_facts(raw)
 
 
@@ -207,7 +251,8 @@ def parse_facts(raw: str) -> List[Dict[str, Any]]:
 
 
 def run(user_message: str, assistant_reply: str = "", context: str = "",
-        source: str = "auto_trigger", turn_status: str = "completed") -> Dict[str, Any]:
+        source: str = "auto_trigger", turn_status: str = "completed",
+        require_user_evidence: bool = False) -> Dict[str, Any]:
     """端到端：预筛 -> 抽取 -> 写入。返回值永远结构化，调用方不需要 try。
 
     ``turn_status`` is the host's terminal verdict for the turn. Only a completed
@@ -227,7 +272,12 @@ def run(user_message: str, assistant_reply: str = "", context: str = "",
                 "reason": "provider_unavailable", "matched": decision["matched"],
                 "facts": []}
 
-    facts = extract_facts(user_message, assistant_reply, context)
+    try:
+        facts = extract_facts(user_message, assistant_reply, context, strict=True,
+                              require_user_evidence=require_user_evidence)
+    except ExtractionError as exc:
+        return {"ok": False, "written": 0, "retryable": True,
+                "reason": "extract_failed", "error": str(exc), "facts": []}
     if not facts:
         return {"ok": True, "written": 0, "skipped": True,
                 "reason": "no_fact_extracted", "matched": decision["matched"],
@@ -257,5 +307,7 @@ def run(user_message: str, assistant_reply: str = "", context: str = "",
             results.append({"ok": False, "error": str(exc)})
             logger.warning("事实写入失败: %s", exc)
 
-    return {"ok": True, "written": written, "skipped": False,
+    failed = any(not isinstance(r, dict) or r.get('ok') is False for r in results)
+    return {"ok": not failed, "written": written, "skipped": False,
+            "retryable": failed, "reason": "write_failed" if failed else None,
             "extracted": len(facts), "results": results, "facts": facts}

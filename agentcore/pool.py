@@ -8,6 +8,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import sqlite3
@@ -375,6 +376,18 @@ class Pool:
                         result = response if isinstance(response, dict) else {'reason': 'invalid receipt'}
                     except (ValueError, UnicodeError):
                         result = {'reason': 'invalid JSON receipt'}
+                elif reason is None:
+                    # Preserve a runner's bounded public error code on exit 1.
+                    # Do not expose arbitrary stdout/stderr in the queue ledger.
+                    out.seek(0)
+                    try:
+                        failure = json.loads(out.read(max_output))
+                        code = failure.get('error') if isinstance(failure, dict) else None
+                        if (failure.get('ok') is False and isinstance(code, str)
+                                and re.fullmatch(r'[a-z][a-z0-9_]{0,79}', code)):
+                            result['runner_error'] = code
+                    except (ValueError, UnicodeError, AttributeError):
+                        pass
                 self.finish(job, attempt, ok, result)
         except Exception as exc:
             self.finish(job, attempt, False, {'reason': 'execution error', 'type': type(exc).__name__,

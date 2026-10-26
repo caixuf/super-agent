@@ -89,6 +89,7 @@ class MemoryEventWorker:
         *,
         queue: Optional[TurnEventQueue] = None,
         runner: Optional[Callable[..., Dict[str, Any]]] = None,
+        event_runner: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         owner: Optional[str] = None,
         clock: Optional[Callable[[], float]] = None,
         lease_seconds: float = DEFAULT_LEASE_SECONDS,
@@ -98,6 +99,7 @@ class MemoryEventWorker:
     ):
         self.queue = queue if queue is not None else TurnEventQueue()
         self._runner = runner if runner is not None else memory_trigger.run
+        self._event_runner = event_runner
         self.owner = owner or "%s:%d:%s" % (
             socket.gethostname(), os.getpid(), uuid.uuid4().hex[:8])
         self.clock = clock or time.time
@@ -311,11 +313,14 @@ class MemoryEventWorker:
         claim = claims[0]
         event = claim["event"]
         try:
-            result = self._runner(
-                event.get("user_message") or "",
-                event.get("assistant_reply") or "",
-                turn_status="completed",
-            )
+            if self._event_runner is not None:
+                result = self._event_runner(event)
+            else:
+                result = self._runner(
+                    event.get("user_message") or "",
+                    event.get("assistant_reply") or "",
+                    turn_status="completed",
+                )
         except Exception as exc:  # noqa: BLE001 —— 抽取后端异常按可重试处理
             logger.warning("回合抽取异常，按可重试失败处理: %s", exc)
             return self._record_failure(
