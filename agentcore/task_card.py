@@ -101,6 +101,9 @@ class CardWriter:
     accepted or ``None`` when the frame was dropped. Dropping is silent by design: a late
     or duplicated frame must never resurrect or overwrite a card that already reached its
     final state.
+
+    ``clock`` is only consulted to stamp ``started_at`` on the first accepted frame, so it
+    must be a wall clock: ``0.0`` is the "unset" sentinel.
     """
 
     def __init__(self, handle: CardHandle, *, clock: Optional[Callable[[], float]] = None):
