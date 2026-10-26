@@ -14,6 +14,7 @@
 #   bash install/install.sh --help
 #   bash install/install.sh --dry-run                        # 看计划
 #   bash install/install.sh --profile <profile>              # 真装（通用 + 示例）
+#   bash install/install.sh --profile <profile> --skip-plugins
 #   bash install/install.sh --profile <profile> --compose-soul /path/to/overlay.md
 #   INSTALL_BUSINESS_SKILLS=1 BUSINESS_SKILLS_SRC=<dir> bash install/install.sh
 #
@@ -32,6 +33,7 @@ HERMES_HOME_ARG=""
 DEPLOY_DIR_ARG=""
 SOUL_COMPOSE_ARG=""
 DO_SOUL_LIVE=0
+DO_PLUGINS=1
 DO_SKILLS=1
 DO_PATCH=1
 DO_BASELINE=0
@@ -63,6 +65,7 @@ install.sh — 智能体本体安装器（幂等 / 支持 --dry-run）
   --deploy-soul             只装通用骨架到 <HERMES_HOME>/SOUL.md（**会丢掉业务叠加层**，
                             仅用于全新机器；已有现场身份时不要用）
   --business-skills-src D   业务技能源目录；等价于 BUSINESS_SKILLS_SRC=D
+  --skip-plugins            不装按 profile 的插件副本
   --skip-skills             不装技能
   --skip-patch              不打消息平台适配补丁
   --apply-baseline          写入**通用能力基线**（轮次/派工上限/无人值守档）。默认**不动**配置；
@@ -77,8 +80,12 @@ install.sh — 智能体本体安装器（幂等 / 支持 --dry-run）
   3. toolsets/*/              -> <DEPLOY_DIR>/toolsets/
   4. runtime/*                -> <DEPLOY_DIR>/runtime/
   5. patches/*                -> <DEPLOY_DIR>/patches/
-  6. skills/**/SKILL.md       -> <HERMES_HOME>/skills/<name>/    （通用技能；examples/ 是范本，不安装）
-  7. patches/apply_feishu_card_replies.py --apply（对 Hermes 安装树打补丁）
+  6. plugins/*/               -> <HERMES_HOME>/plugins/<连字符名>/（按 profile 的插件副本；
+                                 目录名里的下划线转连字符，跳过 __pycache__ / *.pyc）
+  7. skills/**/SKILL.md       -> <HERMES_HOME>/skills/<name>/    （通用技能；examples/ 是范本，不安装）
+  8. 对 Hermes 安装树打补丁（可 --skip-patch）：
+       patches/apply_feishu_card_replies.py --apply（卡片流式 + 审批纯文字）
+       patches/patch_card_finalize.py --apply（卡片终态 / 整轮同一张卡）
 
 业务叠加层（默认不装）:
   业务技能：INSTALL_BUSINESS_SKILLS=1 + BUSINESS_SKILLS_SRC=<dir>（或 --business-skills-src）
@@ -101,6 +108,7 @@ while [ $# -gt 0 ]; do
     --compose-soul)        SOUL_COMPOSE_ARG="${2:?--compose-soul 需要参数}"; shift ;;
     --deploy-soul)         DO_SOUL_LIVE=1 ;;
     --business-skills-src) BUSINESS_SKILLS_SRC="${2:?--business-skills-src 需要参数}"; shift ;;
+    --skip-plugins)        DO_PLUGINS=0 ;;
     --skip-skills)         DO_SKILLS=0 ;;
     --skip-patch)          DO_PATCH=0 ;;
     --apply-baseline)      DO_BASELINE=1 ;;
@@ -139,6 +147,24 @@ install_tree() {  # 幂等拷目录（排除 __pycache__ / *.pyc）
     case "$rel" in *__pycache__*|*.pyc) continue ;; esac
     install_file "$f" "$dest/$rel"
   done < <(find "$src" -type f -print0 | sort -z)
+}
+
+install_plugin_tree() {  # 幂等装各插件目录：<root>/<snake_case>/ -> <dest>/<kebab-case>/
+  local src_root="${1%/}" dest_root="$2" d name dest
+  [ -d "$src_root" ] || { warn "插件源目录不存在：$src_root"; return 0; }
+  for d in "$src_root"/*/; do
+    [ -d "$d" ] || continue
+    name="$(basename "$d")"
+    name="${name//_/-}"
+    dest="$dest_root/$name"
+    # 现场有把插件目录做成指向开发仓的符号链接。直接 cp 会**写穿到链接目标**，
+    # 等于安装器改了别的仓；这里先摘掉链接，再落实体副本。
+    if [ -L "$dest" ]; then
+      warn "目标原是符号链接（$dest -> $(readlink "$dest")），改为实体副本"
+      run rm -f "$dest"
+    fi
+    install_tree "$d" "$dest"
+  done
 }
 
 install_skill_tree() {  # 幂等装一棵技能树（递归找 SKILL.md，按目录名安装）
@@ -204,8 +230,9 @@ if [ -d "$HOME/.hermes/profiles" ]; then
 fi
 
 step "② 检查本仓源资产"
-for need in identity/SOUL.generic.md identity/agents toolsets patches \
-            patches/feishu_card_replies.patch patches/apply_feishu_card_replies.py skills; do
+for need in identity/SOUL.generic.md identity/agents toolsets patches plugins \
+            patches/feishu_card_replies.patch patches/apply_feishu_card_replies.py \
+            patches/patch_card_finalize.py skills; do
   if [ -e "$REPO_ROOT/$need" ]; then ok "$need"
   else fail "缺少源资产：$REPO_ROOT/$need"; exit 1; fi
 done
@@ -279,8 +306,16 @@ step "⑦ 补丁文件 -> $DEPLOY_DIR/patches"
 install_tree "$REPO_ROOT/patches" "$DEPLOY_DIR/patches"
 
 # ---------------------------------------------------------------------------- #
+if [ "$DO_PLUGINS" = "1" ]; then
+  step "⑧ 插件（按 profile）-> $TARGET_HOME/plugins"
+  install_plugin_tree "$REPO_ROOT/plugins" "$TARGET_HOME/plugins"
+else
+  step "⑧ 跳过插件（--skip-plugins）"
+fi
+
+# ---------------------------------------------------------------------------- #
 if [ "$DO_SKILLS" = "1" ]; then
-  step "⑧ 技能（通用）-> $SKILLS_DEST"
+  step "⑨ 技能（通用）-> $SKILLS_DEST"
   install_skill_tree "$REPO_ROOT/skills" "通用" 1
   skip "skills/examples/ 是写法范本，不作为生产技能安装"
 
@@ -292,33 +327,45 @@ if [ "$DO_SKILLS" = "1" ]; then
     log "      要装业务技能：INSTALL_BUSINESS_SKILLS=1 BUSINESS_SKILLS_SRC=<业务技能源目录>"
   fi
 else
-  step "⑧ 跳过技能（--skip-skills）"
+  step "⑨ 跳过技能（--skip-skills）"
 fi
 
 # ---------------------------------------------------------------------------- #
 if [ "$DO_PATCH" = "1" ]; then
-  step "⑨ 消息平台适配补丁（卡片流式 + 审批纯文字）"
+  step "⑩ 消息平台适配补丁（卡片流式 + 审批纯文字 + 卡片终态/同卡）"
   APPLY="$REPO_ROOT/patches/apply_feishu_card_replies.py"
+  FINALIZE="$REPO_ROOT/patches/patch_card_finalize.py"
   if [ "$DRY_RUN" = "1" ]; then
     log "    [plan] HERMES_AGENT_DIR=$HERMES_AGENT_DIR python3 $APPLY --check"
     log "    [plan] HERMES_AGENT_DIR=$HERMES_AGENT_DIR python3 $APPLY --apply"
     log "    [plan] HERMES_PROFILE_DIR=$TARGET_HOME python3 $APPLY --config"
+    log "    [plan] python3 $FINALIZE --check --agent-dir $HERMES_AGENT_DIR"
+    log "    [plan] python3 $FINALIZE --apply --agent-dir $HERMES_AGENT_DIR   （仅当 --check 不在位）"
   elif [ ! -d "$HERMES_AGENT_DIR" ]; then
     warn "Hermes 安装树不存在（$HERMES_AGENT_DIR），跳过补丁。装好 Hermes 后重跑本步。"
-  elif HERMES_AGENT_DIR="$HERMES_AGENT_DIR" python3 "$APPLY" --check; then
-    skip "补丁已整块在位"
-  elif HERMES_AGENT_DIR="$HERMES_AGENT_DIR" python3 "$APPLY" --apply; then
-    ok "补丁已重放（**需重启网关**才生效）"
   else
-    fail "补丁重放失败（上游 adapter.py 可能已变动）；人工核对后用 git apply --3way"
+    if HERMES_AGENT_DIR="$HERMES_AGENT_DIR" python3 "$APPLY" --check; then
+      skip "卡片流式补丁已整块在位"
+    elif HERMES_AGENT_DIR="$HERMES_AGENT_DIR" python3 "$APPLY" --apply; then
+      ok "卡片流式补丁已重放（**需重启网关**才生效）"
+    else
+      fail "卡片流式补丁重放失败（上游 adapter.py 可能已变动）；人工核对后用 git apply --3way"
+    fi
+    if python3 "$FINALIZE" --check --agent-dir "$HERMES_AGENT_DIR"; then
+      skip "卡片终态/同卡补丁已整块在位"
+    elif python3 "$FINALIZE" --apply --agent-dir "$HERMES_AGENT_DIR"; then
+      ok "卡片终态/同卡补丁已重放（**需重启网关**才生效）"
+    else
+      fail "卡片终态/同卡补丁重放失败（上游锚点可能已漂移，退出码 2）；人工核对后重跑"
+    fi
   fi
 else
-  step "⑨ 跳过补丁（--skip-patch）"
+  step "⑩ 跳过补丁（--skip-patch）"
 fi
 
 # ---------------------------------------------------------------------------- #
 if [ "$DO_BASELINE" = "1" ]; then
-  step "⑩ 能力基线（显式开关；只走官方设置命令）"
+  step "⑪ 能力基线（显式开关；只走官方设置命令）"
   if ! command -v hermes >/dev/null 2>&1; then
     warn "没有 hermes CLI，跳过基线写入。装好 Hermes 后重跑：bash install/install.sh --apply-baseline"
   else
@@ -350,11 +397,11 @@ if [ "$DO_BASELINE" = "1" ]; then
   warn "写保护开关（security.protected_instruction_files）**不**在本步改动："
   warn "  它是提示注入的持久化防线，关闭属**安全降级** —— 人工决定 + 留痕，详见 runtime/BASELINE.md"
 else
-  step "⑩ 跳过能力基线（未给 --apply-baseline；默认不动现场配置）"
+  step "⑪ 跳过能力基线（未给 --apply-baseline；默认不动现场配置）"
 fi
 
 # ---------------------------------------------------------------------------- #
-step "⑪ 需要人工执行的步骤（本脚本不启停任何服务）"
+step "⑫ 需要人工执行的步骤（本脚本不启停任何服务）"
 cat <<EOF
 
   当前 profile      : ${PROFILE:-default（未指定 --profile）}
@@ -384,5 +431,5 @@ step "完成"
 if [ "$DRY_RUN" = "1" ]; then
   log "  DRY-RUN 结束：以上 [plan] 行是唯一会发生的动作（其实没发生）。"
 else
-  log "  通用资产已落位。上面 ⑩ 的人工步骤仍需执行。"
+  log "  通用资产已落位。上面 ⑫ 的人工步骤仍需执行。"
 fi
