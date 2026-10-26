@@ -28,7 +28,11 @@ def check_write(path,before,after):
     review=json.loads(approved.read_text()) if approved.is_file() else None
     report=module.evaluate(before,after,references=refs,review=review)
     if report['passed']:return None
-    pending=module.stage(queue,path,before,after,report)
+    try:
+        pending=module.stage(queue,path,before,after,report)
+    except module.CapacityExceeded:
+        return dict(success=False,staged=False,conservation_capacity_exceeded=True,
+                    error='保全候选队列已满，原记忆未改；请先核对或归档已有候选，本轮停止重试。')
     return dict(success=False,staged=True,conservation_pending=True,proposal_id=pending['id'],
                 unresolved_count=pending['unresolved_count'],
                 error='自动压缩尚缺保全证据，候选已保存，原记忆未改；请补齐校验后再应用。')

@@ -73,10 +73,23 @@ assert '【新增】当前版本事实' in store.memory_entries
 # Profiles without opt-in retain their existing behavior.
 (home/'config.yaml').write_text('{}')
 assert store.remove('memory','【新增】当前版本事实')['success']
+# The actual runtime bridge distinguishes capacity refusal from a saved
+# candidate and never falls back to overwriting the memory source.
+(home/'config.yaml').write_text(json.dumps({'memory':{'conservation':{'enabled':True,
+ 'engine_root':str(engine),'queue_root':str(queue)}}}))
+index=0
+while len(c.inventory(queue/'pending'))<128:
+ candidate='隔离容量样本'+str(index);index+=1
+ c.stage(queue,memory,newer,candidate,c.evaluate(newer,candidate))
+current=memory.read_text()
+capacity=store.remove('memory','【回执】保留完整回执')
+assert not capacity['success'] and capacity['conservation_capacity_exceeded'] and capacity['staged'] is False
+assert memory.read_text()==current and '【回执】保留完整回执' in store.memory_entries
 assert patch.transform(patch.transform(source.read_text()))==patch.transform(source.read_text())
 proof=dict(passed=True,lossy_cron_staged=True,source_and_live_entries_preserved=True,
            lossless_cron_add_applied=True,foreground_unchanged=True,exact_review_applied=True,
-           stale_review_refused=True,missing_reference_refused=True,unconfigured_profile_unchanged=True)
+           stale_review_refused=True,missing_reference_refused=True,unconfigured_profile_unchanged=True,
+           capacity_refusal_explicit_and_source_unchanged=True)
 (home/'proof.json').write_text(json.dumps(proof));print(json.dumps(proof))
 '''
     result=subprocess.run([str(runtime),'-c',code,str(host),str(engine),str(tmp_path/'home')],
