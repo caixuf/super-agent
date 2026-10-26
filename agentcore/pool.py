@@ -80,7 +80,8 @@ class Pool:
                 if name not in columns:
                     db.execute('ALTER TABLE jobs ADD COLUMN ' + name + ' ' + kind)
             outbox_columns = {r[1] for r in db.execute('PRAGMA table_info(outbox)')}
-            for name, kind in [('lease_token', 'TEXT'), ('lease_until', 'REAL')]:
+            for name, kind in [('lease_token', 'TEXT'), ('lease_until', 'REAL'),
+                               ('receipt_id', 'TEXT'), ('delivered', 'REAL')]:
                 if name not in outbox_columns:
                     db.execute('ALTER TABLE outbox ADD COLUMN ' + name + ' ' + kind)
 
@@ -262,13 +263,33 @@ class Pool:
             db.execute('UPDATE outbox SET lease_token=?,lease_until=? WHERE job=?', (token, time.time() + lease, row['job']))
             return {'token': token, 'receipt': json.loads(row['receipt'])}
 
-    def acknowledge(self, job, token=None):
+    def acknowledge(self, job, token=None, *, receipt_id=None):
+        """Mark a delivered receipt acknowledged, recording the transport's receipt id.
+
+        ``receipt_id`` is audit trail only: the ack itself is still fenced by the lease
+        token, so a stale consumer cannot acknowledge work another consumer now owns.
+        """
+        if receipt_id is not None and (not isinstance(receipt_id, str) or not receipt_id.strip()):
+            raise ValueError('receipt id must be a nonempty string when given')
+        delivered_at = time.time() if receipt_id is not None else None
         with self.db() as db:
             if token is None:
-                updated = db.execute('UPDATE outbox SET acknowledged=1 WHERE job=? AND lease_token IS NULL AND acknowledged=0', (job,))
+                updated = db.execute('UPDATE outbox SET acknowledged=1, receipt_id=COALESCE(?,receipt_id), '
+                                     'delivered=COALESCE(?,delivered) WHERE job=? AND lease_token IS NULL '
+                                     'AND acknowledged=0', (receipt_id, delivered_at, job))
             else:
-                updated = db.execute('UPDATE outbox SET acknowledged=1 WHERE job=? AND lease_token=? AND lease_until>? AND acknowledged=0', (job, token, time.time()))
+                updated = db.execute('UPDATE outbox SET acknowledged=1, receipt_id=COALESCE(?,receipt_id), '
+                                     'delivered=COALESCE(?,delivered) WHERE job=? AND lease_token=? '
+                                     'AND lease_until>? AND acknowledged=0',
+                                     (receipt_id, delivered_at, job, token, time.time()))
             return updated.rowcount == 1
+
+    def delivery_record(self, job):
+        """How a completion was delivered, or None while it is still pending."""
+        with self.db() as db:
+            row = db.execute('SELECT acknowledged,receipt_id,delivered FROM outbox WHERE job=?',
+                             (job,)).fetchone()
+        return dict(row) if row is not None else None
 
     def run_once(self, command, timeout=300, lease=60, max_output=1048576, max_file=67108864):
         if timeout <= 0 or lease <= 0 or max_output <= 0 or max_file <= 0:
