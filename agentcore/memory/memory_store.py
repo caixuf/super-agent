@@ -191,6 +191,17 @@ def _tags_of(conn: sqlite3.Connection, fact_id: str) -> Dict[str, str]:
             conn.execute("SELECT key, value FROM fact_tags WHERE fact_id=?", (fact_id,))}
 
 
+def _tags_of_many(conn: sqlite3.Connection, fact_ids: Sequence[str]) -> Dict[str, Dict[str,str]]:
+    ids=list(dict.fromkeys(fact_ids));result={fid:{} for fid in ids}
+    # Stay below SQLite's conservative variable limit, including old installs.
+    for offset in range(0,len(ids),400):
+        chunk=ids[offset:offset+400]
+        rows=conn.execute('SELECT fact_id,key,value FROM fact_tags WHERE fact_id IN ('+
+                          ','.join('?' for _ in chunk)+')',chunk)
+        for row in rows:result[row['fact_id']][row['key']]=row['value']
+    return result
+
+
 def _put_tags(conn: sqlite3.Connection, fact_id: str, tags: Dict[str, str]) -> None:
     for k, v in tags.items():
         conn.execute(
@@ -489,9 +500,12 @@ def _knn_rowids(conn: sqlite3.Connection, query: str, *,
         except Exception as exc:  # noqa: BLE001 —— 补捞失败不影响主结果
             logging.getLogger(logger_name("store")).debug("KNN 补捞失败: %s", exc)
 
-    fids = [fid for fid, _dist in hits]
-    marks = ",".join("?" * len(fids))
-    where = ["f.fact_id IN (" + marks + ")", "f.status = 'active'", "f.user_id = ?"]
+    fids = list(dict.fromkeys(fid for fid, _dist in hits))
+    # IN(200 ids) + user/status can make SQLite prefer a low-cardinality
+    # owner index and scan the owner's entire library. Drive the join from
+    # the bounded candidate list instead: each inner lookup is one unique PK.
+    values = ",".join("(?)" for _ in fids)
+    where = ["f.fact_id = candidate.fact_id", "f.status = 'active'", "f.user_id = ?"]
     params: List[Any] = [*fids, user_id]
     if buckets:
         where.append("f.workspace_id IN (%s)" % ",".join("?" * len(buckets)))
@@ -515,7 +529,9 @@ def _knn_rowids(conn: sqlite3.Connection, query: str, *,
              " AND k2.key = 'kind'))")
         params.extend(kinds)
     rows = conn.execute(
-        "SELECT f.rowid AS rid FROM working_fact f WHERE " + " AND ".join(where),
+        "WITH candidate_ids(fact_id) AS (VALUES " + values + ") "
+        "SELECT f.rowid AS rid FROM candidate_ids candidate CROSS JOIN working_fact f WHERE "
+        + " AND ".join(where),
         params).fetchall()
     return [r["rid"] if isinstance(r, sqlite3.Row) else r[0] for r in rows]
 
@@ -877,9 +893,10 @@ def recall_facts(
                     "searched_tags": want, "empty_reason": reason}
 
         picked: List[Dict[str, Any]] = []
+        tags_by_id=_tags_of_many(conn,[r['fact_id'] for r in rows])
         for r in rows:
             d = dict(r)
-            d["tags"] = _tags_of(conn, d["fact_id"])
+            d["tags"] = tags_by_id[d['fact_id']]
             d["apply_match"] = ("legacy_unknown" if (d["workspace_id"] or UNKNOWN_BUCKET) == UNKNOWN_BUCKET
                                 else "exact_ebm" if buckets and d["workspace_id"] == buckets[0]
                                 else "unscoped_ebm")
