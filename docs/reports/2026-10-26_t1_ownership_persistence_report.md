@@ -63,10 +63,14 @@ rowcount now: True
 ## 五、顺带修掉的一条既有红灯（不属于本任务，但同一次跑测暴露）
 
 `tests/test_repo_neutrality.py::test_no_business_literals_anywhere_in_repo` 之前是红的，
-来自 T3 合成数据 `tests/fixtures/memory_recall_cases.json` 里的 `r7` / `f_repo_r7`（命中禁用词表
-`R7`）。该文件未入库，语义是「旧 revision 的事实不应被当作当前事实」，与具体业务无关，
-已把 `r7/r8/r3` 改成 `rev-a/rev-b/rev-0`、`f_repo_r7` 改成 `f_repo_stale`，语义不变。
+来自 T3 合成数据 `tests/fixtures/memory_recall_cases.json` 里的 revision 标签命中了禁用词表
+（该表把某两个「车型代际代号」列为禁用）。那条用例的语义是「旧 revision 的事实不应被当作
+当前事实」，与具体业务无关，与代际代号只是字面重合。已把 revision 标签改成
+`rev-a` / `rev-b` / `rev-0` 这类中性写法，事实 id 同步改名，语义不变。
 **该文件仍由 T3 线持有，本次不提交。**
+
+（本报告初版描述这段时直接抄了那几个字面量，被同一道门禁在自查时抓红——说明门禁覆盖含 `docs/`，
+记录问题时同样要不写实名字面量。）
 
 ## 六、未验 / 边界（不要当成已完成）
 
