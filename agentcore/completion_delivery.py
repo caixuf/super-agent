@@ -88,11 +88,15 @@ def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS) ->
 
 
 def deliver_once(pool: Pool, transport: Optional[Transport], *, lease: float = 60,
-                 limit: int = MAX_SUMMARY_CHARS) -> dict[str, Any]:
-    """Deliver at most one pending completion. Returns a status record, never raises."""
+                 limit: int = MAX_SUMMARY_CHARS, skip=()) -> dict[str, Any]:
+    """Deliver at most one pending completion. Returns a status record, never raises.
+
+    ``skip`` is forwarded to the ledger so a caller can leave a receipt it already knows
+    it cannot address pending without letting that row block every later completion.
+    """
     if transport is None:
         return {'status': 'unavailable', 'reason': 'no transport configured'}
-    claim = pool.claim_receipt(lease)
+    claim = pool.claim_receipt(lease, skip=skip)
     if claim is None:
         return {'status': 'empty'}
     job, token = claim['receipt'].get('job'), claim['token']
@@ -127,7 +131,8 @@ def deliver_once(pool: Pool, transport: Optional[Transport], *, lease: float = 6
 
 
 def deliver_pending(pool: Pool, transport: Optional[Transport], *, limit: int = 100,
-                    lease: float = 60, max_summary: int = MAX_SUMMARY_CHARS) -> list[dict[str, Any]]:
+                    lease: float = 60, max_summary: int = MAX_SUMMARY_CHARS,
+                    skip=()) -> list[dict[str, Any]]:
     """Drain pending completions once. Every non-progressing status stops the loop.
 
     Stopping (rather than spinning) matters: a rejected or unowned receipt stays pending
@@ -137,7 +142,7 @@ def deliver_pending(pool: Pool, transport: Optional[Transport], *, limit: int = 
         raise ValueError('limit must be positive')
     outcomes = []
     for _ in range(limit):
-        outcome = deliver_once(pool, transport, lease=lease, limit=max_summary)
+        outcome = deliver_once(pool, transport, lease=lease, limit=max_summary, skip=skip)
         if outcome['status'] == 'empty':
             # Nothing left. An already-empty queue still reports one row so a caller can
             # tell "drained" from "never ran"; a trailing empty would just be noise.

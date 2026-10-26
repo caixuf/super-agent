@@ -2,6 +2,11 @@
 
 Identity is supplied by the dispatcher keyword, never model arguments or ambient
 session environment. The shared queue remains the only scheduling authority.
+
+A completion is routed back through the address persisted at submit time: the profile,
+the durable session and the route key of the turn that submitted the work. Delivery uses
+the public ``PluginContext.inject_message`` host surface with that stored route; it never
+looks at whichever session happens to be active when the job finishes.
 """
 from __future__ import annotations
 
@@ -12,34 +17,148 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import sys
+import threading
+import types
 
-def _pool_type(engine_root=None):
-    """Resolve the canonical engine without changing interpreter search paths.
+#: Bound session variables copied into a job's persisted origin. These name the route
+#: of the turn handling this tool call, not "the active session" of a later process.
+_BOUND_ROUTE = (
+    ('route', 'HERMES_SESSION_KEY'),
+    ('channel', 'HERMES_SESSION_PLATFORM'),
+    ('chat', 'HERMES_SESSION_CHAT_ID'),
+    ('thread', 'HERMES_SESSION_THREAD_ID'),
+)
+_ENGINE_MODULES = ('pool.py', 'ops_alerts.py', 'completion_delivery.py',
+                   'completion_backfill.py')
+_DEFAULT_DELIVERY_INTERVAL = 5.0
+
+
+def _engine(engine_root=None):
+    """Resolve the canonical engine modules without changing interpreter search paths.
 
     Plugin import itself must work in an isolated host runtime. Administrator
     settings supply the checkout fallback; job arguments never enter resolution.
     """
     try:
-        return importlib.import_module('agentcore.pool').Pool
+        pool = importlib.import_module('agentcore.pool')
+        backfill = importlib.import_module('agentcore.completion_backfill')
+        return pool.Pool, backfill
     except ModuleNotFoundError as error:
-        if error.name not in ('agentcore', 'agentcore.pool'):
+        if error.name not in ('agentcore', 'agentcore.pool', 'agentcore.completion_backfill',
+                              'agentcore.completion_delivery', 'agentcore.ops_alerts'):
             raise
     if not isinstance(engine_root, str) or not Path(engine_root).is_absolute():
         raise ValueError('engine_root is required when the engine package is unavailable')
-    source = Path(engine_root).resolve(strict=True) / 'agentcore' / 'pool.py'
-    if not source.is_file():
-        raise ValueError('engine_root must contain the canonical agentcore/pool.py')
-    spec = importlib.util.spec_from_file_location('durable_dispatch_canonical_pool', source)
-    if spec is None or spec.loader is None:
-        raise ImportError('canonical durable engine unavailable')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.Pool
+    directory = Path(engine_root).resolve(strict=True) / 'agentcore'
+    missing = [name for name in _ENGINE_MODULES if not (directory / name).is_file()]
+    if missing:
+        raise ValueError('engine_root is missing canonical modules: ' + ', '.join(missing))
+    # Load the checkout as a transient package so its intra-package imports resolve,
+    # then remove every trace: later checks must still see an uninstalled engine.
+    saved = {name: module for name, module in sys.modules.items()
+             if name == 'agentcore' or name.startswith('agentcore.')}
+    for name in saved:
+        del sys.modules[name]
+    package = types.ModuleType('agentcore')
+    package.__path__ = [str(directory)]
+    package.__package__ = 'agentcore'
+    sys.modules['agentcore'] = package
+    loaded = {}
+    try:
+        for name in ('pool', 'ops_alerts', 'completion_delivery', 'completion_backfill'):
+            spec = importlib.util.spec_from_file_location(
+                'agentcore.' + name, directory / (name + '.py'))
+            if spec is None or spec.loader is None:
+                raise ImportError('canonical durable engine unavailable: ' + name)
+            module = importlib.util.module_from_spec(spec)
+            # Register before execution so ``from agentcore.x import y`` resolves.
+            sys.modules['agentcore.' + name] = module
+            spec.loader.exec_module(module)
+            loaded[name] = module
+        return loaded['pool'].Pool, loaded['completion_backfill']
+    finally:
+        for name in [name for name in list(sys.modules)
+                     if name == 'agentcore' or name.startswith('agentcore.')]:
+            del sys.modules[name]
+        sys.modules.update(saved)
+
+
+def _pool_type(engine_root=None):
+    """Compatibility helper for callers that only need the queue class."""
+    return _engine(engine_root)[0]
 
 
 def Pool(root):
     """Compatibility factory for callers with an installed/importable engine."""
     return _pool_type()(root)
+
+
+def _bound_route(session_id):
+    """Route fields of the turn calling this tool, or ``{}`` when none is bound.
+
+    The bound durable session id must agree with the dispatcher's identity when both
+    are present. A mismatch means the caller is not running in the submitting turn,
+    so no route is recorded rather than borrowing another conversation's address.
+    """
+    try:
+        from gateway.session_context import get_session_env
+    except Exception:
+        return {}
+    try:
+        bound_session = get_session_env('HERMES_SESSION_ID', '')
+    except Exception:
+        bound_session = ''
+    if isinstance(bound_session, str) and bound_session and bound_session != session_id:
+        return {}
+    route = {}
+    for field, variable in _BOUND_ROUTE:
+        try:
+            value = get_session_env(variable, '')
+        except Exception:
+            value = ''
+        if isinstance(value, str) and value.strip() and len(value) <= 512:
+            route[field] = value.strip()
+    if 'channel' not in route:
+        # Local CLI/TUI/desktop binds SOURCE instead of a platform.
+        try:
+            source = get_session_env('HERMES_SESSION_SOURCE', '')
+        except Exception:
+            source = ''
+        if isinstance(source, str) and source.strip() and len(source) <= 512:
+            route['channel'] = source.strip()
+    return route
+
+
+def _render_completion(message):
+    """Platform-neutral completion text; the host adapter renders its own formatting."""
+    status = message.get('status')
+    label = {'completed': '已完成', 'failed': '失败', 'cancelled': '已取消'}.get(status, status)
+    text = '[后台任务 %s] %s\n%s' % (message.get('task_id'), label, message.get('summary'))
+    if message.get('truncated'):
+        text += '\n（摘要已截断，完整报告请查看任务结果）'
+    return text
+
+
+class InjectionTransport:
+    """Deliver through the host's public session injection, addressed by stored route."""
+
+    def __init__(self, inject, profile):
+        self._inject = inject
+        self.profile = profile
+
+    def deliver(self, address, message, *, idempotency_key):
+        if address.get('profile') != self.profile or not address.get('route'):
+            return None
+        accepted = self._inject(_render_completion(message), session_key=address['route'])
+        if accepted is not True:
+            # False means the host refused outright; anything else is unknown. Neither
+            # acknowledges the receipt, so a later poll can retry after the lease.
+            return False if accepted is False else None
+        digest = hashlib.sha256(
+            ('inject\0' + address['route'] + '\0' + idempotency_key).encode()).hexdigest()
+        return {'accepted': True, 'event_id': idempotency_key,
+                'receipt_id': 'injected:' + digest[:32]}
 
 
 def _public_result(raw):
@@ -94,7 +213,7 @@ def _public_result(raw):
 
 class DispatchService:
     def __init__(self, root, profile, allowed_roots, *, max_sources=8, max_lines=400,
-                 denied_globs=None, pool_type=None):
+                 denied_globs=None, pool_type=None, delivery=None, route_provider=None):
         if not isinstance(profile, str) or not profile:
             raise ValueError('profile identity required')
         if not isinstance(root, str) or not Path(root).is_absolute():
@@ -106,6 +225,8 @@ class DispatchService:
             raise ValueError('allowed roots must be directories')
         self.profile = profile
         self.pool = (pool_type or Pool)(root)
+        self.delivery = delivery or importlib.import_module('agentcore.completion_backfill')
+        self.route_provider = route_provider or _bound_route
         self.max_sources, self.max_lines = max_sources, max_lines
         self.denied_globs = tuple(denied_globs or ()) + (
             '.env*', '*.pem', '*.key', '*credentials*', '*token*', 'auth.json',
@@ -116,6 +237,20 @@ class DispatchService:
         if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 512:
             raise PermissionError('trusted dispatcher session identity required')
         return hashlib.sha256(json.dumps([self.profile, session_id]).encode()).hexdigest()
+
+    def _origin(self, session_id):
+        """Ownership proof stays a hash; the origin is the addressable conversation."""
+        origin = {'profile': self.profile, 'session': session_id}
+        try:
+            route = self.route_provider(session_id)
+        except Exception:
+            route = {}
+        if isinstance(route, dict):
+            for field in ('route', 'channel', 'chat', 'thread'):
+                value = route.get(field)
+                if isinstance(value, str) and value.strip() and len(value) <= 512:
+                    origin[field] = value.strip()
+        return origin
 
     def _sources(self, sources):
         if not isinstance(sources, list) or not 1 <= len(sources) <= self.max_sources:
@@ -161,12 +296,17 @@ class DispatchService:
                    '_dispatch_owner': owner}
         dedupe = owner + ':' + hashlib.sha256(key.encode()).hexdigest()
         # ``_dispatch_owner`` is an ownership *proof* (one-way), never an address:
-        # persist profile + session alongside it so a completion can be routed back
-        # to the conversation that submitted the work, after reconnects and restarts.
+        # persist profile + session + route alongside it so a completion can be routed
+        # back to the conversation that submitted the work, after reconnects and restarts.
         job = self.pool.submit(dedupe, payload, replay_safe=True, max_tries=2,
-                               origin={'profile': self.profile, 'session': session_id})
+                               origin=self._origin(session_id))
         return {'ok': True, 'task_id': job, 'status': self.pool.status(job)['status'],
                 'next_action': 'Return the task ID to the user and finish this turn. Do not poll.'}
+
+    def drain_delivery(self, transport, *, limit=50, lease=60):
+        """Deliver routable completions once; unaddressable receipts stay pending."""
+        return self.delivery.drain(self.pool, transport, profile=self.profile,
+                                   limit=limit, lease=lease)
 
     def _owned(self, session_id, job):
         owner = self._owner(session_id)
@@ -225,6 +365,60 @@ def _handler(service, action):
     return handle
 
 
+def _delivery_interval(ctx):
+    try:
+        value = float(ctx.get_config('delivery_interval', _DEFAULT_DELIVERY_INTERVAL))
+    except (TypeError, ValueError):
+        value = _DEFAULT_DELIVERY_INTERVAL
+    if not 1.0 <= value <= 300.0:
+        raise ValueError('delivery_interval must be between 1 and 300 seconds')
+    return value
+
+
+def start_backfill(ctx, service):
+    """Poll the queue and inject routable completions until the plugin unloads.
+
+    Opt-in through ``deliver_completions: true`` plus the host's own
+    ``plugins.entries.durable-dispatch.allow_gateway_injection: true``. The thread holds
+    no delivery state: every pass re-reads the ledger, so a restart, reconnect or a
+    second gateway resumes the same pending receipts without replaying delivered ones.
+    """
+    if ctx.get_config('deliver_completions', False) is not True:
+        return None
+    inject = getattr(ctx, 'inject_message', None)
+    if not callable(inject):
+        return None
+    interval = _delivery_interval(ctx)
+    transport = InjectionTransport(inject, service.profile)
+    stop = threading.Event()
+
+    def loop():
+        while not stop.is_set():
+            try:
+                service.drain_delivery(transport)
+            except Exception:
+                # A broken pass must not kill the poller; the next pass retries from
+                # the ledger. Never log task content from here.
+                pass
+            if stop.wait(interval):
+                break
+
+    thread = threading.Thread(target=loop, name='durable-dispatch-backfill', daemon=True)
+    thread.start()
+
+    def _stop():
+        stop.set()
+        thread.join(timeout=max(1.0, interval))
+
+    on_unload = getattr(ctx, 'on_unload', None)
+    if callable(on_unload):
+        try:
+            on_unload(_stop)
+        except TypeError:
+            pass
+    return thread
+
+
 def register(ctx):
     if ctx.get_config('enabled', False) is not True:
         return
@@ -234,10 +428,11 @@ def register(ctx):
 Use durable_submit when the task can be completed by analyzing administrator-approved source files. Submit one task, return its ID, and finish the turn without waiting or polling. Use delegate_task for independent reasoning subtasks or work that needs separate agent context; do not use it as a substitute when durable analysis fits. Choose by the work and source bounds, not by keywords such as 'log'. Never provide an owner, shell command, runner, or model adapter.""",
         position='after_memory', max_chars=1000,
     )
+    pool_type, delivery = _engine(ctx.get_config('engine_root'))
     service = DispatchService(ctx.get_config('queue_root'), ctx.profile_name,
                               ctx.get_config('allowed_roots'),
                               denied_globs=ctx.get_config('denied_globs', []),
-                              pool_type=_pool_type(ctx.get_config('engine_root')))
+                              pool_type=pool_type, delivery=delivery)
     source_schema = {'type': 'object', 'additionalProperties': False, 'properties': {
         'path': {'type': 'string'}, 'start_line': {'type': 'integer', 'minimum': 1},
         'end_line': {'type': 'integer', 'minimum': 1}}, 'required': ['path']}
@@ -262,3 +457,4 @@ Use durable_submit when the task can be completed by analyzing administrator-app
                               'type': 'object', 'additionalProperties': False,
                               'properties': properties, 'required': required}},
                           handler=_handler(service, action))
+    start_backfill(ctx, service)

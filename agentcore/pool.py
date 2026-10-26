@@ -250,13 +250,27 @@ class Pool:
         with self.db() as db:
             return [json.loads(r[0]) for r in db.execute('SELECT receipt FROM outbox WHERE acknowledged=0')]
 
-    def claim_receipt(self, lease=60):
-        """Single-consumer lease; transport must dedupe by job across crash windows."""
+    def claim_receipt(self, lease=60, skip=()):
+        """Single-consumer lease; transport must dedupe by job across crash windows.
+
+        ``skip`` names receipts the caller already knows it cannot address (for example
+        a task admitted before its route was persisted). Skipping happens in the ledger,
+        not by acknowledging: such a row stays pending for an operator while a later
+        deliverable completion is not blocked behind it.
+        """
         if lease <= 0:
             raise ValueError('lease must be positive')
+        skip = tuple(skip)
+        if any(not isinstance(job, str) or not job for job in skip):
+            raise ValueError('skip must contain task ids')
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT * FROM outbox WHERE acknowledged=0 AND (lease_until IS NULL OR lease_until<?) ORDER BY rowid LIMIT 1', (time.time(),)).fetchone()
+            query = 'SELECT * FROM outbox WHERE acknowledged=0 AND (lease_until IS NULL OR lease_until<?)'
+            values = [time.time()]
+            if skip:
+                query += ' AND job NOT IN (%s)' % ','.join('?' * len(skip))
+                values.extend(skip)
+            row = db.execute(query + ' ORDER BY rowid LIMIT 1', values).fetchone()
             if row is None:
                 return None
             token = uuid.uuid4().hex

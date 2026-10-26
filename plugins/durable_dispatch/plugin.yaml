@@ -1,8 +1,8 @@
 name: durable-dispatch
 label: Durable Dispatch
 kind: standalone
-version: "0.1.0"
-description: "Persist scoped read-only analysis requests and expose status and cancellation. Worker lifecycle remains separate from the chat gateway."
+version: "0.2.0"
+description: "Persist scoped read-only analysis requests, expose status and cancellation, and route each completion back to the conversation that submitted it."
 author: agentcore
 provides_tools:
   - durable_submit
