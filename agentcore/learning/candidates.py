@@ -29,6 +29,9 @@
    且不能是候选作者本人；审批时重新校验快照、哈希、引文与冲突。
 4. 冲突：同一 ``subject`` 下出现不同 statement 即冲突，冲突未解决前双方都不能
    通过审批；显式 reject 掉一方后才解除。当前不做语义相似度推断。
+5. 撤销：只有 ``approved`` 候选能被撤回为 ``revoked``（终态），且必须给出
+   具名、非作者的审查者与理由；晋升只接受 ``approved``，撤销后不会再写入正式
+   记忆。撤销复用同一条审查审计轨迹（decision=``revoke``）。
 
 剩余工作（本阶段明确不做）
 --------------------------
@@ -59,10 +62,12 @@ __all__ = [
     "STATUS_REJECTED",
     "STATUS_CONFLICTED",
     "STATUS_NEEDS_HUMAN",
+    "STATUS_REVOKED",
     "STATUSES",
     "TERMINAL_STATUSES",
     "DECISION_APPROVE",
     "DECISION_REJECT",
+    "DECISION_REVOKE",
     "CandidateError",
     "InvalidCandidate",
     "QuoteNotGrounded",
@@ -86,15 +91,18 @@ STATUS_APPROVED = "approved"
 STATUS_REJECTED = "rejected"
 STATUS_CONFLICTED = "conflicted"
 STATUS_NEEDS_HUMAN = "needs_human"
+#: 已批准候选被撤回：终态，且晋升只接受 approved，所以撤销后不可入库。
+STATUS_REVOKED = "revoked"
 
 STATUSES = (STATUS_PENDING, STATUS_APPROVED, STATUS_REJECTED,
-            STATUS_CONFLICTED, STATUS_NEEDS_HUMAN)
+            STATUS_CONFLICTED, STATUS_NEEDS_HUMAN, STATUS_REVOKED)
 
 #: 终态：一旦进入就不再接受审查（要改结论只能新建候选）。
-TERMINAL_STATUSES = (STATUS_APPROVED, STATUS_REJECTED)
+TERMINAL_STATUSES = (STATUS_APPROVED, STATUS_REJECTED, STATUS_REVOKED)
 
 DECISION_APPROVE = "approve"
 DECISION_REJECT = "reject"
+DECISION_REVOKE = "revoke"
 
 #: 参与「冲突」判定的状态：未解决的相反说法仍然挡住审批。
 _CONFLICTING_STATUSES = (STATUS_PENDING, STATUS_APPROVED, STATUS_CONFLICTED,
@@ -625,6 +633,38 @@ class CandidateStore:
             self._save(updated)
             self._record_attempt(candidate_id, decision_norm, reviewer, reviewed_at,
                                  outcome, (), note)
+            return updated
+
+    def revoke(self, candidate_id: str, *, reviewer: str, reason: str,
+               now: Optional[str] = None) -> Candidate:
+        """撤回一条 **approved** 候选：状态置 ``revoked``，附具名审查者与理由。
+
+        撤销是终态且**不可入库**：晋升只接受 ``approved``，因此撤销后
+        :func:`~agentcore.learning.promotion.promote_candidate` 会在打开事实库
+        之前拒绝。未批准的候选请用 ``reject``；重复撤销或再审查一律拒绝。
+        """
+        reviewer = self._reviewer_identity(reviewer)
+        reason = _require_text(reason, "reason", limit=2000).strip()
+        revoked_at = canonical_timestamp(now, "reviewed_at") if now else self._clock()
+        with self._lock:
+            candidate = self._require(candidate_id)
+            if candidate.review_status in (STATUS_REVOKED, STATUS_REJECTED):
+                raise CandidateError(
+                    "候选 %s 已终结于 %s，不能再次撤销"
+                    % (candidate_id, candidate.review_status))
+            if candidate.review_status != STATUS_APPROVED:
+                raise CandidateError(
+                    "候选 %s 状态为 %s，只有 %s 才能撤销"
+                    % (candidate_id, candidate.review_status, STATUS_APPROVED))
+            if candidate.author and _canonical(candidate.author) == _canonical(reviewer):
+                raise ReviewerNotIndependent(
+                    "审查者 %r 与候选作者是同一身份，不能撤销" % reviewer)
+            updated = replace(candidate, review_status=STATUS_REVOKED,
+                              reviewer=reviewer, reviewed_at=revoked_at,
+                              review_note=reason)
+            self._save(updated)
+            self._record_attempt(candidate_id, DECISION_REVOKE, reviewer,
+                                 revoked_at, "revoked", (), reason)
             return updated
 
     def escalate(self, candidate_id: str, *, reviewer: str, reason: str,
