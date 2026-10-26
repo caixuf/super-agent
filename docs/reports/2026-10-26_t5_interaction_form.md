@@ -179,8 +179,33 @@ QUEUED ──▶ RUNNING ──▶ DONE        （终态）
 
 ---
 
-## 7. 参考
+## 7. 实现状态（截至本日）
 
-- 本仓参考实现：`agentcore/task_card.py`、`tests/test_task_card.py`
+**已实现并通过门禁**（业务中立、零第三方依赖；`verify.sh` 退出码 0，全仓 164 passed）：
+
+| 模块 | 职责 | 对应本文章节 | 提交 |
+| :--- | :--- | :--- | :--- |
+| `agentcore/task_card.py` | 句柄契约：状态机、`sequence`/`uuid`、终态锁、`heartbeat()`、`route()` | §2 | `8cd699b` |
+| `agentcore/card_store.py` | 持久化：`task_id → CardHandle` 落 SQLite；`writer()` 从持久态重建（重启续 sequence） | §2.3 | `8042cfc` |
+| `agentcore/card_emit.py` | 适配器面：`CardView` + `CardEmitter`（唯一写者；丢弃帧不下发） | §1①、§2.4 | `9acb309` |
+
+测试：`tests/test_task_card.py`(15) + `tests/test_card_store.py`(9) + `tests/test_card_emit.py`(9)。
+
+**尚未做（宿主侧接线，需平台真验）**：
+
+1. 网关准入层调用 `route()`，按尺度分派（查表 / 建卡 / 流式）。
+2. 网关把结构化阶段事件喂给 `CardEmitter.update()`（不再读本机临时文件）。
+3. 宿主 adapter 用 `CardStore` 取代内存里的 card-id 映射（重启续同一张卡）。
+4. 卡片更新失败 → 回落纯文本、清半截卡片。
+5. 平台真流式（Phase 2）——仅改观感。
+
+> 1–4 都要改**宿主安装树**（`plugins/platforms/feishu/adapter.py` 与 `gateway/`），
+> 属生产路径，必须**真人观察下验证**；本仓只提供被调用的契约，不直接改宿主。
+
+---
+
+## 8. 参考
+
+- 本仓参考实现：`agentcore/task_card.py`、`agentcore/card_store.py`、`agentcore/card_emit.py` 及对应测试
 - 既有实现镜像：`patches/feishu_card_replies.patch`（原地编辑整卡）、`patches/feishu_preview_bubble_cleanup.patch`（终稿另发时删预览条）
 - 事故记录：`docs/handover/2026-10-23_guanguan-bridge-and-release-rerun_handover.md`（卡片三病）
