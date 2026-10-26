@@ -3,8 +3,8 @@
 `plugins/durable_dispatch` registers three tools through the public Hermes API:
 `durable_submit`, `durable_status`, and `durable_cancel`. Submit returns after
 the task is committed; execution happens in the existing independent Worker.
-The returned instruction asks the model to finish its turn. Actual turn release
-still needs live-session acceptance; the plugin cannot force the model to stop.
+The returned instruction asks the model to finish its turn. Turn release was observed through the live API on a synthetic task; the plugin
+cannot force the model to stop on every request.
 
 Dispatcher session identity and the registration profile determine ownership.
 They are never accepted as model arguments or read from an ambient environment
@@ -59,7 +59,9 @@ new tool schemas at a new session boundary. Install any optional native backend
 for the exact service interpreter in a persistent location. Source policies and
 runner module names belong to the host deployment, never the task request.
 
-No production plugin or Worker was enabled by this change. Automated outbound
-delivery remains a host integration; status currently exposes verified artifact
-references. For one-card delivery, reuse the existing CardStore/CardEmitter and
+A host deployment now has the plugin and independent FlowCoro Worker enabled;
+live API submission, query, terminal cancellation and crash recovery were checked
+with synthetic fixtures. See reports/2026-10-26_core_activation.md. Human business
+acceptance is pending. Automated outbound delivery remains a host integration;
+status exposes a bounded summary and verified artifact references. For one-card delivery, reuse the existing CardStore/CardEmitter and
 outbox protocols rather than creating another task state machine.

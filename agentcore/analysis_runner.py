@@ -120,13 +120,13 @@ def _read_snapshot(source, policy, index):
         raise AnalysisError('source_not_utf8') from None
     if '\x00' in text:
         raise AnalysisError('source_not_text')
-    if _SECRET_VALUE.search(text):
-        raise AnalysisError('source_contains_sensitive_assignment')
     lines = text.splitlines()
     start = _positive(source.get('start_line', 1), 'start_line')
     end = _positive(source.get('end_line', min(len(lines), start + policy['max_lines'] - 1)), 'end_line')
     if start > end or start > len(lines) or end > len(lines) or end - start + 1 > policy['max_lines']:
         raise AnalysisError('source_line_budget')
+    if _SECRET_VALUE.search('\n'.join(lines[start - 1:end])):
+        raise AnalysisError('source_contains_sensitive_assignment')
     return {'source_id': 'source_' + str(index), 'path': str(path),
             'sha256': hashlib.sha256(content).hexdigest(), 'bytes': len(content),
             'start_line': start, 'end_line': end,
@@ -258,6 +258,10 @@ def run_analysis(job, policy, model, output_dir='.'):
         _atomic(out / filename, content)
     return {'ok': True, 'result': {'job': job.get('job'), 'attempt': job.get('attempt'),
             'verification': report['verification'], 'claim_count': len(report['claims']),
+            'summary': report['conclusion'][:2000],
+            'summary_truncated': len(report['conclusion']) > 2000,
+            'limitations': [item[:300] for item in report['limitations'][:3]],
+            'verification_note': 'Quotes match source snapshots; causal conclusions still require review.',
             'artifacts': [str(out / name) for name in ('report.json', 'report.md', 'manifest.json')]}}
 
 

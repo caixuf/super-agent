@@ -164,3 +164,33 @@ def model(messages):
         capture_output=True, env=env, cwd=tmp_path, timeout=30)
     assert failure.returncode == 1
     assert json.loads(failure.stdout) == {'ok': False, 'error': 'source_denied'}
+
+
+def test_bounded_query_summary_preserves_complete_report(tmp_path):
+    job, policy, _ = case(tmp_path)
+    full = '故障记录显示数据不一致。' * 300
+    def long_report(messages):
+        value = json.loads(report(messages)['content'])
+        value['conclusion'] = full
+        return value
+    receipt = run_analysis(job, policy, long_report, tmp_path / 'output')
+    result = receipt['result']
+    assert result['summary_truncated'] is True
+    assert result['summary'] == full[:2000]
+    assert json.loads((tmp_path / 'output/report.json').read_text())['conclusion'] == full
+    assert result['verification'] == 'citation_traceability_only'
+    assert 'causal' in result['verification_note']
+
+
+def test_only_transmitted_source_window_is_screened_and_exposed(tmp_path):
+    job, policy, log = case(tmp_path)
+    private_marker = 'EXAMPLE_NOT_A_REAL_CREDENTIAL_123456'
+    log.write_text(log.read_text() + 'api_key=' + private_marker + '\n')
+    receipt = run_analysis(job, policy, report, tmp_path / 'output')
+    assert receipt['ok'] is True
+    manifest = json.loads((tmp_path / 'output/manifest.json').read_text())
+    assert manifest['sources'][0]['lines'] == [{'line': 2, 'text': 'ERROR: expected 4, observed 7'}]
+    assert private_marker not in (tmp_path / 'output/manifest.json').read_text()
+    job['payload']['sources'][0].update(start_line=4, end_line=4)
+    with pytest.raises(AnalysisError, match='source_contains_sensitive_assignment'):
+        run_analysis(job, policy, report, tmp_path / 'rejected')

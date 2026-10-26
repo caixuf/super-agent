@@ -70,7 +70,7 @@ def test_missing_identity_and_model_spoofing_are_denied(tmp_path, monkeypatch):
     context, args = make_context(tmp_path)
     monkeypatch.setenv('HERMES_SESSION_ID', 'environment-is-not-dispatch-proof')
     assert not call(context, 'submit', args)['ok']
-    for key in ('session_id', 'owner', '_dispatch_owner', 'runner', 'command'):
+    for key in ('session_id', 'owner', '_dispatch_owner', 'runner', 'command', 'engine_root'):
         assert not call(context, 'submit', dict(args, **{key: 'spoof'}), session_id='real')['ok']
     with plugin.Pool(context.settings['queue_root']).db() as db:
         assert db.execute('SELECT count(*) FROM jobs').fetchone()[0] == 0
@@ -163,3 +163,144 @@ print('real registry identity passed')
                             env=env, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr[-3000:]
     assert 'real registry identity passed' in result.stdout
+
+
+def test_pool_fallback_uses_only_admin_engine_root(tmp_path, monkeypatch):
+    original = plugin.importlib.import_module
+    def unavailable(name, *args, **kwargs):
+        if name == 'agentcore.pool':
+            error = ModuleNotFoundError('engine unavailable')
+            error.name = 'agentcore'
+            raise error
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(plugin.importlib, 'import_module', unavailable)
+    before = list(sys.path)
+    with pytest.raises(ValueError, match='engine_root'):
+        plugin._pool_type()
+    with pytest.raises(ValueError, match='engine_root'):
+        plugin._pool_type('relative')
+    context, args = make_context_for_fallback(tmp_path, str(REPO))
+    plugin.register(context)
+    assert call(context, 'submit', args, session_id='trusted')['ok']
+    assert sys.path == before
+
+
+def make_context_for_fallback(tmp_path, engine):
+    sources = tmp_path / 'sources'
+    sources.mkdir()
+    source = sources / 'failure.log'
+    source.write_text('failure evidence\n')
+    return (Context({'enabled': True, 'queue_root': str(tmp_path / 'queue'),
+                     'allowed_roots': [str(sources)], 'engine_root': engine}),
+            {'goal': 'Read evidence', 'sources': [{'path': str(source)}], 'request_key': 'fallback'})
+
+
+def test_chinese_summary_remains_structured_despite_json_escaping(tmp_path):
+    context, args = make_context(tmp_path)
+    task = call(context, 'submit', args, session_id='session')['task_id']
+    pool = plugin.Pool(context.settings['queue_root'])
+    row, fd = pool.claim()
+    try:
+        report = {'ok': True, 'result': {'summary': '原文核对通过。' * 250,
+                                        'summary_truncated': False,
+                                        'artifacts': ['report.md'], 'limitations': ['仅核对原文引用。']}}
+        assert len(json.dumps(report)) > 10000
+        pool.finish(task, row['attempt'], True, report)
+    finally:
+        os.close(fd)
+    answer = call(context, 'status', {'task_id': task}, session_id='session')
+    assert answer['result'] == report
+    assert 'result_preview' not in answer
+    assert 'result_truncated' not in answer
+
+
+def test_large_result_preserves_json_structure_and_marks_summary(tmp_path):
+    context, args = make_context(tmp_path)
+    task = call(context, 'submit', args, session_id='session')['task_id']
+    pool = plugin.Pool(context.settings['queue_root'])
+    row, fd = pool.claim()
+    try:
+        pool.finish(task, row['attempt'], True, {'ok': True, 'result': {
+            'summary': '核对结果' * 4000, 'summary_truncated': False,
+            'artifacts': ['report.md'], 'limitations': ['限制' * 1000] * 5}})
+    finally:
+        os.close(fd)
+    answer = call(context, 'status', {'task_id': task}, session_id='session')
+    report = answer['result']['result']
+    assert answer['result_truncated'] is True
+    assert report['summary_truncated'] is True
+    assert len(report['summary']) <= 2000
+    assert report['artifacts'] == ['report.md']
+    assert len(report['limitations']) <= 3
+    assert all(len(v) <= 300 for v in report['limitations'])
+    json.loads(json.dumps(answer, ensure_ascii=False))
+
+
+@pytest.mark.parametrize('terminal', ['completed', 'failed', 'cancelled'])
+def test_cancel_terminal_task_does_not_claim_a_new_request(tmp_path, terminal):
+    context, args = make_context(tmp_path)
+    task = call(context, 'submit', args, session_id='session')['task_id']
+    pool = plugin.Pool(context.settings['queue_root'])
+    if terminal == 'cancelled':
+        pool.cancel(task)
+        assert pool.claim() is None
+    else:
+        row, fd = pool.claim()
+        try:
+            # Disable replay so a failed fixture is genuinely terminal.
+            with pool.db() as db:
+                db.execute('UPDATE jobs SET replay_safe=0 WHERE id=?', (task,))
+            pool.finish(task, row['attempt'], terminal == 'completed', {})
+        finally:
+            os.close(fd)
+    before = call(context, 'status', {'task_id': task}, session_id='session')
+    answer = call(context, 'cancel', {'task_id': task}, session_id='session')
+    assert answer['already_terminal'] is True
+    assert answer['request_accepted'] is False
+    assert answer['status'] == terminal
+    assert answer['cancellation_requested'] == before['cancellation_requested']
+
+
+def test_real_hermes_runtime_without_engine_package(tmp_path):
+    host = Path(os.environ.get('HERMES_SOURCE', Path.home() / '.hermes/hermes-agent'))
+    runtime = host / '.venv/bin/python'
+    if not runtime.is_file():
+        pytest.skip('Actual isolated host interpreter unavailable')
+    code = '''
+import importlib.util,json,os,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+assert importlib.util.find_spec('agentcore') is None
+from hermes_cli.plugins import PluginContext,PluginManager,PluginManifest
+from hermes_cli.plugins_state import save_plugin_setting
+from tools.registry import registry
+home=Path(sys.argv[4]); home.mkdir()
+source=home/'failure.log'; source.write_text('checked evidence\\n')
+for key,value in {'enabled':True,'engine_root':sys.argv[2],
+                  'queue_root':str(home/'queue'),'allowed_roots':[str(home)]}.items():
+    save_plugin_setting('durable-dispatch',(key,),value)
+spec=importlib.util.spec_from_file_location('isolated_durable_plugin',sys.argv[3])
+p=importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
+manifest=PluginManifest(name='durable-dispatch',version='0.1.0',description='test',author='test',path=Path(sys.argv[3]).parent)
+manager=PluginManager(scope_key=str(home)); ctx=PluginContext(manifest,manager)
+before=list(sys.path)
+p.register(ctx)
+assert sys.path==before
+assert manager._plugin_tool_names=={'durable_submit','durable_status','durable_cancel'}
+assert {registry.get_entry(name,scope=manager.scope_key).toolset for name in manager._plugin_tool_names}=={'durable_dispatch'}
+args={'goal':'Read the evidence','sources':[{'path':str(source)}],'request_key':'event'}
+assert not json.loads(registry.dispatch('durable_submit',args,scope=manager.scope_key))['ok']
+answer=json.loads(registry.dispatch('durable_submit',args,scope=manager.scope_key,session_id='trusted'))
+assert answer['ok'] and answer['status']=='queued'
+assert json.loads(registry.dispatch('durable_status',{'task_id':answer['task_id']},scope=manager.scope_key,session_id='trusted'))['status']=='queued'
+assert not json.loads(registry.dispatch('durable_cancel',{'task_id':answer['task_id']},scope=manager.scope_key,session_id='other'))['ok']
+assert importlib.util.find_spec('agentcore') is None
+print('isolated host runtime dispatch passed')
+'''
+    env = dict(os.environ, HERMES_HOME=str(tmp_path / 'home'))
+    env.pop('PYTHONPATH', None)
+    result = subprocess.run([str(runtime), '-c', code, str(host), str(REPO), str(PLUGIN),
+                             str(tmp_path / 'home')], cwd=tmp_path, env=env,
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert 'isolated host runtime dispatch passed' in result.stdout
