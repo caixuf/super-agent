@@ -44,3 +44,22 @@ operations负责scheduler与双后端测试；delivery负责恢复审查和回�
 - 第一次磁盘繁忙联测发现SQLite并行心跳OperationalError，已以本进程事务锁、原子续租和低频心跳修复；高磁盘负载下另一次CLI测试仍触及测试自身20秒超时，不能宣称生产磁盘容量已通过压测。
 - 最终tmpfs回归验证事务、进程重启、取消、输出/文件预算、进程认领、token回执等逻辑；未测机器断电、跨机共享存储、真实消息投递、费用预算或生产模型任务。
 - 运行与接线指导在 docs/POOL_RUNTIME.md；生产网关、记忆库、消息平台均未改动。
+
+## 持久派工与失败分析同事接线
+
+用户授权推进Hermes接入与真实失败分析。先交付隔离可审阅实现，生产启用作为单独验收点。
+切片：root负责宿主接线、配置样例和集成验收；runner负责只读证据分析runner；plugin负责Hermes插件与作用域校验；review负责接口审查与集成测试。全部禁止读取或输出凭据、修改其它并行任务文件。
+
+
+### 接线实现与验收回执
+
+- 新增durable_dispatch插件，三个公开工具通过Hermes registry注册；owner只来自可信dispatcher session_id和profile。
+- 新增analysis_runner，只读有界文件快照、管理员model_options、逐条原文引用检查与原子报告产物；不提供模型工具执行。
+- 新增dispatch_pipeline集成测试，覆盖调用方重建、异会话拒绝、真实子进程runner、伪造证据失败、结果outbox确认。
+- 已修短文件默认end_line越界，插件与runner默认来源数统一8。
+- 真实模型探针：合成日志，task=783d05fd4d0e46cbaac5b15fd32767fa，attempt=6b80dda72daf4b3b848d442540bb56e3；FlowCoro worker完成一次，三条claim引用均匹配快照。结论明确区分时间顺序与因果，verification=citation_traceability_only。
+- 探针产物：/tmp/agentcore-live-analysis-hzhz_2p5/queue/attempts/6b80dda72daf4b3b848d442540bb56e3/{report.json,report.md,manifest.json}。关键结果写入本回执，不以/tmp作为唯一记忆。
+- 统一验证：TMPDIR使用本机tmpfs，PYTHONPATH含真实FlowCoro绑定，bash verify.sh退出码0，当前完整工作树210项通过（无skip），7个shell静态通过、安装器dry-run退出码0。工作树计数包含其它并行任务；本提交不含其write_guard、卡片或README改动。
+- 专项指导：docs/DISPATCH_ANALYSIS.md、plugins/durable_dispatch/README.md及两份专项报告。
+- 尚未验收：真实业务案例准确性、主模型提交后及时终轮、真实平台状态查询、自动回填与同卡到终。当前插件工具说明要求结束turn，未强制终轮。
+- 生产插件、配置与服务未启用；独立配置审阅包已在宿主业务仓落盘。下一步先审阅最小来源目录，再在新会话完成真人验收。
