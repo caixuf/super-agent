@@ -748,12 +748,26 @@ def recall_facts(
         subject_key = re.sub(r'[^a-z0-9_\u4e00-\u9fff]', '', (query or '').lower())
         if subject_key:
             exact = conn.execute(
-                'SELECT f.* FROM fact_tags sk INDEXED BY idx_fact_tags_kv '
+                'SELECT DISTINCT f.* FROM fact_tags sk INDEXED BY idx_fact_tags_kv '
                 'CROSS JOIN working_fact f ON f.fact_id=sk.fact_id '
-                "WHERE sk.key='subject_key' AND sk.value=? AND " + ' AND '.join(where) +
+                "WHERE sk.key IN ('subject_key','subject_alias_0','subject_alias_1','subject_alias_2',"
+                "'subject_alias_3','subject_alias_4','subject_alias_5','subject_alias_6','subject_alias_7')"
+                " AND sk.value=? AND " + ' AND '.join(where) +
                 ' ORDER BY f.created_at DESC LIMIT ?',
                 [subject_key, *params, max(1, int(limit))]).fetchall()
             lookup_mode = 'exact_subject'
+            if not exact:
+                # Reviewed CJK topic names remain addresses inside a sentence.
+                # Read the small alias index, never the whole fact corpus.
+                exact = conn.execute(
+                    'SELECT DISTINCT f.* FROM fact_tags sk INDEXED BY idx_fact_tags_kv '
+                    'CROSS JOIN working_fact f ON f.fact_id=sk.fact_id '
+                    "WHERE sk.key IN ('subject_alias_0','subject_alias_1','subject_alias_2',"
+                    "'subject_alias_3','subject_alias_4','subject_alias_5','subject_alias_6','subject_alias_7')"
+                    " AND length(sk.value)>=4 AND sk.value GLOB '*[一-鿿]*' AND instr(?,sk.value)>0 AND "
+                    + ' AND '.join(where) + ' ORDER BY f.created_at DESC LIMIT ?',
+                    [subject_key, *params, max(1, int(limit))]).fetchall()
+                lookup_mode = 'curated_alias'
             if not exact:
                 identifiers = list(dict.fromkeys(re.findall(r'[a-z0-9_]{2,}', (query or '').lower())))
                 addressed = {}

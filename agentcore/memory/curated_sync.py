@@ -35,7 +35,7 @@ def sections(text):
     return result
 
 
-def sync_document(path, *, document_id, flush_timeout=120):
+def sync_document(path, *, document_id, flush_timeout=120, aliases=None):
     cfg = get_config()
     source = Path(path).resolve(strict=True)
     if not source.is_file() or source.stat().st_size > 512*1024:
@@ -53,6 +53,26 @@ def sync_document(path, *, document_id, flush_timeout=120):
             raise ValueError('curated_document_budget')
         revision = hashlib.sha256(raw).hexdigest()
         entries = sections(raw.decode('utf-8'))
+        aliases = aliases or {}
+        subjects = {entry['subject'] for entry in entries}
+        if not isinstance(aliases, dict) or set(aliases) - subjects:
+            raise ValueError('invalid_curated_alias_subject')
+        for values in aliases.values():
+            if (not isinstance(values, list) or len(values) > 8
+                    or any(not isinstance(v, str) or not v.strip() or len(v) > 160 for v in values)):
+                raise ValueError('invalid_curated_aliases')
+            keys = [re.sub(r'[^a-z0-9_\u4e00-\u9fff]', '', v.lower()) for v in values]
+            if any(not key for key in keys) or len(set(keys)) != len(keys):
+                raise ValueError('invalid_curated_alias_keys')
+        alias_bytes = json.dumps(aliases, ensure_ascii=False, sort_keys=True).encode()
+        alias_revision = hashlib.sha256(alias_bytes).hexdigest()
+        alias_snapshot = archive/(revision+'.aliases-'+alias_revision+'.json')
+        if not alias_snapshot.exists():
+            with alias_snapshot.open('xb') as stream:
+                os.chmod(alias_snapshot, 0o600)
+                stream.write(alias_bytes); stream.flush(); os.fsync(stream.fileno())
+        elif alias_snapshot.read_bytes() != alias_bytes:
+            raise ValueError('curated_alias_snapshot_conflict')
         snapshot = archive/(revision+'.md')
         if not snapshot.exists():
             with snapshot.open('xb') as stream:
@@ -112,10 +132,19 @@ def sync_document(path, *, document_id, flush_timeout=120):
                     [cfg.default_user, origin, *ids]).rowcount
                 conn.execute("UPDATE working_fact SET status='active' WHERE user_id=? AND source=? AND fact_id IN ("+marks+')',
                              [cfg.default_user, origin, *ids])
+                for fid, entry in zip(ids, entries):
+                    conn.execute("DELETE FROM fact_tags WHERE fact_id=? AND key GLOB 'subject_alias_[0-7]'", (fid,))
+                    for i, alias in enumerate(aliases.get(entry['subject'], [])):
+                        normalized = re.sub(r'[^a-z0-9_\u4e00-\u9fff]', '', alias.lower())
+                        if not normalized:
+                            raise ValueError('invalid_curated_alias_key')
+                        conn.execute('INSERT INTO fact_tags(fact_id,key,value) VALUES(?,?,?)',
+                                     (fid, 'subject_alias_'+str(i), normalized))
                 conn.execute('INSERT INTO curated_documents VALUES(?,?,?,?) '
                              'ON CONFLICT(user_id,document_id) DO UPDATE SET revision=excluded.revision,fact_ids=excluded.fact_ids',
                              (cfg.default_user, document_id, revision, json.dumps(ids)))
         finally:
             conn.close()
         return {'ok': True, 'revision': revision, 'fact_ids': ids, 'retired': retired,
-                'snapshot': str(snapshot), 'vector_backend': vector_backend}
+                'snapshot': str(snapshot), 'vector_backend': vector_backend,
+                'alias_revision': alias_revision, 'alias_snapshot': str(alias_snapshot)}

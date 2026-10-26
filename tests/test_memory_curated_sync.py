@@ -41,6 +41,32 @@ def test_revision_retires_old_sections_without_deleting_them(tmp_path, configure
         assert '七个' in Path(first['snapshot']).read_text()
 
 
+def test_reviewed_alias_survives_heading_merge_and_is_source_owned(tmp_path, configured):
+    path = tmp_path/'MEMORY.md'
+    path.write_text('【运行与调度】并发预算固定为七个。\n')
+    with configured(tmp_path/'data'):
+        first = sync_document(path, document_id='owner/memory',
+                              aliases={'运行与调度': ['演练预算']})
+        result = store.recall_facts('演练预算')['results']
+        assert len(result) == 1 and result[0]['subject'] == '运行与调度'
+        assert result[0]['tags']['subject_alias_0'] == '演练预算'
+        assert store.recall_facts('演练预算是多少')['results'][0]['fact_id'] == result[0]['fact_id']
+        assert not store.recall_facts('演练预算', user_id='someone-else')['results']
+        assert Path(first['alias_snapshot']).read_text() == '{"运行与调度": ["演练预算"]}'
+        sync_document(path, document_id='owner/memory', aliases={})
+        conn = store._connect()
+        try:
+            assert not conn.execute("SELECT 1 FROM fact_tags WHERE key='subject_alias_0'").fetchall()
+        finally:
+            conn.close()
+
+
+def test_aliases_cannot_refer_to_a_missing_heading(tmp_path, configured):
+    path = document(tmp_path/'MEMORY.md')
+    with configured(tmp_path/'data'), pytest.raises(ValueError, match='alias_subject'):
+        sync_document(path, document_id='owner/memory', aliases={'不存在的标题': ['旧标题']})
+
+
 def test_long_named_phrase_finds_curated_context_without_matching_a_book(tmp_path, configured):
     path = tmp_path/'MEMORY.md'
     path.write_text('【运行岗位】记忆预算守护每六小时检查一次。\n')
