@@ -21,9 +21,12 @@ source leaves that caller's connection open. Importing the module or calling
 ordinary `recall_facts` does not build a view or install change capture.
 
 The snapshot and growing SQLite page count have an explicit `max_bytes` budget.
-Incremental batches are bounded by event count; this is not a complete process
-RSS limit. A service still needs a process memory limit, delta payload budget,
-idle lease renewal, fault reporting and rebuild supervision. The constructor
+Incremental batches are bounded by event count and payload bytes (64 MiB by
+default); supported SQLite builds also cap row length during loading and restore
+the borrowed connection's previous limit afterward. This is not a complete
+process RSS limit. The separate recall service adds address-space limits, idle
+renewal and recovery witnesses; deployment still needs supervision and alerts.
+The constructor
 renews through a separate connection during a long file-backed backup. Active
 queries renew leases as needed and prune acknowledged changes; a dormant caller
 must call `refresh` periodically before its lease expires.

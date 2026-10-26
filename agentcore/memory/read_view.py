@@ -22,12 +22,16 @@ class ViewInvalid(RuntimeError):
 
 
 class MemoryReadView:
-    def __init__(self,source=None,*,max_bytes=256*1024*1024,lease_seconds=300,progress=None):
+    def __init__(self,source=None,*,max_bytes=256*1024*1024,lease_seconds=300,progress=None,
+                 max_delta_bytes=64*1024*1024,checkpoint=None):
         if type(max_bytes) is not int or max_bytes<16384:raise ValueError('invalid view memory budget')
+        if type(max_delta_bytes) is not int or max_delta_bytes<1024:raise ValueError('invalid delta payload budget')
         self.source=source if source is not None else memory_store._connect()
         self.owns_source=source is None
         self.conn=None;self.consumer=None;self.ready=False;self.invalid=False
         self.max_bytes=max_bytes;self.lease_seconds=lease_seconds
+        self.max_delta_bytes=max_delta_bytes;self.checkpoint=checkpoint
+        self.binding=self._binding()
         self._renew_at=0
         try:
             self.consumer=journal.register(self.source,'read-view-'+uuid.uuid4().hex,lease_seconds=lease_seconds)
@@ -56,7 +60,7 @@ class MemoryReadView:
             with self.conn:
                 for name in journal.TRIGGERS:self.conn.execute('DROP TRIGGER '+name)
                 for table in (journal.CONSUMERS,journal.EVENTS,journal.META):self.conn.execute('DROP TABLE '+table)
-            self.consumer=journal.acknowledge(self.source,self.consumer,baseline)
+            self._acknowledge(baseline)
             self._renew_at=time.monotonic()+min(lease_seconds/3,30)
             self.refresh()
         except Exception:
@@ -65,19 +69,38 @@ class MemoryReadView:
     def bytes(self):
         return self.conn.execute('PRAGMA page_count').fetchone()[0]*self.conn.execute('PRAGMA page_size').fetchone()[0]
 
+    def _binding(self):
+        cfg=get_config()
+        return (cfg.default_user,cfg.default_agent,str(cfg.db_path().resolve()))
+
+    def _acknowledge(self,batch):
+        # Persist a recovery witness before advancing/pruning the source cursor.
+        # Failure leaves the old consumer pin and forbids serving the new view.
+        if self.checkpoint is not None:self.checkpoint(self.consumer,batch)
+        self.consumer=journal.acknowledge(self.source,self.consumer,batch)
+
     def _apply(self,batch):
         ids=list(dict.fromkeys(row[2] for row in batch.events))
         if not ids:return
         # Load all three entities from the same source snapshot. Chunking stays
         # below old SQLite's variable limit, even during a large update burst.
-        records={table:[] for table in journal.TABLES}
-        for offset in range(0,len(ids),400):
-            chunk=ids[offset:offset+400];marks=','.join('?' for _ in chunk)
-            for table in journal.TABLES:
-                select='rowid AS _view_rowid,*' if table=='working_fact' else '*'
-                cursor=self.source.execute('SELECT '+select+' FROM '+table+' WHERE fact_id IN ('+marks+')',chunk)
-                names=[item[0] for item in cursor.description]
-                records[table].extend(dict(zip(names,row)) for row in cursor)
+        records={table:[] for table in journal.TABLES};payload_bytes=0
+        limited=hasattr(self.source,'setlimit')
+        previous=self.source.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,self.max_delta_bytes) if limited else None
+        try:
+            for offset in range(0,len(ids),400):
+                chunk=ids[offset:offset+400];marks=','.join('?' for _ in chunk)
+                for table in journal.TABLES:
+                    select='rowid AS _view_rowid,*' if table=='working_fact' else '*'
+                    cursor=self.source.execute('SELECT '+select+' FROM '+table+' WHERE fact_id IN ('+marks+')',chunk)
+                    names=[item[0] for item in cursor.description]
+                    for row in cursor:
+                        payload_bytes+=sum(len(v.encode('utf-8')) if isinstance(v,str) else len(v) if isinstance(v,bytes)
+                                           else 0 if v is None else 8 for v in row)
+                        if payload_bytes>self.max_delta_bytes:raise ViewInvalid('memory_view_delta_payload_budget')
+                        records[table].append(dict(zip(names,row)))
+        finally:
+            if limited:self.source.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,previous)
         embeds={row['fact_id']:row for row in records['fact_embeddings']}
         for fact in records['working_fact']:
             if fact['status']!='active':continue
@@ -112,10 +135,11 @@ class MemoryReadView:
         if self.invalid or self.conn is None:raise ViewInvalid('memory_view_rebuild_required')
         self.ready=False;deadline=time.monotonic()+max_seconds
         try:
+            if self._binding()!=self.binding:raise ViewInvalid('memory_view_configuration_changed')
             for _ in range(max_batches):
                 with journal.read_changes(self.source,self.consumer) as batch:self._apply(batch)
                 if batch.events:
-                    self.consumer=journal.acknowledge(self.source,self.consumer,batch)
+                    self._acknowledge(batch)
                     journal.prune(self.source)
                     self._renew_at=time.monotonic()+min(self.lease_seconds/3,30)
                 elif time.monotonic()>=self._renew_at:
