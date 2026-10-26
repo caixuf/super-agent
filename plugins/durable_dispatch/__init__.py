@@ -4,9 +4,9 @@ Identity is supplied by the dispatcher keyword, never model arguments or ambient
 session environment. The shared queue remains the only scheduling authority.
 
 A completion is routed back through the address persisted at submit time: the profile,
-the durable session and the route key of the turn that submitted the work. Delivery uses
-the public ``PluginContext.inject_message`` host surface with that stored route; it never
-looks at whichever session happens to be active when the job finishes.
+the durable session and the route key of the turn that submitted the work. An optional
+administrator transport posts directly without starting a model turn. The legacy
+injection transport remains explicit compatibility behavior, never an active-chat guess.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import logging
 from pathlib import Path
 import re
 import sys
@@ -303,10 +304,10 @@ class DispatchService:
         return {'ok': True, 'task_id': job, 'status': self.pool.status(job)['status'],
                 'next_action': 'Return the task ID to the user and finish this turn. Do not poll.'}
 
-    def drain_delivery(self, transport, *, limit=50, lease=60):
+    def drain_delivery(self, transport, *, limit=50, lease=60, not_before=None):
         """Deliver routable completions once; unaddressable receipts stay pending."""
         return self.delivery.drain(self.pool, transport, profile=self.profile,
-                                   limit=limit, lease=lease)
+                                   limit=limit, lease=lease, not_before=not_before)
 
     def _owned(self, session_id, job):
         owner = self._owner(session_id)
@@ -376,7 +377,7 @@ def _delivery_interval(ctx):
 
 
 def start_backfill(ctx, service):
-    """Poll the queue and inject routable completions until the plugin unloads.
+    """Poll the queue and deliver routable completions until the plugin unloads.
 
     Opt-in through ``deliver_completions: true`` plus the host's own
     ``plugins.entries.durable-dispatch.allow_gateway_injection: true``. The thread holds
@@ -385,21 +386,39 @@ def start_backfill(ctx, service):
     """
     if ctx.get_config('deliver_completions', False) is not True:
         return None
-    inject = getattr(ctx, 'inject_message', None)
-    if not callable(inject):
-        return None
     interval = _delivery_interval(ctx)
-    transport = InjectionTransport(inject, service.profile)
+    not_before = ctx.get_config('delivery_not_before', None)
+    if not_before is not None and (not isinstance(not_before, (int, float)) or not 0 <= not_before < float('inf')):
+        raise ValueError('delivery_not_before must be a finite nonnegative timestamp')
+    factory_path = ctx.get_config('delivery_transport_file', '')
+    if factory_path:
+        path = Path(factory_path)
+        if not path.is_absolute():
+            raise ValueError('absolute administrator delivery transport path required')
+        spec = importlib.util.spec_from_file_location('_durable_completion_transport', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        transport = module.create_transport(ctx, service)
+    else:
+        inject = getattr(ctx, 'inject_message', None)
+        if not callable(inject):
+            return None
+        transport = InjectionTransport(inject, service.profile)
     stop = threading.Event()
 
     def loop():
+        last_error = None
         while not stop.is_set():
             try:
-                service.drain_delivery(transport)
-            except Exception:
+                service.drain_delivery(transport, not_before=not_before)
+                last_error = None
+            except Exception as exc:
                 # A broken pass must not kill the poller; the next pass retries from
-                # the ledger. Never log task content from here.
-                pass
+                # the ledger. Report only a changed error type, never task content.
+                name = type(exc).__name__
+                if name != last_error:
+                    logging.getLogger(__name__).warning('completion backfill failed: %s', name)
+                last_error = name
             if stop.wait(interval):
                 break
 

@@ -51,10 +51,14 @@ class CompletionMessage:
     status: str
     summary: str
     truncated: bool
+    artifacts: tuple[str, ...] = ()
 
     def render(self) -> dict[str, Any]:
-        return {'task_id': self.task_id, 'status': self.status,
-                'summary': self.summary, 'truncated': self.truncated}
+        result = {'task_id': self.task_id, 'status': self.status,
+                  'summary': self.summary, 'truncated': self.truncated}
+        if self.artifacts:
+            result['artifacts'] = list(self.artifacts)
+        return result
 
 
 def _summary(result: Any, *, limit: int = MAX_SUMMARY_CHARS) -> tuple[str, bool]:
@@ -82,13 +86,22 @@ def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS) ->
     if not isinstance(receipt, dict) or not isinstance(receipt.get('job'), str):
         raise ValueError('receipt must name its job')
     status = str(receipt.get('status') or 'unknown')
-    summary, truncated = _summary(receipt.get('result'), limit=limit)
+    result = receipt.get('result')
+    # Worker protocol envelopes persist intact in the queue. Unwrap only an
+    # explicit successful envelope, never arbitrary nested model fields.
+    if isinstance(result, dict) and result.get('ok') is True and isinstance(result.get('result'), dict):
+        result = result['result']
+    summary, truncated = _summary(result, limit=limit)
+    artifacts = result.get('artifacts', []) if isinstance(result, dict) else []
+    if not isinstance(artifacts, list) or len(artifacts) > 8 or any(
+            not isinstance(p, str) or not p or len(p) > 4096 for p in artifacts):
+        raise ValueError('invalid completion artifacts')
     return CompletionMessage(task_id=receipt['job'], status=status, summary=summary,
-                             truncated=truncated)
+                             truncated=truncated, artifacts=tuple(artifacts))
 
 
 def deliver_once(pool: Pool, transport: Optional[Transport], *, lease: float = 60,
-                 limit: int = MAX_SUMMARY_CHARS, skip=()) -> dict[str, Any]:
+                 limit: int = MAX_SUMMARY_CHARS, skip=(), not_before=None) -> dict[str, Any]:
     """Deliver at most one pending completion. Returns a status record, never raises.
 
     ``skip`` is forwarded to the ledger so a caller can leave a receipt it already knows
@@ -96,7 +109,7 @@ def deliver_once(pool: Pool, transport: Optional[Transport], *, lease: float = 6
     """
     if transport is None:
         return {'status': 'unavailable', 'reason': 'no transport configured'}
-    claim = pool.claim_receipt(lease, skip=skip)
+    claim = pool.claim_receipt(lease, skip=skip, **({'not_before': not_before} if not_before is not None else {}))
     if claim is None:
         return {'status': 'empty'}
     job, token = claim['receipt'].get('job'), claim['token']
@@ -107,7 +120,10 @@ def deliver_once(pool: Pool, transport: Optional[Transport], *, lease: float = 6
     if not address:
         return {'status': 'unowned', 'task_id': job,
                 'reason': 'task has no persisted origin; refusing to guess a conversation'}
-    message = build_message(claim['receipt'], limit=limit).render()
+    try:
+        message = build_message(claim['receipt'], limit=limit).render()
+    except (ValueError, TypeError):
+        return {'status': 'invalid_receipt', 'task_id': job}
     try:
         response = transport.deliver(address, message, idempotency_key=job)
     except Exception as exc:

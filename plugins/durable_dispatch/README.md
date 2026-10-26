@@ -14,8 +14,6 @@ plugins:
     - durable-dispatch
   entries:
     durable-dispatch:
-      # Separate from settings: unlocks PluginContext.inject_message for this plugin.
-      allow_gateway_injection: true
       settings:
         enabled: true
         engine_root: /absolute/path/to/agentcore-checkout
@@ -27,6 +25,8 @@ plugins:
         # Completion backfill is separately opt-in; default is off.
         deliver_completions: true
         delivery_interval: 5
+        direct_delivery_enabled: true
+        delivery_transport_file: /absolute/path/to/agentcore-checkout/runtime/hermes_completion_transport.py
 ```
 
 Add the `durable_dispatch` toolset to the intended profile/platform using the
@@ -79,6 +79,27 @@ persisted address, never whichever session is active later, is what completion
 delivery uses. If no route is bound, the job still runs and its completion is
 reported as unaddressable rather than guessed.
 
+For direct backfill, the administrator transport file above reuses the host's
+route resolver and profile ownership checks, then posts through its adapter.
+It does not inject a user message or start a model turn. Native attachments are
+snapshotted from the submitting job's actual attempt directory before any send.
+The worker protocol envelope is unwrapped so the real summary and artifact list
+reach this transport. Every text/file operation gets its own durable journal
+entry and platform receipt; the queue is acknowledged only after every part has
+a real message ID. An uncertain send stays pending without automatic resend,
+including across restarts. A definite refusal before sending may retry. Inspect
+`DirectCompletionTransport.inspect()` for bounded operation states.
+
+Feishu additionally requires `patches/patch_feishu_delivery_uuid.py` and an idle
+adapter reload: stable per-operation UUIDs must survive the adapter's own
+internal retries. The bridge refuses an adapter without the runtime capability
+marker. Local viewer notices are not treated as messaging-platform delivery.
+
+Without `delivery_transport_file`, the legacy injection transport is retained
+for compatibility and requires `allow_gateway_injection: true`. That path
+starts a new model turn and its injected receipt does not prove platform
+delivery. Use the direct transport for production background completions.
+
 Status returns structured JSON. Unicode text is bounded by its decoded content,
 not by escape-sequence size, and an oversized result is never sliced into an
 invalid JSON fragment. A truncated summary is marked; full reports remain in
@@ -99,10 +120,18 @@ gateway behavior in a live test.
 
 ## Completion backfill
 
-With `deliver_completions: true`, a daemon thread drains `pool.outbox` and calls
-`PluginContext.inject_message(text, session_key=<persisted route>)`. The host also
-requires `plugins.entries.durable-dispatch.allow_gateway_injection: true`;
-without it every send is refused and the receipt stays pending.
+With `deliver_completions: true`, a daemon thread drains `pool.outbox` using the
+configured transport. The direct transport in the template uses real platform
+receipts and never starts a model turn. Its per-operation journal fences unknown
+sends and resumes partially delivered summaries/files without replaying successes.
+An optional numeric `delivery_not_before` Unix timestamp limits delivery to jobs
+submitted at or after activation. Older records stay pending without blocking
+newer completions.
+
+Without `delivery_transport_file`, the compatibility transport calls
+`PluginContext.inject_message(text, session_key=<persisted route>)` and requires
+`plugins.entries.durable-dispatch.allow_gateway_injection: true`. Its acceptance
+is not proof of platform delivery, and it starts a model turn.
 
 Semantics and limits:
 
@@ -114,8 +143,9 @@ Semantics and limits:
 - Unaddressable receipts (legacy origin, foreign profile) stay pending and are
   skipped in the ledger, so they cannot block later completions. Inspect them with
   `python3 -m agentcore.completion_backfill --root <queue> --profile <profile>`.
-- Delivery is **at-least-once**: a crash between send and acknowledge can resend.
-  The persisted task id is the idempotency key handed to the transport.
+- The legacy transport is **at-least-once**: a crash between send and acknowledge
+  can resend. The direct transport instead fences uncertain operations for
+  inspection; only definitely unsent parts may retry automatically.
 - The public injection API addresses a route, not a durable session id. After a
   `/new` on the same chat, Hermes resolves the route's current session; this
   plugin cannot pin the historical session id. Treat that as a known residual

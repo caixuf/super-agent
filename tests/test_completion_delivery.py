@@ -66,6 +66,19 @@ def test_delivers_to_the_persisted_origin_and_acknowledges(tmp_path):
     assert len(transport.calls) == 1
 
 
+def test_activation_cutoff_holds_old_backlog_without_blocking_new_results(tmp_path):
+    pool, transport = Pool(tmp_path), Transport()
+    old = finished_job(pool, key='old')
+    recent = finished_job(pool, key='recent')
+    with pool.db() as db:
+        db.execute('UPDATE jobs SET created=? WHERE id=?', (10, old))
+        db.execute('UPDATE jobs SET created=? WHERE id=?', (30, recent))
+    outcome = deliver_once(pool, transport, not_before=20)
+    assert outcome['task_id'] == recent and outcome['status'] == 'delivered'
+    assert not pool.delivery_record(old)['acknowledged']
+    assert deliver_once(pool, transport, not_before=20)['status'] == 'empty'
+
+
 def test_task_without_origin_is_refused_and_left_pending(tmp_path):
     pool, transport = Pool(tmp_path), Transport()
     job = finished_job(pool, origin=None)

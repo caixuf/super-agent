@@ -251,7 +251,7 @@ class Pool:
         with self.db() as db:
             return [json.loads(r[0]) for r in db.execute('SELECT receipt FROM outbox WHERE acknowledged=0')]
 
-    def claim_receipt(self, lease=60, skip=()):
+    def claim_receipt(self, lease=60, skip=(), *, not_before=None):
         """Single-consumer lease; transport must dedupe by job across crash windows.
 
         ``skip`` names receipts the caller already knows it cannot address (for example
@@ -261,6 +261,8 @@ class Pool:
         """
         if lease <= 0:
             raise ValueError('lease must be positive')
+        if not_before is not None and (not isinstance(not_before, (int, float)) or not 0 <= not_before < float('inf')):
+            raise ValueError('not_before must be a finite nonnegative timestamp')
         skip = tuple(skip)
         if any(not isinstance(job, str) or not job for job in skip):
             raise ValueError('skip must contain task ids')
@@ -268,6 +270,9 @@ class Pool:
             db.execute('BEGIN IMMEDIATE')
             query = 'SELECT * FROM outbox WHERE acknowledged=0 AND (lease_until IS NULL OR lease_until<?)'
             values = [time.time()]
+            if not_before is not None:
+                query += ' AND EXISTS (SELECT 1 FROM jobs WHERE jobs.id=outbox.job AND jobs.created>=?)'
+                values.append(not_before)
             if skip:
                 query += ' AND job NOT IN (%s)' % ','.join('?' * len(skip))
                 values.extend(skip)

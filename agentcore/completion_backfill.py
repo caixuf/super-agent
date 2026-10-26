@@ -73,7 +73,7 @@ def parked_jobs(pool: Pool, *, profile: Optional[str] = None,
 
 def drain(pool: Pool, transport: Any, *, profile: Optional[str] = None,
           limit: int = 100, lease: float = 60,
-          max_summary: int = MAX_SUMMARY_CHARS) -> dict[str, Any]:
+          max_summary: int = MAX_SUMMARY_CHARS, not_before=None) -> dict[str, Any]:
     """Deliver routable completions once, stepping over unaddressable ones.
 
     Returns a bounded status record. A non-``delivered`` outcome stops the pass so a
@@ -90,7 +90,7 @@ def drain(pool: Pool, transport: Any, *, profile: Optional[str] = None,
                  if not routable(address, profile=profile))
     outcomes: list[dict[str, Any]] = []
     for _ in range(limit):
-        outcome = deliver_once(pool, transport, lease=lease, limit=max_summary, skip=skip)
+        outcome = deliver_once(pool, transport, lease=lease, limit=max_summary, skip=skip, not_before=not_before)
         if outcome['status'] == 'empty':
             if not outcomes:
                 outcomes.append(outcome)
