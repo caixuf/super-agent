@@ -72,6 +72,19 @@ def test_priority_statement_is_considered_but_question_is_not():
     assert not memory_trigger.should_consider('先做完十个任务再优化吗？')['consider']
 
 
+def test_automatic_quote_deduplication_does_not_depend_on_model_subject(tmp_path, configured):
+    subjects = iter(['配色偏好', '标签颜色约定'])
+    def model(*a, **kw):
+        return {'content': json.dumps({'facts': [{'statement': 'model paraphrase is ignored',
+            'subject': next(subjects), 'user_quote': '决定以后保留绿色标签'}]})}
+    with configured(tmp_path, llm_fn=model):
+        first = memory_trigger.run('决定以后保留绿色标签', '已记录', require_user_evidence=True)
+        again = memory_trigger.run('决定以后保留绿色标签', '已记录', require_user_evidence=True)
+        assert first['ok'] and first['written'] == 1
+        assert again['ok'] and again['written'] == 0
+        assert again['results'][0]['fact_id'] == first['results'][0]['fact_id']
+
+
 @pytest.mark.parametrize('field,value', [('profile', 'other'), ('user_id', 'another'),
                                        ('agent_id', 'foreign'), ('status', 'failed')])
 def test_runtime_rejects_foreign_events_before_extraction(monkeypatch, field, value):

@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import re
 import sys
@@ -296,9 +297,16 @@ def run(user_message: str, assistant_reply: str = "", context: str = "",
     results = []
     for f in facts:
         try:
+            identity = {}
+            if require_user_evidence:
+                cfg = get_config()
+                key = json.dumps([cfg.default_user, cfg.default_agent,
+                                  cfg.normalize_era(f['ebm'] or ''), f['statement']], ensure_ascii=False)
+                identity = {'fact_id': 'auto_quote_'+hashlib.sha256(key.encode()).hexdigest(),
+                            'dedupe_by_statement': True}
             r = memory_store.write_fact(
                 f["statement"], ebm=f["ebm"] or None, tags=f["tags"],
-                subject=f["subject"], source=source, resolve_conflict=True,
+                subject=f["subject"], source=source, resolve_conflict=True, **identity,
             )
             results.append(r)
             if r.get("written"):

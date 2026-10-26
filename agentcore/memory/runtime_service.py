@@ -10,7 +10,7 @@ import threading
 from .config import get_config
 from .event_worker import MemoryEventWorker
 from .runtime_bridge import TurnEventQueue, enqueue_turn
-from .turn_spool import TurnSpool
+from .turn_spool import TurnSpool, is_automated_turn
 from . import memory_store, memory_trigger
 
 
@@ -26,6 +26,8 @@ def scoped_runner(*, profile, user_id, agent_id):
         expected = dict(profile=profile, user_id=user_id, agent_id=agent_id, status='completed')
         if any(event.get(k) != v for k, v in expected.items()):
             return {'ok': False, 'retryable': False, 'reason': 'event_principal_mismatch'}
+        if is_automated_turn(event.get('turn_id')):
+            return {'ok': True, 'skipped': True, 'reason': 'automated_turn', 'written': 0}
         return run_and_flush(event.get('user_message', ''), event.get('assistant_reply', ''),
                              turn_status='completed', source='turn:' + event['idempotency_key'])
     return process

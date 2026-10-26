@@ -56,6 +56,31 @@ def test_admission_failure_retries_same_identity(tmp_path):
     assert keys == [('s', 't')]
 
 
+def test_cron_capture_is_not_a_human_memory(tmp_path):
+    s = spool(tmp_path)
+    assert s.capture(session_id='s', turn_id='s:cron:job:run',
+                     user_message='定时维护指令', assistant_reply='完成') == 'discarded'
+    assert not list(tmp_path.glob('*.json'))
+
+
+def test_old_cron_spool_and_already_queued_event_are_skipped(tmp_path, monkeypatch):
+    from agentcore.memory import runtime_service
+    s = spool(tmp_path)
+    record = dict(s.identity, session_id='s', turn_id='s:cron:job:run',
+                  user_message='定时维护指令', assistant_reply='完成',
+                  state='completed', occurred_at=1)
+    path = s._path('s', record['turn_id'])
+    s._save(path, record)
+    def forbidden(*args, **kwargs):
+        pytest.fail('automated input reached extraction or admission')
+    assert s.ingest(forbidden)['discarded'] == 1
+    assert json.loads(path.read_text())['discard_reason'] == 'automated_turn'
+    monkeypatch.setattr(runtime_service, 'run_and_flush', forbidden)
+    process = runtime_service.scoped_runner(**s.identity)
+    result = process(dict(record, status='completed', idempotency_key='k'))
+    assert result['ok'] and result['written'] == 0 and result['skipped']
+
+
 def test_conflicts_and_cross_principal_rejected(tmp_path):
     s = spool(tmp_path)
     captured(s)

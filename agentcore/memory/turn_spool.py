@@ -13,6 +13,11 @@ import tempfile
 import time
 
 
+def is_automated_turn(turn_id):
+    """Host cron IDs identify scheduler instructions, not human preferences."""
+    return isinstance(turn_id, str) and ':cron:' in turn_id
+
+
 class TurnSpool:
     def __init__(self, root, *, profile, user_id, agent_id):
         self.root = Path(root)
@@ -54,6 +59,8 @@ class TurnSpool:
                 os.unlink(name)
 
     def capture(self, *, session_id, turn_id, user_message, assistant_reply):
+        if is_automated_turn(turn_id):
+            return 'discarded'
         path = self._path(session_id, turn_id)
         text = {'user_message': str(user_message or '')[:8000],
                 'assistant_reply': str(assistant_reply or '')[:8000]}
@@ -94,6 +101,12 @@ class TurnSpool:
                 if any(record.get(k) != v for k, v in self.identity.items()):
                     raise ValueError('spool_principal_mismatch')
                 state = record['state']
+                if state == 'completed' and is_automated_turn(record.get('turn_id')):
+                    record['state'] = 'discarded'
+                    record['discard_reason'] = 'automated_turn'
+                    self._save(path, record)
+                    counts['discarded'] += 1
+                    continue
                 if state != 'completed':
                     if state in ('awaiting_verdict', 'discarded'):
                         counts['unconfirmed' if state == 'awaiting_verdict' else 'discarded'] += 1

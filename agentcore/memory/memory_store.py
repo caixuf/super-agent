@@ -212,6 +212,8 @@ def write_fact(
     branch: Optional[str] = None,
     fact_id: Optional[str] = None,
     resolve_conflict: bool = False,
+    initial_status: str = 'active',
+    dedupe_by_statement: bool = False,
 ) -> Dict[str, Any]:
     """确定性写入一条经验。同 (workspace_id, subject, statement) 视为同一条，幂等跳过。
 
@@ -224,6 +226,10 @@ def write_fact(
     自动触发链路（tools/memory_trigger）显式打开它。
     """
     stmt = (statement or "").strip()
+    if initial_status not in ('active', 'candidate') or (initial_status == 'candidate' and resolve_conflict):
+        raise ValueError('invalid initial fact status')
+    if initial_status == 'candidate' and dedupe_by_statement:
+        raise ValueError('candidate publishers require source-scoped identity')
     if not stmt:
         return {"ok": False, "error": "statement 为空"}
 
@@ -236,6 +242,8 @@ def write_fact(
 
     bucket = normalize_ebm(ebm)
     tag_map = _clean_tags(tags)
+    if subject:
+        tag_map.setdefault('subject_key', re.sub(r'[^a-z0-9_\u4e00-\u9fff]', '', subject.lower()))
     # ebm 同时进 workspace_id 与标签：前者做物理分桶，后者让调用方
     # 能用统一接口按任意维度查（含 ebm 本身）。
     tag_map["ebm"] = bucket
@@ -284,10 +292,16 @@ def write_fact(
 
     conn = _connect()
     try:
+        # Candidate publishers own only their source, never a matching manual fact.
+        dedupe_source = ' AND source=?' if initial_status == 'candidate' else ''
+        duplicate_clause = (' WHERE user_id=? AND workspace_id=? AND statement=?' if dedupe_by_statement
+                            else ' WHERE user_id=? AND workspace_id=? AND subject=? AND statement=?')
+        duplicate_params = [user_id, bucket, stmt] if dedupe_by_statement else [user_id, bucket, subject, stmt]
+        if dedupe_source:
+            duplicate_params.append(source)
         dup = conn.execute(
-            "SELECT fact_id FROM working_fact"
-            " WHERE user_id=? AND workspace_id=? AND subject=? AND statement=?",
-            (user_id, bucket, subject, stmt),
+            "SELECT fact_id FROM working_fact" + duplicate_clause + dedupe_source,
+            duplicate_params,
         ).fetchone()
         if dup:
             return {"ok": True, "written": False, "reason": "duplicate",
@@ -316,7 +330,7 @@ def write_fact(
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (fid, user_id, agent_id, "default_session", bucket, branch, source,
              stmt, "[]", subject, details, None, "[]",
-             "active", "", time.strftime("%Y-%m-%dT%H:%M:%S")),
+             initial_status, "", time.strftime("%Y-%m-%dT%H:%M:%S")),
         )
         _put_tags(conn, fid, tag_map)
         superseded: List[str] = []
@@ -575,7 +589,11 @@ def _passes_floor(it: Dict[str, Any], floor: float, query: str = "") -> bool:
         # 去掉泛用词后剩不下什么，说明这句问话本身没有技术信息量
         # （「今天天气不错」只剩 {天气, 气不}）。此时只认很高的相似度。
         return sc >= max(floor, _REFERENCE_SCOPE_FLOOR)
-    hit = sum(1 for t in terms if t in text)
+    # ASCII identifiers are whole tokens: Pi is not MPI, TCP is not TCPIP.
+    # Chinese bigrams still use substring overlap because they have no spaces.
+    hit = sum(1 for t in terms if (
+        bool(re.search(r'(?<![a-z0-9_])' + re.escape(t) + r'(?![a-z0-9_])', text))
+        if re.fullmatch(r'[a-z0-9_]+', t) else t in text))
     if hit / len(terms) >= _REFERENCE_TERM_RATIO:
         return True
     return sc >= max(floor, _REFERENCE_SCOPE_FLOOR)
@@ -725,6 +743,66 @@ def recall_facts(
                 " AND k2.key = 'kind'))")
             params.extend(want_kinds)
 
+        # An explicit named topic is an address lookup, not a similarity guess.
+        # Honor every identity/scope filter before returning its active entries.
+        subject_key = re.sub(r'[^a-z0-9_\u4e00-\u9fff]', '', (query or '').lower())
+        if subject_key:
+            exact = conn.execute(
+                'SELECT f.* FROM fact_tags sk INDEXED BY idx_fact_tags_kv '
+                'CROSS JOIN working_fact f ON f.fact_id=sk.fact_id '
+                "WHERE sk.key='subject_key' AND sk.value=? AND " + ' AND '.join(where) +
+                ' ORDER BY f.created_at DESC LIMIT ?',
+                [subject_key, *params, max(1, int(limit))]).fetchall()
+            lookup_mode = 'exact_subject'
+            if not exact:
+                identifiers = list(dict.fromkeys(re.findall(r'[a-z0-9_]{2,}', (query or '').lower())))
+                addressed = {}
+                for token in [t for t in identifiers if t not in _GENERIC_TERMS][:8]:
+                    candidates = conn.execute(
+                        'SELECT f.* FROM fact_tags ct INDEXED BY idx_fact_tags_kv '
+                        'CROSS JOIN working_fact f ON f.fact_id=ct.fact_id '
+                        "WHERE ct.key='curated_document' AND "+' AND '.join(where)+
+                        " AND f.source GLOB 'curated_profile:*' AND lower(f.subject) LIKE ? ESCAPE '!' LIMIT 128",
+                        [*params, '%'+token.replace('_', '!_')+'%']).fetchall()
+                    matches = [r for r in candidates if re.search(
+                        r'(?<![a-z0-9_])'+re.escape(token)+r'(?![a-z0-9_])', r['subject'].lower())]
+                    if len(matches) == 1:
+                        addressed[matches[0]['fact_id']] = matches[0]
+                if addressed:
+                    exact = list(addressed.values())[:max(1, int(limit))]
+                    lookup_mode = 'curated_identifier'
+            if not exact:
+                phrases = [term.lower() for term in re.findall(r'[a-zA-Z0-9_\u4e00-\u9fff]{4,}', query or '')
+                           if term.lower() not in _GENERIC_TERMS
+                           and not (re.fullmatch(r'[a-zA-Z0-9_]+', term) and len(term) < 5)][:8]
+                if phrases:
+                    clauses = ' OR '.join("lower(f.statement) LIKE ? ESCAPE '!'" for _ in phrases)
+                    patterns = ['%'+term.replace('!', '!!').replace('%', '!%').replace('_', '!_')+'%'
+                                for term in phrases]
+                    candidates = conn.execute(
+                        'SELECT f.* FROM fact_tags ct INDEXED BY idx_fact_tags_kv '
+                        'CROSS JOIN working_fact f ON f.fact_id=ct.fact_id '
+                        "WHERE ct.key='curated_document' AND "+' AND '.join(where)+
+                        " AND f.source GLOB 'curated_profile:*' AND ("+clauses+')'
+                        ' ORDER BY f.created_at DESC LIMIT 2', [*params, *patterns]).fetchall()
+                    # A generic term appearing in several curated sections is not
+                    # an address. Let semantic ranking resolve that ambiguity.
+                    if len(candidates) == 1:
+                        exact = candidates
+                        lookup_mode = 'curated_phrase'
+            if exact:
+                entries = []
+                for row in exact:
+                    item = dict(row)
+                    item['tags'] = _tags_of(conn, item['fact_id'])
+                    item['rank_mode'] = lookup_mode
+                    item['apply_match'] = ('legacy_unknown' if item['workspace_id'] == UNKNOWN_BUCKET
+                                           else 'exact_ebm' if buckets and item['workspace_id'] == buckets[0]
+                                           else 'unscoped_ebm')
+                    entries.append(item)
+                return {'ok': True, 'results': entries, 'total': len(entries),
+                        'searched_buckets': buckets, 'searched_tags': want}
+
         # 两阶段检索的第一阶段：先粗筛再全取。
         # 记忆库从 46 条涨到几万条后，把全表拉进 Python 再逐条比对会直接拖垮召回。
         # 有 FTS 时用 BM25 把候选收窄到 COARSE_CANDIDATES（毫秒级）；
@@ -737,7 +815,7 @@ def recall_facts(
             # 「李龙飞是谁」永远匹配不上「李龙飞自称菜虚虚飞...」，而语义检索可以。
             # 这也是做规模化最关键的一步：数据越多，字面匹配越不可靠。
             rid_list = _knn_rowids(conn, query, buckets=buckets or None,
-                                   kinds=want_kinds or None, user_id=user_id)
+                                   kinds=want_kinds or None, scopes=scopes, user_id=user_id)
             if rid_list is None:
                 try:
                     from .memory_scale import COARSE_CANDIDATES, coarse_filter
