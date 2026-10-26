@@ -12,12 +12,14 @@ from pathlib import Path
 import signal
 import sqlite3
 import subprocess
+import threading
 import time
 import uuid
 
 
 class Pool:
     def __init__(self, root):
+        self._db_lock = threading.RLock()
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         (self.root / 'locks').mkdir(exist_ok=True)
@@ -37,18 +39,31 @@ class Pool:
               job TEXT PRIMARY KEY, receipt TEXT NOT NULL,
               acknowledged INTEGER NOT NULL DEFAULT 0);
             ''')
+            db.execute('BEGIN IMMEDIATE')
+            columns = {r[1] for r in db.execute('PRAGMA table_info(jobs)')}
+            for name, kind in [('pid', 'INTEGER'), ('pid_start', 'TEXT'), ('deadline', 'REAL')]:
+                if name not in columns:
+                    db.execute('ALTER TABLE jobs ADD COLUMN ' + name + ' ' + kind)
+            outbox_columns = {r[1] for r in db.execute('PRAGMA table_info(outbox)')}
+            for name, kind in [('lease_token', 'TEXT'), ('lease_until', 'REAL')]:
+                if name not in outbox_columns:
+                    db.execute('ALTER TABLE outbox ADD COLUMN ' + name + ' ' + kind)
 
     @contextlib.contextmanager
     def db(self):
-        db = sqlite3.connect(str(self.root / 'pool.db'), timeout=15)
-        db.row_factory = sqlite3.Row
-        try:
-            with db:
-                yield db
-        finally:
-            db.close()
+        # Serialize local transactions, leaving SQLite to arbitrate processes.
+        # Otherwise heartbeat writers on slow storage can exhaust busy_timeout.
+        with self._db_lock:
+            db = sqlite3.connect(str(self.root / 'pool.db'), timeout=30)
+            db.row_factory = sqlite3.Row
+            try:
+                with db:
+                    yield db
+            finally:
+                db.close()
 
     def submit(self, key, payload, dependencies=(), replay_safe=False, max_tries=2):
+        dependencies = tuple(dependencies)
         if not key or max_tries < 1:
             raise ValueError('dedupe key and positive max_tries required')
         with self.db() as db:
@@ -57,7 +72,8 @@ class Pool:
             serialized = json.dumps(payload, sort_keys=True)
             if existing:
                 old_deps = {r[0] for r in db.execute('SELECT dependency FROM deps WHERE job=?', (existing['id'],))}
-                if existing['payload'] != serialized or old_deps != set(dependencies):
+                if (existing['payload'] != serialized or old_deps != set(dependencies)
+                        or existing['replay_safe'] != bool(replay_safe) or existing['max_tries'] != max_tries):
                     raise ValueError('dedupe key reused with different task')
                 return existing['id']
             for dependency in dependencies:
@@ -88,10 +104,13 @@ class Pool:
             db.execute('BEGIN IMMEDIATE')
             rows = db.execute("SELECT * FROM jobs WHERE status IN ('queued','running') ORDER BY created").fetchall()
             for row in rows:
+                if row['status'] == 'running':
+                    self._stop_expired_runner(row)
                 if row['status'] == 'running' and (row['heartbeat'] or 0) > time.time() - lease:
                     continue
                 fd = self._lock(row['id'])
                 if fd is None:
+                    self._stop_expired_runner(row)
                     continue  # A surviving runner still owns this job, even after lease expiry.
                 keep = False
                 try:
@@ -108,7 +127,7 @@ class Pool:
                     if any(s != 'completed' for s in deps):
                         continue
                     token = uuid.uuid4().hex
-                    db.execute("UPDATE jobs SET status='running',attempt=?,heartbeat=?,tries=tries+1 WHERE id=?",
+                    db.execute("UPDATE jobs SET status='running',attempt=?,heartbeat=?,tries=tries+1,pid=NULL,pid_start=NULL,deadline=NULL WHERE id=?",
                                (token, time.time(), row['id']))
                     keep = True
                     return dict(row, attempt=token), fd
@@ -117,13 +136,41 @@ class Pool:
                         os.close(fd)
         return None
 
+    @staticmethod
+    def _process_start(pid):
+        try:
+            # comm may contain spaces and parentheses; split only after its last ')'.
+            fields = Path('/proc/{}/stat'.format(pid)).read_text().rsplit(')', 1)[1].split()
+            boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+            return boot + ':' + fields[19]  # starttime = field 22
+        except (OSError, IndexError):
+            return None
+
+    def _stop_expired_runner(self, row):
+        """Linux orphan recovery; match boot-local PID starttime before signalling.
+
+        A worker crash before PID registration remains conservatively locked.
+        Runners must stay in their assigned process group; this is not a sandbox.
+        """
+        if not row['cancel'] and (not row['deadline'] or row['deadline'] > time.time()):
+            return
+        pid = row['pid']
+        if not pid or not row['pid_start'] or self._process_start(pid) != row['pid_start']:
+            return
+        try:
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
     def heartbeat(self, job, attempt):
         with self.db() as db:
-            row = db.execute("SELECT cancel FROM jobs WHERE id=? AND attempt=? AND status='running'", (job, attempt)).fetchone()
-            if row is None or row['cancel']:
-                return False
-            db.execute('UPDATE jobs SET heartbeat=? WHERE id=? AND attempt=?', (time.time(), job, attempt))
-            return True
+            updated = db.execute("UPDATE jobs SET heartbeat=? WHERE id=? AND attempt=? AND status='running' AND cancel=0", (time.time(), job, attempt))
+            return updated.rowcount == 1
+
+    def is_current(self, job, attempt):
+        with self.db() as db:
+            return db.execute("SELECT 1 FROM jobs WHERE id=? AND attempt=? AND status='running' AND cancel=0", (job, attempt)).fetchone() is not None
 
     def finish(self, job, attempt, ok, result):
         with self.db() as db:
@@ -152,31 +199,68 @@ class Pool:
         with self.db() as db:
             return [json.loads(r[0]) for r in db.execute('SELECT receipt FROM outbox WHERE acknowledged=0')]
 
-    def acknowledge(self, job):
+    def claim_receipt(self, lease=60):
+        """Single-consumer lease; transport must dedupe by job across crash windows."""
+        if lease <= 0:
+            raise ValueError('lease must be positive')
         with self.db() as db:
-            db.execute('UPDATE outbox SET acknowledged=1 WHERE job=?', (job,))
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM outbox WHERE acknowledged=0 AND (lease_until IS NULL OR lease_until<?) ORDER BY rowid LIMIT 1', (time.time(),)).fetchone()
+            if row is None:
+                return None
+            token = uuid.uuid4().hex
+            db.execute('UPDATE outbox SET lease_token=?,lease_until=? WHERE job=?', (token, time.time() + lease, row['job']))
+            return {'token': token, 'receipt': json.loads(row['receipt'])}
 
-    def run_once(self, command, timeout=300, lease=60, max_output=1048576):
-        if timeout <= 0 or lease <= 0 or max_output <= 0:
+    def acknowledge(self, job, token=None):
+        with self.db() as db:
+            if token is None:
+                updated = db.execute('UPDATE outbox SET acknowledged=1 WHERE job=? AND lease_token IS NULL AND acknowledged=0', (job,))
+            else:
+                updated = db.execute('UPDATE outbox SET acknowledged=1 WHERE job=? AND lease_token=? AND lease_until>? AND acknowledged=0', (job, token, time.time()))
+            return updated.rowcount == 1
+
+    def run_once(self, command, timeout=300, lease=60, max_output=1048576, max_file=67108864):
+        if timeout <= 0 or lease <= 0 or max_output <= 0 or max_file <= 0:
             raise ValueError('budgets must be positive')
         claimed = self.claim(lease)
         if not claimed:
             return False
+        return self.run_claimed(claimed, command, timeout, lease, max_output, max_file)
+
+    def run_claimed(self, claimed, command, timeout=300, lease=60, max_output=1048576, max_file=67108864):
+        """Execute a claim owned by this process; caller transfers lock ownership here."""
         row, fd = claimed
         job, attempt = row['id'], row['attempt']
         directory = self.root / 'attempts' / attempt
-        directory.mkdir(mode=0o700)
         proc = None
         try:
+            if timeout <= 0 or lease <= 0 or max_output <= 0 or max_file <= 0:
+                raise ValueError('budgets must be positive')
+            directory.mkdir(mode=0o700)
             with (directory / 'input.json').open('w+') as inp, (directory / 'stdout').open('w+') as out, (directory / 'stderr').open('w+') as err:
                 json.dump({'job': job, 'attempt': attempt, 'payload': json.loads(row['payload'])}, inp)
                 inp.seek(0)
-                proc = subprocess.Popen(command, stdin=inp, stdout=out, stderr=err, cwd=directory,
+                if not self.is_current(job, attempt):
+                    raise RuntimeError('claim cancelled before runner launch')
+                import sys
+                guarded_command = [sys.executable, str(Path(__file__).with_name('exec_runner.py')),
+                                   str(max_file)] + command
+                proc = subprocess.Popen(guarded_command, stdin=inp, stdout=out, stderr=err, cwd=directory,
                                         start_new_session=True, pass_fds=(fd,))
+                with self.db() as db:
+                    db.execute("UPDATE jobs SET pid=?,pid_start=?,deadline=? WHERE id=? AND attempt=? AND status='running'",
+                               (proc.pid, self._process_start(proc.pid), time.time() + timeout, job, attempt))
                 deadline = time.monotonic() + timeout
+                next_heartbeat = time.monotonic() + lease / 3
                 reason = None
                 while proc.poll() is None:
-                    if not self.heartbeat(job, attempt):
+                    if time.monotonic() >= next_heartbeat:
+                        current = self.heartbeat(job, attempt)
+                        next_heartbeat = time.monotonic() + lease / 3
+                    else:
+                        current = self.is_current(job, attempt)
+                    if not current:
                         reason = 'cancelled or lease revoked'
                     elif time.monotonic() > deadline:
                         reason = 'timeout'
@@ -191,9 +275,14 @@ class Pool:
                 except ProcessLookupError:
                     pass
                 proc.wait()
+                if reason is None:
+                    if time.monotonic() > deadline:
+                        reason = 'timeout'
+                    elif os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size > max_output:
+                        reason = 'output budget exceeded'
                 result = {'reason': reason or 'runner failed', 'exit_code': proc.returncode}
                 ok = False
-                if reason is None and proc.returncode == 0 and os.fstat(out.fileno()).st_size <= max_output:
+                if reason is None and proc.returncode == 0:
                     out.seek(0)
                     try:
                         response = json.loads(out.read(max_output))
@@ -203,7 +292,8 @@ class Pool:
                         result = {'reason': 'invalid JSON receipt'}
                 self.finish(job, attempt, ok, result)
         except Exception as exc:
-            self.finish(job, attempt, False, {'reason': 'execution error', 'type': type(exc).__name__})
+            self.finish(job, attempt, False, {'reason': 'execution error', 'type': type(exc).__name__,
+                                             'sqlite_code': getattr(exc, 'sqlite_errorname', None)})
         finally:
             if proc is not None:
                 try:
@@ -225,12 +315,21 @@ def main():
     submit.add_argument('--dependency', action='append', default=[])
     submit.add_argument('--replay-safe', action='store_true')
     for action in ('status', 'cancel', 'ack'):
-        sub.add_parser(action).add_argument('job')
+        action_parser = sub.add_parser(action)
+        action_parser.add_argument('job')
+        if action == 'ack':
+            action_parser.add_argument('--token')
     sub.add_parser('receipts')
+    sub.add_parser('claim-receipt')
     worker = sub.add_parser('worker')
     worker.add_argument('--runner-config', required=True, help='JSON argv array; trusted administrator config')
     worker.add_argument('--timeout', type=float, default=300)
     worker.add_argument('--once', action='store_true')
+    worker.add_argument('--drain', action='store_true', help='Process all currently runnable work, then exit')
+    worker.add_argument('--workers', type=int, default=1)
+    worker.add_argument('--backend', choices=['stdlib', 'flowcoro'], default='stdlib')
+    worker.add_argument('--max-output', type=int, default=1048576)
+    worker.add_argument('--max-file', type=int, default=67108864)
     args = parser.parse_args()
     pool = Pool(args.root)
     if args.action == 'submit':
@@ -240,19 +339,32 @@ def main():
     elif args.action == 'cancel':
         pool.cancel(args.job)
     elif args.action == 'ack':
-        pool.acknowledge(args.job)
+        if not pool.acknowledge(args.job, args.token):
+            parser.exit(1, 'receipt absent, already acknowledged, or lease token invalid\n')
     elif args.action == 'receipts':
         print(json.dumps(pool.receipts()))
+    elif args.action == 'claim-receipt':
+        print(json.dumps(pool.claim_receipt()))
     else:
         command = json.loads(Path(args.runner_config).read_text())
         if not isinstance(command, list) or not command or not all(isinstance(v, str) for v in command):
             parser.error('runner-config must be a nonempty argv array')
-        while True:
-            did_work = pool.run_once(command, timeout=args.timeout)
-            if args.once:
-                break
-            if not did_work:
-                time.sleep(1)
+        if args.once:
+            pool.run_once(command, timeout=args.timeout, max_output=args.max_output, max_file=args.max_file)
+        else:
+            from agentcore.worker import Worker
+            import threading
+            stop = threading.Event()
+            previous = {}
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                previous[sig] = signal.signal(sig, lambda *_: stop.set())
+            try:
+                stats = Worker(pool, command, workers=args.workers, backend=args.backend,
+                               timeout=args.timeout, max_output=args.max_output, max_file=args.max_file).run(stop, drain=args.drain)
+                print(json.dumps(stats))
+            finally:
+                for sig, handler in previous.items():
+                    signal.signal(sig, handler)
 
 
 if __name__ == '__main__':

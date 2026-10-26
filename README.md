@@ -1,5 +1,15 @@
 # super-agent —— 通用智能体本体
 
+## 持久任务与可选 FlowCoro 执行层
+
+`agentcore.pool` 负责持久任务、依赖、租约与结果 outbox；`agentcore.worker`
+通过有界 `AgentScheduler` 调用 stdlib 或真实 `flowcoro_py` 后端。
+支持取消、超时、输出预算和旧 attempt 隔离；原生后端显式选择，缺依赖时报错。
+模型 runner、权限与消息回填由宿主接入，新增模板不会自动启动生产服务。
+
+使用与恢复边界见 [docs/POOL_RUNTIME.md](docs/POOL_RUNTIME.md)。
+
+
 **一句话定位**：把一个「和你一样强的智能体」拆成可 clone、可幂等安装的技术仓。
 
 这里只有**通用机制**：身份纪律骨架、记忆引擎、工具面适配、运行时骨架、平台适配补丁、安装器。
