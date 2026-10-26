@@ -303,6 +303,19 @@ def write_fact(
 
     conn = _connect()
     try:
+        # Curated publishers supply a content-addressed id. Replays must check
+        # that exact identity before the general statement deduplication query,
+        # which otherwise scans a large owner's library once per section.
+        if initial_status == 'candidate' and fact_id:
+            known = conn.execute(
+                'SELECT fact_id,user_id,workspace_id,subject,statement,source FROM working_fact WHERE fact_id=?',
+                (fact_id,)).fetchone()
+            if known is not None:
+                if any(known[k] != v for k,v in dict(user_id=user_id,workspace_id=bucket,
+                        subject=subject,statement=stmt,source=source).items()):
+                    raise ValueError('candidate_fact_identity_conflict')
+                return {'ok':True,'written':False,'reason':'duplicate',
+                        'fact_id':fact_id,'workspace_id':bucket,'tags':_tags_of(conn,fact_id)}
         # Candidate publishers own only their source, never a matching manual fact.
         dedupe_source = ' AND source=?' if initial_status == 'candidate' else ''
         duplicate_clause = (' WHERE user_id=? AND workspace_id=? AND statement=?' if dedupe_by_statement
