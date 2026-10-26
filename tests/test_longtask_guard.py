@@ -45,8 +45,11 @@ def test_compound_commands_are_detected(command):
     assert _hit(command), f"复合命令应命中：{command}"
 
 
-def test_explicit_long_timeout_converts():
-    assert _hit("curl something", timeout=1800)
+def test_timeout_env_wrapped_pytest_converts_even_with_tool_timeout():
+    assert _hit(
+        "timeout 550 env PATH=/usr/bin:$PATH python3 -m pytest tests/unit -q",
+        timeout=580,
+    )
 
 
 def test_already_background_is_left_alone():
@@ -123,11 +126,14 @@ def test_execution_wrappers_do_not_hide_suites(command):
     assert _hit(command)
 
 
-@pytest.mark.parametrize("seconds", [31, 180, 580, 600])
-def test_declared_foreground_wait_over_chat_budget_is_background(seconds):
-    assert _hit("custom-runner --check", timeout=seconds)
+@pytest.mark.parametrize("command", [
+    "sed -n '1,80p' /var/log/agent.log",
+    "awk 'NR >= 1 && NR <= 80 { print }' /var/log/agent.log",
+    "for f in /var/log/agent.log; do printf '%s\\n' \"$f\"; done",
+])
+def test_timeout_120_does_not_background_short_read_queries(command):
+    assert _hit(command, timeout=120) is None
 
 
-def test_short_declared_probe_stays_foreground():
-    assert _hit("timeout 5 env A=1 python3 -c 'print(1)'", timeout=10) is None
-    assert _hit("bash -n verify.sh", timeout=10) is None
+def test_timeout_alone_does_not_background_unknown_command():
+    assert _hit("custom-runner --check", timeout=580) is None

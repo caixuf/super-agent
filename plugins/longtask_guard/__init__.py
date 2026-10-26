@@ -9,7 +9,7 @@
 本插件用 `pre_tool_call` 的 `modify` 指令，在 `terminal` 真正执行前改写参数：
 
 * 命中长任务特征 → 自动置 `background=true` + `notify_on_complete=true`（完成时通知，不守着轮询）；
-* 前台 `timeout` 超过阈值 → 同样转后台（前台上限本来也等不到）。
+* timeout/env 等包裹器会递归剥离，按实际执行的命令判断；超时数值本身不判重。
 
 判定必须"宁窄勿宽"：误拦一个 3 秒的 `git status` 比漏掉一个长任务更烦人。
 所以只认**明确的耗时动作**，并提供 `LONGTASK_GUARD_OFF=1` 一键关闭。
@@ -41,10 +41,6 @@ _HEAVY_PATTERNS: tuple[tuple[str, str], ...] = (
     ("apt-get install", "装依赖"),
     ("sleep ", "显式长等待"),
 )
-
-#: 主会话只允许短等待；显式声明超过30秒的调用交给后台。
-#: 这是派发规则，不是对任意未知命令运行时间的保证。
-_FOREGROUND_TIMEOUT_CAP_S = 30
 
 
 def _is_off() -> bool:
@@ -178,13 +174,6 @@ def classify(args: dict[str, Any]) -> Optional[str]:
     # 已经是后台就没必要动它（重复改写会让 notify 语义漂移）。
     if args.get("background"):
         return None
-
-    try:
-        timeout = int(args.get("timeout") or 0)
-    except (TypeError, ValueError):
-        timeout = 0
-    if timeout > _FOREGROUND_TIMEOUT_CAP_S:
-        return f"前台超时 {timeout}s 超过上限"
 
     for segment in _shell_segments(command):
         hit = _match_segment(segment)
