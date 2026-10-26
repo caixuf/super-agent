@@ -42,8 +42,9 @@ _HEAVY_PATTERNS: tuple[tuple[str, str], ...] = (
     ("sleep ", "显式长等待"),
 )
 
-#: 前台超时超过它就一定等不到（工具侧前台上限 600s），直接转后台。
-_FOREGROUND_TIMEOUT_CAP_S = 600
+#: 主会话只允许短等待；显式声明超过30秒的调用交给后台。
+#: 这是派发规则，不是对任意未知命令运行时间的保证。
+_FOREGROUND_TIMEOUT_CAP_S = 30
 
 
 def _is_off() -> bool:
@@ -76,19 +77,21 @@ _GIT_HEAVY_SUBCOMMANDS: frozenset[str] = frozenset({"clone", "fetch", "pull", "p
 #: 解释器：真正执行的是它**后面**那一段，所以要往下看。
 _INTERPRETERS: frozenset[str] = frozenset({"bash", "sh", "zsh", "python", "python3", "node", "npx", "sudo", "env"})
 
-#: 解释器的"只看不跑"开关：`bash -n` 语法检查、`python -c` 一行、`python -m` 模块。
+#: 解释器的"只看不跑"开关：`bash -n` 语法检查、`python --version` 等；shell -c 实际执行，不能当作只读。
 _NOEXEC_FLAGS: frozenset[str] = frozenset({"-n", "-c", "--version", "-V", "-h", "--help"})
 
 
-def _match_segment(segment: str) -> Optional[str]:
+def _match_segment(segment: str, _depth: int = 0) -> Optional[str]:
     """在一个命令片段里找长任务特征。只看**命令本体位置**，不看参数与字符串。
 
     判据分三步，每一步都在挡一类误伤：
       1. 首 token 是只读包裹器（grep/echo/git/...）→ 它后面全是参数，整段不判；
-      2. 首 token 是解释器（bash/python/...）→ 看它后面的脚本名，但 `-n`/`-c` 这类
-         "只看不跑"的开关直接放行（`bash -n verify.sh` 是语法检查，几毫秒）；
+      2. 首 token 是解释器（bash/python/...）→ 看它后面的脚本名，但 `bash -n` 这类
+         只做语法检查的开关直接放行（`bash -n verify.sh` 是语法检查，几毫秒）；
       3. 否则按可执行名/脚本路径精确匹配，**不做子串包含**。
     """
+    if _depth > 8:
+        return None
     try:
         tokens = shlex.split(segment, posix=True)
     except ValueError:
@@ -103,6 +106,37 @@ def _match_segment(segment: str) -> Optional[str]:
         return None
 
     exe = tokens[0].rsplit("/", 1)[-1]
+    # 包裹器不是真正执行的程序；逐层解析，不把pytest藏在timeout/env后面。
+    if exe == "timeout":
+        rest = tokens[1:]
+        while rest and rest[0].startswith("-"):
+            option = rest.pop(0)
+            if option == "--":
+                break
+            if option in ("-k", "--kill-after", "-s", "--signal"):
+                if not rest:
+                    return None
+                rest.pop(0)
+        if len(rest) < 2:
+            return None
+        return _match_segment(shlex.join(rest[1:]), _depth + 1)
+    if exe in ("env", "sudo"):
+        rest = tokens[1:]
+        while rest:
+            word = rest[0]
+            if word == "--":
+                rest.pop(0)
+                break
+            if word in ("-u", "--unset", "-C", "--chdir", "--user", "-g", "--group"):
+                rest = rest[2:]
+            elif word.startswith("-") or (exe == "env" and "=" in word):
+                rest.pop(0)
+            else:
+                break
+        return _match_segment(shlex.join(rest), _depth + 1) if rest else None
+    if exe in ("bash", "sh", "zsh") and len(tokens) > 2 and tokens[1] in ("-c", "-lc"):
+        return next((hit for part in _shell_segments(tokens[2])
+                     if (hit := _match_segment(part, _depth + 1))), None)
     if exe == "git":
         # 按子命令分流：只读子命令放行，clone/fetch/pull/push 这类照转后台。
         sub = next((t for t in tokens[1:] if not t.startswith("-")), "")

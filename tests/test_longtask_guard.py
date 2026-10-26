@@ -111,3 +111,23 @@ def test_original_args_are_not_mutated():
     original = {"command": "pytest tests -q"}
     guard._on_pre_tool_call(tool_name="terminal", args=original)
     assert "background" not in original
+
+
+@pytest.mark.parametrize("command", [
+    "timeout 550 env PATH=/usr/bin:$PATH /usr/bin/python3 -m pytest tests/unit -q",
+    "timeout -k 5s 550s env -u PYTHONPATH /usr/bin/python3 -m pytest tests -q",
+    "env A=1 B=2 timeout 120 python3 -m pytest tests -q",
+    "bash -lc 'timeout 550 env PATH=/usr/bin:$PATH python3 -m pytest tests/unit'",
+])
+def test_execution_wrappers_do_not_hide_suites(command):
+    assert _hit(command)
+
+
+@pytest.mark.parametrize("seconds", [31, 180, 580, 600])
+def test_declared_foreground_wait_over_chat_budget_is_background(seconds):
+    assert _hit("custom-runner --check", timeout=seconds)
+
+
+def test_short_declared_probe_stays_foreground():
+    assert _hit("timeout 5 env A=1 python3 -c 'print(1)'", timeout=10) is None
+    assert _hit("bash -n verify.sh", timeout=10) is None
