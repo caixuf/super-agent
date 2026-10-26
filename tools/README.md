@@ -1,45 +1,59 @@
-# tools/ —— 智能体自带的小工具
+# 图文交付工具
 
-## `arch_doc.py`：Markdown（含 Mermaid）→ 带图文档
+`arch_doc.py` 把 Markdown 与 Mermaid 生成完整、自包含的 HTML 和可阅读的 PNG 页。
+它复用同一套排版与浏览器检查，不另开一条“看起来成功”的截图路径。
 
-架构类内容在 IM / 工单里天然被降级（表格会被渲染成源码、图更是没有），**出口只能是"文档"**。
-这个脚本把一份 Markdown 变成两件可交付物：
+## 什么时候生成
 
-| 产物 | 是什么 | 给谁看 |
-| :--- | :--- | :--- |
-| `<名>.html` | 自包含：内联 CSS + 本地 mermaid | 人，双击即可读；可直接进文档系统 |
-| `<名>.png` | chromium 无头截图（自动裁掉底部留白） | IM / 邮件 / 工单内联展示，对方零环境 |
+需要读者理解职责和关系、一个过程、分阶段行动或方案取舍时，图文通常有帮助。
+一个事实、术语定义、状态查询、单条命令和局部追问，直接回答更合适。
+明确的格式偏好优先；不能因为有一个表格或篇幅稍长就自动生成附件。
 
-```bash
-python3 tools/arch_doc.py doc.md -o out/          # HTML + PNG
-python3 tools/arch_doc.py doc.md --png-only       # 只要图
-python3 tools/arch_doc.py doc.md --width 1100     # 图要更大就收窄页宽
-python3 tools/arch_doc.py doc.md --html-only      # 只要 HTML
-```
+完整判断与写作要求见 `skills/illustrated-doc-rendering/SKILL.md`。
+`illustrated-delivery` 插件可以在每轮给模型临时建议，最终仍要由模型按意思选规模、写清楚内容并实际调用工具。
 
-### 机制与坑（改之前先看）
-
-- **mermaid 必须内联进 HTML，不能用 CDN**：截图的正确性不能依赖出网，CDN 断则 PNG 里只剩空框。
-  首次运行会把 `mermaid.min.js`（约 3.5MB）拉到 `tools/assets/`，该文件已进 `.gitignore`。
-- **围栏要连围栏一起换掉**：把 ` ```mermaid ` 只改成 `<div class="mermaid">` 而保留围栏，
-  markdown 仍按代码块渲染 → 图上屏是源码文字。判定「图真的成了」看 DOM 里
-  `data-processed="true"` 的个数，以及 `language-mermaid` 残留必须为 0。
-- **截图要用 `--virtual-time-budget`**：mermaid 是异步渲染，不给虚拟时间预算就会截到还没画完的页面。
-- 依赖：`python-markdown` / `pygments` / `Pillow` + 本机 chromium 或 google-chrome（node 不需要）。
-- 只支持 Mermaid。需要 Graphviz / PlantUML 这类更强排版时，再单独加后端（本机已有 java，PlantUML 可行）。
-
-### 验证方式（别只看"文件生成了"）
+## 使用
 
 ```bash
-# 图真的渲成了吗 —— 两条互补，都要过
-chromium --headless=new --virtual-time-budget=15000 --dump-dom out/doc.html \
-  | grep -c 'data-processed="true"'          # 应等于 mermaid 块数（这个只有 DOM 里可见）
-grep -o 'class="language-mermaid"' out/doc.html | wc -l    # 应为 0（这个必须在**静态 HTML 文件**上查）
+python3 tools/arch_doc.py doc.md -o output/ --width 1100
+python3 tools/arch_doc.py doc.md -o output/ --png-only
+python3 tools/arch_doc.py doc.md -o output/ --html-only
 ```
 
-> 两条口径的边界（都实测踩过）：
-> - 内联的 mermaid.js 源码里带 `language-mermaid` 字符串 → 裸 `grep -c 'language-mermaid'` 假阳性；
-> - `dump-dom` 的输出还会带上 mermaid 运行时的同名类 → 残留判定**只能在静态 HTML 上做**，否则同样是假阳性。
-> 反过来 `data-processed` 只在 DOM 里出现，静态文件里没有 —— 所以这两条不能互相替代。
-> - **自引用陷阱**：把判据串写进一份"随便哪个产物"（比如规划文档把它当验收判据）后，再拿这条判据去查**这份文档自己**，
->   必然命中自己写的那几个字 —— 实测连续误判两次。**判据串要么只放在 README/脚本里，要么在产物里描述而不写字面量。**
+在业务工作目录使用时，用管理员配置的本体绝对路径；也可调用技能 wrapper：
+
+```bash
+bash /path/to/skill/scripts/render_doc.sh --engine-root /path/to/engine doc.md -o output/
+bash /path/to/skill/scripts/verify_render.sh output/doc.html 2 --engine-root /path/to/engine
+```
+
+wrapper 支持源码仓和托管安装路径；自定义安装位置可用 `--engine-root` 或 `ARCH_DOC_TOOL`。
+不扫描个人目录、不假定用户名。
+
+## 产物与质量
+
+- `doc.html` 保存完整内容与本地内联 Mermaid，不依赖在线脚本。
+- `doc.png` 是第一页预览；需要时增加 `doc.page-02.png` 等连续页，避免整份长文缩成小字。
+- `doc.render.json` 记录本次源文指纹、实际高度、图数、页范围与完整性。
+- `--png-only` 仍重新读取当前 Markdown；旧文件存在不代表本次渲染成功。
+- `--html-only` 可以不启动浏览器；要验证交付效果，仍需执行浏览器检查与视觉校样。
+
+浏览器等待图形、字体和布局就绪，再检查真实 SVG、源码残留、横向溢出与图中文字尺寸。
+分页尽量保留图、表和标题的阅读关系。错误图或不完整截图会报错，不复用旧 PNG 冒充成功。
+
+检查器的四例自检：
+
+```bash
+bash skills/illustrated-doc-rendering/scripts/selftest_verify_render.sh
+```
+
+四例包含正常页面、真实代码残留、普通文字自引用、图数不符。两个负例必须失败。
+机械检查通过后还要看实际 PNG，检查阅读顺序、字号、密度和正文是否好懂。
+
+## 依赖与边界
+
+Python 可选依赖通过 `pip install '.[documents]'` 声明：markdown、Pygments、Pillow、websocket-client。
+浏览器由 `ARCH_DOC_BROWSER`、PATH 或当前用户的标准本地 bin 位置发现。
+Mermaid vendor 首次需要准备到 `tools/assets/mermaid.min.js`；生成时内联，缺失且无法准备就明确失败，不悄悄挂 CDN。
+
+插件、技能、renderer、依赖和 vendor 都需要进入最终部署清单。完整打包与 Docker 干净环境复现按用户要求留到所有功能完成后的最后阶段。

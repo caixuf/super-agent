@@ -22,6 +22,7 @@ dependencies = []
 # markdown 是 tools/arch_doc.py 的可选依赖：缺它时该脚本无法渲染 HTML，相关测试应整体 skip。
 # 干净室必须装上它，否则「文档渲染链」这条能力在容器里从未被真正验证过（曾是发布红的根因之一）。
 test = ["pytest>=7.0", "markdown>=3.4"]
+documents = ["markdown>=3.4", "Pygments>=2.15", "Pillow>=10", "websocket-client>=1.6"]
 
 [project.urls]
 Homepage = "https://github.com/caixuf/super-agent"

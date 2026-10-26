@@ -1,0 +1,7 @@
+name: illustrated-delivery
+version: "1.0.0"
+description: "Per-turn advice for choosing useful illustrated documents, using the existing rendering skill."
+author: agentcore
+provides_hooks:
+  - pre_llm_call
+provides_tools: []

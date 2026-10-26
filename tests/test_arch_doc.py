@@ -54,8 +54,7 @@ def _browser() -> str | None:
 def test_mermaid_fence_is_swapped_wholesale():
     html = arch_doc.md_to_html(DOC)
     assert '<div class="mermaid">' in html
-    assert "A --> B" in html, "mermaid 源码必须在 div 里原样出现"
-    assert "A --&gt; B" not in html, "转义了 → 说明它被当成代码块走了 markdown 转义"
+    assert "A --&gt; B" in html, "diagram source is escaped as text, then read by the engine"
     assert "language-mermaid" not in html, "围栏没换干净 → 图会被当代码块渲染成源码"
     # 非 mermaid 的代码块必须照旧（别为了修图把代码块也拆了）
     assert 'class="codehilite"' in html and "echo" in html and "hi" in html
@@ -126,6 +125,22 @@ def test_inline_md_renders_bold_and_escapes_rest():
     out = arch_doc.inline_md("**粗** 与 `码` 与 <script>")
     assert "<strong>粗</strong>" in out and "<code>码</code>" in out
     assert "&lt;script&gt;" in out and "<script>" not in out
+
+
+def test_diagram_parser_preserves_nested_fenced_examples():
+    example = '````markdown\n```mermaid\nA --> B\n```\n````\n'
+    assert arch_doc._mermaid_blocks(example) == []
+    assert arch_doc.mermaid_to_div(example) == example
+    genuine = '  ```mermaid  \nflowchart LR\nA --> B\n  ```\n'
+    assert len(arch_doc._mermaid_blocks(genuine)) == 1
+    assert '<div class="mermaid">' in arch_doc.mermaid_to_div(genuine)
+
+
+def test_missing_vendor_never_silently_uses_network_script(tmp_path, monkeypatch):
+    monkeypatch.setattr(arch_doc, 'MERMAID_LOCAL', tmp_path / 'missing.js')
+    monkeypatch.setattr(arch_doc, 'ensure_mermaid', lambda: None)
+    with pytest.raises(RuntimeError, match='self-contained'):
+        arch_doc.load_mermaid_script()
 
 
 @pytest.mark.skipif(_browser() is None, reason="本机没有 chromium/google-chrome")
