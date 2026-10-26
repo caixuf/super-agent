@@ -17,6 +17,40 @@ import time
 import uuid
 
 
+ORIGIN_FIELDS = ('profile', 'session', 'route', 'channel', 'chat', 'thread', 'turn')
+# The dispatcher is only guaranteed to hold these two; the rest are recorded when
+# the host supplies them, never inferred from an ambient session.
+ORIGIN_REQUIRED = ('profile', 'session')
+
+
+def normalize_origin(origin):
+    """Serialize addressable task ownership, refusing partial or unknown fields.
+
+    Returns the canonical JSON text stored in ``jobs.origin`` (None when no
+    ownership was supplied). Blank strings are refused rather than coerced: an
+    empty route would look addressable while routing nowhere.
+    """
+    if origin is None:
+        return None
+    if not isinstance(origin, dict):
+        raise ValueError('origin must be a mapping')
+    unknown = set(origin) - set(ORIGIN_FIELDS)
+    if unknown:
+        raise ValueError('unknown origin fields: ' + ', '.join(sorted(unknown)))
+    normalized = {}
+    for name in ORIGIN_FIELDS:
+        if name not in origin:
+            continue
+        value = origin[name]
+        if not isinstance(value, str) or not value.strip() or len(value) > 512:
+            raise ValueError('origin %s must be a nonempty string of at most 512 characters' % name)
+        normalized[name] = value
+    missing = [name for name in ORIGIN_REQUIRED if name not in normalized]
+    if missing:
+        raise ValueError('origin requires ' + ', '.join(missing))
+    return json.dumps(normalized, sort_keys=True)
+
+
 class Pool:
     def __init__(self, root):
         self._db_lock = threading.RLock()
@@ -41,7 +75,8 @@ class Pool:
             ''')
             db.execute('BEGIN IMMEDIATE')
             columns = {r[1] for r in db.execute('PRAGMA table_info(jobs)')}
-            for name, kind in [('pid', 'INTEGER'), ('pid_start', 'TEXT'), ('deadline', 'REAL')]:
+            for name, kind in [('pid', 'INTEGER'), ('pid_start', 'TEXT'), ('deadline', 'REAL'),
+                               ('origin', 'TEXT')]:
                 if name not in columns:
                     db.execute('ALTER TABLE jobs ADD COLUMN ' + name + ' ' + kind)
             outbox_columns = {r[1] for r in db.execute('PRAGMA table_info(outbox)')}
@@ -62,10 +97,17 @@ class Pool:
             finally:
                 db.close()
 
-    def submit(self, key, payload, dependencies=(), replay_safe=False, max_tries=2):
+    def submit(self, key, payload, dependencies=(), replay_safe=False, max_tries=2, origin=None):
+        """Enqueue work. ``origin`` is the addressable ownership to persist with it.
+
+        A completion can only be routed back to the conversation that submitted the
+        work if the submission recorded who that was; resolving it later from
+        whatever session happens to be active is the failure this field prevents.
+        """
         dependencies = tuple(dependencies)
         if not key or max_tries < 1:
             raise ValueError('dedupe key and positive max_tries required')
+        origin = normalize_origin(origin)
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             existing = db.execute('SELECT * FROM jobs WHERE dedupe=?', (key,)).fetchone()
@@ -73,17 +115,25 @@ class Pool:
             if existing:
                 old_deps = {r[0] for r in db.execute('SELECT dependency FROM deps WHERE job=?', (existing['id'],))}
                 if (existing['payload'] != serialized or old_deps != set(dependencies)
-                        or existing['replay_safe'] != bool(replay_safe) or existing['max_tries'] != max_tries):
+                        or existing['replay_safe'] != bool(replay_safe) or existing['max_tries'] != max_tries
+                        or existing['origin'] != origin):
                     raise ValueError('dedupe key reused with different task')
                 return existing['id']
             for dependency in dependencies:
                 if not db.execute('SELECT 1 FROM jobs WHERE id=?', (dependency,)).fetchone():
                     raise ValueError('unknown dependency')
             job = uuid.uuid4().hex
-            db.execute('INSERT INTO jobs(id,dedupe,payload,max_tries,replay_safe,created) VALUES(?,?,?,?,?,?)',
-                       (job, key, serialized, max_tries, bool(replay_safe), time.time()))
+            db.execute('INSERT INTO jobs(id,dedupe,payload,max_tries,replay_safe,created,origin) '
+                       'VALUES(?,?,?,?,?,?,?)',
+                       (job, key, serialized, max_tries, bool(replay_safe), time.time(), origin))
             db.executemany('INSERT INTO deps VALUES(?,?)', [(job, d) for d in set(dependencies)])
             return job
+
+    def origin(self, job):
+        """Ownership persisted at submit time, or None for work admitted before it was recorded."""
+        with self.db() as db:
+            row = db.execute('SELECT origin FROM jobs WHERE id=?', (job,)).fetchone()
+        return json.loads(row['origin']) if row is not None and row['origin'] else None
 
     def _lock(self, job):
         fd = os.open(str(self.root / 'locks' / job), os.O_CREAT | os.O_RDWR, 0o600)

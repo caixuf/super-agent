@@ -160,7 +160,11 @@ class DispatchService:
         payload = {'goal': goal, 'sources': self._sources(args.get('sources')),
                    '_dispatch_owner': owner}
         dedupe = owner + ':' + hashlib.sha256(key.encode()).hexdigest()
-        job = self.pool.submit(dedupe, payload, replay_safe=True, max_tries=2)
+        # ``_dispatch_owner`` is an ownership *proof* (one-way), never an address:
+        # persist profile + session alongside it so a completion can be routed back
+        # to the conversation that submitted the work, after reconnects and restarts.
+        job = self.pool.submit(dedupe, payload, replay_safe=True, max_tries=2,
+                               origin={'profile': self.profile, 'session': session_id})
         return {'ok': True, 'task_id': job, 'status': self.pool.status(job)['status'],
                 'next_action': 'Return the task ID to the user and finish this turn. Do not poll.'}
 
@@ -224,6 +228,12 @@ def _handler(service, action):
 def register(ctx):
     if ctx.get_config('enabled', False) is not True:
         return
+    ctx.register_system_prompt_section(
+        'durable-dispatch-routing',
+        """Capability routing for bounded read-only evidence analysis:
+Use durable_submit when the task can be completed by analyzing administrator-approved source files. Submit one task, return its ID, and finish the turn without waiting or polling. Use delegate_task for independent reasoning subtasks or work that needs separate agent context; do not use it as a substitute when durable analysis fits. Choose by the work and source bounds, not by keywords such as 'log'. Never provide an owner, shell command, runner, or model adapter.""",
+        position='after_memory', max_chars=1000,
+    )
     service = DispatchService(ctx.get_config('queue_root'), ctx.profile_name,
                               ctx.get_config('allowed_roots'),
                               denied_globs=ctx.get_config('denied_globs', []),

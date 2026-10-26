@@ -19,13 +19,16 @@ class Context:
     profile_name = 'test-profile'
 
     def __init__(self, settings):
-        self.settings, self.tools = settings, {}
+        self.settings, self.tools, self.prompt_sections = settings, {}, {}
 
     def get_config(self, key, default=None):
         return self.settings.get(key, default)
 
     def register_tool(self, **kwargs):
         self.tools[kwargs['name']] = kwargs
+
+    def register_system_prompt_section(self, id, content, **kwargs):
+        self.prompt_sections[id] = {'content': content, **kwargs}
 
 
 def make_context(tmp_path):
@@ -52,6 +55,10 @@ def test_register_opt_in_and_bounded_submission(tmp_path):
     assert not (tmp_path / 'off').exists()
     context, args = make_context(tmp_path)
     assert set(context.tools) == {'durable_submit', 'durable_status', 'durable_cancel'}
+    assert set(context.prompt_sections) == {'durable-dispatch-routing'}
+    routing = context.prompt_sections['durable-dispatch-routing']['content']
+    assert 'durable_submit' in routing and 'finish the turn' in routing
+    assert 'not by keywords' in routing
     result = call(context, 'submit', args, session_id='trusted-session')
     assert result['ok'] and result['status'] == 'queued'
     assert 'finish this turn' in result['next_action']
@@ -148,6 +155,7 @@ class Context:
     def get_config(self,key,default=None):
         return {'enabled':True,'queue_root':sys.argv[4],'allowed_roots':[sys.argv[5]]}.get(key,default)
     def register_tool(self,**kw): registry.register(**kw)
+    def register_system_prompt_section(self, *args, **kw): pass
 p.register(Context())
 args={'goal':'Read evidence','sources':[{'path':sys.argv[6]}],'request_key':'real-registry'}
 assert json.loads(registry.dispatch('durable_submit',args))['ok'] is False
@@ -288,6 +296,7 @@ p.register(ctx)
 assert sys.path==before
 assert manager._plugin_tool_names=={'durable_submit','durable_status','durable_cancel'}
 assert {registry.get_entry(name,scope=manager.scope_key).toolset for name in manager._plugin_tool_names}=={'durable_dispatch'}
+assert set(manager._system_prompt_sections)=={'durable-dispatch-routing'}
 args={'goal':'Read the evidence','sources':[{'path':str(source)}],'request_key':'event'}
 assert not json.loads(registry.dispatch('durable_submit',args,scope=manager.scope_key))['ok']
 answer=json.loads(registry.dispatch('durable_submit',args,scope=manager.scope_key,session_id='trusted'))
@@ -304,3 +313,25 @@ print('isolated host runtime dispatch passed')
                             capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr[-3000:]
     assert 'isolated host runtime dispatch passed' in result.stdout
+
+
+def test_submit_persists_submitting_conversation_as_origin(tmp_path):
+    context, args = make_context(tmp_path)
+    result = call(context, 'submit', args, session_id='session-one')
+    pool = plugin.Pool(context.settings['queue_root'])
+    assert pool.origin(result['task_id']) == {'profile': 'test-profile', 'session': 'session-one'}
+    # The one-way owner hash stays the ownership proof; the origin is the address.
+    row = pool.status(result['task_id'])
+    assert row['status'] == 'queued'
+
+
+def test_origin_records_which_session_owns_each_task(tmp_path):
+    context, args = make_context(tmp_path)
+    mine = call(context, 'submit', args, session_id='session-one')['task_id']
+    theirs = call(context, 'submit', dict(args, request_key='request-2'), session_id='session-two')['task_id']
+    pool = plugin.Pool(context.settings['queue_root'])
+    assert pool.origin(mine)['session'] == 'session-one'
+    assert pool.origin(theirs)['session'] == 'session-two'
+    # Addressability does not weaken the access check.
+    assert not call(context, 'status', {'task_id': mine}, session_id='session-two')['ok']
+    assert call(context, 'status', {'task_id': mine}, session_id='session-one')['ok']
