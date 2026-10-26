@@ -67,6 +67,42 @@ def test_aliases_cannot_refer_to_a_missing_heading(tmp_path, configured):
         sync_document(path, document_id='owner/memory', aliases={'不存在的标题': ['旧标题']})
 
 
+def test_archived_revision_and_alias_restore_preserve_new_user_facts(tmp_path,configured):
+    from agentcore.memory.curated_sync import document_manifest,restore_document_revision
+    path=document(tmp_path/'MEMORY.md')
+    with configured(tmp_path/'data'):
+        first=sync_document(path,document_id='owner/memory',aliases={'演练预算':['旧预算']})
+        document(path,'并发预算固定为九个')
+        second=sync_document(path,document_id='owner/memory',aliases={'演练预算':['新预算']})
+        newcomer=store.write_fact('新会话决定保留独立报告',subject='新决定',source='user_turn')
+        assert document_manifest('owner/memory')['alias_revision']==second['alias_revision']
+        assert restore_document_revision(document_id='owner/memory',revision=first['revision'],
+                                         alias_revision=first['alias_revision'])['ok']
+        assert '七个' in store.recall_facts('旧预算')['results'][0]['statement']
+        assert document_manifest('owner/memory')['fact_ids']==first['fact_ids']
+        assert restore_document_revision(document_id='owner/memory',revision=second['revision'],
+                                         alias_revision=second['alias_revision'])['ok']
+        assert '九个' in store.recall_facts('新预算')['results'][0]['statement']
+        conn=store._connect()
+        try:assert conn.execute('SELECT status FROM working_fact WHERE fact_id=?',(newcomer['fact_id'],)).fetchone()[0]=='active'
+        finally:conn.close()
+        assert '九个' in path.read_text()  # Restoration never rewrites the prompt.
+
+
+def test_wrong_or_tampered_revision_cannot_publish(tmp_path,configured):
+    from agentcore.memory.curated_sync import document_manifest,restore_document_revision
+    path=document(tmp_path/'MEMORY.md')
+    with configured(tmp_path/'data'):
+        first=sync_document(path,document_id='owner/memory')
+        Path(first['snapshot']).write_text('【演练预算】被篡改的内容')
+        before=document_manifest('owner/memory')
+        with pytest.raises(ValueError,match='revision_mismatch'):
+            restore_document_revision(document_id='owner/memory',revision=first['revision'])
+        assert document_manifest('owner/memory')==before
+        with pytest.raises(ValueError,match='invalid_curated_revision'):
+            restore_document_revision(document_id='owner/memory',revision='../outside')
+
+
 def test_long_named_phrase_finds_curated_context_without_matching_a_book(tmp_path, configured):
     path = tmp_path/'MEMORY.md'
     path.write_text('【运行岗位】记忆预算守护每六小时检查一次。\n')

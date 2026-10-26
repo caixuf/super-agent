@@ -35,7 +35,7 @@ def sections(text):
     return result
 
 
-def sync_document(path, *, document_id, flush_timeout=120, aliases=None):
+def sync_document(path, *, document_id, flush_timeout=120, aliases=None, expected_revision=None):
     cfg = get_config()
     source = Path(path).resolve(strict=True)
     if not source.is_file() or source.stat().st_size > 512*1024:
@@ -52,6 +52,8 @@ def sync_document(path, *, document_id, flush_timeout=120, aliases=None):
         if len(raw) > 512*1024:
             raise ValueError('curated_document_budget')
         revision = hashlib.sha256(raw).hexdigest()
+        if expected_revision is not None and revision != expected_revision:
+            raise ValueError('curated_revision_mismatch')
         entries = sections(raw.decode('utf-8'))
         aliases = aliases or {}
         subjects = {entry['subject'] for entry in entries}
@@ -124,7 +126,9 @@ def sync_document(path, *, document_id, flush_timeout=120, aliases=None):
             with conn:
                 conn.execute('CREATE TABLE IF NOT EXISTS curated_documents ('
                              'user_id TEXT NOT NULL, document_id TEXT NOT NULL, revision TEXT NOT NULL,'
-                             'fact_ids TEXT NOT NULL, PRIMARY KEY(user_id,document_id))')
+                             "fact_ids TEXT NOT NULL, alias_revision TEXT NOT NULL DEFAULT '', PRIMARY KEY(user_id,document_id))")
+                if 'alias_revision' not in {r[1] for r in conn.execute('PRAGMA table_info(curated_documents)')}:
+                    conn.execute("ALTER TABLE curated_documents ADD COLUMN alias_revision TEXT NOT NULL DEFAULT ''")
                 marks = ','.join('?' for _ in ids)
                 retired = conn.execute(
                     "UPDATE working_fact SET status='deprecated',fact_chain_summary='curated_source_revised'"
@@ -140,11 +144,56 @@ def sync_document(path, *, document_id, flush_timeout=120, aliases=None):
                             raise ValueError('invalid_curated_alias_key')
                         conn.execute('INSERT INTO fact_tags(fact_id,key,value) VALUES(?,?,?)',
                                      (fid, 'subject_alias_'+str(i), normalized))
-                conn.execute('INSERT INTO curated_documents VALUES(?,?,?,?) '
-                             'ON CONFLICT(user_id,document_id) DO UPDATE SET revision=excluded.revision,fact_ids=excluded.fact_ids',
-                             (cfg.default_user, document_id, revision, json.dumps(ids)))
+                conn.execute('INSERT INTO curated_documents(user_id,document_id,revision,fact_ids,alias_revision) VALUES(?,?,?,?,?) '
+                             'ON CONFLICT(user_id,document_id) DO UPDATE SET revision=excluded.revision,'
+                             'fact_ids=excluded.fact_ids,alias_revision=excluded.alias_revision',
+                             (cfg.default_user, document_id, revision, json.dumps(ids),alias_revision))
         finally:
             conn.close()
         return {'ok': True, 'revision': revision, 'fact_ids': ids, 'retired': retired,
                 'snapshot': str(snapshot), 'vector_backend': vector_backend,
                 'alias_revision': alias_revision, 'alias_snapshot': str(alias_snapshot)}
+
+
+def document_manifest(document_id):
+    """The exact published source and alias versions, without conversation text."""
+    cfg=get_config();conn=memory_store._connect()
+    try:
+        columns={r[1] for r in conn.execute('PRAGMA table_info(curated_documents)')}
+        if not columns:return None
+        alias='alias_revision' if 'alias_revision' in columns else "'' AS alias_revision"
+        row=conn.execute('SELECT revision,fact_ids,'+alias+' FROM curated_documents WHERE user_id=? AND document_id=?',
+                         (cfg.default_user,document_id)).fetchone()
+        if row is None:return None
+        return dict(document_id=document_id,revision=row['revision'],alias_revision=row['alias_revision'] or None,
+                    fact_ids=json.loads(row['fact_ids']))
+    finally:conn.close()
+
+
+def restore_document_revision(*,document_id,revision,alias_revision=None,flush_timeout=120):
+    """Republish archived facts only; unrelated and concurrent writes stay intact.
+
+    This does not overwrite the bounded prompt file or replace a live database.
+    Rehearse restoration in an isolated configured store before production use.
+    """
+    if revision is None or not isinstance(document_id,str) or not document_id.strip():
+        raise ValueError('invalid_curated_revision')
+    for value in (revision,alias_revision):
+        if value is not None and (not isinstance(value,str) or not re.fullmatch('[0-9a-f]{64}',value)):
+            raise ValueError('invalid_curated_revision')
+    cfg=get_config();key=hashlib.sha256((cfg.default_user+'\n'+document_id).encode()).hexdigest()
+    archive=cfg.base_dir()/'curated-snapshots'/key
+    source=archive/(revision+'.md')
+    if not source.resolve(strict=True).is_relative_to(archive.resolve()):
+        raise ValueError('curated_snapshot_path_escaped')
+    aliases={}
+    if alias_revision is not None:
+        metadata=archive/(revision+'.aliases-'+alias_revision+'.json')
+        if not metadata.resolve(strict=True).is_relative_to(archive.resolve()):
+            raise ValueError('curated_alias_path_escaped')
+        raw=metadata.read_bytes();aliases=json.loads(raw)
+        canonical=json.dumps(aliases,ensure_ascii=False,sort_keys=True).encode()
+        if hashlib.sha256(raw).hexdigest()!=alias_revision or raw!=canonical:
+            raise ValueError('curated_alias_revision_mismatch')
+    return sync_document(source,document_id=document_id,flush_timeout=flush_timeout,
+                         aliases=aliases,expected_revision=revision)
