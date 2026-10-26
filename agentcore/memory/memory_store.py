@@ -693,6 +693,7 @@ def recall_facts(
     scopes: Optional[Sequence[str]] = None,
     domains: Optional[Sequence[str]] = None,
     genres: Optional[Sequence[str]] = None,
+    _connection: Optional[sqlite3.Connection] = None,
 ) -> Dict[str, Any]:
     """按代际 + 任意 KV 标签召回。空结果给出 reason，不返回假的成功。
 
@@ -704,7 +705,7 @@ def recall_facts(
     # 只在 WHERE 子句里兜底、却把原始 None 传给下游，就会「库里明明有数据，
     # COUNT 出来 0，报 no_match」—— 看起来像没数据，其实是在按 NULL 查。
     user_id = user_id or get_config().default_user
-    conn = _connect()
+    conn = _connection if _connection is not None else _connect()
     try:
         buckets: List[str] = []
         if ebm:
@@ -917,7 +918,8 @@ def recall_facts(
         # 只有查询指定了代际时才按代际优先；否则 exact_ebm 是本次筛选的产物，
         # 拿它当排序依据会把 G1/G2 那两条无关经验强行顶到所有查询的第一位
         # （实测：任何查询都返回「门限-制动踏板」）。
-        ranked = _rank(picked, query, prefer_ebm=bool(ebm))
+        ranked = (_rank(picked, query, prefer_ebm=bool(ebm), connection=conn)
+                  if _connection is not None else _rank(picked, query, prefer_ebm=bool(ebm)))
         # 相关性下限：向量召回永远能凑出 top-N，但「总能返回」不等于「相关」。
         # 实测「完全无关的词汇xyz123」在 45 条库里也照样返回 3 条；这类噪声塞进
         # 诊断结果反而制造干扰。低于门限的一律不返回，由 empty_reason 说明。
@@ -939,7 +941,8 @@ def recall_facts(
             payload["score_floor"] = floor
         return payload
     finally:
-        conn.close()
+        if _connection is None:
+            conn.close()
 
 
 
@@ -1153,11 +1156,12 @@ def _persist_fact_embedding(fact_id: str, text: str, vec: Sequence[float], model
         conn.close()
 
 
-def _get_persisted_embeddings(fact_ids: Sequence[str], model: str = DEFAULT_EMBED_MODEL) -> Dict[str, Tuple[List[float], str]]:
+def _get_persisted_embeddings(fact_ids: Sequence[str], model: str = DEFAULT_EMBED_MODEL,
+                              *, connection=None) -> Dict[str, Tuple[List[float], str]]:
     """批量从数据库获取已持久化的向量。返回 {fact_id: (vector, text_hash)}"""
     if not fact_ids:
         return {}
-    conn = _connect()
+    conn = connection if connection is not None else _connect()
     try:
         marks = ",".join("?" * len(fact_ids))
         rows = conn.execute(
@@ -1176,7 +1180,8 @@ def _get_persisted_embeddings(fact_ids: Sequence[str], model: str = DEFAULT_EMBE
     except Exception:
         return {}
     finally:
-        conn.close()
+        if connection is None:
+            conn.close()
 
 
 def reindex_embeddings(user_id: Optional[str] = None, model: str = DEFAULT_EMBED_MODEL, force: bool = False) -> Dict[str, Any]:
@@ -1323,7 +1328,8 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
         return 0.0
 
 
-def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True) -> List[Dict[str, Any]]:
+def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True,
+          *, connection=None) -> List[Dict[str, Any]]:
     """在给定候选集内排序：有可用向量就按余弦，否则退回关键词重合度。
 
     注意排序**只作用于传入的 items**：调用方已经按代际桶和标签过滤过了，
@@ -1347,7 +1353,8 @@ def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True) 
         fact_ids = [it.get("fact_id") or "" for it in items]
         
         # 1. 尝试从 SQLite 持久化表获取已存在的向量
-        persisted = _get_persisted_embeddings(fact_ids)
+        persisted = (_get_persisted_embeddings(fact_ids, connection=connection)
+                     if connection is not None else _get_persisted_embeddings(fact_ids))
         
         # 2. 检查哪些候选文本需要补算向量
         missing_texts = []
