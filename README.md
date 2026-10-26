@@ -31,7 +31,7 @@
 | 运行时 | `runtime/` | `<HERMES_HOME>/agentcore/runtime/` | 常驻服务单元骨架（占位符化，profile 名/服务名都不是写死的）+ `BASELINE.md`（能力基线与无人值守档：通用键名 / 地板值）+ `CONFIG_MAP.md`（段归属、并行会话语义、派工协议陷阱） |
 | 文档 | `docs/` | —— | `MIGRATION.md`（八层迁移清单 + 「只在盘上」资产表）、`PLUGINS.md`（插件 / MCP / 工具集注册的边界与验收口径） |
 | 平台适配补丁 | `patches/` | `<HERMES_HOME>/agentcore/patches/` | 消息平台：流式卡片 + 纯文字审批（不依赖卡片回调）；幂等重放/校验 |
-| 插件 | `plugins/` | `<HERMES_HOME>/plugins/<name>`（软链或拷贝） | `longtask_guard/`：用 `pre_tool_call` 的 `modify` 指令，在派发前把**明确的长任务**（测试套、建镜像、克隆、装依赖、干净室验证）自动转成后台执行 —— 长任务前台会把回合占死，用户几分钟收不到消息，还可能撞上轮数上限连"已提交"都发不出去。判定刻意窄：只读包裹器（`grep`/`echo`/`cat`…）、解释器的只看不跑开关（`bash -n`/`python -c`）、`git` 的只读子命令、已是后台的调用，一律不碰；`LONGTASK_GUARD_OFF=1` 可整关 |
+| 插件 | `plugins/` | `<HERMES_HOME>/plugins/<name>`（软链或拷贝）+ profile `config.yaml` 的 `plugins.enabled` | `longtask_guard/`：用 `pre_tool_call` 的 `modify` 指令，在派发前把**明确的长任务**（测试套、建镜像、克隆、装依赖、干净室验证）自动转成后台执行 —— 长任务前台会把回合占死，用户几分钟收不到消息，还可能撞上轮数上限连"已提交"都发不出去。判定刻意窄：只读包裹器（`grep`/`echo`/`cat`…）、解释器的只看不跑开关（`bash -n`/`python -c`）、`git` 的只读子命令、已是后台的调用，一律不碰；`LONGTASK_GUARD_OFF=1` 可整关。安装器落位后把带 `plugin.yaml` 的插件名写进启用列表（官方 `hermes plugins enable` 优先，否则最小文本合并；`--skip-plugins` 两步都跳过） |
 | 安装器 | `install/install.sh` | —— | 幂等、`--dry-run` 零副作用、不启停服务、不碰凭据、不覆盖现场身份 |
 | 干净室验证 | `docker/` | —— | 容器里从一个空 HOME 装一遍，20 项断言 |
 | 迁移口径 | `docs/MIGRATION.md` | —— | 「只在盘上」的漏项清单 + 可量化验收 |

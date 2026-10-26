@@ -9,6 +9,13 @@
 #   5. **不覆盖现场业务身份**：本仓只有通用骨架，生效身份 = 骨架 + 业务叠加层。
 #      默认**不动** $HERMES_HOME/SOUL.md（那上面有业务叠加层），只在显式开关下合成。
 #   6. **不动任何源**：只从本仓读、往部署位写；业务仓只读引用。
+#   7. **启用插件只写启用记录**：优先官方 `hermes plugins enable`；目标还不能被
+#      官方命令寻址时（全新 profile）改用 install/enable_plugins.py 的最小文本合并。
+#      回退合并只增删 `plugins.enabled` / `plugins.disabled` 两个列表的行，不整文件重写
+#      config.yaml（注释/顺序/密钥/entries 逐字节保留）。
+#      `plugins.entries.*.settings`（engine_root / queue_root / allowed_roots）仍属部署配置，
+#      本脚本不猜值。官方命令可能请求正在运行的网关重载插件（不重启进程）；要严格只落文件
+#      设 PLUGIN_ENABLE_MODE=merge。
 #
 # 用法
 #   bash install/install.sh --help
@@ -17,6 +24,7 @@
 #   bash install/install.sh --profile <profile> --skip-plugins
 #   bash install/install.sh --profile <profile> --compose-soul /path/to/overlay.md
 #   INSTALL_BUSINESS_SKILLS=1 BUSINESS_SKILLS_SRC=<dir> bash install/install.sh
+#   PLUGIN_ENABLE_MODE=merge bash install/install.sh --profile <profile>   # 只改文件
 #
 # 退出码：0 = 成功（含全部已就位）；1 = 前置缺失或某步失败。
 
@@ -39,6 +47,8 @@ DO_PATCH=1
 DO_BASELINE=0
 BUSINESS_SKILLS_SRC="${BUSINESS_SKILLS_SRC:-}"
 INSTALL_BUSINESS_SKILLS="${INSTALL_BUSINESS_SKILLS:-0}"
+# auto = 官方入口可用就用，否则最小合并；cli = 只用官方；merge = 只改文件（不碰运行中的网关）
+PLUGIN_ENABLE_MODE="${PLUGIN_ENABLE_MODE:-auto}"
 
 log()  { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
@@ -65,7 +75,7 @@ install.sh — 智能体本体安装器（幂等 / 支持 --dry-run）
   --deploy-soul             只装通用骨架到 <HERMES_HOME>/SOUL.md（**会丢掉业务叠加层**，
                             仅用于全新机器；已有现场身份时不要用）
   --business-skills-src D   业务技能源目录；等价于 BUSINESS_SKILLS_SRC=D
-  --skip-plugins            不装按 profile 的插件副本
+  --skip-plugins            不装按 profile 的插件副本，也不写 plugins.enabled / plugins.disabled
   --skip-skills             不装技能
   --skip-patch              不打消息平台适配补丁
   --apply-baseline          写入**通用能力基线**（轮次/派工上限/无人值守档）。默认**不动**配置；
@@ -82,6 +92,9 @@ install.sh — 智能体本体安装器（幂等 / 支持 --dry-run）
   5. patches/*                -> <DEPLOY_DIR>/patches/
   6. plugins/*/               -> <HERMES_HOME>/plugins/<连字符名>/（按 profile 的插件副本；
                                  目录名里的下划线转连字符，跳过 __pycache__ / *.pyc）
+     落位后把带 plugin.yaml 的插件名写进该 profile config 的 plugins.enabled，
+     并把同名项从 plugins.disabled 移出（幂等；不动 plugins.entries / 其它键）。
+     plugins/localvec 没有 manifest，属 memory.provider，不在此列表。
   7. skills/**/SKILL.md       -> <HERMES_HOME>/skills/<name>/    （通用技能；examples/ 是范本，不安装）
   8. 对 Hermes 安装树打补丁（可 --skip-patch）：
        patches/apply_feishu_card_replies.py --apply（卡片流式 + 审批纯文字）
@@ -91,6 +104,13 @@ install.sh — 智能体本体安装器（幂等 / 支持 --dry-run）
   业务技能：INSTALL_BUSINESS_SKILLS=1 + BUSINESS_SKILLS_SRC=<dir>（或 --business-skills-src）
   业务 MCP / 业务 provider / 业务 SOUL 叠加：由业务层按 runtime/README.md 与
   identity/README.md 的占位符契约补齐。**本脚本不生成任何业务内容。**
+
+环境变量:
+  PLUGIN_ENABLE_MODE=auto|cli|merge
+                            插件启用入口。auto（默认）：目标 profile 已能被官方命令寻址
+                            （已有配置/身份标记且数据根有 Hermes 安装树）时用
+                            `hermes plugins enable`，否则用最小文本合并。cli = 只用官方；
+                            merge = 只改文件（不请求运行中的网关重载插件）。
 
 不做什么:
   * 不启动/停止/重启任何服务（systemd 命令只打印）
@@ -117,6 +137,12 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+case "$PLUGIN_ENABLE_MODE" in
+  auto|cli|merge) ;;
+  *) warn "未知 PLUGIN_ENABLE_MODE=$PLUGIN_ENABLE_MODE（auto|cli|merge），按 auto 处理"
+     PLUGIN_ENABLE_MODE=auto ;;
+esac
 
 # ---------------------------------------------------------------------------- #
 run() {  # dry-run 时只打印
@@ -188,6 +214,170 @@ install_skill_tree() {  # 幂等装一棵技能树（递归找 SKILL.md，按目
 }
 
 # ---------------------------------------------------------------------------- #
+# 插件启用：优先官方入口，否则最小幂等合并（只动 plugins.enabled / disabled）
+# ---------------------------------------------------------------------------- #
+ENABLER="$REPO_ROOT/install/enable_plugins.py"
+PLUGIN_ENABLE_NAMES=()
+PLUGIN_ENABLE_ROOT=""
+PLUGIN_ENABLE_PROFILE=""
+PLUGIN_ENABLE_BIN=""
+
+plugin_enable_names() {  # 带 manifest 的插件名（localvec 没有 manifest，不在此列）
+  local f line name
+  for f in "$REPO_ROOT"/plugins/*/plugin.yaml; do
+    [ -f "$f" ] || continue
+    name=""
+    while IFS= read -r line; do
+      line="${line%$'\r'}"
+      case "$line" in name:*) name="${line#name:}"; break ;; esac
+    done < "$f"
+    [ -n "$name" ] || continue
+    name="${name#"${name%%[![:space:]]*}"}"
+    name="${name%"${name##*[![:space:]]}"}"
+    name="${name%\"}"; name="${name#\"}"
+    name="${name%\'}"; name="${name#\'}"
+    [ -n "$name" ] && printf '%s\n' "$name"
+  done
+}
+
+plugin_enable_official_target() {  # 官方 `hermes plugins enable` 能否精确寻址这个 profile
+  PLUGIN_ENABLE_ROOT=""
+  PLUGIN_ENABLE_PROFILE=""
+  [ "$PLUGIN_ENABLE_MODE" != "merge" ] || return 1
+  PLUGIN_ENABLE_BIN="$(command -v hermes || true)"
+  [ -n "$PLUGIN_ENABLE_BIN" ] || return 1
+  # `hermes --profile` 拒绝没有身份标记的目录；全新 profile 走最小合并，不猜官方路径。
+  local t="$TARGET_HOME" marker root has_identity=0
+  for marker in config.yaml .env SOUL.md profile.yaml auth.json state.db; do
+    if [ -f "$t/$marker" ] || [ -L "$t/$marker" ]; then has_identity=1; break; fi
+  done
+  [ "$has_identity" = "1" ] || return 1
+  if [ -d "$t/hermes-agent" ]; then
+    PLUGIN_ENABLE_ROOT="$t"
+    PLUGIN_ENABLE_PROFILE="default"
+    return 0
+  fi
+  root="$(dirname "$(dirname "$t")")"
+  if [ "$(basename "$(dirname "$t")")" = "profiles" ] \
+     && { [ -d "$root/hermes-agent" ] || [ -d "$root/installs" ]; }; then
+    PLUGIN_ENABLE_ROOT="$root"
+    PLUGIN_ENABLE_PROFILE="$(basename "$t")"
+    return 0
+  fi
+  return 1
+}
+
+official_plugin_enable() {  # 只对缺的项调用官方入口；失败返回 1（由调用方回退）
+  local name out
+  for name in "$@"; do
+    if out="$(HERMES_HOME="$PLUGIN_ENABLE_ROOT" "$PLUGIN_ENABLE_BIN" \
+              --profile "$PLUGIN_ENABLE_PROFILE" plugins enable "$name" 2>&1)"; then
+      ok "启用 $name（官方入口：hermes --profile $PLUGIN_ENABLE_PROFILE plugins enable）"
+    else
+      warn "官方启用失败：$name —— 回退到最小文本合并"
+      printf '%s\n' "$out" | while IFS= read -r line; do
+        [ -n "$line" ] && log "      $line"
+      done
+      return 1
+    fi
+  done
+  return 0
+}
+
+merge_plugin_enable() {  # 最小幂等合并；无变更时不写盘
+  local -a args=(--config "$TARGET_HOME/config.yaml")
+  local name status payload out rc=0
+  for name in "${PLUGIN_ENABLE_NAMES[@]}"; do args+=(--name "$name"); done
+  [ "$DRY_RUN" = "1" ] && args+=(--dry-run)
+  out="$(python3 "$ENABLER" "${args[@]}")" || rc=$?
+  if [ "$rc" = "2" ]; then
+    warn "配置结构超出最小合并的安全范围（未改动）：$TARGET_HOME/config.yaml"
+    warn "  人工执行：hermes${PLUGIN_ENABLE_PROFILE:+ --profile $PLUGIN_ENABLE_PROFILE} plugins enable <name>"
+    return 0
+  elif [ "$rc" != "0" ]; then
+    fail "写插件启用记录失败（enable_plugins.py 退出码 $rc）"
+    return 1
+  fi
+  while IFS=$'\t' read -r status payload; do
+    case "$status" in
+      ADD)             ok "启用 $payload" ;;
+      ALREADY)         skip "已启用 $payload" ;;
+      UNDISABLED)      ok "从 plugins.disabled 移除 $payload" ;;
+      WOULD-ADD)       log "    [plan] 启用 $payload" ;;
+      WOULD-UNDISABLE) log "    [plan] 从 plugins.disabled 移除 $payload" ;;
+      WOULD-CONFIG)
+        case "$payload" in
+          create) log "    [plan] 新建 $TARGET_HOME/config.yaml（只含 plugins.enabled）" ;;
+          update) log "    [plan] 更新 $TARGET_HOME/config.yaml 的 plugins.enabled" ;;
+        esac ;;
+      CONFIG)
+        case "$payload" in
+          created)   ok "新建配置（仅插件启用段）：$TARGET_HOME/config.yaml" ;;
+          updated)   ok "更新插件启用段：$TARGET_HOME/config.yaml" ;;
+          unchanged) skip "插件启用段已一致：$TARGET_HOME/config.yaml" ;;
+        esac ;;
+      STRUCTURE) : ;;
+      *) [ -n "$status" ] && log "  $status${payload:+	$payload}" ;;
+    esac
+  done <<< "$out"
+  return 0
+}
+
+enable_profile_plugins() {  # 先只读检查：全在就不再触发 CLI / 写盘
+  local -a cargs=(--config "$TARGET_HOME/config.yaml" --check) missing=()
+  local -a still=()
+  local name status payload out rc=0
+  for name in "${PLUGIN_ENABLE_NAMES[@]}"; do cargs+=(--name "$name"); done
+  out="$(python3 "$ENABLER" "${cargs[@]}")" || rc=$?
+  if [ "$rc" = "2" ]; then
+    merge_plugin_enable
+    return $?
+  fi
+  while IFS=$'\t' read -r status payload; do
+    case "$status" in
+      ABSENT|DISABLED) missing+=("$payload") ;;
+    esac
+  done <<< "$out"
+  if [ "${#missing[@]}" -eq 0 ]; then
+    for name in "${PLUGIN_ENABLE_NAMES[@]}"; do skip "已启用 $name"; done
+    return 0
+  fi
+  if [ "$DRY_RUN" = "1" ]; then
+    if plugin_enable_official_target; then
+      for name in "${missing[@]}"; do
+        log "    [plan] HERMES_HOME=$PLUGIN_ENABLE_ROOT hermes --profile $PLUGIN_ENABLE_PROFILE plugins enable $name"
+      done
+    elif [ "$PLUGIN_ENABLE_MODE" = "cli" ]; then
+      warn "PLUGIN_ENABLE_MODE=cli 但官方入口不可用；dry-run 不写启用记录"
+    else
+      merge_plugin_enable || return $?
+    fi
+    return 0
+  fi
+  if plugin_enable_official_target && official_plugin_enable "${missing[@]}"; then
+    # 官方命令写的是不是这个 profile，要复核；仍有缺口才回退合并。
+    out="$(python3 "$ENABLER" "${cargs[@]}")" || rc=$?
+    still=()
+    while IFS=$'\t' read -r status payload; do
+      case "$status" in
+        ABSENT|DISABLED) still+=("$payload") ;;
+      esac
+    done <<< "$out"
+    if [ "${#still[@]}" -gt 0 ]; then
+      warn "官方入口后仍有未启用项：${still[*]} —— 回退最小合并"
+      merge_plugin_enable || return $?
+    fi
+    return 0
+  fi
+  if [ "$PLUGIN_ENABLE_MODE" = "cli" ]; then
+    warn "PLUGIN_ENABLE_MODE=cli：官方入口不可用，未写启用记录"
+    warn "  人工执行：hermes --profile <profile> plugins enable <name>"
+    return 0
+  fi
+  merge_plugin_enable
+}
+
+# ---------------------------------------------------------------------------- #
 step "① 解析目标 Hermes"
 if [ -n "$HERMES_HOME_ARG" ]; then
   TARGET_HOME="$HERMES_HOME_ARG"
@@ -231,6 +421,7 @@ fi
 
 step "② 检查本仓源资产"
 for need in identity/SOUL.generic.md identity/agents toolsets patches plugins \
+            install/enable_plugins.py \
             patches/feishu_card_replies.patch patches/apply_feishu_card_replies.py \
             patches/patch_card_finalize.py skills; do
   if [ -e "$REPO_ROOT/$need" ]; then ok "$need"
@@ -309,8 +500,14 @@ install_tree "$REPO_ROOT/patches" "$DEPLOY_DIR/patches"
 if [ "$DO_PLUGINS" = "1" ]; then
   step "⑧ 插件（按 profile）-> $TARGET_HOME/plugins"
   install_plugin_tree "$REPO_ROOT/plugins" "$TARGET_HOME/plugins"
+  mapfile -t PLUGIN_ENABLE_NAMES < <(plugin_enable_names)
+  if [ "${#PLUGIN_ENABLE_NAMES[@]}" -eq 0 ]; then
+    warn "没有带 plugin.yaml 的插件可启用（localvec 没有 manifest，属 memory.provider，另行配置）"
+  else
+    enable_profile_plugins
+  fi
 else
-  step "⑧ 跳过插件（--skip-plugins）"
+  step "⑧ 跳过插件（--skip-plugins）：不落插件副本，也不写 plugins.enabled"
 fi
 
 # ---------------------------------------------------------------------------- #
@@ -425,6 +622,14 @@ cat <<EOF
   # 4) 生效时机
   #    - 身份文件：**每条消息重新读取**，合成后即生效，无需重启
   #    - 适配器补丁：需重启网关
+  #    - 插件启用：运行时基线；⑧ 已写 plugins.enabled，需新会话/网关重载才加载
+
+  # 5) 插件验收与部署侧设置（本脚本不猜业务路径）
+  #    - 验收口径：**工具面里出现该工具**才算生效；配置文件里那一行不算证据
+  #    - 官方改法：hermes ${PROFILE:+-p $PROFILE }plugins enable <name>
+  #    - plugins.entries.<name>.settings（engine_root / queue_root / allowed_roots 等）
+  #      仍是部署配置，按 plugins/<name>/README.md 的模板补齐；本脚本只写 enabled/disabled
+  #    - localvec 不是 plugins.enabled 项：配 memory.provider: localvec 及其 recall_cmd
 EOF
 
 step "完成"
