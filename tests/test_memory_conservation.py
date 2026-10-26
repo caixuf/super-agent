@@ -66,6 +66,18 @@ def test_evidence_must_be_a_real_exact_quote():
     assert not c.evaluate(before,after,review=manifest)['passed']
 
 
+def test_review_can_drop_list_ordinals_but_not_thresholds_or_measurements():
+    before='2) 门限 >= 3.0';after='当前门限 >= 3.0'
+    manifest=review(before,after,dict(decision='equivalent',source='candidate',quote=after,reason='only list label removed'))
+    assert c.evaluate(before,after,review=manifest)['passed']
+    assert c.protected('3.0 秒')[0]=={'3.0'}
+    assert c.protected('规则：1) 门限 >= 3.0')[0]=={'1','3.0'}
+    assert c.protected('调度中枢 127.0.0.1:9900、唯一入口')[0]=={'127.0.0.1','9900'}
+    changed='当前门限 >= 5.0'
+    manifest=review(before,changed,dict(decision='equivalent',source='candidate',quote=changed,reason='claimed same'))
+    assert not c.evaluate(before,changed,review=manifest)['passed']
+
+
 def test_staging_is_durable_idempotent_and_preserves_source(tmp_path):
     source=tmp_path/'MEMORY.md';before='保留此事实';after='删掉后另写';source.write_text(before)
     report=c.evaluate(before,after)

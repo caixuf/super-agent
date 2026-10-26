@@ -39,6 +39,9 @@ def clauses(text):
 
 def protected(text):
     value=normalize(text)
+    # A leading list ordinal is formatting, not a retained numeric threshold.
+    # Decimal literals (such as 3.0) must not be treated as list ordinals.
+    value=re.sub(r'^\d+(?:[)）、]|\.(?!\d))\s*','',value)
     numbers=set(re.findall(r'(?<![A-Za-z0-9_])[-+]?\d+(?:\.\d+)*(?:ms|Nm|s|%)?(?![A-Za-z0-9_])',value))
     operators=set(re.findall(r'>=|<=|==|!=|>|<',value))
     code=set(re.findall(r'`([^`]+)`',value))

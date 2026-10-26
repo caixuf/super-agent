@@ -2,6 +2,12 @@
 
 本次补的是 T7 的发布门禁。已有快照和恢复演练只能证明“能找回旧版”，不能证明新版没有漏掉重要事实。
 
+最新状态：门禁已在空闲窗口安装并刷新宿主进程，原记忆哈希未变。现场专用部署与证据留在业务仓；本仓保持可复用，不保存现场配置或原文。宿主专项现为 11 passed，通用回归 790 passed、9 skipped。
+
+第一批 11 条逐项审阅中，10 条通过版本及引文校验，1 条仍被保守的数字核对拦住；未解决由 216 降到 206。审核来自主执行代理，不等于用户验收，也不等于完整记忆已经保全。编号识别只处理句首列表序号，不能把端口或测量值当成编号吞掉。
+
+早期报告有一处现场路径违反通用仓的业务无关约束，完整回归曾为 1 failed、789 passed、9 skipped。已改为 profile 占位符，重新完整回归通过；没有放宽门禁。以下较早的“等待空闲窗口”描述保留为阶段记录，当前以上述最新状态为准。
+
 ## 本次行为
 
 仅在明确启用本门禁的 profile、可信 cron 上下文中检查记忆写入。检查放在 MemoryStore 原有文件锁内，且早于更新进程内条目和磁盘文件。
@@ -27,6 +33,6 @@
 - 可重复补丁：patches/patch_memory_conservation.py。
 - 专项验证：tests/test_memory_conservation*.py。
 - 现场部署：业务仓 scripts/ops/enable_memory_conservation.py。
-- 私有候选目录：~/.local/state/agentcore/memory-conservation-imfl/。
+- 私有候选目录：~/.local/state/agentcore/memory-conservation-<profile>/。
 
 下一步在真实空闲窗口部署，核对运行进程已加载；继续逐条审阅旧版事实，制定候选与备份的保留策略。T7 和十项总目标均未完成。
