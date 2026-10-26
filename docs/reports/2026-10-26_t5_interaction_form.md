@@ -202,6 +202,18 @@ QUEUED ──▶ RUNNING ──▶ DONE        （终态）
 > 1–4 都要改**宿主安装树**（`plugins/platforms/feishu/adapter.py` 与 `gateway/`），
 > 属生产路径，必须**真人观察下验证**；本仓只提供被调用的契约，不直接改宿主。
 
+
+**宿主侧补丁（本轮新增，默认关闭）**：
+
+| 文件 | 内容 |
+| :--- | :--- |
+| `patches/patch_card_finalize.py` | 11 处精确锚点（可重入）：① 网关把 `is_turn_final` 送进 adapter；② 平台 adapter 只在整轮结束时转绿/摘登记；③ 卡片 adapter 声明 `PERSISTENT_STREAM_MESSAGE`，`_cumulative_transport()` 据此在工具边界保留同一 message handle。三个能力都取 `card_replies`，关闭时网关行为与改动前一致。 |
+| `patches/verify_card_finalize.py` | fake adapter 契约检查：跨工具边界保持同一 message ID、工具边界不转绿、终态同体收尾；对宿主安装树直接运行。 |
+
+补上了「尚未做」清单里跨工具边界消息身份（第 3 条的前置）与终态语义分离；
+仍未做：`route()` 准入、结构化阶段事件、`CardStore` 持久句柄、失败回落、Phase 2。
+**生产 profile 未升级**：按交付指导，先在隔离 profile 验证，再由维护者决定切换窗口。
+
 ---
 
 ## 8. 参考
