@@ -36,7 +36,8 @@ def test_reuses_exact_engine_and_applies_correction_retirement_and_delete(engine
             for table in ('fact_tags','fact_embeddings','working_fact'):source.execute('DELETE FROM '+table+' WHERE fact_id=?',(fid,))
         view.refresh()
         assert not view.conn.execute('SELECT 1 FROM working_fact WHERE fact_id=?',(fid,)).fetchone()
-        assert not view.conn.execute('SELECT 1 FROM vec_facts WHERE fact_id=?',(fid,)).fetchone()
+        if view.conn.execute("SELECT 1 FROM sqlite_master WHERE name='vec_facts'").fetchone():
+            assert not view.conn.execute('SELECT 1 FROM vec_facts WHERE fact_id=?',(fid,)).fetchone()
     finally:view.close();source.close()
 
 
@@ -118,4 +119,16 @@ def test_default_principal_and_scope_filters_are_not_bypassed(engine):
         assert not view.recall('运行预算',scopes=['reference'])['results']
         with pytest.raises(ValueError):view.recall('运行预算',_connection=source)
         assert view.ready
+    finally:view.close();source.close()
+
+
+def test_optional_vector_extension_absence_preserves_normal_engine_fallback(engine,monkeypatch):
+    from agentcore.memory import vec_index
+    monkeypatch.setattr(vec_index,'find_extension',lambda:None)
+    monkeypatch.setattr(vec_index,'load_into',lambda conn:False)
+    fid=seed(engine);source=engine._connect();journal.install(source);view=MemoryReadView(source)
+    try:
+        assert view.recall('运行预算')['results'][0]['fact_id']==fid
+        query='并发预算'
+        assert view.recall(query)==engine.recall_facts(query)
     finally:view.close();source.close()

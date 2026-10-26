@@ -28,9 +28,10 @@ renews through a separate connection during a long file-backed backup. Active
 queries renew leases as needed and prune acknowledged changes; a dormant caller
 must call `refresh` periodically before its lease expires.
 
-Seven focused tests cover exact-engine equivalence, correction and retirement,
+Eight focused tests cover exact-engine equivalence, correction and retirement,
 physical deletion, concurrent backup handoff, pending embeddings, missing
-history, snapshot/delta budgets and default identity/scope filters. A full-size
+history, snapshot/delta budgets, default identity/scope filters and operation
+without the optional vector extension. A full-size
 1.92 GB isolated-store rehearsal used real 1024-dimensional vectors. With an
 isolated source inode cache-eviction request before each query, five measured
 calls took 2.898, 0.586, 0.564, 0.543 and 2.370 seconds. Those cover a ready view,
