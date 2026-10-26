@@ -38,7 +38,7 @@ logger = logging.getLogger(logger_name("trigger"))
 # 涵盖两类：1. 技术决策与踩坑；2. 个人身份、习惯偏好、交互风格约定。
 DECISION_PATTERNS = (
     # 技术结论与规范
-    r"(决定|定了|已定|拍板|就这么|采用|改用|改成|换成|确定用)",
+    r"(决定|定了|已定|拍板|就这么|采用|改用|改成|换成|确定用|已经确定|已确定|已经确认|已确认|我同意)",
     r"(结论是|根因是|原因是|本质上是|实际上是因为)",
     r"(不要|禁止|必须|一律|绝不能|永远不要)",
     r"(踩过|踩坑|踩了|教训是|之前遇到|曾经因为)",
@@ -49,6 +49,8 @@ DECISION_PATTERNS = (
     r"(叫我|称呼我|别叫我|把我当)",
     r"(我喜欢|我习惯|我偏好|我不喜欢|我讨厌|反感)",
     r"(回答我时|说话风格|语气|你以后|作为助手|你的角色|人设)",
+    r"(?:文档|回答|回复|解释|说明).{0,20}(?:讲人话|可读性|简洁|清楚|详细)",
+    r"(?:以后|今后|默认|每次|所有).{0,16}(?:回答|回复|文档|沟通|称呼|工具)",
 )
 
 # 反问/试探/闲聊：即便含有决策词，也基本不是结论
@@ -102,6 +104,8 @@ EXTRACT_SYSTEM = """你是一个智能体记忆系统的全自动写入抽取器
 - 礼貌寒暄（如“好的谢谢”）
 - 临时过程态（如“正在跑测试”、“请稍等”）
 - 未定论的讨论或猜测
+- 仅约束本轮的命令、工具限制或输出要求，例如“这次不要改文件”“请直接回答，不调用工具”。
+  不能把它们改写成长期偏好。只有用户在引文中明确约定长期、以后、默认或每次适用的规则才可保存。
 
 输出严格 JSON（不要任何 markdown 代码块包裹，直接输出 JSON 字符串）：
 {
@@ -138,6 +142,42 @@ def _load_chat_completions():
 
 class ExtractionError(ValueError):
     """Public bounded code; never includes conversation or provider credentials."""
+
+
+def turn_scoped_constraint(quote):
+    """Do not promote a per-request capability restriction into a lasting rule."""
+    constraint=re.search(r'(?:不(?:要|用|必|需)?|无需|禁止|别|只|仅).{0,12}'
+                         r'(?:调用|使用|运行|执行|改动|修改|写入|发送|输出|回答|回复|工具|代码|文件|仿真)'
+                         r'|\b(?:do not|don.t|no|only).{0,20}(?:tool|execute|run|edit|answer|reply)\b',quote,re.I)
+    if not constraint:return False
+    temporary=re.search(r'本轮|这轮|本次|这次|此次|当前问题|这个问题|暂时|今天先|'
+                        r'\bthis (?:turn|reply|question|request)\b|\bfor now\b',quote,re.I)
+    durable=re.search(r'以后|今后|永远|始终|每次|所有|默认|一律|长期|记住|约定|规范|原则|规则|职责|决定|定案|拍板|'
+                      r'我(?:不喜欢|喜欢|习惯|偏好|讨厌|反感)|'
+                      r'\balways\b|\bfrom now on\b|\bby default\b|\bevery time\b',quote,re.I)
+    return bool(temporary or not durable)
+
+
+def unconfirmed_quote_context(user_message,quote):
+    """A literal substring can still omit a question or quote a rejected plan."""
+    question=r'？|\?(?![A-Za-z0-9_=&/%])'
+    if re.search(question,quote):return True
+    attribution=r'有人(?:建议|说)|别人(?:建议|说)|对方(?:建议|说)|助手建议|模型建议|假设|例如|比如'
+    denial=r'我不同意|我不接受|我没确认|还没决定|未决定|不能当成我的决定|不是我的决定'
+    if re.search(attribution,quote) and re.search(denial,quote):return True
+    delimiters='。！？?!\n'
+    start=0;contexts=[]
+    while True:
+        index=user_message.find(quote,start)
+        if index<0:break
+        left=max((user_message.rfind(ch,0,index) for ch in delimiters),default=-1)+1
+        ends=[user_message.find(ch,index+len(quote)) for ch in delimiters]
+        right=min((end for end in ends if end>=0),default=len(user_message))
+        contexts.append(user_message[left:right+1]);start=index+max(1,len(quote))
+    explicit=re.match(r'我(?:叫|的名字是|习惯|喜欢|不喜欢|偏好|决定|确认|要求|同意)',quote)
+    if contexts and not explicit and all(re.search(attribution,c) and re.search(denial,c) for c in contexts):
+        return True
+    return bool(contexts and not explicit and all(re.search(question,context) for context in contexts))
 
 
 def extract_facts(user_message: str, assistant_reply: str = "",
@@ -262,7 +302,9 @@ def run(user_message: str, assistant_reply: str = "", context: str = "",
     if turn_status != "completed":
         return {"ok": True, "written": 0, "skipped": True,
                 "reason": "turn_not_completed", "turn_status": turn_status, "facts": []}
-    decision = should_consider(user_message, assistant_reply)
+    # An assistant's normative answer does not turn a user's question into a
+    # confirmed decision. Legacy explicitly-invoked extraction keeps its API.
+    decision = should_consider(user_message, '' if require_user_evidence else assistant_reply)
     if not decision["consider"]:
         return {"ok": True, "written": 0, "skipped": True,
                 "reason": decision["reason"], "facts": []}
@@ -279,6 +321,17 @@ def run(user_message: str, assistant_reply: str = "", context: str = "",
     except ExtractionError as exc:
         return {"ok": False, "written": 0, "retryable": True,
                 "reason": "extract_failed", "error": str(exc), "facts": []}
+    if require_user_evidence:
+        context_rejected=sum(unconfirmed_quote_context(user_message,f['statement']) for f in facts)
+        facts=[f for f in facts if not unconfirmed_quote_context(user_message,f['statement'])]
+        rejected=sum(turn_scoped_constraint(f['statement']) for f in facts)
+        facts=[f for f in facts if not turn_scoped_constraint(f['statement'])]
+        if context_rejected and not facts:
+            return {"ok":True,"written":0,"skipped":True,"reason":"unconfirmed_user_context",
+                    "rejected_count":context_rejected,"facts":[]}
+        if rejected and not facts:
+            return {"ok":True,"written":0,"skipped":True,"reason":"turn_scoped_instruction",
+                    "rejected_count":rejected,"facts":[]}
     if not facts:
         return {"ok": True, "written": 0, "skipped": True,
                 "reason": "no_fact_extracted", "matched": decision["matched"],
