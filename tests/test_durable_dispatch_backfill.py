@@ -123,7 +123,8 @@ def test_route_is_persisted_from_the_submitting_turn(tmp_path):
         payload = json.loads(db.execute('SELECT payload FROM jobs WHERE id=?',
                                         (result['task_id'],)).fetchone()['payload'])
     assert 'session-one' not in json.dumps(payload)
-    assert set(payload) == {'goal', 'sources', '_dispatch_owner'}
+    assert set(payload) == {'goal', 'sources', '_dispatch_owner',
+                            '_colleague_role', '_colleague_name', '_colleague_label'}
 
 
 def test_route_without_a_bound_submitting_turn_is_not_invented(tmp_path):

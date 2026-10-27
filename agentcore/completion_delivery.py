@@ -52,12 +52,21 @@ class CompletionMessage:
     summary: str
     truncated: bool
     artifacts: tuple[str, ...] = ()
+    colleague_role: str | None = None
+    colleague_name: str | None = None
+    colleague_label: str | None = None
 
     def render(self) -> dict[str, Any]:
         result = {'task_id': self.task_id, 'status': self.status,
                   'summary': self.summary, 'truncated': self.truncated}
         if self.artifacts:
             result['artifacts'] = list(self.artifacts)
+        if self.colleague_role:
+            result['colleague_role'] = self.colleague_role
+        if self.colleague_name:
+            result['colleague_name'] = self.colleague_name
+        if self.colleague_label:
+            result['colleague_label'] = self.colleague_label
         return result
 
 
@@ -81,10 +90,22 @@ def _summary(result: Any, *, limit: int = MAX_SUMMARY_CHARS) -> tuple[str, bool]
     return text[:limit].rstrip() + _TRUNCATION_MARK, True
 
 
-def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS) -> CompletionMessage:
+def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS,
+                  colleague_role: str | None = None,
+                  colleague_name: str | None = None,
+                  colleague_label: str | None = None) -> CompletionMessage:
     """Turn a queue receipt into the platform-neutral message a transport renders."""
     if not isinstance(receipt, dict) or not isinstance(receipt.get('job'), str):
         raise ValueError('receipt must name its job')
+    if colleague_role is not None and (not isinstance(colleague_role, str)
+                                       or not 1 <= len(colleague_role) <= 64):
+        raise ValueError('invalid colleague role')
+    if colleague_name is not None and (not isinstance(colleague_name, str)
+                                       or not 1 <= len(colleague_name) <= 80):
+        raise ValueError('invalid colleague name')
+    if colleague_label is not None and (not isinstance(colleague_label, str)
+                                        or not 1 <= len(colleague_label) <= 80):
+        raise ValueError('invalid colleague label')
     status = str(receipt.get('status') or 'unknown')
     result = receipt.get('result')
     # Worker protocol envelopes persist intact in the queue. Unwrap only an
@@ -97,7 +118,29 @@ def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS) ->
             not isinstance(p, str) or not p or len(p) > 4096 for p in artifacts):
         raise ValueError('invalid completion artifacts')
     return CompletionMessage(task_id=receipt['job'], status=status, summary=summary,
-                             truncated=truncated, artifacts=tuple(artifacts))
+                             truncated=truncated, artifacts=tuple(artifacts),
+                             colleague_role=colleague_role, colleague_name=colleague_name,
+                             colleague_label=colleague_label)
+
+
+def _colleague_identity(pool: Pool, job: str) -> tuple[str | None, str | None]:
+    """Host-persisted colleague binding for a completion; never parsed from model text."""
+    try:
+        with pool.db() as db:
+            row = db.execute('SELECT payload FROM jobs WHERE id=?', (job,)).fetchone()
+        payload = json.loads(row['payload']) if row and row['payload'] else {}
+    except (TypeError, ValueError, KeyError):
+        return None, None
+    role = payload.get('_colleague_role')
+    name = payload.get('_colleague_name')
+    label = payload.get('_colleague_label')
+    if not isinstance(role, str) or not 1 <= len(role) <= 64:
+        return None, None, None
+    if not isinstance(name, str) or not 1 <= len(name) <= 80:
+        name = role
+    if not isinstance(label, str) or not 1 <= len(label) <= 80:
+        label = role
+    return role, name, label
 
 
 def deliver_once(pool: Pool, transport: Optional[Transport], *, lease: float = 60,
@@ -121,7 +164,10 @@ def deliver_once(pool: Pool, transport: Optional[Transport], *, lease: float = 6
         return {'status': 'unowned', 'task_id': job,
                 'reason': 'task has no persisted origin; refusing to guess a conversation'}
     try:
-        message = build_message(claim['receipt'], limit=limit).render()
+        role, name, label = _colleague_identity(pool, job)
+        message = build_message(claim['receipt'], limit=limit,
+                                colleague_role=role, colleague_name=name,
+                                colleague_label=label).render()
     except (ValueError, TypeError):
         return {'status': 'invalid_receipt', 'task_id': job}
     try:

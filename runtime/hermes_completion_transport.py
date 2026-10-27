@@ -75,6 +75,22 @@ class HostSender:
             return None
 
 
+def _render(message):
+    role = message.get('colleague_role')
+    name = message.get('colleague_name')
+    label = message.get('colleague_label')
+    if role == 'analysis':
+        prefix = '**主 Bot 汇总**\n'
+    elif isinstance(role, str) and role and isinstance(name, str) and name:
+        prefix = '**%s · %s**（由主 Bot 转交）\n' % (
+            name, label if isinstance(label, str) and label else role)
+    else:
+        prefix = ''
+    status = {'completed': '已完成', 'failed': '失败', 'cancelled': '已取消'}.get(
+        message['status'], message['status'])
+    return prefix + '[后台任务 ' + message['task_id'] + '] ' + status + '\n' + message['summary']
+
+
 def create_transport(ctx, service):
     if ctx.get_config('direct_delivery_enabled', False) is not True:
         raise ValueError('direct delivery requires administrator opt-in')
@@ -83,9 +99,6 @@ def create_transport(ctx, service):
         raise ValueError('absolute engine root required')
     transport_type = _transport_type(engine)
     return transport_type(service.pool.root/'direct-delivery', profile=service.profile,
-        sender=HostSender(ctx), render=lambda message: (
-            '[后台任务 '+message['task_id']+'] '+
-            {'completed': '已完成', 'failed': '失败', 'cancelled': '已取消'}.get(message['status'], message['status'])+
-            '\n'+message['summary']),
+        sender=HostSender(ctx), render=_render,
         attempt_root=service.pool.root/'attempts',
         attempt_provider=lambda job: service.pool.status(job).get('attempt'))

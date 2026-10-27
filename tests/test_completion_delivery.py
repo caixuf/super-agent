@@ -251,3 +251,31 @@ def test_dry_run_lists_addresses_without_claiming_or_acking(tmp_path):
     # Nothing was claimed or acknowledged, so the real consumer still gets its turn.
     assert len(pool.receipts()) == 2
     assert deliver_once(pool, Transport())['status'] == 'delivered'
+
+
+def test_colleague_identity_comes_from_persisted_job_payload(tmp_path):
+    pool, transport = Pool(tmp_path), Transport()
+    job = pool.submit('colleague-task', {'goal': 'analyse',
+                                         '_colleague_role': 'evidence',
+                                         '_colleague_name': '阿证',
+                                         '_colleague_label': '证据分析'}, origin=ORIGIN)
+    claimed, fd = pool.claim()
+    try:
+        pool.finish(claimed['id'], claimed['attempt'], True, {'summary': 'checked'})
+    finally:
+        os.close(fd)
+    assert deliver_once(pool, transport)['status'] == 'delivered'
+    message = transport.calls[0]['message']
+    assert message['task_id'] == job
+    assert message['colleague_role'] == 'evidence'
+    assert message['colleague_name'] == '阿证'
+    assert message['colleague_label'] == '证据分析'
+
+
+def test_build_message_rejects_unbounded_colleague_labels():
+    with pytest.raises(ValueError):
+        build_message({'job': 'a' * 32, 'status': 'completed'},
+                      colleague_role='x' * 65)
+    with pytest.raises(ValueError):
+        build_message({'job': 'a' * 32, 'status': 'completed'},
+                      colleague_name='x' * 81)

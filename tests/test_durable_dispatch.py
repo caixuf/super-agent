@@ -68,7 +68,11 @@ def test_register_opt_in_and_bounded_submission(tmp_path):
     assert len(rows) == 1
     payload = json.loads(rows[0]['payload'])
     assert 'trusted-session' not in rows[0]['payload']
-    assert set(payload) == {'goal', 'sources', '_dispatch_owner'}
+    assert set(payload) == {'goal', 'sources', '_dispatch_owner',
+                            '_colleague_role', '_colleague_name', '_colleague_label'}
+    assert payload['_colleague_role'] == 'analysis'
+    assert payload['_colleague_name'] == '主 Bot 汇总'
+    assert payload['_colleague_label'] == '汇总'
     assert payload['sources'] == [{'path': args['sources'][0]['path'], 'start_line': 1}]
     assert 'end_line' not in payload['sources'][0], 'runner must choose the actual end of a short file'
 

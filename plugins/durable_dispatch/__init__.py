@@ -215,17 +215,30 @@ def _public_result(raw):
 class DispatchService:
     def __init__(self, root, profile, allowed_roots, *, max_sources=8, max_lines=400,
                  denied_globs=None, pool_type=None, delivery=None, route_provider=None,
-                 require_delivery_route=False):
+                 require_delivery_route=False, role='analysis', display_name=None,
+                 display_label=None):
         if not isinstance(profile, str) or not profile:
             raise ValueError('profile identity required')
         if not isinstance(root, str) or not Path(root).is_absolute():
             raise ValueError('queue_root must be absolute')
+        if not isinstance(role, str) or not re.fullmatch('[a-z][a-z0-9_]{0,31}', role):
+            raise ValueError('invalid colleague role')
+        if display_name is None:
+            display_name = role
+        if display_label is None:
+            display_label = role
+        if not isinstance(display_name, str) or not 1 <= len(display_name) <= 80:
+            raise ValueError('invalid colleague display name')
+        if not isinstance(display_label, str) or not 1 <= len(display_label) <= 80:
+            raise ValueError('invalid colleague display label')
         if not isinstance(allowed_roots, list) or not allowed_roots:
             raise ValueError('allowed_roots must be a nonempty administrator list')
         self.roots = tuple(Path(value).resolve(strict=True) for value in allowed_roots)
         if any(not value.is_dir() for value in self.roots):
             raise ValueError('allowed roots must be directories')
         self.profile = profile
+        self.role, self.display_name = role, display_name
+        self.display_label = display_label
         self.pool = (pool_type or Pool)(root)
         self.delivery = delivery or importlib.import_module('agentcore.completion_backfill')
         self.route_provider = route_provider or _bound_route
@@ -298,7 +311,9 @@ class DispatchService:
         if not isinstance(key, str) or not key.strip() or len(key) > 128:
             raise ValueError('request_key must contain 1 to 128 characters')
         payload = {'goal': goal, 'sources': self._sources(args.get('sources')),
-                   '_dispatch_owner': owner}
+                   '_dispatch_owner': owner, '_colleague_role': self.role,
+                   '_colleague_name': self.display_name,
+                   '_colleague_label': self.display_label}
         dedupe = owner + ':' + hashlib.sha256(key.encode()).hexdigest()
         # ``_dispatch_owner`` is an ownership *proof* (one-way), never an address:
         # persist profile + session + route alongside it so a completion can be routed
@@ -477,7 +492,7 @@ def register(ctx):
     ctx.register_system_prompt_section(
         'durable-dispatch-routing',
         """Capability routing for bounded read-only evidence analysis:
-Use durable_submit for bounded read-only analysis of approved files, including named colleague roles. Choose by the work and source bounds, not by keywords. Choose an available role, submit one task, return its ID and role, then finish the turn without waiting or polling. NEVER submit interactive colleague work through terminal/execute_code or raw pool CLI: that loses the submitting conversation and cannot promise automatic delivery. Use durable_status/cancel with the returned role and task ID. Use delegate_task for independent reasoning requiring separate agent context. Never provide an owner, queue path, shell command, runner, or model adapter.""",
+Use durable_submit for bounded read-only analysis of approved files, including named colleague roles. Choose by the work and source bounds, not by keywords. When the user explicitly names a colleague or says to continue with one, use the matching role from the allowed roles; if the name is ambiguous or the previous assignment is not settled, ask instead of guessing. Choose an available role, submit one task, return its ID and role, then finish the turn without waiting or polling. NEVER submit interactive colleague work through terminal/execute_code or raw pool CLI: that loses the submitting conversation and cannot promise automatic delivery. Use durable_status/cancel with the returned role and task ID. Use delegate_task for independent reasoning requiring separate agent context. Never provide an owner, queue path, shell command, runner, or model adapter.""",
         position='after_memory', max_chars=1000,
     )
     pool_type, delivery = _engine(ctx.get_config('engine_root'))
@@ -485,7 +500,8 @@ Use durable_submit for bounded read-only analysis of approved files, including n
     service = DispatchService(ctx.get_config('queue_root'), ctx.profile_name,
                               ctx.get_config('allowed_roots'),
                               denied_globs=ctx.get_config('denied_globs', []),
-                              pool_type=pool_type, delivery=delivery,require_delivery_route=require_route)
+                              pool_type=pool_type, delivery=delivery,require_delivery_route=require_route,
+                              role='analysis', display_name='主 Bot 汇总', display_label='汇总')
     services = {'analysis':service}
     colleagues = ctx.get_config('colleagues',{})
     if not isinstance(colleagues,dict) or len(colleagues)>15:
@@ -494,17 +510,20 @@ Use durable_submit for bounded read-only analysis of approved files, including n
     for role,settings in colleagues.items():
         if (not isinstance(role,str) or not re.fullmatch('[a-z][a-z0-9_]{0,31}',role)
                 or role=='analysis' or not isinstance(settings,dict)
-                or set(settings)-{'queue_root','allowed_roots','denied_globs'}):
+                or set(settings)-{'queue_root','allowed_roots','denied_globs','display_name','display_label'}):
             raise ValueError('invalid administrator colleague configuration')
         candidate = DispatchService(settings.get('queue_root'),ctx.profile_name,settings.get('allowed_roots'),
             denied_globs=settings.get('denied_globs',[]),pool_type=pool_type,delivery=delivery,
-            require_delivery_route=require_route)
+            require_delivery_route=require_route, role=role,
+            display_name=settings.get('display_name', role),
+            display_label=settings.get('display_label', role))
         if candidate.pool.root.resolve() in seen_roots:
             raise ValueError('colleague queues must be distinct')
         seen_roots.add(candidate.pool.root.resolve()); services[role]=candidate
     router = DispatchRouter(services)
+    names = ', '.join('%s=%s' % (role, service.display_name) for role, service in services.items())
     role_schema = {'type':'string','enum':list(services),
-                   'description':'Administrator colleague role; preserve it for status/cancel.'}
+                   'description':'Administrator colleague role; use this to select the named colleague and preserve it for status/cancel. Known roles: ' + names}
     source_schema = {'type': 'object', 'additionalProperties': False, 'properties': {
         'path': {'type': 'string'}, 'start_line': {'type': 'integer', 'minimum': 1},
         'end_line': {'type': 'integer', 'minimum': 1}}, 'required': ['path']}
