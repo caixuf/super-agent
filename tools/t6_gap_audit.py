@@ -147,7 +147,9 @@ def _security_doc(repo):
 
 def _workers_doc(repo):
     text = _read(repo, "runtime/CONFIG_MAP.md")
-    return ("worker" in text.lower()), "config map covers workers" if text else "no runtime/CONFIG_MAP.md"
+    template = _read(repo, "runtime/agentcore-worker@.service")
+    ok = "worker 模板" in text and "AGENTCORE_BACKEND" in template and "AGENTCORE_WORKERS" in template
+    return ok, "worker deltas documented + knobs are template variables" if ok else "worker template/doc drifted"
 
 
 def _skills_neutral(repo):
