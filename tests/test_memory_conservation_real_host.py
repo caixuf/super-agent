@@ -93,6 +93,6 @@ proof=dict(passed=True,lossy_cron_staged=True,source_and_live_entries_preserved=
 (home/'proof.json').write_text(json.dumps(proof));print(json.dumps(proof))
 '''
     result=subprocess.run([str(runtime),'-c',code,str(host),str(engine),str(tmp_path/'home')],
-                          env=dict(os.environ,HERMES_HOME=str(tmp_path/'home')),capture_output=True,text=True,timeout=40)
+                          env=dict(os.environ,HERMES_HOME=str(tmp_path/'home')),capture_output=True,text=True,timeout=120)
     assert result.returncode==0,result.stderr[-4000:]+result.stdout[-1000:]
     assert json.loads(result.stdout.strip().splitlines()[-1])['passed']

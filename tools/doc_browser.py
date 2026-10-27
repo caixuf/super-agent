@@ -36,7 +36,7 @@ def find_browser(candidates=()):
 
 
 class Browser:
-    def __init__(self, executable, width, height, timeout=30):
+    def __init__(self, executable, width, height, timeout=60):
         self.executable, self.width, self.height, self.timeout = executable, width, height, timeout
         self._id = 0
         self.ws = None
@@ -207,7 +207,7 @@ def _document_metrics(client, width):
     return metrics
 
 
-def inspect_document(html_path, width=1100, expected_diagrams=None, *, browser=None, timeout=30):
+def inspect_document(html_path, width=1100, expected_diagrams=None, *, browser=None, timeout=60):
     if expected_diagrams is not None and expected_diagrams < 0:
         raise ValueError('expected_diagrams must be nonnegative')
     with Browser(browser or find_browser(), width, 900, timeout) as client:
@@ -221,7 +221,7 @@ def inspect_document(html_path, width=1100, expected_diagrams=None, *, browser=N
 
 
 def capture_document(html_path, png_path, width, viewport_height, *, browser=None,
-                     page_height=2200, timeout=30):
+                     page_height=2200, timeout=60):
     if not 480 <= width <= 2400 or not 240 <= viewport_height <= 12000:
         raise BrowserError('Capture dimensions outside supported bounds')
     png_path = Path(png_path).resolve()
