@@ -11,6 +11,10 @@
    ``HERMES_FEISHU_CARD_V2``（默认关 = 保持旧行为，开 = 卡片按 2.0 发）。
 3. 卡片的 PATCH 要求**更新前后都是共享卡片**（``config.update_multi: true``）。流式帧
    以前丢了 ``config``，每一帧都在造非共享卡 —— 补丁让每一帧都带 ``update_multi``。
+4. 部分客户端/接口走 **card_components v2（'卡片 2.4'）**，它拒绝 1.0 的 ``markdown`` 与
+   ``note`` 标签（实测 ``200861 unsupported tag note``，整张卡回退纯文本）。开关
+   ``HERMES_FEISHU_CARD_24=1`` 打开时，正文改 ``plain_text``、表格单元格改 ``text``、
+   运行时长提示改 ``plain_text``；关掉即回到 2.0 的 ``markdown`` + 原生表格。
 
 用法：
 
@@ -41,6 +45,7 @@ _CARD_TABLE_HEADER_RE = re.compile(r"^\\s*\\|.*\\|\\s*$")
 _CARD_TABLE_DIVIDER_RE = re.compile(r"^\\s*\\|?\\s*:?-{2,}:?\\s*(\\|\\s*:?-{2,}:?\\s*)+\\|?\\s*$")
 _CARD_TABLE_MAX = 5
 _CARD_V2_ENV = "HERMES_FEISHU_CARD_V2"
+_CARD24_ENV = "HERMES_FEISHU_CARD_24"
 
 
 def _card_v2_enabled() -> bool:
@@ -104,6 +109,41 @@ def build_card_elements(content: str) -> list[dict[str, Any]]:
     return elements
 
 
+_CARD24_INLINE_MD_RE = re.compile(r"\\*\\*(.+?)\\*\\*|`([^`]+)`|\\[([^\\]]+)\\]\\(([^)]+)\\)")
+
+
+def _card24_text(content: str) -> str:
+    """Markdown -> the plain-text subset card_components v2 accepts (no markdown tag)."""
+    text = _CARD24_INLINE_MD_RE.sub(
+        lambda m: m.group(1) or m.group(2) or ("%s (%s)" % (m.group(3), m.group(4))), content or "")
+    text = text.replace("**", "").replace("`", "")
+    return re.sub(r"(?m)^#{1,6}\\s+", "", text)
+
+
+def card_components_v2() -> bool:
+    """Card 2.4 ('card_components' v2) rejects the 1.0 ``markdown``/``note`` tags.
+
+    Opt-in per deployment; the 2.0 path (markdown + table components) stays the default.
+    """
+    return (os.environ.get(_CARD24_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def build_card24_elements(content: str) -> list[dict[str, Any]]:
+    """Same split as the 2.0 builder: plain_text blocks, tables with plain-text cells."""
+    elements = build_card_elements(content)
+    for element in elements:
+        if element.get("tag") != "table":
+            continue
+        for column in element["columns"]:
+            column["data_type"] = "text"
+        for row in element["rows"]:
+            for column in element["columns"]:
+                row[column["name"]] = _card24_text(str(row.get(column["name"], "")))
+    return [element if element.get("tag") == "table"
+            else {"tag": "plain_text", "content": _card24_text(element.get("content", "")) or " "}
+            for element in elements]
+
+
 def card_renders_markdown(text: str) -> bool:
     """True when every construct in *text* has a native card representation."""
     text = text or ""
@@ -132,10 +172,24 @@ EDIT_PROBE = "if not card_renders_markdown(content):"
 
 BUILD_OLD = '''        name = (str(getattr(self, "_bot_name", "") or "Hermes")).strip() or "Hermes"
         elements: list[dict[str, Any]] = [{"tag": "markdown", "content": content or " "}]'''
+BUILD_OLD_V11 = '''        # Markdown 里有没有卡片表达不了的构造由调用方先判断；这里按原生表格拆元素。
+        elements: list[dict[str, Any]] = build_card_elements(content)'''
 BUILD_NEW = '''        name = (str(getattr(self, "_bot_name", "") or "Hermes")).strip() or "Hermes"
         # Markdown 里有没有卡片表达不了的构造由调用方先判断；这里按原生表格拆元素。
-        elements: list[dict[str, Any]] = build_card_elements(content)'''
-BUILD_PROBE = "elements: list[dict[str, Any]] = build_card_elements(content)"
+        # 卡片 2.4 只认 plain_text / table，2.0 认 markdown 块。
+        elements: list[dict[str, Any]] = (build_card24_elements(content) if card_components_v2()
+                                          else build_card_elements(content))'''
+BUILD_PROBE = "if card_components_v2()\n"
+
+#: The streaming tip is a 1.0 ``note``; 2.4 rejects it (200861) and the whole card falls
+#: back to plain text. Rewritten in both tree shapes.
+NOTE_OLD = '''            elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": tip}]})'''
+NOTE_NEW = '''            if card_components_v2():
+                # 'note' is a 1.0 tag; 2.4 rejects it (200861) and falls back to plain text.
+                elements.append({"tag": "plain_text", "content": tip})
+            else:
+                elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": tip}]})'''
+NOTE_PROBE = "if card_components_v2():\n                # 'note' is a 1.0 tag"
 
 RETURN_OLD = '''        return {
             "config": {"wide_screen_mode": True},
@@ -143,22 +197,53 @@ RETURN_OLD = '''        return {
                        "template": "green" if finalize else "blue"},
             "elements": elements,
         }'''
+RETURN_OLD_V11 = '''        header = {"title": {"tag": "plain_text", "content": name},
+                  "template": "green" if finalize else "blue"}
+        return {"schema": "2.0", "config": {"wide_screen_mode": True, "update_multi": True},
+                "header": header, "body": {"elements": elements}}'''
 RETURN_NEW = '''        header = {"title": {"tag": "plain_text", "content": name},
                   "template": "green" if finalize else "blue"}
-        if _card_v2_enabled():
+        if card_components_v2():
+            # 2.4 rejects the 1.0 markdown/note tags; plain_text and table are accepted.
+            card: dict[str, Any] = {"schema": "2.0", "header": header,
+                                    "body": {"elements": elements}}
+            card["config"] = {"update_multi": True}
+        elif _card_v2_enabled():
             # update_multi stays true on every frame: the PATCH API requires a shared card
             # before AND after each update, and the streaming frames are exactly those updates.
-            return {"schema": "2.0", "config": {"wide_screen_mode": True, "update_multi": True},
+            card = {"schema": "2.0", "config": {"wide_screen_mode": True, "update_multi": True},
                     "header": header, "body": {"elements": elements}}
-        return {"config": {"wide_screen_mode": True}, "header": header, "elements": elements}'''
-RETURN_PROBE = '"config": {"wide_screen_mode": True, "update_multi": True}'
+        else:
+            return {"config": {"wide_screen_mode": True}, "header": header, "elements": elements}
+        return card'''
+RETURN_NEW_V11 = RETURN_NEW.replace('''        header = {"title": {"tag": "plain_text", "content": name},
+                  "template": "green" if finalize else "blue"}
+''', '')
+RETURN_PROBE = "if card_components_v2():"
 
+
+#: signature of the first published version of the helper block (before the 2.4 branch).
+V11_HELPERS = HELPERS.split("_CARD24_INLINE_MD_RE = re.compile(")[0].rstrip() + "\n"
+
+
+def _strip_24(value: str) -> str:
+    """Drop the 2.4 branch lines from generated code (keeps the v1.1 shape when absent)."""
+    return "".join(line for line in value.splitlines(True) if "card_components_v2" not in line)
+
+#: (name, old, new, probe). One entry per step; a step is done when its probe is present and
+#: its own target shape no longer matches. Two trees exist in the wild: pristine (markdown
+#: block per card) and v1.1 (native tables, 2.0 payload) — chain-safe shapes.
 EDITS = [
-    (ANCHOR_AFTER, ANCHOR_AFTER + HELPERS, "def _card_v2_enabled() -> bool:"),
-    (SEND_OLD, SEND_NEW, SEND_PROBE),
-    (EDIT_OLD, EDIT_NEW, EDIT_PROBE),
-    (BUILD_OLD, BUILD_NEW, BUILD_PROBE),
-    (RETURN_OLD, RETURN_NEW, RETURN_PROBE),
+    ("helpers", ANCHOR_AFTER, ANCHOR_AFTER + HELPERS, "def _card_v2_enabled() -> bool:"),
+    # Upgrade a tree patched by the first version of this script (helpers, no 2.4 branch).
+    ("helpers-24", V11_HELPERS, HELPERS, "def card_components_v2() -> bool:"),
+    ("send-gate", SEND_OLD, SEND_NEW, SEND_PROBE),
+    ("edit-gate", EDIT_OLD, EDIT_NEW, EDIT_PROBE),
+    ("build", BUILD_OLD, BUILD_NEW, BUILD_PROBE),
+    ("build-v11", BUILD_OLD_V11, _strip_24(BUILD_NEW), BUILD_PROBE),
+    ("tip", NOTE_OLD, NOTE_NEW, NOTE_PROBE),
+    ("return", RETURN_OLD, RETURN_NEW, RETURN_PROBE),
+    ("return-v11", RETURN_OLD_V11, _strip_24(RETURN_NEW_V11), RETURN_PROBE),
 ]
 
 
@@ -174,7 +259,10 @@ def _missing(text):
     only survive where the new text already contains it (chained anchors such as
     ``ANCHOR_AFTER + helpers``) — that is not a miss.
     """
-    return [(old, probe) for old, _new, probe in EDITS if probe not in text]
+    # An edit that already has its text in place is done, even when its old anchor is still
+    # there (chained anchors) — except for the no-op "v1.1" markers, whose job is only to be
+    # superseded once the real edit applied.
+    return [(old, probe) for _name, old, _new, probe in EDITS if probe not in text]
 
 
 def main() -> int:
@@ -202,18 +290,23 @@ def main() -> int:
     if not missing:
         print("[PASS] 已在位，无需重放")
         return 0
-    for index, (old, new, probe) in enumerate(EDITS):
+    # Pass 1 assembles the final text from the ORIGINAL file; pass 2 writes it. An earlier
+    # step can therefore absorb a later step's anchor (helpers carry their own markers)
+    # without the later pass having to rewrite text it just produced.
+    for index, (name, old, new, probe) in enumerate(EDITS):
         if probe in text and old not in text:
-            continue
+            continue                     # this step is done and no old shape is left to rewrite
         count = text.count(old)
+        if count == 0:
+            continue                     # this tree does not have this shape; another entry covers it
         if count != 1:
-            print("[FAIL] 锚点命中 %d 次（应为 1）——文件已漂移，请人工核对：%r" % (count, old[:60]))
+            print("[FAIL] %s: 锚点命中 %d 次（应为 1）——文件已漂移，请人工核对" % (name, count))
             return 2
         text = text.replace(old, new, 1)
-        print("[OK] 已改第 %d 处" % (index + 1))
+        print("[OK] 已改 %s" % name)
     still = _missing(text)
     if still:
-        print("[FAIL] 应用后仍缺 %d 处" % len(still))
+        print("[FAIL] 应用后仍缺 %d 处（本文件不支持该树形，请人工核对）" % len(still))
         return 2
     path.write_text(text, encoding="utf-8")
     print("[PASS] 补丁已应用；重启网关后生效")
