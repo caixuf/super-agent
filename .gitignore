@@ -4,3 +4,4 @@ __pycache__/
 *.egg-info/
 .venv/
 tools/assets/mermaid.min.js
+!tools/assets/mermaid.min.js

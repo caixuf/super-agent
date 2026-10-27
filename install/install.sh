@@ -483,6 +483,13 @@ for d in "$REPO_ROOT"/toolsets/*/; do
   install_tree "$d" "$DEPLOY_DIR/toolsets/$(basename "$d")"
 done
 
+step "⑤b 文档渲染引擎 -> $DEPLOY_DIR/tools"
+if [ -d "$REPO_ROOT/tools" ]; then
+  install_tree "$REPO_ROOT/tools" "$DEPLOY_DIR/tools"
+else
+  warn "tools/ 不存在：T4 渲染技能将需要 --engine-root 指向本体检出"
+fi
+
 step "⑥ 运行时基线 -> $DEPLOY_DIR/runtime"
 if compgen -G "$REPO_ROOT/runtime/*" > /dev/null; then
   # 有什么拷什么：本目录的**文件清单由 runtime/README.md 的口径决定**（可能是「只有服务骨架」，

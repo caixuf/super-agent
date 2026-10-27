@@ -15,6 +15,13 @@
 # 退出码：0 = 全部通过；非 0 = 失败项数。
 
 set -u
+
+# 破坏性清理（rm -rf "$HOME/.hermes"）只能在容器里跑。
+if [ ! -f /.dockerenv ]; then
+  echo "clean_room_check.sh 只能在容器内运行（拒绝在宿主执行）" >&2
+  exit 2
+fi
+
 REPO="${REPO:-/opt/super-agent}"
 PROFILE=dockercheck
 P="$HOME/.hermes/profiles/$PROFILE"
@@ -94,9 +101,31 @@ else
 fi
 
 for f in toolsets/pi_executor/__init__.py runtime/hermes-agent.service \
-         patches/feishu_card_replies.patch patches/apply_feishu_card_replies.py; do
+         patches/feishu_card_replies.patch patches/apply_feishu_card_replies.py \
+         patches/patch_card_finalize.py tools/arch_doc.py tools/doc_browser.py \
+         tools/assets/mermaid.min.js; do
   if [ -f "$P/agentcore/$f" ]; then pass "落位 agentcore/$f"; else bad "缺失 agentcore/$f"; fi
 done
+
+for name in durable-dispatch illustrated-delivery localvec longtask-guard \
+            memory-bridge capability-alert-outbox; do
+  if [ -d "$P/plugins/$name" ]; then pass "插件目录 $name"; else bad "插件目录缺失 $name"; fi
+done
+for name in durable-dispatch illustrated-delivery longtask-guard memory-bridge capability-alert-outbox; do
+  if [ -f "$P/plugins/$name/plugin.yaml" ]; then pass "插件清单 $name"; else bad "插件清单缺失 $name"; fi
+  if grep -qE "^[[:space:]]*- $name$" "$P/config.yaml" 2>/dev/null; then
+    pass "插件已启用 $name"
+  else
+    bad "插件未写入 plugins.enabled：$name"
+  fi
+done
+if [ -f "$P/plugins/localvec/__init__.py" ]; then pass "localvec provider 落位"; else bad "localvec provider 缺失"; fi
+
+if [ -f "$P/skills/illustrated-doc-rendering/SKILL.md" ]; then
+  pass "T4 具名技能 illustrated-doc-rendering 落位"
+else
+  bad "T4 具名技能缺失"
+fi
 
 n_src="$(find "$REPO/identity/agents" -name '*.md' | wc -l)"
 n_dst="$(find "$P/agentcore/agents" -name '*.md' 2>/dev/null | wc -l)"

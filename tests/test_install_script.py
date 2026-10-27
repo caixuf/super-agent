@@ -13,10 +13,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 INSTALL = REPO_ROOT / "install" / "install.sh"
 
 #: 与源目录 snake_case 对应的落位名（现场与 config 的启用名都是连字符形态）。
-PLUGIN_NAMES = ("durable-dispatch", "illustrated-delivery", "localvec", "longtask-guard")
+PLUGIN_NAMES = ("capability-alert-outbox", "durable-dispatch", "illustrated-delivery",
+                "localvec", "longtask-guard", "memory-bridge")
 
 #: 带 plugin.yaml 的插件才写启用记录；localvec 没有 manifest，是 memory provider。
-ENABLE_NAMES = ("durable-dispatch", "illustrated-delivery", "longtask-guard")
+ENABLE_NAMES = ("capability-alert-outbox", "durable-dispatch", "illustrated-delivery",
+                "longtask-guard", "memory-bridge")
 
 
 def _run(home: Path, *extra: str, path_prefix: Path | None = None,
@@ -105,6 +107,12 @@ def test_real_install_lands_hyphenated_plugin_dirs(tmp_path):
     # install_tree 的排除规则生效。
     assert not list(plugins.rglob("__pycache__"))
     assert not list(plugins.rglob("*.pyc"))
+
+    agentcore = home / "agentcore"
+    for relative in ("tools/arch_doc.py", "tools/doc_browser.py",
+                     "tools/assets/mermaid.min.js",
+                     "patches/patch_card_finalize.py"):
+        assert (agentcore / relative).is_file(), relative
 
 
 # --------------------------------------------------------------------------- #

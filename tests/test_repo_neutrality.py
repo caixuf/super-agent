@@ -5,7 +5,7 @@
 | 门禁 | 射程 | 允许的残留 |
 | :--- | :--- | :--- |
 | ``test_business_neutrality.py`` | ``agentcore/`` 包内 ``*.py`` 的**可执行代码** | 注释与文档字符串（那里写的是「为什么这么设计」） |
-| 本文件（仓级棘轮） | **全仓所有会进版本库的文件**（``.py`` / ``.md`` / ``.yaml`` / ``.sh`` / ``.service`` / ``.patch`` …） | 只两项，见下方 ``ALLOWLIST_*`` |
+| 本文件（仓级棘轮） | **全仓所有会进版本库的文件**（``.py`` / ``.md`` / ``.yaml`` / ``.sh`` / ``.service`` / ``.patch`` …） | 三项，见下方 ``ALLOWLIST_*`` |
 
 为什么需要第二道：包内门禁只管代码，于是业务词会从**注释、文档、部署脚本、
 模板、技能**这些地方漏进来 —— 一个「业务无关」的仓，README 里写着某家企业的
@@ -38,15 +38,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 #: 按文件名加载本文件来取这份表，不在这里之外重抄一遍 —— 重抄会让两处漂移。
 BANNED = ("imfl", "mff", "tms", "tmas", "djs", "R6", "R7", "飞书", "车机")
 
-#: 允许清单 —— **只两项，且每项都必须带理由**（训诫：不许用它长期开口子）。
+#: 允许清单 —— **三项，且每项都必须带理由**（训诫：不许用它长期开口子）。
 #:
 #: ① **本文件自身**：上面那份词表就定义在这里。校验别人的人必须先能写出这些字面量，
 #:    否则门禁自己先红。
 #: ② ``patches/*.patch``：上游源码的**镜像补丁** —— 它要与真实文件**字节一致**才能
 #:    ``git apply``，其中的上下文行无法改写，不属本仓原创内容。（本仓自己新增的注释
 #:    仍在射程内；这里豁免的是 ``.patch`` 文件本身，不是给它里面的内容开口子。）
+#: ③ ``tools/assets/*.min.js``：第三方压缩产物（mermaid），不可读、不可改写；
+#:    它的字符串常量不是本仓业务内容。源映射/未压缩源不在此豁免范围。
 ALLOWLIST_NAMES = frozenset({Path(__file__).name})
-ALLOWLIST_GLOBS = ("patches/*.patch",)
+ALLOWLIST_GLOBS = ("patches/*.patch", "tools/assets/*.min.js")
 
 
 def _is_allowed(path: Path) -> bool:
@@ -121,10 +123,10 @@ def test_gate_covers_real_files():
     assert any(f.suffix in (".md", ".sh") for f in files)
 
 
-def test_allowlist_is_exactly_two_entries():
-    """自检：允许清单只有两项（本文件 + 上游镜像补丁），不得悄悄膨胀。"""
+def test_allowlist_is_exactly_three_entries():
+    """自检：允许清单只有三项（本文件 + 上游镜像补丁 + 压缩第三方资产），不得悄悄膨胀。"""
     assert ALLOWLIST_NAMES == frozenset({Path(__file__).name}), ALLOWLIST_NAMES
-    assert ALLOWLIST_GLOBS == ("patches/*.patch",), ALLOWLIST_GLOBS
+    assert ALLOWLIST_GLOBS == ("patches/*.patch", "tools/assets/*.min.js"), ALLOWLIST_GLOBS
 
 
 def test_generated_dirs_are_excluded():
