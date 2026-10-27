@@ -24,7 +24,7 @@ class Context:
     def __init__(self, **settings):
         self.settings = settings
         self.hooks = {}
-        self.profile_name = settings.get("profile_name", "imfl")
+        self.profile_name = settings.get("profile_name", "test-profile")
 
     def get_config(self, key, default=None):
         return self.settings.get(key, default)
@@ -102,7 +102,7 @@ def _context(tmp_path, gateway_url="", **extra):
         "gateway_url": gateway_url,
         "audit_path": str(tmp_path / "audit.jsonl"),
         "min_confidence": 0.6,
-        "profile_name": "imfl",
+        "profile_name": "test-profile",
     }
     settings.update(extra)
     return Context(**settings)

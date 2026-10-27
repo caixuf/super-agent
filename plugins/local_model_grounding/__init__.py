@@ -1,4 +1,4 @@
-"""Hermes plugin: ground the IMFL expert's turns with two local models.
+"""Hermes plugin: ground an expert assistant's turns with two local models.
 
 What it does per turn (``pre_llm_call``):
 

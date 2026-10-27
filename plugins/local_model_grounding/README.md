@@ -1,6 +1,6 @@
 # local-model-grounding
 
-为运行中的 Hermes「imfl 高手」提供两类本地模型接地（grounding），两个模型**都不做生成**：
+为运行中的助手提供两类本地模型接地（grounding），两个模型**都不做生成**：
 
 | 模型 | 作用 | 接口 |
 | :--- | :--- | :--- |
@@ -49,9 +49,9 @@ plugins:
 
 ```bash
 ln -s ~/code/super-agent-t6/plugins/local_model_grounding \
-      ~/.hermes/profiles/imfl/plugins/local-model-grounding
-hermes --profile imfl plugins enable local-model-grounding
-# 然后按上文补 plugins.entries，再重启 hermes-gateway-imfl.service
+      ~/.hermes/profiles/<profile>/plugins/local-model-grounding
+hermes --profile <profile> plugins enable local-model-grounding
+# 然后按上文补 plugins.entries，再重启 hermes-gateway-<profile>.service
 ```
 
 首次启用后索引会在后台构建；`index_dir` 下出现 `meta.json` + `vectors.f32` 即完成。
