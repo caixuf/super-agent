@@ -1,0 +1,72 @@
+--- bridge/relay_jobs.py	2026-10-28 00:02:19.314227322 +0800
++++ bridge/relay_jobs.py	2026-10-28 00:02:28.170291870 +0800
+@@ -26,16 +26,39 @@
+                for index, line in enumerate(lines[:-1]))
+ 
+ 
++_BLOCKY = re.compile(r"(?m)(^\s*\|.*\|\s*$|^\s*(?:[-*+]|\d+[.)])\s+|^\s*```|^\s*#{1,3}\s|^\s*---\s*$)")
++
++
++def _needs_markdown_component(text: str) -> bool:
++    """Tables, lists, fences and h1-h3 render only in a 2.0 markdown component.
++
++    The 1.0 ``lark_md`` field is inline markup: lists show as literal "- item" and tables
++    as bare pipes. Any rich-text construct therefore forces the 2.0 card.
++    """
++    return bool(_BLOCKY.search(text or ""))
++
++
++def _esc_at(text: str) -> str:
++    return (text or "").replace("<at", "＜at").replace("</at>", "＜/at＞")
++
++
+ def _final_card_json(text: str) -> str:
+-    """JSON 2.0 card: one markdown body (native tables), no streaming, no edit handle."""
+-    body = text.replace("<at", "＜at").replace("</at>", "＜/at＞")
++    """JSON 2.0 card: one markdown component; used whenever lark_md cannot render the text."""
+     return json.dumps(
+         {"schema": "2.0", "config": {"update_multi": True},
+          "header": {"title": {"tag": "plain_text", "content": "IMFL 高手"}, "template": "blue"},
+-         "body": {"elements": [{"tag": "markdown", "content": body}]}},
++         "body": {"elements": [{"tag": "markdown", "content": _esc_at(text)}]}},
+         ensure_ascii=False)
+ 
+ 
++def _card_payload(text: str) -> dict:
++    """The card body: 2.0 markdown when the text needs it, else the original 1.0 card."""
++    if _needs_markdown_component(text):
++        return json.loads(_final_card_json(text))
++    return {"config": {"wide_screen_mode": True},
++            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": _esc_at(text)}}]}
++
++
+ def _phase_timing(record):
+     """Keep bounded, numeric observations alongside the private request journal."""
+     timing = record.setdefault("timing", {"version": 1, "phases": {}})
+@@ -288,10 +311,9 @@
+ 
+     async def _send_card(self, record, text):
+         if record.get("card_id"):
+-            if _has_table(text):
+-                # A card message cannot change its JSON structure version, so the live 1.0
+-                # card can only show a table as source. Post the final answer once as a 2.0
+-                # card (native table) and mark the live card as superseded.
++            if _needs_markdown_component(text) and not record.get("final_card_id"):
++                # A card message cannot change its JSON structure version: post the answer
++                # once as a 2.0 card and point the live card at it.
+                 if not await self._send_final_card(record, text):
+                     return False
+                 await self._retire_card(record)
+@@ -300,10 +322,8 @@
+                 return True
+             data = await self.feishu._call([
+                 "--as", "bot", "api", "PATCH", "/open-apis/im/v1/messages/" + record["card_id"],
+-                "--data", json.dumps({"content": json.dumps({
+-                    "config": {"wide_screen_mode": True}, "elements": [
+-                        {"tag": "div", "text": {"tag": "lark_md", "content": text}}]},
+-                    ensure_ascii=False)}, ensure_ascii=False)])
++                "--data", json.dumps({"content": json.dumps(
++                    _card_payload(text), ensure_ascii=False)}, ensure_ascii=False)])
+             return successful(data)
+         if record.get("card_creation_unknown"):
+             return False
