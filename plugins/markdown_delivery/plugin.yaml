@@ -1,0 +1,9 @@
+name: markdown-delivery
+version: "1.0.0"
+description: "Deliver hand-written Markdown as a native Feishu document (docx import) instead of a raw .md attachment. Two bounded tools (md_deliver, md_resolve) plus a per-request delivery rule; the source file leaves the outbox only after a document link exists."
+author: agentcore
+provides_hooks:
+  - pre_llm_call
+provides_tools:
+  - md_deliver
+  - md_resolve
