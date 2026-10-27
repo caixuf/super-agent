@@ -159,6 +159,24 @@ def check_patches(result):
                 result.bad(script + " applies and verifies", (applied.stderr or verified.stdout)[-200:])
 
 
+def check_card_roundtrip(result):
+    """The patched adapter really builds the cards we expect (mock, no platform calls)."""
+    print("\n== ③b card round-trip on the patched adapter", flush=True)
+    agent = Path(os.path.expanduser(os.environ.get("HERMES_AGENT_DIR", "~/.hermes/hermes-agent")))
+    adapter = agent / "plugins/platforms/feishu/adapter.py"
+    if not adapter.is_file():
+        result.skip("card round-trip", "no patched adapter at %s" % adapter)
+        return
+    env = dict(os.environ, HERMES_FEISHU_ADAPTER=str(adapter))
+    proc = run([sys.executable, "-m", "pytest", "tests/test_card_markdown_native_patch.py",
+                "tests/test_card_24_elements.py", "-q"], env=env)
+    tail = [line for line in proc.stdout.splitlines() if "passed" in line or "failed" in line]
+    if proc.returncode == 0:
+        result.ok("card round-trip", tail[-1] if tail else "")
+    else:
+        result.bad("card round-trip", tail[-1] if tail else proc.stderr[-200:])
+
+
 def check_verify(result):
     print("\n== ④ repo self-check (verify.sh)", flush=True)
     proc = run(["bash", str(REPO / "verify.sh")], timeout=3600)
@@ -190,6 +208,7 @@ def main(argv=None) -> int:
     check_clone(result, args.ref)
     check_install(result)
     check_patches(result)
+    check_card_roundtrip(result)
     check_verify(result)
     if args.skip_docker:
         result.skip("docker/verify.sh", "--skip-docker")
