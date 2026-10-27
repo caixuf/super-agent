@@ -33,10 +33,13 @@ def test_streaming_frames_use_only_v2_supported_tags():
     elements = namespace["build_card24_elements"](
         "## 结论\n\n| 维度 | 新 | 旧 |\n|---|---|---|\n| 速度 | **快** | 慢 |\n\n后段 `code`。")
     tags = [element["tag"] for element in elements]
-    assert tags == ["plain_text", "table", "plain_text"], tags
+    # card JSON 2.0 addresses text as div + text.plain_text; a bare plain_text element is
+    # rejected with "type of element is not supported tag: plain_text" (200621).
+    assert tags == ["div", "table", "div"], tags
+    assert all(element["text"]["tag"] == "plain_text" for element in (elements[0], elements[2]))
     assert all(column["data_type"] == "text" for column in elements[1]["columns"])
-    assert "**" not in elements[0]["content"] and "`" not in elements[2]["content"]
-    assert not elements[0]["content"].startswith("#")
+    assert "**" not in elements[0]["text"]["content"] and "`" not in elements[2]["text"]["content"]
+    assert not elements[0]["text"]["content"].startswith("#")
 
 
 def test_2_0_path_is_unchanged_when_24_is_off():
