@@ -231,3 +231,25 @@ def test_guidance_only_appears_for_document_requests():
     guidance = plugin._guide(user_message="把结论整理成文档给我")
     assert "md_deliver" in guidance["context"]
     assert "##FILE:" in guidance["context"]
+
+
+def test_upload_rejection_surfaces_the_platform_code_and_message(monkeypatch, tmp_path):
+    """A 400 from the upload step is either a missing scope or a bad extension; say which."""
+    import io
+    import urllib.error
+
+    path = tmp_path / "report.md"
+    path.write_text("# x", encoding="utf-8")
+    body = json.dumps({"code": 99991672, "msg": "Access denied. One of the following scopes is required"}).encode()
+
+    class _Opener:
+        def open(self, request, timeout=0):
+            raise urllib.error.HTTPError("https://x/upload", 400, "Bad Request", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(md, "_opener", lambda: _Opener())
+    with pytest.raises(RuntimeError) as error:
+        md.upload_material(path, authorization=AUTH)
+
+    message = str(error.value)
+    assert "99991672" in message and "scopes" in message
+    assert "Bearer" not in message

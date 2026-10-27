@@ -91,6 +91,16 @@ def check_source(source):
     return extension, source.read_bytes()
 
 
+def _error_detail(exc):
+    """Code + message from a platform error body, never the request (no credentials)."""
+    try:
+        payload = json.loads(exc.read().decode("utf-8", "replace"))
+    except (ValueError, OSError):
+        return ""
+    code, message = payload.get("code"), payload.get("msg") or payload.get("message") or ""
+    return ("code=%s %s" % (code, str(message)[:160])).strip()
+
+
 def upload_material(source, *, authorization):
     """Step 1: multipart material upload carrying the import declaration."""
     extension, content = check_source(source)
@@ -115,7 +125,10 @@ def upload_material(source, *, authorization):
         with _opener().open(request, timeout=DEFAULT_TIMEOUT_SECONDS) as response:
             data = _decode(response, "upload")
     except urllib.error.HTTPError as exc:
-        raise RuntimeError("feishu http %s on upload" % exc.code) from None
+        # Keep the platform's own code/message: 99991672 (missing upload scope) and 1069910
+        # (extension mismatch) are 400s that an operator must be able to tell apart.
+        detail = _error_detail(exc)
+        raise RuntimeError("feishu upload rejected: http %s %s" % (exc.code, detail)) from None
     except OSError as exc:
         raise RuntimeError("feishu transport failed on upload: %s" % type(exc).__name__) from None
     token = data.get("file_token")
