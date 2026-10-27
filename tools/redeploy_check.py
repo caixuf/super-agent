@@ -142,7 +142,8 @@ def check_patches(result):
             (tree / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, tree / relative)
         env = dict(os.environ, HERMES_AGENT_DIR=str(tree))
-        for script in ("apply_feishu_card_replies.py", "patch_card_finalize.py"):
+        for script in ("apply_feishu_card_replies.py", "patch_card_finalize.py",
+                       "patch_card_markdown_native.py"):
             path = REPO / "patches" / script
             check = run([sys.executable, str(path), "--check"], env=env)
             if check.returncode not in (0, 1):
@@ -150,8 +151,10 @@ def check_patches(result):
                 return
             applied = run([sys.executable, str(path), "--apply"], env=env)
             verified = run([sys.executable, str(path), "--check"], env=env)
-            if applied.returncode == 0 and verified.returncode == 0:
-                result.ok(script + " applies and verifies")
+            replay = run([sys.executable, str(path), "--apply"], env=env) if applied.returncode == 0 else None
+            idempotent = replay is not None and replay.returncode == 0
+            if applied.returncode == 0 and verified.returncode == 0 and idempotent:
+                result.ok(script + " applies, verifies, re-applies")
             else:
                 result.bad(script + " applies and verifies", (applied.stderr or verified.stdout)[-200:])
 
