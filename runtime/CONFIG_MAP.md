@@ -4,6 +4,15 @@
 
 键名一律用 Hermes 的通用段名；**业务键（provider 名 / MCP 工具面 / 渠道凭据）由业务叠加层给**，本仓不列。
 
+## 0.1 Worker 模板与现场差在哪（由部署方定，不由本仓猜）
+
+`runtime/agentcore-worker@.service` 是**骨架**：`AGENTCORE_WORKERS` 与 `AGENTCORE_BACKEND` 是环境变量，
+模板给的是最小可跑值（1 worker / stdlib 后端）。现场若用 `flowcoro` 后端、或把 worker 接到某个具体队列
+（而不是默认的 `agent-pool` 状态目录），那属于部署配置：改 unit 或加 drop-in，不要把现场值写回模板。
+
+同一条纪律适用于上下文窗口：`model.context_length` 与 `auxiliary.compression.context_length`
+必须在新机器上重测后写进本机 `config.yaml`，不要照搬旧机的数字（见 §0 第 3 条）。
+
 ## 0. 三条前提
 
 1. **`config.yaml` 在 git 之外**（内联着 provider / MCP 段与密钥）→ clone 带不走它，漏了机器人**能起来但变弱**。
