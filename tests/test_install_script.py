@@ -15,11 +15,12 @@ INSTALL = REPO_ROOT / "install" / "install.sh"
 #: 与源目录 snake_case 对应的落位名（现场与 config 的启用名都是连字符形态）。
 PLUGIN_NAMES = ("capability-alert-outbox", "durable-dispatch", "illustrated-delivery",
                 "localvec", "local-model-grounding", "longtask-guard", "markdown-delivery",
-                "memory-bridge")
+                "memory-bridge", "write-guard")
 
 #: 带 plugin.yaml 的插件才写启用记录；localvec 没有 manifest，是 memory provider。
 ENABLE_NAMES = ("capability-alert-outbox", "durable-dispatch", "illustrated-delivery",
-                "local-model-grounding", "longtask-guard", "markdown-delivery", "memory-bridge")
+                "local-model-grounding", "longtask-guard", "markdown-delivery", "memory-bridge",
+                "write-guard")
 
 
 def _run(home: Path, *extra: str, path_prefix: Path | None = None,

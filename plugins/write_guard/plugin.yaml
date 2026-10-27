@@ -1,0 +1,8 @@
+name: write-guard
+version: "1.0.0"
+description: "Refuse oversized write_file payloads before dispatch and verify every write landed. Long inline content can hit the output token cap, get its JSON truncated, and be replaced with an empty argument object — the file silently never exists while the agent believes it wrote it. pre_tool_call blocks content over a character limit and teaches chunked writing; post_tool_call re-reads the file and transform_tool_result surfaces a mismatch as a real error. Never blocks a normal short write and never raises."
+author: "agentcore"
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call
+  - transform_tool_result

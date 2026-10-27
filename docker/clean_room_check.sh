@@ -111,7 +111,7 @@ for name in durable-dispatch illustrated-delivery localvec longtask-guard markdo
             memory-bridge capability-alert-outbox; do
   if [ -d "$P/plugins/$name" ]; then pass "插件目录 $name"; else bad "插件目录缺失 $name"; fi
 done
-for name in durable-dispatch illustrated-delivery longtask-guard markdown-delivery memory-bridge capability-alert-outbox; do
+for name in durable-dispatch illustrated-delivery longtask-guard markdown-delivery memory-bridge capability-alert-outbox write-guard; do
   if [ -f "$P/plugins/$name/plugin.yaml" ]; then pass "插件清单 $name"; else bad "插件清单缺失 $name"; fi
   if grep -qE "^[[:space:]]*- $name$" "$P/config.yaml" 2>/dev/null; then
     pass "插件已启用 $name"
