@@ -6,7 +6,7 @@ Execution belongs to the separate worker service, not the chat gateway process.
 
 Install this directory using the host's normal standalone plugin mechanism and
 opt in. The host can import an installed engine package, or load the canonical
-`pool.py` from an administrator-supplied checkout without changing `sys.path`:
+modules from an administrator-supplied checkout without changing `sys.path`:
 
 ```yaml
 plugins:
@@ -22,6 +22,11 @@ plugins:
           - /absolute/read-only/project
         denied_globs:
           - private-config.json
+        # Completion backfill is separately opt-in; default is off.
+        deliver_completions: true
+        delivery_interval: 5
+        direct_delivery_enabled: true
+        delivery_transport_file: /absolute/path/to/agentcore-checkout/runtime/hermes_completion_transport.py
 ```
 
 Add the `durable_dispatch` toolset to the intended profile/platform using the
@@ -44,6 +49,7 @@ is `(plugin_id, segments_tuple, value)`, for example:
 
 ```python
 save_plugin_setting('durable-dispatch', ('engine_root',), '/absolute/engine')
+save_plugin_setting('durable-dispatch', ('deliver_completions',), True)
 ```
 
 The plugin's module has no mandatory engine import at load time. Disabled
@@ -63,8 +69,36 @@ and snapshotted by the runner when it opens them.
 The host supplies `session_id` as a dispatcher keyword; it is not in the model
 schema. A hash of that identity and the profile owns each job. Missing identity,
 model-supplied ownership/executable fields, unknown task IDs and cross-session
-status/cancel requests fail closed. No session identity is read from environment
-variables. This intentionally does not provide cross-session task sharing.
+status/cancel requests fail closed. Ownership is never read from an environment
+variable. This intentionally does not provide cross-session task sharing.
+
+Alongside ownership, submission stores the **route of the turn that submitted the
+work**: the bound `HERMES_SESSION_KEY`, platform/source, chat and thread, but only
+when the bound durable session id agrees with the dispatcher identity. That
+persisted address, never whichever session is active later, is what completion
+delivery uses. If no route is bound, the job still runs and its completion is
+reported as unaddressable rather than guessed.
+
+For direct backfill, the administrator transport file above reuses the host's
+route resolver and profile ownership checks, then posts through its adapter.
+It does not inject a user message or start a model turn. Native attachments are
+snapshotted from the submitting job's actual attempt directory before any send.
+The worker protocol envelope is unwrapped so the real summary and artifact list
+reach this transport. Every text/file operation gets its own durable journal
+entry and platform receipt; the queue is acknowledged only after every part has
+a real message ID. An uncertain send stays pending without automatic resend,
+including across restarts. A definite refusal before sending may retry. Inspect
+`DirectCompletionTransport.inspect()` for bounded operation states.
+
+Feishu additionally requires `patches/patch_feishu_delivery_uuid.py` and an idle
+adapter reload: stable per-operation UUIDs must survive the adapter's own
+internal retries. The bridge refuses an adapter without the runtime capability
+marker. Local viewer notices are not treated as messaging-platform delivery.
+
+Without `delivery_transport_file`, the legacy injection transport is retained
+for compatibility and requires `allow_gateway_injection: true`. That path
+starts a new model turn and its injected receipt does not prove platform
+delivery. Use the direct transport for production background completions.
 
 Status returns structured JSON. Unicode text is bounded by its decoded content,
 not by escape-sequence size, and an oversized result is never sliced into an
@@ -82,5 +116,44 @@ role; it must not be reused for effectful runners.
 
 The submit result asks the chat agent to return the ID and finish its turn.
 This is an instruction, not an enforced end-turn primitive. Confirm actual
-gateway behavior in a live test. Result delivery remains an outbox transport
-integration, and this plugin never sends a message itself.
+gateway behavior in a live test.
+
+## Completion backfill
+
+With `deliver_completions: true`, a daemon thread drains `pool.outbox` using the
+configured transport. The direct transport in the template uses real platform
+receipts and never starts a model turn. Its per-operation journal fences unknown
+sends and resumes partially delivered summaries/files without replaying successes.
+An optional numeric `delivery_not_before` Unix timestamp limits delivery to jobs
+submitted at or after activation. Older records stay pending without blocking
+newer completions.
+
+Without `delivery_transport_file`, the compatibility transport calls
+`PluginContext.inject_message(text, session_key=<persisted route>)` and requires
+`plugins.entries.durable-dispatch.allow_gateway_injection: true`. Its acceptance
+is not proof of platform delivery, and it starts a model turn.
+
+Semantics and limits:
+
+- Address and profile come from `jobs.origin` written at submit time. There is no
+  "current conversation" fallback; a route-less task is parked, not guessed.
+- A delivered receipt is acknowledged with a transport receipt id in the ledger.
+  Restart or reconnect re-reads the ledger, so a delivered completion is not
+  replayed; a pending one is retried.
+- Unaddressable receipts (legacy origin, foreign profile) stay pending and are
+  skipped in the ledger, so they cannot block later completions. Inspect them with
+  `python3 -m agentcore.completion_backfill --root <queue> --profile <profile>`.
+- The legacy transport is **at-least-once**: a crash between send and acknowledge
+  can resend. The direct transport instead fences uncertain operations for
+  inspection; only definitely unsent parts may retry automatically.
+- The public injection API addresses a route, not a durable session id. After a
+  `/new` on the same chat, Hermes resolves the route's current session; this
+  plugin cannot pin the historical session id. Treat that as a known residual
+  gap, not as proof of same-session delivery.
+- Enabling this changes user-visible behavior. Verify in an isolated profile
+  first; installing or reloading the plugin is a deployment action, not a test.
+- Plugin host isolation (`plugins.isolation: host`) runs the plugin in a separate
+  process, so the gateway's bound session ContextVars are not visible there and
+  route capture yields no route; completions then park. The current host serves this
+  plugin in-process. Host mode needs a future public API that supplies the calling
+  route to plugin code.

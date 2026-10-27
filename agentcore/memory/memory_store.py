@@ -191,6 +191,17 @@ def _tags_of(conn: sqlite3.Connection, fact_id: str) -> Dict[str, str]:
             conn.execute("SELECT key, value FROM fact_tags WHERE fact_id=?", (fact_id,))}
 
 
+def _tags_of_many(conn: sqlite3.Connection, fact_ids: Sequence[str]) -> Dict[str, Dict[str,str]]:
+    ids=list(dict.fromkeys(fact_ids));result={fid:{} for fid in ids}
+    # Stay below SQLite's conservative variable limit, including old installs.
+    for offset in range(0,len(ids),400):
+        chunk=ids[offset:offset+400]
+        rows=conn.execute('SELECT fact_id,key,value FROM fact_tags WHERE fact_id IN ('+
+                          ','.join('?' for _ in chunk)+')',chunk)
+        for row in rows:result[row['fact_id']][row['key']]=row['value']
+    return result
+
+
 def _put_tags(conn: sqlite3.Connection, fact_id: str, tags: Dict[str, str]) -> None:
     for k, v in tags.items():
         conn.execute(
@@ -212,6 +223,8 @@ def write_fact(
     branch: Optional[str] = None,
     fact_id: Optional[str] = None,
     resolve_conflict: bool = False,
+    initial_status: str = 'active',
+    dedupe_by_statement: bool = False,
 ) -> Dict[str, Any]:
     """确定性写入一条经验。同 (workspace_id, subject, statement) 视为同一条，幂等跳过。
 
@@ -224,6 +237,10 @@ def write_fact(
     自动触发链路（tools/memory_trigger）显式打开它。
     """
     stmt = (statement or "").strip()
+    if initial_status not in ('active', 'candidate') or (initial_status == 'candidate' and resolve_conflict):
+        raise ValueError('invalid initial fact status')
+    if initial_status == 'candidate' and dedupe_by_statement:
+        raise ValueError('candidate publishers require source-scoped identity')
     if not stmt:
         return {"ok": False, "error": "statement 为空"}
 
@@ -236,6 +253,8 @@ def write_fact(
 
     bucket = normalize_ebm(ebm)
     tag_map = _clean_tags(tags)
+    if subject:
+        tag_map.setdefault('subject_key', re.sub(r'[^a-z0-9_\u4e00-\u9fff]', '', subject.lower()))
     # ebm 同时进 workspace_id 与标签：前者做物理分桶，后者让调用方
     # 能用统一接口按任意维度查（含 ebm 本身）。
     tag_map["ebm"] = bucket
@@ -284,10 +303,29 @@ def write_fact(
 
     conn = _connect()
     try:
+        # Curated publishers supply a content-addressed id. Replays must check
+        # that exact identity before the general statement deduplication query,
+        # which otherwise scans a large owner's library once per section.
+        if initial_status == 'candidate' and fact_id:
+            known = conn.execute(
+                'SELECT fact_id,user_id,workspace_id,subject,statement,source FROM working_fact WHERE fact_id=?',
+                (fact_id,)).fetchone()
+            if known is not None:
+                if any(known[k] != v for k,v in dict(user_id=user_id,workspace_id=bucket,
+                        subject=subject,statement=stmt,source=source).items()):
+                    raise ValueError('candidate_fact_identity_conflict')
+                return {'ok':True,'written':False,'reason':'duplicate',
+                        'fact_id':fact_id,'workspace_id':bucket,'tags':_tags_of(conn,fact_id)}
+        # Candidate publishers own only their source, never a matching manual fact.
+        dedupe_source = ' AND source=?' if initial_status == 'candidate' else ''
+        duplicate_clause = (' WHERE user_id=? AND workspace_id=? AND statement=?' if dedupe_by_statement
+                            else ' WHERE user_id=? AND workspace_id=? AND subject=? AND statement=?')
+        duplicate_params = [user_id, bucket, stmt] if dedupe_by_statement else [user_id, bucket, subject, stmt]
+        if dedupe_source:
+            duplicate_params.append(source)
         dup = conn.execute(
-            "SELECT fact_id FROM working_fact"
-            " WHERE user_id=? AND workspace_id=? AND subject=? AND statement=?",
-            (user_id, bucket, subject, stmt),
+            "SELECT fact_id FROM working_fact" + duplicate_clause + dedupe_source,
+            duplicate_params,
         ).fetchone()
         if dup:
             return {"ok": True, "written": False, "reason": "duplicate",
@@ -316,7 +354,7 @@ def write_fact(
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (fid, user_id, agent_id, "default_session", bucket, branch, source,
              stmt, "[]", subject, details, None, "[]",
-             "active", "", time.strftime("%Y-%m-%dT%H:%M:%S")),
+             initial_status, "", time.strftime("%Y-%m-%dT%H:%M:%S")),
         )
         _put_tags(conn, fid, tag_map)
         superseded: List[str] = []
@@ -475,9 +513,12 @@ def _knn_rowids(conn: sqlite3.Connection, query: str, *,
         except Exception as exc:  # noqa: BLE001 —— 补捞失败不影响主结果
             logging.getLogger(logger_name("store")).debug("KNN 补捞失败: %s", exc)
 
-    fids = [fid for fid, _dist in hits]
-    marks = ",".join("?" * len(fids))
-    where = ["f.fact_id IN (" + marks + ")", "f.status = 'active'", "f.user_id = ?"]
+    fids = list(dict.fromkeys(fid for fid, _dist in hits))
+    # IN(200 ids) + user/status can make SQLite prefer a low-cardinality
+    # owner index and scan the owner's entire library. Drive the join from
+    # the bounded candidate list instead: each inner lookup is one unique PK.
+    values = ",".join("(?)" for _ in fids)
+    where = ["f.fact_id = candidate.fact_id", "f.status = 'active'", "f.user_id = ?"]
     params: List[Any] = [*fids, user_id]
     if buckets:
         where.append("f.workspace_id IN (%s)" % ",".join("?" * len(buckets)))
@@ -501,7 +542,9 @@ def _knn_rowids(conn: sqlite3.Connection, query: str, *,
              " AND k2.key = 'kind'))")
         params.extend(kinds)
     rows = conn.execute(
-        "SELECT f.rowid AS rid FROM working_fact f WHERE " + " AND ".join(where),
+        "WITH candidate_ids(fact_id) AS (VALUES " + values + ") "
+        "SELECT f.rowid AS rid FROM candidate_ids candidate CROSS JOIN working_fact f WHERE "
+        + " AND ".join(where),
         params).fetchall()
     return [r["rid"] if isinstance(r, sqlite3.Row) else r[0] for r in rows]
 
@@ -575,7 +618,11 @@ def _passes_floor(it: Dict[str, Any], floor: float, query: str = "") -> bool:
         # 去掉泛用词后剩不下什么，说明这句问话本身没有技术信息量
         # （「今天天气不错」只剩 {天气, 气不}）。此时只认很高的相似度。
         return sc >= max(floor, _REFERENCE_SCOPE_FLOOR)
-    hit = sum(1 for t in terms if t in text)
+    # ASCII identifiers are whole tokens: Pi is not MPI, TCP is not TCPIP.
+    # Chinese bigrams still use substring overlap because they have no spaces.
+    hit = sum(1 for t in terms if (
+        bool(re.search(r'(?<![a-z0-9_])' + re.escape(t) + r'(?![a-z0-9_])', text))
+        if re.fullmatch(r'[a-z0-9_]+', t) else t in text))
     if hit / len(terms) >= _REFERENCE_TERM_RATIO:
         return True
     return sc >= max(floor, _REFERENCE_SCOPE_FLOOR)
@@ -646,6 +693,7 @@ def recall_facts(
     scopes: Optional[Sequence[str]] = None,
     domains: Optional[Sequence[str]] = None,
     genres: Optional[Sequence[str]] = None,
+    _connection: Optional[sqlite3.Connection] = None,
 ) -> Dict[str, Any]:
     """按代际 + 任意 KV 标签召回。空结果给出 reason，不返回假的成功。
 
@@ -657,7 +705,7 @@ def recall_facts(
     # 只在 WHERE 子句里兜底、却把原始 None 传给下游，就会「库里明明有数据，
     # COUNT 出来 0，报 no_match」—— 看起来像没数据，其实是在按 NULL 查。
     user_id = user_id or get_config().default_user
-    conn = _connect()
+    conn = _connection if _connection is not None else _connect()
     try:
         buckets: List[str] = []
         if ebm:
@@ -725,6 +773,80 @@ def recall_facts(
                 " AND k2.key = 'kind'))")
             params.extend(want_kinds)
 
+        # An explicit named topic is an address lookup, not a similarity guess.
+        # Honor every identity/scope filter before returning its active entries.
+        subject_key = re.sub(r'[^a-z0-9_\u4e00-\u9fff]', '', (query or '').lower())
+        if subject_key:
+            exact = conn.execute(
+                'SELECT DISTINCT f.* FROM fact_tags sk INDEXED BY idx_fact_tags_kv '
+                'CROSS JOIN working_fact f ON f.fact_id=sk.fact_id '
+                "WHERE sk.key IN ('subject_key','subject_alias_0','subject_alias_1','subject_alias_2',"
+                "'subject_alias_3','subject_alias_4','subject_alias_5','subject_alias_6','subject_alias_7')"
+                " AND sk.value=? AND " + ' AND '.join(where) +
+                ' ORDER BY f.created_at DESC LIMIT ?',
+                [subject_key, *params, max(1, int(limit))]).fetchall()
+            lookup_mode = 'exact_subject'
+            if not exact:
+                # Reviewed CJK topic names remain addresses inside a sentence.
+                # Read the small alias index, never the whole fact corpus.
+                exact = conn.execute(
+                    'SELECT DISTINCT f.* FROM fact_tags sk INDEXED BY idx_fact_tags_kv '
+                    'CROSS JOIN working_fact f ON f.fact_id=sk.fact_id '
+                    "WHERE sk.key IN ('subject_alias_0','subject_alias_1','subject_alias_2',"
+                    "'subject_alias_3','subject_alias_4','subject_alias_5','subject_alias_6','subject_alias_7')"
+                    " AND length(sk.value)>=4 AND sk.value GLOB '*[一-鿿]*' AND instr(?,sk.value)>0 AND "
+                    + ' AND '.join(where) + ' ORDER BY f.created_at DESC LIMIT ?',
+                    [subject_key, *params, max(1, int(limit))]).fetchall()
+                lookup_mode = 'curated_alias'
+            if not exact:
+                identifiers = list(dict.fromkeys(re.findall(r'[a-z0-9_]{2,}', (query or '').lower())))
+                addressed = {}
+                for token in [t for t in identifiers if t not in _GENERIC_TERMS][:8]:
+                    candidates = conn.execute(
+                        'SELECT f.* FROM fact_tags ct INDEXED BY idx_fact_tags_kv '
+                        'CROSS JOIN working_fact f ON f.fact_id=ct.fact_id '
+                        "WHERE ct.key='curated_document' AND "+' AND '.join(where)+
+                        " AND f.source GLOB 'curated_profile:*' AND lower(f.subject) LIKE ? ESCAPE '!' LIMIT 128",
+                        [*params, '%'+token.replace('_', '!_')+'%']).fetchall()
+                    matches = [r for r in candidates if re.search(
+                        r'(?<![a-z0-9_])'+re.escape(token)+r'(?![a-z0-9_])', r['subject'].lower())]
+                    if len(matches) == 1:
+                        addressed[matches[0]['fact_id']] = matches[0]
+                if addressed:
+                    exact = list(addressed.values())[:max(1, int(limit))]
+                    lookup_mode = 'curated_identifier'
+            if not exact:
+                phrases = [term.lower() for term in re.findall(r'[a-zA-Z0-9_\u4e00-\u9fff]{4,}', query or '')
+                           if term.lower() not in _GENERIC_TERMS
+                           and not (re.fullmatch(r'[a-zA-Z0-9_]+', term) and len(term) < 5)][:8]
+                if phrases:
+                    clauses = ' OR '.join("lower(f.statement) LIKE ? ESCAPE '!'" for _ in phrases)
+                    patterns = ['%'+term.replace('!', '!!').replace('%', '!%').replace('_', '!_')+'%'
+                                for term in phrases]
+                    candidates = conn.execute(
+                        'SELECT f.* FROM fact_tags ct INDEXED BY idx_fact_tags_kv '
+                        'CROSS JOIN working_fact f ON f.fact_id=ct.fact_id '
+                        "WHERE ct.key='curated_document' AND "+' AND '.join(where)+
+                        " AND f.source GLOB 'curated_profile:*' AND ("+clauses+')'
+                        ' ORDER BY f.created_at DESC LIMIT 2', [*params, *patterns]).fetchall()
+                    # A generic term appearing in several curated sections is not
+                    # an address. Let semantic ranking resolve that ambiguity.
+                    if len(candidates) == 1:
+                        exact = candidates
+                        lookup_mode = 'curated_phrase'
+            if exact:
+                entries = []
+                for row in exact:
+                    item = dict(row)
+                    item['tags'] = _tags_of(conn, item['fact_id'])
+                    item['rank_mode'] = lookup_mode
+                    item['apply_match'] = ('legacy_unknown' if item['workspace_id'] == UNKNOWN_BUCKET
+                                           else 'exact_ebm' if buckets and item['workspace_id'] == buckets[0]
+                                           else 'unscoped_ebm')
+                    entries.append(item)
+                return {'ok': True, 'results': entries, 'total': len(entries),
+                        'searched_buckets': buckets, 'searched_tags': want}
+
         # 两阶段检索的第一阶段：先粗筛再全取。
         # 记忆库从 46 条涨到几万条后，把全表拉进 Python 再逐条比对会直接拖垮召回。
         # 有 FTS 时用 BM25 把候选收窄到 COARSE_CANDIDATES（毫秒级）；
@@ -737,7 +859,7 @@ def recall_facts(
             # 「李龙飞是谁」永远匹配不上「李龙飞自称菜虚虚飞...」，而语义检索可以。
             # 这也是做规模化最关键的一步：数据越多，字面匹配越不可靠。
             rid_list = _knn_rowids(conn, query, buckets=buckets or None,
-                                   kinds=want_kinds or None, user_id=user_id)
+                                   kinds=want_kinds or None, scopes=scopes, user_id=user_id)
             if rid_list is None:
                 try:
                     from .memory_scale import COARSE_CANDIDATES, coarse_filter
@@ -785,9 +907,10 @@ def recall_facts(
                     "searched_tags": want, "empty_reason": reason}
 
         picked: List[Dict[str, Any]] = []
+        tags_by_id=_tags_of_many(conn,[r['fact_id'] for r in rows])
         for r in rows:
             d = dict(r)
-            d["tags"] = _tags_of(conn, d["fact_id"])
+            d["tags"] = tags_by_id[d['fact_id']]
             d["apply_match"] = ("legacy_unknown" if (d["workspace_id"] or UNKNOWN_BUCKET) == UNKNOWN_BUCKET
                                 else "exact_ebm" if buckets and d["workspace_id"] == buckets[0]
                                 else "unscoped_ebm")
@@ -795,7 +918,8 @@ def recall_facts(
         # 只有查询指定了代际时才按代际优先；否则 exact_ebm 是本次筛选的产物，
         # 拿它当排序依据会把 G1/G2 那两条无关经验强行顶到所有查询的第一位
         # （实测：任何查询都返回「门限-制动踏板」）。
-        ranked = _rank(picked, query, prefer_ebm=bool(ebm))
+        ranked = (_rank(picked, query, prefer_ebm=bool(ebm), connection=conn)
+                  if _connection is not None else _rank(picked, query, prefer_ebm=bool(ebm)))
         # 相关性下限：向量召回永远能凑出 top-N，但「总能返回」不等于「相关」。
         # 实测「完全无关的词汇xyz123」在 45 条库里也照样返回 3 条；这类噪声塞进
         # 诊断结果反而制造干扰。低于门限的一律不返回，由 empty_reason 说明。
@@ -817,7 +941,8 @@ def recall_facts(
             payload["score_floor"] = floor
         return payload
     finally:
-        conn.close()
+        if _connection is None:
+            conn.close()
 
 
 
@@ -1031,11 +1156,12 @@ def _persist_fact_embedding(fact_id: str, text: str, vec: Sequence[float], model
         conn.close()
 
 
-def _get_persisted_embeddings(fact_ids: Sequence[str], model: str = DEFAULT_EMBED_MODEL) -> Dict[str, Tuple[List[float], str]]:
+def _get_persisted_embeddings(fact_ids: Sequence[str], model: str = DEFAULT_EMBED_MODEL,
+                              *, connection=None) -> Dict[str, Tuple[List[float], str]]:
     """批量从数据库获取已持久化的向量。返回 {fact_id: (vector, text_hash)}"""
     if not fact_ids:
         return {}
-    conn = _connect()
+    conn = connection if connection is not None else _connect()
     try:
         marks = ",".join("?" * len(fact_ids))
         rows = conn.execute(
@@ -1054,7 +1180,8 @@ def _get_persisted_embeddings(fact_ids: Sequence[str], model: str = DEFAULT_EMBE
     except Exception:
         return {}
     finally:
-        conn.close()
+        if connection is None:
+            conn.close()
 
 
 def reindex_embeddings(user_id: Optional[str] = None, model: str = DEFAULT_EMBED_MODEL, force: bool = False) -> Dict[str, Any]:
@@ -1201,7 +1328,8 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
         return 0.0
 
 
-def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True) -> List[Dict[str, Any]]:
+def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True,
+          *, connection=None) -> List[Dict[str, Any]]:
     """在给定候选集内排序：有可用向量就按余弦，否则退回关键词重合度。
 
     注意排序**只作用于传入的 items**：调用方已经按代际桶和标签过滤过了，
@@ -1225,7 +1353,8 @@ def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True) 
         fact_ids = [it.get("fact_id") or "" for it in items]
         
         # 1. 尝试从 SQLite 持久化表获取已存在的向量
-        persisted = _get_persisted_embeddings(fact_ids)
+        persisted = (_get_persisted_embeddings(fact_ids, connection=connection)
+                     if connection is not None else _get_persisted_embeddings(fact_ids))
         
         # 2. 检查哪些候选文本需要补算向量
         missing_texts = []

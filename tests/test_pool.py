@@ -5,6 +5,8 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from agentcore.pool import Pool
 
 
@@ -91,3 +93,69 @@ def test_retry_budget_and_dependency_success(tmp_path):
     row, fd = p.claim()
     assert row['id'] == child
     os.close(fd)
+
+
+def test_submit_persists_addressable_origin(tmp_path):
+    pool = Pool(tmp_path)
+    origin = {'profile': 'prof-1', 'session': 'sess-1', 'route': 'agent:prof-1:dm:u1',
+              'channel': 'chat', 'chat': 'u1', 'thread': 't1', 'turn': '3'}
+    job = pool.submit('owned', {'goal': 'read a log'}, origin=origin)
+    assert pool.origin(job) == origin
+    # Work admitted without ownership stays explicitly unowned instead of guessing a route.
+    assert pool.origin(pool.submit('anonymous', {'goal': 'read a log'})) is None
+    assert pool.origin('0' * 32) is None
+
+
+def test_origin_is_part_of_dedupe_identity(tmp_path):
+    pool = Pool(tmp_path)
+    first = pool.submit('same-key', {'goal': 'x'}, origin={'profile': 'p', 'session': 's1'})
+    assert pool.submit('same-key', {'goal': 'x'}, origin={'profile': 'p', 'session': 's1'}) == first
+    # The same retry key from a different conversation must not inherit the stored route.
+    try:
+        pool.submit('same-key', {'goal': 'x'}, origin={'profile': 'p', 'session': 's2'})
+    except ValueError as error:
+        assert 'different task' in str(error)
+    else:
+        raise AssertionError('reused dedupe key accepted a different origin')
+
+
+@pytest.mark.parametrize('origin', [
+    {'profile': 'p'},
+    {'session': 's'},
+    {'profile': 'p', 'session': ''},
+    {'profile': 'p', 'session': '   '},
+    {'profile': 'p', 'session': 's', 'owner': 'forged'},
+    {'profile': 'p', 'session': 7},
+    'profile=p&session=s',
+])
+def test_origin_rejects_partial_or_unknown_fields(tmp_path, origin):
+    pool = Pool(tmp_path)
+    with pytest.raises(ValueError):
+        pool.submit('bad-origin', {'goal': 'x'}, origin=origin)
+    assert pool.status(pool.submit('good-origin', {'goal': 'x'}))['status'] == 'queued'
+
+
+def test_legacy_database_gains_origin_column_and_unowned_rows(tmp_path):
+    # A queue created before ownership was persisted must migrate in place, and its
+    # existing jobs must read back as unowned rather than crashing the consumer.
+    import sqlite3
+    root = tmp_path / 'legacy'
+    root.mkdir()
+    db = sqlite3.connect(str(root / 'pool.db'))
+    db.executescript('''
+    CREATE TABLE jobs (
+      id TEXT PRIMARY KEY, dedupe TEXT UNIQUE NOT NULL, payload TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued', attempt TEXT, heartbeat REAL,
+      tries INTEGER NOT NULL DEFAULT 0, max_tries INTEGER NOT NULL,
+      replay_safe INTEGER NOT NULL, cancel INTEGER NOT NULL DEFAULT 0,
+      created REAL NOT NULL, result TEXT);
+    ''')
+    legacy = 'a' * 32
+    db.execute("INSERT INTO jobs VALUES(?,?,?,'queued',NULL,NULL,0,2,1,0,0,NULL)",
+               (legacy, 'legacy-key', '{}'))
+    db.commit()
+    db.close()
+    pool = Pool(root)
+    assert pool.origin(legacy) is None
+    assert pool.submit('owned-after-upgrade', {'goal': 'x'},
+                       origin={'profile': 'p', 'session': 's'}) != legacy

@@ -1,0 +1,10 @@
+name: memory-bridge
+label: Durable Memory Capture
+kind: standalone
+version: "0.3.0"
+description: "Capture completed turns for supervised extraction; existing memory provider owns recall."
+author: agentcore
+provides_tools: []
+provides_hooks:
+  - post_llm_call
+  - on_session_end

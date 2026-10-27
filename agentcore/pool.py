@@ -6,8 +6,10 @@ Runner commands are administrator supplied argv arrays; never task supplied shel
 import argparse
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import sqlite3
@@ -15,6 +17,40 @@ import subprocess
 import threading
 import time
 import uuid
+
+
+ORIGIN_FIELDS = ('profile', 'session', 'route', 'channel', 'chat', 'thread', 'turn')
+# The dispatcher is only guaranteed to hold these two; the rest are recorded when
+# the host supplies them, never inferred from an ambient session.
+ORIGIN_REQUIRED = ('profile', 'session')
+
+
+def normalize_origin(origin):
+    """Serialize addressable task ownership, refusing partial or unknown fields.
+
+    Returns the canonical JSON text stored in ``jobs.origin`` (None when no
+    ownership was supplied). Blank strings are refused rather than coerced: an
+    empty route would look addressable while routing nowhere.
+    """
+    if origin is None:
+        return None
+    if not isinstance(origin, dict):
+        raise ValueError('origin must be a mapping')
+    unknown = set(origin) - set(ORIGIN_FIELDS)
+    if unknown:
+        raise ValueError('unknown origin fields: ' + ', '.join(sorted(unknown)))
+    normalized = {}
+    for name in ORIGIN_FIELDS:
+        if name not in origin:
+            continue
+        value = origin[name]
+        if not isinstance(value, str) or not value.strip() or len(value) > 512:
+            raise ValueError('origin %s must be a nonempty string of at most 512 characters' % name)
+        normalized[name] = value
+    missing = [name for name in ORIGIN_REQUIRED if name not in normalized]
+    if missing:
+        raise ValueError('origin requires ' + ', '.join(missing))
+    return json.dumps(normalized, sort_keys=True)
 
 
 class Pool:
@@ -38,14 +74,20 @@ class Pool:
             CREATE TABLE IF NOT EXISTS outbox (
               job TEXT PRIMARY KEY, receipt TEXT NOT NULL,
               acknowledged INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS origin_repairs (
+              job TEXT PRIMARY KEY, payload_sha256 TEXT NOT NULL,
+              origin TEXT NOT NULL, proof_id TEXT NOT NULL,
+              proof_sha256 TEXT NOT NULL, created REAL NOT NULL);
             ''')
             db.execute('BEGIN IMMEDIATE')
             columns = {r[1] for r in db.execute('PRAGMA table_info(jobs)')}
-            for name, kind in [('pid', 'INTEGER'), ('pid_start', 'TEXT'), ('deadline', 'REAL')]:
+            for name, kind in [('pid', 'INTEGER'), ('pid_start', 'TEXT'), ('deadline', 'REAL'),
+                               ('origin', 'TEXT')]:
                 if name not in columns:
                     db.execute('ALTER TABLE jobs ADD COLUMN ' + name + ' ' + kind)
             outbox_columns = {r[1] for r in db.execute('PRAGMA table_info(outbox)')}
-            for name, kind in [('lease_token', 'TEXT'), ('lease_until', 'REAL')]:
+            for name, kind in [('lease_token', 'TEXT'), ('lease_until', 'REAL'),
+                               ('receipt_id', 'TEXT'), ('delivered', 'REAL')]:
                 if name not in outbox_columns:
                     db.execute('ALTER TABLE outbox ADD COLUMN ' + name + ' ' + kind)
 
@@ -62,10 +104,17 @@ class Pool:
             finally:
                 db.close()
 
-    def submit(self, key, payload, dependencies=(), replay_safe=False, max_tries=2):
+    def submit(self, key, payload, dependencies=(), replay_safe=False, max_tries=2, origin=None):
+        """Enqueue work. ``origin`` is the addressable ownership to persist with it.
+
+        A completion can only be routed back to the conversation that submitted the
+        work if the submission recorded who that was; resolving it later from
+        whatever session happens to be active is the failure this field prevents.
+        """
         dependencies = tuple(dependencies)
         if not key or max_tries < 1:
             raise ValueError('dedupe key and positive max_tries required')
+        origin = normalize_origin(origin)
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             existing = db.execute('SELECT * FROM jobs WHERE dedupe=?', (key,)).fetchone()
@@ -73,17 +122,62 @@ class Pool:
             if existing:
                 old_deps = {r[0] for r in db.execute('SELECT dependency FROM deps WHERE job=?', (existing['id'],))}
                 if (existing['payload'] != serialized or old_deps != set(dependencies)
-                        or existing['replay_safe'] != bool(replay_safe) or existing['max_tries'] != max_tries):
+                        or existing['replay_safe'] != bool(replay_safe) or existing['max_tries'] != max_tries
+                        or existing['origin'] != origin):
                     raise ValueError('dedupe key reused with different task')
                 return existing['id']
             for dependency in dependencies:
                 if not db.execute('SELECT 1 FROM jobs WHERE id=?', (dependency,)).fetchone():
                     raise ValueError('unknown dependency')
             job = uuid.uuid4().hex
-            db.execute('INSERT INTO jobs(id,dedupe,payload,max_tries,replay_safe,created) VALUES(?,?,?,?,?,?)',
-                       (job, key, serialized, max_tries, bool(replay_safe), time.time()))
+            db.execute('INSERT INTO jobs(id,dedupe,payload,max_tries,replay_safe,created,origin) '
+                       'VALUES(?,?,?,?,?,?,?)',
+                       (job, key, serialized, max_tries, bool(replay_safe), time.time(), origin))
             db.executemany('INSERT INTO deps VALUES(?,?)', [(job, d) for d in set(dependencies)])
             return job
+
+    def origin(self, job):
+        """Ownership persisted at submit time, or None for work admitted before it was recorded."""
+        with self.db() as db:
+            row = db.execute('SELECT origin FROM jobs WHERE id=?', (job,)).fetchone()
+        return json.loads(row['origin']) if row is not None and row['origin'] else None
+
+    def attach_origin(self, job, *, origin, expected_payload_sha256, proof_id, proof_sha256):
+        """Administrative recovery of one proven, terminal unaddressed result.
+
+        The host must establish request/tool provenance before calling this API.
+        No active-chat inference, resubmission, payload/result edits or queue ACK.
+        Existing ownership and evidence cannot be replaced, even by a retry.
+        """
+        if (not isinstance(job,str) or not re.fullmatch('[0-9a-f]{32}',job)
+                or not isinstance(proof_id,str) or not 1 <= len(proof_id) <= 128
+                or any(not isinstance(value,str) or not re.fullmatch('[0-9a-f]{64}',value)
+                       for value in (expected_payload_sha256,proof_sha256))):
+            raise ValueError('invalid origin recovery proof')
+        serialized = normalize_origin(origin)
+        if serialized is None or not origin.get('route'):raise ValueError('addressable recovery origin required')
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT payload,origin,status FROM jobs WHERE id=?',(job,)).fetchone()
+            if row is None or hashlib.sha256(row['payload'].encode()).hexdigest()!=expected_payload_sha256:
+                raise ValueError('origin recovery payload mismatch')
+            proof = db.execute('SELECT * FROM origin_repairs WHERE job=?',(job,)).fetchone()
+            if proof is not None:
+                if (proof['payload_sha256'],proof['origin'],proof['proof_id'],proof['proof_sha256'],row['origin']) != (
+                        expected_payload_sha256,serialized,proof_id,proof_sha256,serialized):
+                    raise ValueError('origin recovery conflicts with recorded proof')
+                return dict(job=job,attached=True,already_attached=True,proof_sha256=proof_sha256)
+            pending = db.execute('SELECT * FROM outbox WHERE job=?',(job,)).fetchone()
+            if (row['origin'] is not None or row['status'] not in ('completed','failed','cancelled')
+                    or pending is None or pending['acknowledged'] or pending['receipt_id'] or pending['delivered']
+                    or pending['lease_token'] is not None):
+                raise ValueError('origin recovery requires an untouched terminal unowned receipt')
+            db.execute('INSERT INTO origin_repairs VALUES(?,?,?,?,?,?)',
+                (job,expected_payload_sha256,serialized,proof_id,proof_sha256,time.time()))
+            changed = db.execute('UPDATE jobs SET origin=? WHERE id=? AND origin IS NULL AND payload=?',
+                                 (serialized,job,row['payload']))
+            if changed.rowcount!=1:raise RuntimeError('origin recovery changed concurrently')
+            return dict(job=job,attached=True,already_attached=False,proof_sha256=proof_sha256)
 
     def _lock(self, job):
         fd = os.open(str(self.root / 'locks' / job), os.O_CREAT | os.O_RDWR, 0o600)
@@ -199,26 +293,65 @@ class Pool:
         with self.db() as db:
             return [json.loads(r[0]) for r in db.execute('SELECT receipt FROM outbox WHERE acknowledged=0')]
 
-    def claim_receipt(self, lease=60):
-        """Single-consumer lease; transport must dedupe by job across crash windows."""
+    def claim_receipt(self, lease=60, skip=(), *, not_before=None):
+        """Single-consumer lease; transport must dedupe by job across crash windows.
+
+        ``skip`` names receipts the caller already knows it cannot address (for example
+        a task admitted before its route was persisted). Skipping happens in the ledger,
+        not by acknowledging: such a row stays pending for an operator while a later
+        deliverable completion is not blocked behind it.
+        """
         if lease <= 0:
             raise ValueError('lease must be positive')
+        if not_before is not None and (not isinstance(not_before, (int, float)) or not 0 <= not_before < float('inf')):
+            raise ValueError('not_before must be a finite nonnegative timestamp')
+        skip = tuple(skip)
+        if any(not isinstance(job, str) or not job for job in skip):
+            raise ValueError('skip must contain task ids')
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT * FROM outbox WHERE acknowledged=0 AND (lease_until IS NULL OR lease_until<?) ORDER BY rowid LIMIT 1', (time.time(),)).fetchone()
+            query = 'SELECT * FROM outbox WHERE acknowledged=0 AND (lease_until IS NULL OR lease_until<?)'
+            values = [time.time()]
+            if not_before is not None:
+                query += ' AND EXISTS (SELECT 1 FROM jobs WHERE jobs.id=outbox.job AND jobs.created>=?)'
+                values.append(not_before)
+            if skip:
+                query += ' AND job NOT IN (%s)' % ','.join('?' * len(skip))
+                values.extend(skip)
+            row = db.execute(query + ' ORDER BY rowid LIMIT 1', values).fetchone()
             if row is None:
                 return None
             token = uuid.uuid4().hex
             db.execute('UPDATE outbox SET lease_token=?,lease_until=? WHERE job=?', (token, time.time() + lease, row['job']))
             return {'token': token, 'receipt': json.loads(row['receipt'])}
 
-    def acknowledge(self, job, token=None):
+    def acknowledge(self, job, token=None, *, receipt_id=None):
+        """Mark a delivered receipt acknowledged, recording the transport's receipt id.
+
+        ``receipt_id`` is audit trail only: the ack itself is still fenced by the lease
+        token, so a stale consumer cannot acknowledge work another consumer now owns.
+        """
+        if receipt_id is not None and (not isinstance(receipt_id, str) or not receipt_id.strip()):
+            raise ValueError('receipt id must be a nonempty string when given')
+        delivered_at = time.time() if receipt_id is not None else None
         with self.db() as db:
             if token is None:
-                updated = db.execute('UPDATE outbox SET acknowledged=1 WHERE job=? AND lease_token IS NULL AND acknowledged=0', (job,))
+                updated = db.execute('UPDATE outbox SET acknowledged=1, receipt_id=COALESCE(?,receipt_id), '
+                                     'delivered=COALESCE(?,delivered) WHERE job=? AND lease_token IS NULL '
+                                     'AND acknowledged=0', (receipt_id, delivered_at, job))
             else:
-                updated = db.execute('UPDATE outbox SET acknowledged=1 WHERE job=? AND lease_token=? AND lease_until>? AND acknowledged=0', (job, token, time.time()))
+                updated = db.execute('UPDATE outbox SET acknowledged=1, receipt_id=COALESCE(?,receipt_id), '
+                                     'delivered=COALESCE(?,delivered) WHERE job=? AND lease_token=? '
+                                     'AND lease_until>? AND acknowledged=0',
+                                     (receipt_id, delivered_at, job, token, time.time()))
             return updated.rowcount == 1
+
+    def delivery_record(self, job):
+        """How a completion was delivered, or None while it is still pending."""
+        with self.db() as db:
+            row = db.execute('SELECT acknowledged,receipt_id,delivered FROM outbox WHERE job=?',
+                             (job,)).fetchone()
+        return dict(row) if row is not None else None
 
     def run_once(self, command, timeout=300, lease=60, max_output=1048576, max_file=67108864):
         if timeout <= 0 or lease <= 0 or max_output <= 0 or max_file <= 0:
@@ -290,6 +423,18 @@ class Pool:
                         result = response if isinstance(response, dict) else {'reason': 'invalid receipt'}
                     except (ValueError, UnicodeError):
                         result = {'reason': 'invalid JSON receipt'}
+                elif reason is None:
+                    # Preserve a runner's bounded public error code on exit 1.
+                    # Do not expose arbitrary stdout/stderr in the queue ledger.
+                    out.seek(0)
+                    try:
+                        failure = json.loads(out.read(max_output))
+                        code = failure.get('error') if isinstance(failure, dict) else None
+                        if (failure.get('ok') is False and isinstance(code, str)
+                                and re.fullmatch(r'[a-z][a-z0-9_]{0,79}', code)):
+                            result['runner_error'] = code
+                    except (ValueError, UnicodeError, AttributeError):
+                        pass
                 self.finish(job, attempt, ok, result)
         except Exception as exc:
             self.finish(job, attempt, False, {'reason': 'execution error', 'type': type(exc).__name__,
