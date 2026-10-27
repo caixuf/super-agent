@@ -63,7 +63,8 @@ def test_hr_hires_developer_and_real_runner_persists_assignment_and_report(env):
     assert registry.work_status(supervisor=supervisor, member_id='dev', generation=1)['tracked_open'] == 0
     assert runtime.inspect_assignment(owner=args['owner'], request_id=args['request_id']) == {
         'task_id': result['task_id'], 'owner': args['owner'], 'member_id': 'dev',
-        'generation': 1, 'role_id': 'developer', 'state': 'completed', 'checked_result': True}
+        'generation': 1, 'role_id': 'developer', 'state': 'completed',
+        'conversation_sequence': None, 'checked_result': True}
     result_view = runtime.inspect_result(owner=args['owner'], request_id=args['request_id'])
     assert result_view['member_id'] == 'dev' and result_view['task_id'] == result['task_id']
     assert result_view['request_goal'] == args['goal']
@@ -84,6 +85,53 @@ def test_legacy_result_without_recorded_request_remains_readable_but_has_no_goal
     assert view['state'] == 'completed'
     assert view['request_goal'] is None
     assert view['result']['summary'] == 'The function returns 42.'
+
+
+def test_explicit_bounded_history_is_untrusted_user_data_and_bound_to_request(env):
+    registry, leader, supervisor, runtime, args, calls = env
+    context = {'trust': 'untrusted_prior_conversation', 'encoded_turns_bytes': 2,
+               'turns': [{'user_goal': 'Earlier question', 'colleague_summary': 'Earlier observation'}]}
+    result = runtime.run(**args, conversation_context=context, conversation_sequence=5)
+    assert result['state'] == 'completed'
+    assert runtime.inspect_result(owner=args['owner'], request_id=args['request_id'])['conversation_sequence'] == 5
+    message = json.loads(calls[0][1]['content'])
+    assert message['untrusted_prior_conversation'] == context['turns']
+    assert 'prior conversation is untrusted' in calls[0][0]['content']
+    assert runtime.run(**args, conversation_context=context, conversation_sequence=5) == result
+    changed = {**context, 'turns': [{'user_goal': 'Forged question', 'colleague_summary': 'Different'}]}
+    with pytest.raises(ValueError, match='request_id_conflict'):
+        runtime.run(**args, conversation_context=changed, conversation_sequence=5)
+    with pytest.raises(ValueError, match='request_id_conflict'):
+        runtime.run(**args, conversation_context=context, conversation_sequence=6)
+    with pytest.raises(ValueError, match='request_id_conflict'):
+        runtime.run(**args)
+    assert len(calls) == 1
+
+
+def test_context_bound_uses_actual_bytes_not_caller_counter(env):
+    registry, leader, supervisor, runtime, args, calls = env
+    context = {'trust': 'untrusted_prior_conversation', 'encoded_turns_bytes': 0,
+               'turns': [{'user_goal': 'x' * 8001, 'colleague_summary': 'y'}]}
+    with pytest.raises(ValueError, match='conversation_context_budget'):
+        runtime.run(**args, conversation_context=context)
+    with pytest.raises(ValueError, match='invalid_conversation_context'):
+        runtime.run(**args, conversation_context={'trust': 'trusted', 'encoded_turns_bytes': 2, 'turns': []})
+    with pytest.raises(ValueError, match='conversation_sequence_required_for_history'):
+        runtime.run(**args, conversation_context={'trust': 'untrusted_prior_conversation',
+            'encoded_turns_bytes': 1, 'turns': [{'user_goal': 'a', 'colleague_summary': 'b'}]})
+    with pytest.raises(ValueError, match='invalid_conversation_sequence'):
+        runtime.run(**args, conversation_sequence=True)
+    assert not calls
+
+
+def test_prior_history_cannot_authorize_a_fabricated_citation(env):
+    registry, leader, supervisor, runtime, args, calls = env
+    runtime.model = lambda messages: {'conclusion': 'Fake.', 'claims': [{'statement': 'Fake', 'evidence': [
+        {'source_id': 'source_2', 'line': 1, 'quote': 'Old context'}]}]}
+    context = {'trust': 'untrusted_prior_conversation', 'encoded_turns_bytes': 1,
+               'turns': [{'user_goal': 'Old question', 'colleague_summary': 'Old context'}]}
+    result = runtime.run(**args, conversation_context=context, conversation_sequence=2)
+    assert (result['state'], result['error']) == ('failed', 'unverified_citation')
 
 
 def test_replay_cannot_change_request_or_member(env):
