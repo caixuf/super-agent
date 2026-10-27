@@ -214,7 +214,8 @@ def _public_result(raw):
 
 class DispatchService:
     def __init__(self, root, profile, allowed_roots, *, max_sources=8, max_lines=400,
-                 denied_globs=None, pool_type=None, delivery=None, route_provider=None):
+                 denied_globs=None, pool_type=None, delivery=None, route_provider=None,
+                 require_delivery_route=False):
         if not isinstance(profile, str) or not profile:
             raise ValueError('profile identity required')
         if not isinstance(root, str) or not Path(root).is_absolute():
@@ -229,6 +230,9 @@ class DispatchService:
         self.delivery = delivery or importlib.import_module('agentcore.completion_backfill')
         self.route_provider = route_provider or _bound_route
         self.max_sources, self.max_lines = max_sources, max_lines
+        if type(require_delivery_route) is not bool:
+            raise ValueError('require_delivery_route must be boolean')
+        self.require_delivery_route = require_delivery_route
         self.denied_globs = tuple(denied_globs or ()) + (
             '.env*', '*.pem', '*.key', '*credentials*', '*token*', 'auth.json',
             'config.yaml', 'llm_config.json',
@@ -299,8 +303,10 @@ class DispatchService:
         # ``_dispatch_owner`` is an ownership *proof* (one-way), never an address:
         # persist profile + session + route alongside it so a completion can be routed
         # back to the conversation that submitted the work, after reconnects and restarts.
-        job = self.pool.submit(dedupe, payload, replay_safe=True, max_tries=2,
-                               origin=self._origin(session_id))
+        origin = self._origin(session_id)
+        if self.require_delivery_route and not origin.get('route'):
+            raise PermissionError('addressable submitting conversation required before dispatch')
+        job = self.pool.submit(dedupe, payload, replay_safe=True, max_tries=2,origin=origin)
         return {'ok': True, 'task_id': job, 'status': self.pool.status(job)['status'],
                 'next_action': 'Return the task ID to the user and finish this turn. Do not poll.'}
 
@@ -314,9 +320,17 @@ class DispatchService:
         if not isinstance(job, str) or not re.fullmatch('[0-9a-f]{32}', job):
             raise PermissionError('task unavailable in this session')
         with self.pool.db() as db:
-            row = db.execute('SELECT payload FROM jobs WHERE id=?', (job,)).fetchone()
-        if row is None or json.loads(row['payload']).get('_dispatch_owner') != owner:
+            row = db.execute('SELECT payload,origin FROM jobs WHERE id=?', (job,)).fetchone()
+            repaired = db.execute('SELECT origin FROM origin_repairs WHERE job=?',(job,)).fetchone()
+        if row is None:
             raise PermissionError('task unavailable in this session')
+        proof = json.loads(row['payload']).get('_dispatch_owner')
+        if proof == owner:return
+        # Only explicit administrative provenance can recover old CLI work.
+        if proof is None and repaired is not None and repaired['origin']==row['origin']:
+            origin = json.loads(row['origin'])
+            if origin.get('profile')==self.profile and origin.get('session')==session_id:return
+        raise PermissionError('task unavailable in this session')
 
     def status(self, session_id, args):
         if not isinstance(args, dict) or set(args) != {'task_id'}:
@@ -350,6 +364,25 @@ class DispatchService:
                 'request_accepted': not bool(before['cancel']) and bool(after['cancel']),
                 'already_terminal': not bool(after['cancel']) and after['status'] in ('completed', 'failed', 'cancelled'),
                 'cancellation_requested': bool(after['cancel']), 'status': after['status']}
+
+
+class DispatchRouter:
+    """One public entry point, administrator-owned queues and per-role policies."""
+    def __init__(self,services):
+        self.services = services
+
+    def _call(self,action,session_id,args):
+        if not isinstance(args,dict): raise ValueError('dispatch arguments required')
+        role = args.get('role','analysis')
+        if not isinstance(role,str) or role not in self.services:
+            raise ValueError('unknown administrator colleague role')
+        result = getattr(self.services[role],action)(session_id,
+            {key:value for key,value in args.items() if key != 'role'})
+        return dict(result,role=role)
+
+    def submit(self,session_id,args): return self._call('submit',session_id,args)
+    def status(self,session_id,args): return self._call('status',session_id,args)
+    def cancel(self,session_id,args): return self._call('cancel',session_id,args)
 
 
 def _handler(service, action):
@@ -444,14 +477,34 @@ def register(ctx):
     ctx.register_system_prompt_section(
         'durable-dispatch-routing',
         """Capability routing for bounded read-only evidence analysis:
-Use durable_submit when the task can be completed by analyzing administrator-approved source files. Submit one task, return its ID, and finish the turn without waiting or polling. Use delegate_task for independent reasoning subtasks or work that needs separate agent context; do not use it as a substitute when durable analysis fits. Choose by the work and source bounds, not by keywords such as 'log'. Never provide an owner, shell command, runner, or model adapter.""",
+Use durable_submit for bounded read-only analysis of approved files, including named colleague roles. Choose by the work and source bounds, not by keywords. Choose an available role, submit one task, return its ID and role, then finish the turn without waiting or polling. NEVER submit interactive colleague work through terminal/execute_code or raw pool CLI: that loses the submitting conversation and cannot promise automatic delivery. Use durable_status/cancel with the returned role and task ID. Use delegate_task for independent reasoning requiring separate agent context. Never provide an owner, queue path, shell command, runner, or model adapter.""",
         position='after_memory', max_chars=1000,
     )
     pool_type, delivery = _engine(ctx.get_config('engine_root'))
+    require_route = ctx.get_config('require_delivery_route',ctx.get_config('deliver_completions',False))
     service = DispatchService(ctx.get_config('queue_root'), ctx.profile_name,
                               ctx.get_config('allowed_roots'),
                               denied_globs=ctx.get_config('denied_globs', []),
-                              pool_type=pool_type, delivery=delivery)
+                              pool_type=pool_type, delivery=delivery,require_delivery_route=require_route)
+    services = {'analysis':service}
+    colleagues = ctx.get_config('colleagues',{})
+    if not isinstance(colleagues,dict) or len(colleagues)>15:
+        raise ValueError('colleagues must be a bounded administrator mapping')
+    seen_roots = {service.pool.root.resolve()}
+    for role,settings in colleagues.items():
+        if (not isinstance(role,str) or not re.fullmatch('[a-z][a-z0-9_]{0,31}',role)
+                or role=='analysis' or not isinstance(settings,dict)
+                or set(settings)-{'queue_root','allowed_roots','denied_globs'}):
+            raise ValueError('invalid administrator colleague configuration')
+        candidate = DispatchService(settings.get('queue_root'),ctx.profile_name,settings.get('allowed_roots'),
+            denied_globs=settings.get('denied_globs',[]),pool_type=pool_type,delivery=delivery,
+            require_delivery_route=require_route)
+        if candidate.pool.root.resolve() in seen_roots:
+            raise ValueError('colleague queues must be distinct')
+        seen_roots.add(candidate.pool.root.resolve()); services[role]=candidate
+    router = DispatchRouter(services)
+    role_schema = {'type':'string','enum':list(services),
+                   'description':'Administrator colleague role; preserve it for status/cancel.'}
     source_schema = {'type': 'object', 'additionalProperties': False, 'properties': {
         'path': {'type': 'string'}, 'start_line': {'type': 'integer', 'minimum': 1},
         'end_line': {'type': 'integer', 'minimum': 1}}, 'required': ['path']}
@@ -460,14 +513,15 @@ Use durable_submit when the task can be completed by analyzing administrator-app
         'request_key': {'type': 'string', 'minLength': 1, 'maxLength': 128,
                         'description': 'Stable key for retries of the same request; use a new key for an intentional rerun.'},
         'sources': {'type': 'array', 'items': source_schema, 'minItems': 1, 'maxItems': 8},
+        'role': role_schema,
     }
     entries = (
         ('submit', 'Persist a read-only evidence analysis task. Return its ID and finish the turn; do not wait or poll.',
          submit_properties, ['goal', 'sources', 'request_key']),
         ('status', 'Read a durable task belonging to this same session, only when progress is requested.',
-         {'task_id': {'type': 'string'}}, ['task_id']),
+         {'task_id': {'type': 'string'},'role':role_schema}, ['task_id']),
         ('cancel', 'Request cancellation of a durable task belonging to this same session.',
-         {'task_id': {'type': 'string'}}, ['task_id']),
+         {'task_id': {'type': 'string'},'role':role_schema}, ['task_id']),
     )
     for action, description, properties, required in entries:
         name = 'durable_' + action
@@ -475,5 +529,5 @@ Use durable_submit when the task can be completed by analyzing administrator-app
                           schema={'name': name, 'description': description, 'parameters': {
                               'type': 'object', 'additionalProperties': False,
                               'properties': properties, 'required': required}},
-                          handler=_handler(service, action))
-    start_backfill(ctx, service)
+                          handler=_handler(router, action))
+    for colleague in services.values(): start_backfill(ctx,colleague)

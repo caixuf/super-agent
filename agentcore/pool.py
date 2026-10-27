@@ -6,6 +6,7 @@ Runner commands are administrator supplied argv arrays; never task supplied shel
 import argparse
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -73,6 +74,10 @@ class Pool:
             CREATE TABLE IF NOT EXISTS outbox (
               job TEXT PRIMARY KEY, receipt TEXT NOT NULL,
               acknowledged INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS origin_repairs (
+              job TEXT PRIMARY KEY, payload_sha256 TEXT NOT NULL,
+              origin TEXT NOT NULL, proof_id TEXT NOT NULL,
+              proof_sha256 TEXT NOT NULL, created REAL NOT NULL);
             ''')
             db.execute('BEGIN IMMEDIATE')
             columns = {r[1] for r in db.execute('PRAGMA table_info(jobs)')}
@@ -136,6 +141,43 @@ class Pool:
         with self.db() as db:
             row = db.execute('SELECT origin FROM jobs WHERE id=?', (job,)).fetchone()
         return json.loads(row['origin']) if row is not None and row['origin'] else None
+
+    def attach_origin(self, job, *, origin, expected_payload_sha256, proof_id, proof_sha256):
+        """Administrative recovery of one proven, terminal unaddressed result.
+
+        The host must establish request/tool provenance before calling this API.
+        No active-chat inference, resubmission, payload/result edits or queue ACK.
+        Existing ownership and evidence cannot be replaced, even by a retry.
+        """
+        if (not isinstance(job,str) or not re.fullmatch('[0-9a-f]{32}',job)
+                or not isinstance(proof_id,str) or not 1 <= len(proof_id) <= 128
+                or any(not isinstance(value,str) or not re.fullmatch('[0-9a-f]{64}',value)
+                       for value in (expected_payload_sha256,proof_sha256))):
+            raise ValueError('invalid origin recovery proof')
+        serialized = normalize_origin(origin)
+        if serialized is None or not origin.get('route'):raise ValueError('addressable recovery origin required')
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT payload,origin,status FROM jobs WHERE id=?',(job,)).fetchone()
+            if row is None or hashlib.sha256(row['payload'].encode()).hexdigest()!=expected_payload_sha256:
+                raise ValueError('origin recovery payload mismatch')
+            proof = db.execute('SELECT * FROM origin_repairs WHERE job=?',(job,)).fetchone()
+            if proof is not None:
+                if (proof['payload_sha256'],proof['origin'],proof['proof_id'],proof['proof_sha256'],row['origin']) != (
+                        expected_payload_sha256,serialized,proof_id,proof_sha256,serialized):
+                    raise ValueError('origin recovery conflicts with recorded proof')
+                return dict(job=job,attached=True,already_attached=True,proof_sha256=proof_sha256)
+            pending = db.execute('SELECT * FROM outbox WHERE job=?',(job,)).fetchone()
+            if (row['origin'] is not None or row['status'] not in ('completed','failed','cancelled')
+                    or pending is None or pending['acknowledged'] or pending['receipt_id'] or pending['delivered']
+                    or pending['lease_token'] is not None):
+                raise ValueError('origin recovery requires an untouched terminal unowned receipt')
+            db.execute('INSERT INTO origin_repairs VALUES(?,?,?,?,?,?)',
+                (job,expected_payload_sha256,serialized,proof_id,proof_sha256,time.time()))
+            changed = db.execute('UPDATE jobs SET origin=? WHERE id=? AND origin IS NULL AND payload=?',
+                                 (serialized,job,row['payload']))
+            if changed.rowcount!=1:raise RuntimeError('origin recovery changed concurrently')
+            return dict(job=job,attached=True,already_attached=False,proof_sha256=proof_sha256)
 
     def _lock(self, job):
         fd = os.open(str(self.root / 'locks' / job), os.O_CREAT | os.O_RDWR, 0o600)

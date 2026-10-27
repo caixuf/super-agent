@@ -83,6 +83,13 @@ class AlertOutbox:
               delivered REAL);
             CREATE INDEX IF NOT EXISTS ops_alert_pending_idx
               ON ops_alert_outbox(delivered, lease_until, created);
+            CREATE TABLE IF NOT EXISTS ops_health_conditions (
+              profile TEXT NOT NULL, scope TEXT NOT NULL,
+              generation INTEGER NOT NULL DEFAULT 0,
+              active_event_id TEXT, bad_since REAL, good_since REAL,
+              last_at REAL NOT NULL, PRIMARY KEY(profile,scope));
+            CREATE TABLE IF NOT EXISTS ops_health_events (
+              event_id TEXT PRIMARY KEY);
             """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(ops_alert_outbox)")}
             if "receipt_id" not in columns:
@@ -154,6 +161,90 @@ class AlertOutbox:
                        (event_id, profile, scope, generation, serialized, now))
             return {"drifted": True, "closed_episode": False, "event_id": event_id,
                     "created": True, "event": payload}
+
+    def observe_health(self, profile: str, scope: str, *, healthy: bool,
+                       expected: dict, observed: dict, fault_grace: float = 30,
+                       recovery_grace: float = 10, now: float | None = None,
+                       max_events: int = 4096, retain_delivered: int = 256) -> dict[str, Any]:
+        """Debounce a condition durably and enqueue fault/recovery atomically.
+
+        Repeated observations and observer restarts keep one fault episode.
+        Pending events are never discarded; capacity failure rolls back both
+        condition progress and event creation. Only this API's delivered history
+        is eligible for trimming. The caller supplies sanitized observations.
+        """
+        if (not isinstance(profile,str) or not 1 <= len(profile) <= 128
+                or not isinstance(scope,str) or not 1 <= len(scope) <= 128
+                or type(healthy) is not bool or not isinstance(expected,dict)
+                or not isinstance(observed,dict)):
+            raise ValueError('invalid health observation')
+        for value in (fault_grace,recovery_grace):
+            if type(value) not in (int,float) or not math.isfinite(value) or not 0 <= value <= 3600:
+                raise ValueError('invalid health grace')
+        now = time.time() if now is None else now
+        if type(now) not in (int,float) or not math.isfinite(now) or now < 0:
+            raise ValueError('invalid observation time')
+        if (type(max_events) is not int or not 2 <= max_events <= 4096
+                or type(retain_delivered) is not int or not 0 <= retain_delivered < max_events):
+            raise ValueError('invalid health retention budget')
+        # Reject large/non-finite input even when debouncing produces no event.
+        if len(json.dumps([expected,observed],allow_nan=False).encode()) > 8192:
+            raise ValueError('health observation budget')
+        with self.pool.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM ops_health_conditions WHERE profile=? AND scope=?',
+                             (profile,scope)).fetchone()
+            if row is None:
+                if db.execute('SELECT count(*) FROM ops_health_conditions').fetchone()[0] >= 64:
+                    raise RuntimeError('health_condition_capacity')
+                generation,active,bad,good = 0,None,None,None
+            else:
+                generation,active,bad,good = (row[key] for key in
+                    ('generation','active_event_id','bad_since','good_since'))
+                if now < row['last_at']:
+                    bad,good = None,None  # A clock regression cannot mature a grace window.
+            phase = None
+            if healthy:
+                bad = None
+                if active is not None:
+                    good = now if good is None else good
+                    if now-good >= recovery_grace: phase = 'recovery'
+                else: good = None
+            else:
+                good = None
+                bad = now if bad is None else bad
+                if active is None and now-bad >= fault_grace: phase = 'fault'
+            payload = None
+            if phase is not None:
+                old = db.execute('''SELECT e.event_id FROM ops_health_events e
+                    JOIN ops_alert_outbox o ON o.event_id=e.event_id
+                    WHERE o.delivered IS NOT NULL AND e.event_id NOT IN
+                      (SELECT active_event_id FROM ops_health_conditions WHERE active_event_id IS NOT NULL)
+                    ORDER BY o.delivered DESC,e.event_id DESC LIMIT -1 OFFSET ?''',
+                    (retain_delivered,)).fetchall()
+                ids = [(r[0],) for r in old]
+                db.executemany('DELETE FROM ops_alert_outbox WHERE event_id=?',ids)
+                db.executemany('DELETE FROM ops_health_events WHERE event_id=?',ids)
+                if db.execute('SELECT count(*) FROM ops_alert_outbox').fetchone()[0] >= max_events:
+                    raise RuntimeError('health_event_capacity')
+                if phase == 'fault': generation += 1
+                event_id = hashlib.sha256(json.dumps(
+                    ['health',profile,scope,generation,phase],separators=(',',':')).encode()).hexdigest()
+                payload = dict(kind='health_'+phase,event_id=event_id,profile=profile,scope=scope,
+                    generation=generation,expected=expected,observed=observed,
+                    fault_event_id=active if phase == 'recovery' else event_id)
+                serialized = json.dumps(payload,ensure_ascii=False,sort_keys=True,allow_nan=False)
+                db.execute('INSERT INTO ops_alert_outbox(event_id,profile,scope,generation,payload,created) VALUES(?,?,?,?,?,?)',
+                           (event_id,profile,scope,generation,serialized,now))
+                db.execute('INSERT INTO ops_health_events VALUES(?)',(event_id,))
+                active = event_id if phase == 'fault' else None
+                if phase == 'recovery': good = None
+            db.execute('''INSERT INTO ops_health_conditions VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(profile,scope) DO UPDATE SET generation=excluded.generation,
+                active_event_id=excluded.active_event_id,bad_since=excluded.bad_since,
+                good_since=excluded.good_since,last_at=excluded.last_at''',
+                (profile,scope,generation,active,bad,good,now))
+            return dict(healthy=healthy,active_event_id=active,created=payload is not None,event=payload)
 
     def claim(self, lease: float = 60) -> dict[str, Any] | None:
         if (isinstance(lease, bool) or not isinstance(lease, (int, float))
