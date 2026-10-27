@@ -80,6 +80,9 @@ bash docker/verify.sh <commit>     # 验证某个已发布提交（发布前跑�
 | ⑥ | 合成生效身份：骨架 + 业务叠加层，`{{BUSINESS_OVERLAY}}` 必须被替换干净 |
 | ⑦ | 引擎端到端：写入 → 汇合 → 召回（离线确定性嵌入，不依赖网络/模型） |
 
+换机器上线只认一条路径：[`docs/REDEPLOY.md`](docs/REDEPLOY.md)（`tools/redeploy_check.py` 一条命令复验干净 clone，
+`tools/t6_gap_audit.py` 逐条报 T6 缺口；插件「装了」不等于「工具面里看得见」，清单与重启步骤都写在里面）。
+
 **最近一次验证报告**：[`docs/reports/2026-10-26_release_freeze_report.md`](docs/reports/2026-10-26_release_freeze_report.md)
 （候选提交 `6333c92`，干净室**退出码 0**；同一目录另有 `.html` 单文件版可分享。）
 > 更早的两份报告（`2026-10-25_clean_room_deploy_report.md`、`2026-10-26_identity_and_feature_verification_report.md`）
