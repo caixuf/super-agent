@@ -160,7 +160,10 @@ def check_patches(result):
 
 
 def check_card_roundtrip(result):
-    """The patched adapter really builds the cards we expect (mock, no platform calls)."""
+    """The patched adapter really builds the cards we expect (mock, no platform calls).
+
+    Needs HERMES_FEISHU_ADAPTER to point at a patched adapter; the tests skip otherwise.
+    """
     print("\n== ③b card round-trip on the patched adapter", flush=True)
     agent = Path(os.path.expanduser(os.environ.get("HERMES_AGENT_DIR", "~/.hermes/hermes-agent")))
     adapter = agent / "plugins/platforms/feishu/adapter.py"
