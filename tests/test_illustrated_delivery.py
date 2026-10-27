@@ -102,5 +102,14 @@ print('real hook registration passed')
     result = subprocess.run([interpreter, '-c', code, str(host), str(REPO), str(PATH), str(tmp_path / 'home')],
                             env=dict(os.environ, HERMES_HOME=str(tmp_path / 'home')),
                             capture_output=True, text=True, timeout=60)
+    # A missing third-party module (e.g. ruamel.yaml) in the selected interpreter means the
+    # Hermes tree cannot be imported at all: that is an environment gap, not a hook failure.
+    missing = [line for line in (result.stderr or "").splitlines()
+               if line.startswith("ModuleNotFoundError: No module named")]
+    known_hermes_modules = ("hermes_cli", "gateway", "agent", "tools", "hermes_constants", "pm")
+    if (result.returncode != 0 and missing
+            and not any(name.split("'")[1].split(".")[0] in known_hermes_modules
+                        for name in missing if "'" in name)):
+        pytest.skip("Hermes runtime lacks a dependency: " + missing[-1])
     assert result.returncode == 0, result.stderr[-3000:]
     assert 'real hook registration passed' in result.stdout
