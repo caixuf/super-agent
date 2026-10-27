@@ -90,7 +90,7 @@ RETURN_OLD_V11 = '''        header = {"title": {"tag": "plain_text", "content": 
 RETURN_NEW = '''        header = {"title": {"tag": "plain_text", "content": name},
                   "template": "green" if finalize else "blue"}
         if card_components_v2():
-            # 2.4 只认 plain_text / table（1.0 的 markdown、note 会 200861 整卡回退）
+            # 2.4 rejects the 1.0 markdown/note tags; plain_text and table are accepted.
             card: dict[str, Any] = {"schema": "2.0", "config": {"update_multi": True},
                                     "header": header, "body": {"elements": elements}}
         elif _card_v2_enabled():
@@ -105,7 +105,7 @@ RETURN_PROBE_V11 = "if _card_v2_enabled():\n            # update_multi stays tru
 RETURN_NEW_V11 = RETURN_NEW.replace('''        header = {"title": {"tag": "plain_text", "content": name},
                   "template": "green" if finalize else "blue"}
 ''', '')
-RETURN_PROBE = "2.4 只认 plain_text / table"
+RETURN_PROBE = "if card_components_v2():\n            # 2.4 rejects"
 
 
 #: Every shape the helper block has taken on a real host (the 2.4 upgrade rewrites it).
@@ -140,7 +140,8 @@ EDITS = [
     ("build-v11", BUILD_OLD_V11, _strip_24(BUILD_NEW), BUILD_PROBE),
     ("tip", NOTE_OLD, NOTE_NEW, NOTE_PROBE),
     # both shapes end in the same 2.0 payload; one probe covers either tree
-    ("return", RETURN_OLD, RETURN_NEW, RETURN_PROBE),
+    # A tree without the streaming tip (synthetic or a host variant) still returns the 1.0 card.
+    ("return-no-tip", RETURN_OLD, RETURN_NEW, RETURN_PROBE),
     ("return-v11", RETURN_OLD_V11, _strip_24(RETURN_NEW_V11), RETURN_PROBE),
 ]
 
