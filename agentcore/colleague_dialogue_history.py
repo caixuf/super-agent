@@ -223,8 +223,9 @@ class ColleagueDialogueHistory:
         ``authorize_prior(task_id)`` must be a host-owned, fail-closed policy
         that proves *all* old source content remains permitted under the current
         request's authenticated principal, exact source ranges and current
-        permissions. The callback must consult trusted execution/source records,
-        not model input or a role label. Missing, false or failed authorization
+        permissions, including transitive sources inherited from earlier turns.
+        The callback must consult trusted execution/source lineage records, not
+        model input or a role label. Missing, false or failed authorization
         yields no earlier turns. The current runtime does not yet furnish that
         full reauthorization source record; never replace it with ``lambda: True``
         in integration. Previously permitted data may since have been revoked.
