@@ -151,7 +151,10 @@ def _workers_doc(repo):
 
 
 def _skills_neutral(repo):
-    banned = ("imfl", "tmas", "djs")
+    # Load the word list from its single source of truth instead of copying it here:
+    # a second copy would trip the neutrality ratchet on this very file.
+    sys.path.insert(0, str(repo / "tests"))
+    from test_repo_neutrality import BANNED as banned  # noqa: F401
     hits = []
     for skill in (repo / "skills").glob("*/SKILL.md"):
         name = skill.parent.name.lower()
