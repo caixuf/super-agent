@@ -40,6 +40,7 @@ plugins:
       min_confidence: 0.6      # 只能调高，低于 0.6 会被抬回
       top_k: 5
       max_context_chars: 4000
+      rebuild_min_interval_s: 600   # 文档变更后最多每 10 分钟重建一次索引（0 = 不节流）
       timeout: 10
 ```
 
@@ -53,6 +54,11 @@ hermes --profile imfl plugins enable local-model-grounding
 ```
 
 首次启用后索引会在后台构建；`index_dir` 下出现 `meta.json` + `vectors.f32` 即完成。
+
+索引重建策略：文档一旦变更（另一个 agent 提交 handover 也算），后台线程会重建，
+但受 `rebuild_min_interval_s`（默认 600s）节流，且**永不在回合内同步重建** ——
+重建要重新 embedding 全量文档（实测 219s），放在回合里会直接毁掉响应时间。
+索引过期时该回合只是没有先例注入，不影响判定与回合本身。
 
 ## 审计
 

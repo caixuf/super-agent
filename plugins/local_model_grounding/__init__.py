@@ -168,6 +168,8 @@ class Grounding:
         self._index_ok = False
         self._index_checked = 0.0
         self._index_building = False
+        self._last_build_attempt = 0.0
+        self.rebuild_interval = float(ctx.get_config("rebuild_min_interval_s", 600) or 0)
 
     # -- audit -------------------------------------------------------------
     def _audit(self, row: Dict[str, Any]) -> None:
@@ -181,7 +183,14 @@ class Grounding:
     def _roots(self) -> List[Path]:
         return [Path(p).expanduser() for p in self.docs_roots]
 
-    def _ensure_index(self) -> bool:
+    def _index_fresh(self) -> bool:
+        """Cheap freshness probe, cached for a minute. Never starts a build.
+
+        Docs change whenever another agent commits a handover, and a rebuild
+        re-embeds the whole corpus (minutes of gateway traffic). A live turn must
+        therefore never trigger a build inline: it either uses the current index
+        or goes without precedents.
+        """
         if not self.index_dir or not self.docs_roots or not self.client.configured:
             return False
         now = time.time()
@@ -191,27 +200,32 @@ class Grounding:
             self._index_checked = now
             try:
                 self._index_ok = precedent.index_ready(self.index_dir, self._roots())
-            except Exception:
+            except Exception as exc:
                 self._index_ok = False
+                log.warning("local-model-grounding index probe failed: %s", type(exc).__name__)
             return self._index_ok
 
     def build_index_now(self) -> Optional[str]:
         if not self.index_dir or not self.docs_roots or not self.client.configured:
             return None
+        self._last_build_attempt = time.time()
         path = precedent.build_index(self.index_dir, self._roots(), self.client)
         with self._lock:
             self._index_ok = bool(path)
             self._index_checked = time.time()
         return path
 
-    def start_index_build(self) -> None:
-        """Warm the index in the background; never block plugin load."""
-        if self._ensure_index():
+    def _launch_build(self, *, ignore_throttle: bool) -> None:
+        if not self.index_dir or not self.docs_roots or not self.client.configured:
             return
         with self._lock:
             if self._index_building:
                 return
+            now = time.time()
+            if not ignore_throttle and now - self._last_build_attempt < self.rebuild_interval:
+                return
             self._index_building = True
+            self._last_build_attempt = now
 
         def _work() -> None:
             try:
@@ -226,6 +240,16 @@ class Grounding:
                     self._index_building = False
 
         threading.Thread(target=_work, name="local-model-grounding-index", daemon=True).start()
+
+    def start_index_build(self) -> None:
+        """Initial warm-up at plugin load; ignores the rebuild throttle."""
+        if not self._index_fresh():
+            self._launch_build(ignore_throttle=True)
+
+    def ensure_index_async(self) -> None:
+        """Turn-time guard: refresh in the background, never inline."""
+        if not self._index_fresh():
+            self._launch_build(ignore_throttle=False)
 
     # -- decider -----------------------------------------------------------
     def _decide(self, failure: str, session_id: str, source: str) -> Optional[Dict[str, Any]]:
@@ -276,6 +300,7 @@ class Grounding:
                      conversation_history: Optional[Sequence[Any]] = None,
                      **kwargs: Any) -> Optional[Dict[str, str]]:
         try:
+            self.ensure_index_async()
             failure = recent_failure(conversation_history, user_message)
             segments: List[str] = []
 
@@ -284,7 +309,7 @@ class Grounding:
                 if verdict and verdict.get("skip_llm"):
                     segments.append(_prescreen_text(verdict, self.min_confidence))
 
-            if self._ensure_index():
+            if self._index_fresh():
                 query = "\n\n".join(part for part in (user_message, failure) if part)
                 hits = precedent.retrieve(query, self.index_dir, self.client,
                                           top_k=self.top_k, min_score=self.min_score)

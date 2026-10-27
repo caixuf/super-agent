@@ -148,6 +148,12 @@ def build_index(index_dir: str, roots: Sequence[Path], client: Any, *,
     return str(vec_path)
 
 
+#: Vectors are a multi-megabyte file; reloading them on every turn would cost
+#: more than the query itself. Cache on (path, mtime, size) and reload when the
+#: index is rebuilt.
+_CACHE: Dict[str, Any] = {"key": None, "matrix": None, "meta": None, "dim": 0}
+
+
 def _load(index_dir: str) -> Tuple[Optional[array.array], Optional[Dict[str, Any]], int]:
     out = Path(index_dir).expanduser()
     meta_path = out / "meta.json"
@@ -155,6 +161,10 @@ def _load(index_dir: str) -> Tuple[Optional[array.array], Optional[Dict[str, Any
     if not meta_path.is_file() or not vec_path.is_file():
         return None, None, 0
     try:
+        stat = vec_path.stat()
+        key = (str(vec_path), stat.st_mtime_ns, stat.st_size)
+        if _CACHE.get("key") == key and _CACHE.get("matrix") is not None:
+            return _CACHE["matrix"], _CACHE["meta"], int(_CACHE["dim"])
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         if meta.get("version") != INDEX_VERSION:
             return None, None, 0
@@ -163,6 +173,7 @@ def _load(index_dir: str) -> Tuple[Optional[array.array], Optional[Dict[str, Any
         matrix = array.array("f")
         with vec_path.open("rb") as handle:
             matrix.fromfile(handle, count * dim)
+        _CACHE.update({"key": key, "matrix": matrix, "meta": meta, "dim": dim})
         return matrix, meta, dim
     except (OSError, ValueError, EOFError):
         return None, None, 0
