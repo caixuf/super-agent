@@ -147,7 +147,10 @@ def _reply(ok, state, message, **extra):
 
 
 def _handler(deliver, resolve, ctx, token):
-    def call_deliver(**kwargs):
+    def call_deliver(args=None, **kwargs):
+        # Hermes dispatches plugin tools as ``handler(args_dict, **kwargs)`` (tools/registry.py),
+        # so the argument dict arrives POSITIONALLY; keyword calls must keep working too.
+        kwargs = {**kwargs, **(args if isinstance(args, dict) else {})}
         path = kwargs.get("path")
         try:
             root = _outbox(ctx)
@@ -172,7 +175,8 @@ def _handler(deliver, resolve, ctx, token):
                       document_id=outcome.get("document_id", ""),
                       warnings=outcome.get("warnings") or [])
 
-    def call_resolve(**kwargs):
+    def call_resolve(args=None, **kwargs):
+        kwargs = {**kwargs, **(args if isinstance(args, dict) else {})}
         ticket = kwargs.get("ticket")
         if not isinstance(ticket, str) or not ticket.strip():
             return _reply(False, "error", "ticket is required")

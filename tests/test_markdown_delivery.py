@@ -210,6 +210,22 @@ def test_credentials_come_from_the_profile_env_and_are_cached():
     assert token.authorization() == "Bearer cached", "a live token must not be refetched"
 
 
+def test_handlers_accept_the_positional_argument_dict(tmp_path):
+    """Hermes dispatches plugin tools as ``handler(args_dict)``; keyword-only handlers fail live."""
+    ctx = _ctx(tmp_path)
+    handlers = plugin._handler(
+        lambda path, **kw: {"state": "delivered", "url": "https://x/docx/pos", "document_id": "pos"},
+        lambda ticket, **kw: {"state": "delivered", "url": "https://x/docx/pos2", "document_id": "pos2"}, ctx,
+        _Token())
+    source = tmp_path / "positional.md"
+    source.write_text("# x", encoding="utf-8")
+
+    out = json.loads(handlers["md_deliver"]({"path": str(source)}))
+
+    assert out["ok"] is True and out["message"] == "https://x/docx/pos"
+    assert not source.exists()
+
+
 def test_guidance_only_appears_for_document_requests():
     assert plugin._guide(user_message="查一下这个端口是多少") is None
     guidance = plugin._guide(user_message="把结论整理成文档给我")
