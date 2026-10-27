@@ -74,3 +74,20 @@ service failure 0.139 seconds; diagnostics confirmed the socket transport. A
 prior harness incorrectly required byte-identical checkpoints across restart;
 that failure was retained and replaced with source/history/monotonic-cursor
 checks. The full working-tree verification passed 874 tests with 9 skips.
+
+Further host rehearsals exposed an error in the external cache-eviction helper:
+it opened and closed the database file in a process that still owned SQLite
+connections. On Unix, that close can release the process's SQLite file locks;
+see [SQLite's locking warning](https://sqlite.org/howtocorrupt.html#_posix_advisory_locks_canceled_by_a_separate_thread_doing_close_).
+Two isolated stores later failed freelist checks. Earlier host latency figures
+remain historical observations, not proof of storage safety. Neither damaged
+store was installed as canonical data.
+
+The host now executes raw-file cache/page diagnostics in independent processes.
+A real writer-lock control on SQLite 3.45.1 reproduced loss of exclusion after
+the old same-process close; the new helpers preserved exclusion. A fresh complete
+daemon rehearsal then passed both initial and final quick_check, including
+external write, retirement, restart and fixture cleanup. Four IPC calls measured
+0.769/0.649/0.636/0.517 seconds; the 21-case quality maximum was 0.612 seconds.
+Sequential reads aid integrity scans only, separately from timed queries, each
+of which still requests source-file cache eviction through the safe helper.
