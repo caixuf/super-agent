@@ -34,6 +34,9 @@ Older backups, changed sources and unavailable checkpoint history require
 reviewed recovery; restarting does not authorize copying arbitrary old data.
 The witness itself must not be rolled back with the database backup. This is
 not a substitute for the outstanding semantic correction/revocation replay.
+Normal restart may advance the checkpoint if the source committed more changes
+after the last query. Byte-for-byte checkpoint equality is not the invariant:
+identity/history must match and the cursor must never move backwards.
 
 Idle maintenance renews the lease, applies changes and prunes acknowledged
 events. It also renews while embeddings are pending. Pending work can recover;
@@ -48,7 +51,7 @@ cgroup RSS/file-cache budget. Production units must apply their own memory and
 restart limits. Safe stop releases the consumer and removes the socket. Exclusive
 locks prevent two writers of the same socket/checkpoint.
 
-Validation includes 24 focused service/view tests: checkpoint failure ordering,
+Validation includes 25 focused service/view tests: checkpoint failure ordering,
 older-source rejection, idle renewal, configuration drift, payload caps, protocol
 identity/build/type checks and duplicate owners. A 1.92 GB isolated-store daemon
 rehearsal used real 1024-dimensional vectors, a six-second lease and an eight-second
@@ -64,3 +67,10 @@ no false hit, precision 90.48%, no cross-user data, maximum 0.664 seconds. The
 foreign-principal probe was explicitly denied. Cache eviction is best effort on
 the isolated source inode, not a guarantee of hardware-cold state. No production
 journal, service unit or caller routing was activated in this rehearsal.
+
+A subsequent full IPC repeat measured 2.746/0.706/0.635/0.499 seconds, with the
+21-case maximum at 0.645 seconds. Its CLI round trip was 0.145 seconds and stopped
+service failure 0.139 seconds; diagnostics confirmed the socket transport. A
+prior harness incorrectly required byte-identical checkpoints across restart;
+that failure was retained and replaced with source/history/monotonic-cursor
+checks. The full working-tree verification passed 874 tests with 9 skips.

@@ -59,6 +59,20 @@ def test_corrupt_checkpoint_cannot_be_reinitialized_over_existing_history(tmp_pa
     assert p.read_text()=='broken'
 
 
+def test_restart_may_advance_witness_when_source_committed_after_last_query(engine,tmp_path):
+    source,fid=seed(engine);path=tmp_path/'private/state.json'
+    serving=ServingMemory(path,initialize=True)
+    before=dict(serving.checkpoint.record);serving.close()
+    with source:source.execute("UPDATE working_fact SET status='deprecated' WHERE fact_id=?",(fid,))
+    restarted=ServingMemory(path)
+    try:
+        assert restarted.health()['ready'] and restarted.checkpoint.record['seq']>before['seq']
+        for key in ('binding','source_identity','epoch','schema_version'):
+            assert restarted.checkpoint.record[key]==before[key]
+        assert not restarted.view.recall('服务预算')['results']
+    finally:restarted.close();source.close()
+
+
 def test_idle_maintenance_renews_lease_and_captures_external_retirement(engine,tmp_path):
     source,fid=seed(engine);serving=ServingMemory(tmp_path/'private/state.json',initialize=True,lease_seconds=5)
     try:
