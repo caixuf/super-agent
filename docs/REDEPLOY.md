@@ -72,8 +72,11 @@ bash install/install.sh --profile <name> --compose-soul <业务叠加层.md>
 
 | 现象 | 原因 | 处理 |
 | :--- | :--- | :--- |
-| 插件已启用、工具不出现 | `platform_toolsets.<platform>` 显式清单里没有它；或没重启网关 | 第 3 节：加清单 + 重启 |
-| 插件工具报 `takes 0 positional arguments but 1 was given` | 工具按位置参数派发 `handler(args_dict, **kwargs)` | 处理器签名写成 `def call(args=None, **kwargs)` |
-| 卡片表格显示「请升级客户端」 | 卡片 JSON 1.0 不渲染表格；需 2.0 | 设 `HERMES_FEISHU_CARD_V2=1`（网关环境）+ 重启 |
+| 飞书群里机器人「在线但不回」 | `FEISHU_ALLOWED_USERS` 不含你的身份，网关日志是 `Unauthorized user (ignored): Dropped a message from unrecognized` | 把身份加进该 profile `.env` 的 allowlist，重启网关 |
+| 卡片表格显示「请升级客户端」 | 卡片 JSON 2.0 需要客户端 ≥ 7.20；开关没开也会回退 post | `HERMES_FEISHU_CARD_V2=1`（网关环境）+ 重启；关掉即回旧行为 |
+| 卡片 PATCH 反复失败 | 更新前后都必须是共享卡：`config.update_multi: true` 每一帧都要带 | 用 `patches/patch_card_markdown_native.py`（已含） |
 | 卡片表格被 API 拒 `200905` | `row_height: "auto"` 非法 | 用 `low/middle/high` 或像素值 |
-| `.md` 报告以附件发出、打开是源码 | 没走文档导入 | 用 `md_deliver`，见 `plugins/markdown_delivery/README.md` |
+| 卡片表格被拒 `200914` | 行数据与列类型不匹配（例如 `lark_md` 列给了对象） | 单元格一律字符串 |
+| `md_deliver` 报 `99991672` | 应用缺上传素材作用域（`drive:drive` / `docs:document.media:upload` 等） | 在应用后台授权；错误信息会带平台返回的完整作用域列表 |
+| `.md` 报告还是以附件发出 | 旧的 `##FILE:` 习惯；或转换失败后仍有客户端补发 | 规则：只给 `md_deliver` 返回的链接；relay 会把未转换的 `.md` 拦下（`markdown_not_converted`） |
+| 插件工具报 `takes 0 positional arguments but 1 was given` | 工具按位置参数派发 `handler(args_dict, **kwargs)` | 处理器签名写成 `def call(args=None, **kwargs)` |
