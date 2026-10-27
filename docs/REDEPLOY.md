@@ -72,7 +72,7 @@ bash install/install.sh --profile <name> --compose-soul <业务叠加层.md>
 
 | 现象 | 原因 | 处理 |
 | :--- | :--- | :--- |
-| 飞书群里机器人「在线但不回」 | `FEISHU_ALLOWED_USERS` 不含你的身份，网关日志是 `Unauthorized user (ignored): Dropped a message from unrecognized` | 把身份加进该 profile `.env` 的 allowlist，重启网关 |
+| 消息平台里机器人「在线但不回」 | `FEISHU_ALLOWED_USERS` 不含你的身份，网关日志是 `Unauthorized user (ignored): Dropped a message from unrecognized` | 把身份加进该 profile `.env` 的 allowlist，重启网关 |
 | 卡片表格显示「请升级客户端」 | 卡片 JSON 2.0 需要客户端 ≥ 7.20；开关没开也会回退 post | `HERMES_FEISHU_CARD_V2=1`（网关环境）+ 重启；关掉即回旧行为 |
 | 卡片 PATCH 反复失败 | 更新前后都必须是共享卡：`config.update_multi: true` 每一帧都要带 | 用 `patches/patch_card_markdown_native.py`（已含） |
 | 卡片表格被 API 拒 `200905` | `row_height: "auto"` 非法 | 用 `low/middle/high` 或像素值 |
