@@ -34,7 +34,12 @@ settings=dict(enabled=True,engine_root=str(engine),queue_root=str(root),allowed_
               delivery_transport_file=str(engine/'runtime/hermes_completion_transport.py'))
 for key,value in settings.items():save_plugin_setting('durable-dispatch',(key,),value)
 pool=Pool(root)
-origin=dict(profile='default',session='source-session',route=route,channel='feishu',chat='chat-1',thread='thread-1')
+# The host derives the profile name from HERMES_HOME: unset/~/.hermes is 'default',
+# ~/.hermes/profiles/<name> is <name>, and any other path (a temp home like this one)
+# is 'custom'. A hard-coded name stops matching the moment the home moves, so derive it.
+from hermes_cli.profiles import get_active_profile_name
+profile=get_active_profile_name()
+origin=dict(profile=profile,session='source-session',route=route,channel='feishu',chat='chat-1',thread='thread-1')
 job=pool.submit('real-host-direct',{'goal':'read-only review'},origin=origin)
 claimed,fd=pool.claim()
 directory=root/'attempts'/claimed['attempt'];directory.mkdir(parents=True,exist_ok=True)

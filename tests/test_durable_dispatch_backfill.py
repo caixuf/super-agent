@@ -349,7 +349,20 @@ def test_real_host_public_injection_receives_the_persisted_route(tmp_path):
         pytest.skip('Hermes host source unavailable')
     if not runtime.is_file():
         pytest.skip('Hermes host interpreter unavailable')
-    origin = dict(ORIGIN, profile='default')
+    # The plugin gates delivery on the profile name the host derives from HERMES_HOME,
+    # and a temp home resolves to 'custom' — derive the same value instead of assuming
+    # the host's own profile name, which only matches when HERMES_HOME is unset.
+    probe = subprocess.run(
+        [str(runtime), '-c',
+         'import sys;sys.path.insert(0,sys.argv[1]);'
+         'from hermes_cli.profiles import get_active_profile_name;'
+         'print(get_active_profile_name())', str(host)],
+        env=dict(os.environ, HERMES_HOME=str(tmp_path / 'home')),
+        capture_output=True, text=True, timeout=40)
+    if probe.returncode != 0:
+        pytest.skip('Hermes host cannot report its profile name: %s' % probe.stderr[-200:])
+    profile = probe.stdout.strip().splitlines()[-1]
+    origin = dict(ORIGIN, profile=profile)
     pool = Pool(str(tmp_path / 'queue'))
     job = pool.submit('host', {'goal': 'g'}, replay_safe=True, origin=origin)
     _finish(pool, job)
