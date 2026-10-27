@@ -30,18 +30,19 @@ plugins:
     - local-model-grounding
   entries:
     local-model-grounding:
-      enabled: true
-      gateway_url: "http://192.168.137.2:8920"
-      token_file: "/home/emily/.config/local-model/token"   # 0600，勿写进仓
-      docs_roots:
-        - "/home/emily/imfl_auto_test/docs/handover"
-      index_dir: "/home/emily/.local/state/local-model-grounding/index"
-      audit_path: "/home/emily/.local/state/local-model-grounding/audit.jsonl"
-      min_confidence: 0.6      # 只能调高，低于 0.6 会被抬回
-      top_k: 5
-      max_context_chars: 4000
-      rebuild_min_interval_s: 600   # 文档变更后最多每 10 分钟重建一次索引（0 = 不节流）
-      timeout: 10
+      settings:                  # 与既有插件一致：配置放在 settings 下
+        enabled: true
+        gateway_url: "http://192.168.137.2:8920"
+        token_file: "/home/emily/.config/local-model/token"   # 0600，勿写进仓
+        docs_roots:
+          - "/home/emily/imfl_auto_test/docs/handover"
+        index_dir: "/home/emily/.local/state/local-model-grounding/index"
+        audit_path: "/home/emily/.local/state/local-model-grounding/audit.jsonl"
+        min_confidence: 0.6      # 只能调高，低于 0.6 会被抬回
+        top_k: 5
+        max_context_chars: 4000
+        rebuild_min_interval_s: 600   # 文档变更后最多每 10 分钟重建一次索引（0 = 不节流）
+        timeout: 10
 ```
 
 ## 安装
