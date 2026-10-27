@@ -61,18 +61,26 @@ def plugin_names():
 
 
 def enabled_list(config_path: Path):
-    """``plugins.enabled`` as the installer writes it (2-space child), or None."""
-    lines = config_path.read_text(encoding="utf-8").splitlines() if config_path.is_file() else []
-    for index, line in enumerate(lines):
-        if line.startswith("  enabled:") and not line.startswith("    "):
-            found = []
-            for follower in lines[index + 1:]:
-                if follower.startswith("    - "):
-                    found.append(follower.strip()[2:].strip("\"'"))
-                elif follower.strip() and not follower.startswith("    "):
-                    break
-            return found
-    return None
+    """``plugins.enabled`` as installed, read the way the config itself is structured."""
+    if not config_path.is_file():
+        return None
+    try:
+        import yaml
+    except ImportError:  # tiny reader: the list items are 2- or 4-space indented children
+        lines = config_path.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            if line.startswith("  enabled:") and not line.startswith("    "):
+                found = []
+                for follower in lines[index + 1:]:
+                    stripped = follower.strip()
+                    if stripped.startswith("- ") and follower.startswith(("  ", "    ")):
+                        found.append(stripped[2:].strip("\"'"))
+                    elif stripped and not follower.startswith(" "):
+                        break
+                return found
+        return None
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    return list((data.get("plugins") or {}).get("enabled") or [])
 
 
 def check_clone(result, ref):
@@ -91,7 +99,7 @@ def check_clone(result, ref):
 
 
 def check_install(result):
-    print("\n== ② fresh profile install + plugin enable list")
+    print("\n== ② fresh profile install + plugin enable list", flush=True)
     with tempfile.TemporaryDirectory() as home:
         env = {k: v for k, v in os.environ.items()
                if k not in ("HERMES_HOME", "HERMES_AGENT_DIR", "PLUGIN_ENABLE_MODE")}
@@ -149,7 +157,7 @@ def check_patches(result):
 
 
 def check_verify(result):
-    print("\n== ④ repo self-check (verify.sh)")
+    print("\n== ④ repo self-check (verify.sh)", flush=True)
     proc = run(["bash", str(REPO / "verify.sh")], timeout=3600)
     if proc.returncode == 0:
         tail = [line for line in proc.stdout.splitlines() if "passed" in line][-1:]
