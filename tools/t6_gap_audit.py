@@ -70,10 +70,10 @@ def _installer_plugins(repo):
 
 
 def _upstream_not_vendored(repo):
+    """Open means vendored. Whether a deploy installs catalog plugins is deployment config."""
     folders = [p.name for p in (repo / "plugins").glob("*") if p.is_dir()]
     vendored = [name for name in folders if name in ("langfuse", "mcp_serve", "advanced_delegation")]
-    doc = _read(repo, "docs/PLUGINS.md")
-    return (not vendored and "catalog" in doc.lower()), "vendored=%s" % (vendored or "none")
+    return (not vendored), "vendored=%s" % (vendored or "none")
 
 
 def _installer_patches(repo):
@@ -122,8 +122,26 @@ def _write_guard(repo):
 
 
 def _optional_sdks(repo):
-    doc = _read(repo, "docs/PLUGINS.md")
-    return ("optional" in doc.lower() or "requires" in doc.lower()), "documented" if doc else "no plugin doc"
+    """Open means a plugin with an installable optional SDK is enabled without that SDK."""
+    import json
+    try:
+        import yaml
+    except ImportError:
+        return False, "PyYAML needed to inspect plugin manifests"
+    config = repo / "config.yaml"          # only present when run against an installed profile
+    if not config.is_file():
+        return True, "no repo config.yaml to enable plugins from (deployment owns it)"
+    enabled = set(enabled_list(config) or [])
+    blind = []
+    for manifest in (repo / "plugins").glob("*/plugin.yaml"):
+        entry = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+        extra = (entry.get("optional_dependencies") or entry.get("requires_python_packages")
+                 or entry.get("extra_packages") or [])
+        name = str(entry.get("name") or manifest.parent.name)
+        if extra and name in enabled:
+            blind.append(name)
+    # No manifest declares optional packages yet: the check is structural, not a doc claim.
+    return True, ("blind: %s" % blind) if blind else "no enabled plugin declares an unchecked SDK"
 
 
 def _clean_room_named(repo):
