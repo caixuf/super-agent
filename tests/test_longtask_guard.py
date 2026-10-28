@@ -262,3 +262,52 @@ def test_register_wires_both_hooks():
     guard.register(ctx)
     assert set(ctx.hooks) == {"pre_tool_call", "post_tool_call"}
     assert ctx.hooks["post_tool_call"] is guard._on_post_tool_call
+
+
+# ── 回执形态识别：宿主可能把「改写前」的参数交给 post 钩子 ────────────────
+# 现场实证：emily 上 27 次转后台、账本一条没落 —— post 钩子拿到的是模型原始参数
+# （没有 background），于是 old 代码直接 return。回执本身能证明这是后台进程。
+def test_post_hook_registers_from_a_spawn_receipt_without_background_args(monkeypatch):
+    fake = _FakeLedger()
+    monkeypatch.setattr(guard, "_ledger", lambda: fake)
+    monkeypatch.setattr(guard, "_CTX", _Ctx())
+    guard._on_post_tool_call(
+        tool_name="terminal",
+        args={"command": "pip install -q markdown", "timeout": 300},   # 原始参数：没有 background
+        result={"output": "Background process started", "session_id": "proc_7a6d7683664e",
+                "pid": 7342, "exit_code": 0, "error": None, "notify_on_complete": True},
+        session_id="session-one")
+    assert len(fake.register_calls) == 1
+    args, kwargs = fake.register_calls[0]
+    assert args == ("proc_7a6d7683664e",)
+    assert kwargs["pid"] == 7342 and kwargs["state"] == "running"
+    assert fake.exit_calls == []          # spawn receipt carries exit_code=0 while alive
+
+
+def test_post_hook_registers_from_a_yield_receipt(monkeypatch):
+    fake = _FakeLedger()
+    monkeypatch.setattr(guard, "_ledger", lambda: fake)
+    monkeypatch.setattr(guard, "_CTX", _Ctx())
+    guard._on_post_tool_call(
+        tool_name="terminal",
+        args={"command": "pytest tests", "timeout": 300},
+        result={"output": "collected 12 items", "returncode": None,
+                "yielded_session_id": "proc_ac42e2e34dbb", "pid": 371772,
+                "notify_on_complete": True},
+        session_id="session-one")
+    assert [call[0] for call in fake.register_calls] == [("proc_ac42e2e34dbb",)]
+
+
+def test_post_hook_ignores_a_foreground_result_quoting_the_spawn_note(monkeypatch):
+    fake = _FakeLedger()
+    monkeypatch.setattr(guard, "_ledger", lambda: fake)
+    monkeypatch.setattr(guard, "_CTX", _Ctx())
+    # stdout that happens to equal the spawn note, but no tracked process: never a spawn.
+    guard._on_post_tool_call(tool_name="terminal", args={"command": "echo ..."},
+                             result={"output": "Background process started", "exit_code": 0},
+                             session_id="s1")
+    # a tail that merely mentions the note while a process id is present is not a spawn either.
+    guard._on_post_tool_call(tool_name="terminal", args={"command": "pytest tests"},
+                             result={"output": "Background process started\nok", "session_id": "proc_1"},
+                             session_id="s1")
+    assert fake.register_calls == []

@@ -25,6 +25,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -91,6 +92,25 @@ def _ledger():
         return None
 
 
+#: The host's own background-spawn receipt (``terminal(background=True)`` result body).
+_SPAWN_RECEIPT_OUTPUT = "Background process started"
+#: Tracked background process ids: ``proc_`` + short hex suffix.
+_PROCESS_ID = re.compile(r"proc_[0-9a-f]{1,}")
+
+
+def _named_process(payload: dict) -> Optional[str]:
+    """The tracked background process a terminal result names, if it names one.
+
+    The spawn result carries ``session_id``; the yield-to-background result carries
+    ``yielded_session_id``. Anything else is not a background identity.
+    """
+    for key in ("session_id", "yielded_session_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and _PROCESS_ID.fullmatch(value):
+            return value
+    return None
+
+
 def _parse_result(result: Any) -> Optional[dict]:
     if isinstance(result, dict):
         return result
@@ -111,12 +131,16 @@ def _on_post_tool_call(tool_name: str = "", args: Any = None, result: Any = None
     payload = _parse_result(result)
     if payload is None:
         return None
-    background = bool(args.get("background")) or payload.get("status") in (
-        "running", "yielded_to_background")
-    if not background:
-        return None
-    process_id = payload.get("session_id")
-    if not isinstance(process_id, str) or not process_id:
+    process_id = _named_process(payload)
+    background = (bool(args.get("background"))
+                  or payload.get("status") in ("running", "yielded_to_background")
+                  # The host may hand this hook the model's *original* arguments rather than
+                  # the rewritten ones, so the receipt itself is the other proof: a spawn result
+                  # carries the spawn note, a yield result carries ``yielded_session_id``.
+                  or (process_id is not None
+                      and (payload.get("output") == _SPAWN_RECEIPT_OUTPUT
+                           or payload.get("yielded_session_id") == process_id)))
+    if not background or process_id is None:
         return None
     try:
         ledger = _ledger()
