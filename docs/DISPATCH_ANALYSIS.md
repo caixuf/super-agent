@@ -44,6 +44,48 @@ attempt directory, and prints one machine-readable receipt. Admin options should
 disable hidden token expansion in the chosen adapter and set an explicit request
 timeout below the Worker wall deadline.
 
+## Development colleague runner (dev_runner)
+
+While `analysis_runner` operates in read-only citation verification mode, `dev_runner`
+executes active engineering tasks with full development tooling inside isolated Git
+worktrees.
+
+The runner is invoked as:
+
+```bash
+python3 -m agentcore.dev_runner \
+  --policy /absolute/admin-policy.json \
+  --role-contract /path/to/role_contract.md \
+  --workdir /path/to/worktree \
+  --agent-dir /path/to/agent_dir \
+  --output-dir /path/to/attempt_output
+```
+
+Core properties:
+
+1. **Physical Worktree Isolation & POSIX Locks**:
+   Each development colleague executes within an independent worktree directory.
+   Concurrency across processes is guarded by `fcntl.flock(LOCK_EX | LOCK_NB)` on
+   the target directory hash. Concurrent tasks targeting the same busy worktree are
+   safely rejected (`worktree_busy`) rather than corrupting work in progress.
+
+2. **Full Engineering Toolset**:
+   Unlike read-only verification, the runner equips colleague roles with coding tools
+   (`read, write, edit, bash`). When `--sandbox` is enabled, execution runs inside
+   `bwrap` sandboxing with the host root read-only and only the worktree and agent
+   directory writable.
+
+3. **dev_traceability_v1 Evidence Protocol**:
+   Every execution atomically generates `report.json`, `report.md`, and `manifest.json`
+   in the output directory. Evidence records include `modified_files`, `role`, `job`,
+   `attempt`, tool calls, and execution summaries verified by `agentcore.colleague_evidence`.
+
+4. **Colleague Role Roster**:
+   `agentcore.colleague_dev` provides standardized role contracts for 8 development
+   roles (`architect`, `cases`, `reviewer`, `test`, `triage`, `backend`, `frontend`, `ops`),
+   enabling multi-stage pipelines (`architect` -> `cases` -> `reviewer` with score-based
+   self-healing loops -> `test` syntax/AST verification).
+
 ## Acceptance and deployment
 
 Tests cover fake and actual Hermes registry dispatch, session isolation,

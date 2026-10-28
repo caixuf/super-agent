@@ -1,13 +1,13 @@
 # super-agent —— 通用智能体本体
 
-## 持久任务与可选 FlowCoro 执行层
+## 持久任务、研发同事与执行层
 
-`agentcore.pool` 负责持久任务、依赖、租约与结果 outbox；`agentcore.worker`
-通过有界 `AgentScheduler` 调用 stdlib 或真实 `flowcoro_py` 后端。
-支持取消、超时、输出预算和旧 attempt 隔离；原生后端显式选择，缺依赖时报错。
-模型 runner、权限与消息回填由宿主接入，新增模板不会自动启动生产服务。
+- **持久任务池**：`agentcore.pool` 负责持久任务、依赖、租约与结果 outbox；`agentcore.worker` 通过有界 `AgentScheduler` 调用 stdlib 或真实 `flowcoro_py` 后端。支持取消、超时、输出预算和旧 attempt 隔离。
+- **只读分析运行器**：`agentcore.analysis_runner` 执行只读分析任务，产出 `citation_traceability_only` 结构化引用事实。
+- **研发同事运行器**：`agentcore.dev_runner` 在独立的 Git Worktree 中执行编码与测试任务，配备 `read, write, edit, bash` 工具，由跨进程 `fcntl.flock` 文件锁保证单一写者，产出 `dev_traceability_v1` 证据链。
+- **研发同事模型**：`agentcore.colleague_dev` 定义了 8 大官方研发岗位契约（需求架构师、用例开发大师、红队评审员、仿真测试专家、归因专家、后端开发、前端卡片交互、运维巡检），支持编排闭环与平台 SOP 流水线原生桥接。
 
-使用与恢复边界见 [docs/POOL_RUNTIME.md](docs/POOL_RUNTIME.md)。
+使用与恢复边界见 [docs/POOL_RUNTIME.md](docs/POOL_RUNTIME.md) 与 [docs/DISPATCH_ANALYSIS.md](docs/DISPATCH_ANALYSIS.md)。
 
 
 **一句话定位**：把一个「和你一样强的智能体」拆成可 clone、可幂等安装的技术仓。
@@ -25,13 +25,17 @@
 
 | 层 | 目录 | 落位 | 是什么 |
 | :--- | :--- | :--- | :--- |
-| 身份与纪律 | `identity/` | `<HERMES_HOME>/agentcore/identity/` | 通用纪律骨架 `SOUL.generic.md`（业务处用 `{{BUSINESS_OVERLAY}}` 占位）+ 派工角色契约 `agents/*.md` |
-| 记忆引擎 | `agentcore/` | pip 包 | 长期记忆：存储 / 双路召回 / 分桶 / 冲突判定 / 置信度衰减；业务约定全部注入式 |
-| 工具面 | `toolsets/` | `<HERMES_HOME>/agentcore/toolsets/` | 外部编码执行器适配器（长任务派出去跑，不用主 agent 逐行磨） |
-| 运行时 | `runtime/` | `<HERMES_HOME>/agentcore/runtime/` | 常驻服务单元骨架（占位符化，profile 名/服务名都不是写死的）+ `BASELINE.md`（能力基线与无人值守档：通用键名 / 地板值）+ `CONFIG_MAP.md`（段归属、并行会话语义、派工协议陷阱） |
-| 文档 | `docs/` | —— | `MIGRATION.md`（八层迁移清单 + 「只在盘上」资产表）、`PLUGINS.md`（插件 / MCP / 工具集注册的边界与验收口径） |
-| 平台适配补丁 | `patches/` | `<HERMES_HOME>/agentcore/patches/` | 消息平台：流式卡片 + 纯文字审批（不依赖卡片回调）；幂等重放/校验 |
-| 插件 | `plugins/` | `<HERMES_HOME>/plugins/<name>`（软链或拷贝）+ profile `config.yaml` 的 `plugins.enabled` | `longtask_guard/`：用 `pre_tool_call` 的 `modify` 指令，在派发前把**明确的长任务**（测试套、建镜像、克隆、装依赖、干净室验证）自动转成后台执行 —— 长任务前台会把回合占死，用户几分钟收不到消息，还可能撞上轮数上限连"已提交"都发不出去。判定刻意窄：只读包裹器（`grep`/`echo`/`cat`…）、解释器的只看不跑开关（`bash -n`/`python -c`）、`git` 的只读子命令、已是后台的调用，一律不碰；`LONGTASK_GUARD_OFF=1` 可整关。安装器落位后把带 `plugin.yaml` 的插件名写进启用列表（官方 `hermes plugins enable` 优先，否则最小文本合并；`--skip-plugins` 两步都跳过） |
+| 身份与纪律 | `identity/` | `<HERMES_HOME>/agentcore/identity/` | 通用纪律骨架 `SOUL.generic.md`（业务处用 `{{BUSINESS_OVERLAY}}` 占位）+ 派工角色契约 `agents/*.md` + 同事模型规范 `COLLEAGUE_MODEL.md` |
+| 研发同事与执行 | `agentcore/` | pip 包 | 8 大官方研发角色契约（`colleague_dev.py`）+ 具备全套编码测试工具（`read, write, edit, bash`）与独立 Git Worktree 文件锁隔离运行器（`dev_runner.py`）+ 任务持久池与调度器（`pool.py`, `worker.py`） |
+| 记忆引擎 | `agentcore/memory/` | pip 包 | 长期记忆：存储 / 双路召回 / 分桶 / 冲突判定 / 置信度衰减 / 突触账本；业务约定全部注入式 |
+| 任务活体状态 | `agentcore/liveness.py` + `plugins/task_status/` | pip 包 + 插件 | 长任务账本：心跳 / 阶段 / 进度 / pid 证据 / 终态写一次；`stalled` 与 `lost` 分开，询问时返回 elapsed、heartbeat age、bounded tail，不靠轮询猜测 |
+| 工具面 | `toolsets/` | `<HERMES_HOME>/agentcore/toolsets/` | 外部编码执行器适配器（`pi_executor`：长任务派出去独立跑，不用主 agent 逐行磨） |
+| 运行时 | `runtime/` | `<HERMES_HOME>/agentcore/runtime/` | 常驻服务单元骨架（占位符化，profile 名/服务名非写死）+ `BASELINE.md`（通用能力基线）+ `CONFIG_MAP.md`（段归属与并发语义）+ `autotask/` 定时作业规范 |
+| 技能库 | `skills/` | `<HERMES_HOME>/skills/` | 通用与示例技能库（`illustrated-doc-rendering`, `im-card-markdown`, `research-before-build`, `skill-distillation`），业务技能通过挂钩环境变量注入 |
+| 运维与审计工具 | `tools/` | —— | 部署复验 `redeploy_check.py`、T6 缺口审计 `t6_gap_audit.py`、AI 定时作业编译器 `tools/autotask/`、文档架构浏览器等 |
+| 文档 | `docs/` | —— | `MIGRATION.md`（八层迁移清单 + 资产表）、`PLUGINS.md`（插件/MCP/工具集注册）、`POOL_RUNTIME.md`、`DISPATCH_ANALYSIS.md`、`REDEPLOY.md` |
+| 平台适配补丁 | `patches/` | `<HERMES_HOME>/agentcore/patches/` | 消息平台适配：Card 2.4 流式卡片 + 纯文字审批；幂等重放与内容探针校验 |
+| 插件集 | `plugins/` | `<HERMES_HOME>/plugins/<name>` + profile `config.yaml` 的 `plugins.enabled` | `longtask_guard/`（前台长任务自动转后台 + 心跳/账本登记）、`task_status/`（长任务活体快照：state/elapsed/heartbeat age/tail）、`durable_dispatch/`（持久任务提交与状态查询）、`colleague_team/` 与 `colleague_catalog/`（研发团队管理与目录呈现）、`markdown_delivery/`（大文档直发与租户级共享）、`write_guard/`（写保护门禁）等 12 款通用插件 |
 | 安装器 | `install/install.sh` | —— | 幂等、`--dry-run` 零副作用、不启停服务、不碰凭据、不覆盖现场身份 |
 | 干净室验证 | `docker/` | —— | 容器里从一个空 HOME 装一遍，20 项断言 |
 | 迁移口径 | `docs/MIGRATION.md` | —— | 「只在盘上」的漏项清单 + 可量化验收 |
@@ -125,7 +129,7 @@ bash checks/identity_injection_check.sh   # 证明「身份文件真的进了发
 
 特性矩阵与身份注入的**上一轮**实测报告：`docs/reports/2026-10-26_identity_and_feature_verification_report.md`
 （特性矩阵 31 PASS / 注入判定 14 PASS，并列出当轮修掉的 7 个真缺陷）。
-> ⚠️ 该报告的验证对象是 `2f23720`，**本轮未复跑**（F7/F8 需真实 Hermes 树、Node 与可解析凭据）。
+> [说明] 该报告的验证对象是 `2f23720`，**本轮未复跑**（F7/F8 需真实 Hermes 树、Node 与可解析凭据）。
 > 最新一次干净室 + 本地结果只认 [`2026-10-26_release_freeze_report.md`](docs/reports/2026-10-26_release_freeze_report.md)；
 > 「特性」侧的未复跑状态记在该报告 §4 缺口。
 
@@ -250,30 +254,52 @@ for hit in result["results"]:
 
 ```
 super-agent/
-├── identity/          # 身份与纪律（通用骨架 + 派工契约）
-├── agentcore/
-│   └── memory/        # 记忆引擎
-│       ├── config.py            # 业务可调项与全局配置注入
-│       ├── memory_store.py      # 写入 / 双路召回 / 后台汇合
-│       ├── vec_index.py         # sqlite-vec 可选加速层
-│       ├── memory_registry.py   # 领域/体裁注册表（数据驱动）
-│       ├── memory_buckets.py    # 三维分桶兼容层
-│       ├── memory_scope.py      # 作用域
-│       ├── memory_kind.py       # 记忆类别
-│       ├── domain_infer.py      # 领域推断（词表由宿主注入）
-│       ├── memory_gate.py       # 入库门禁
-│       ├── memory_conflict.py   # 冲突判定
-│       ├── memory_plasticity.py # 突触强化
-│       ├── memory_ingest.py     # 文档批量灌入
-│       ├── memory_sync.py       # 同步
-│       ├── memory_trace.py      # 追踪
-│       ├── memory_trigger.py    # 自动触发
-│       └── vendor/vec0.so       # sqlite-vec 扩展（随包分发）
-├── toolsets/          # 工具面（外部编码执行器适配）
-├── runtime/           # 运行时骨架（服务单元）
-├── patches/           # 平台适配补丁（消息平台）
-├── install/install.sh # 幂等安装器
-├── docker/            # 干净室部署验证
-├── docs/MIGRATION.md  # 迁移口径与漏项清单
-└── tests/             # 门禁 + 引擎单测
+├── identity/                  # 身份与纪律
+│   ├── SOUL.generic.md        # 通用纪律骨架（占位符化）
+│   ├── COLLEAGUE_MODEL.md     # 同事制角色分层与边界模型
+│   └── agents/                # 派工角色叶子契约 (reader/author/runner/triage/closure 等)
+├── agentcore/                 # 核心引擎包
+│   ├── memory/                # 长期记忆引擎（存储/双路召回/vec0/冲突判定/突触账本）
+│   ├── pool.py                # 持久任务队列、POSIX 任务锁与隔离
+│   ├── worker.py              # 有界任务 Worker 与执行器适配
+│   ├── scheduler.py           # 调度器门控与超时控制
+│   ├── colleague_dev.py       # 8 大官方研发同事角色契约与编排器
+│   ├── dev_runner.py          # 具备编码/测试工具的独立 Git Worktree 隔离运行器与文件锁
+│   ├── analysis_runner.py     # 只读分析运行器（输出引用可追溯证据）
+│   ├── colleague_catalog.py   # 规范化同事名录与描述提取
+│   ├── colleague_conversation.py # 同事会话生命周期与路由
+│   ├── colleague_evidence.py  # 研发证据链校验 (dev_traceability_v1)
+│   ├── markdown_delivery.py   # 大文档递送与共享权限
+│   └── card_emit.py           # 卡片流式状态发射与存储
+├── plugins/                   # 通用插件集
+│   ├── colleague_team/        # 研发同事团队管理（招聘/授权/停用）
+│   ├── colleague_catalog/     # 同事名录与岗位描述查询
+│   ├── durable_dispatch/      # 持久任务提交、状态查询与取消
+│   ├── longtask_guard/        # 前台长任务自动转后台保护
+│   ├── markdown_delivery/     # 大文档云端直发与租户级共享
+│   ├── write_guard/           # 文件写操作守卫与安全拦截
+│   ├── capability_alert_outbox/ # 能力异常与漂移告警发件箱
+│   └── illustrated_delivery/  # 图文排版与渲染交付
+├── skills/                    # 通用技能库
+│   ├── illustrated-doc-rendering/ # 图文排版与渲染
+│   ├── im-card-markdown/      # 消息卡片 Markdown 转换
+│   ├── research-before-build/ # 建前预研规范
+│   └── skill-distillation/    # 技能提炼与抽取
+├── tools/                     # 运维、测试与审计工具
+│   ├── redeploy_check.py      # 一键重建复验
+│   ├── t6_gap_audit.py        # T6 迁移缺口逐条审计
+│   ├── install_skills.py      # 技能安装器
+│   └── autotask/              # 定时 AI 作业规范编译器 (taskfile.py/cron.py)
+├── toolsets/                  # 外部工具适配面
+│   └── pi_executor/           # 外部代码隔离执行器适配
+├── runtime/                   # 运行时服务单元骨架与基线
+│   ├── agentcore-worker@.service # Worker 服务模板
+│   ├── BASELINE.md            # 能力基线与通用键地板值
+│   ├── CONFIG_MAP.md          # 配置段归属与并行语义
+│   └── autotask/jobs/         # 生产定时巡检作业模板
+├── patches/                   # 宿主平台适配补丁（Card 2.4 / 流式卡片等）
+├── install/                   # 安装器与插件启用脚本 (install.sh, enable_plugins.py)
+├── docker/                    # 干净室部署验证 (verify.sh, Dockerfile)
+├── docs/                      # 架构、迁移与规范文档
+└── tests/                     # 仓级门禁、单测与集成测试
 ```

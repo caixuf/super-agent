@@ -104,8 +104,8 @@ if [ "${#skipped[@]}" -gt 0 ]; then
   printf '  跳过（环境缺失，不算通过）：%s\n' "$(IFS='、'; echo "${skipped[*]}")"
 fi
 if [ "$rc_total" -eq 0 ]; then
-  echo "  全部通过 ✅"
+  echo "  全部通过 [PASS]"
 else
-  echo "  失败 $rc_total 项 ❌"
+  echo "  失败 $rc_total 项 [FAIL]"
 fi
 exit "$rc_total"
