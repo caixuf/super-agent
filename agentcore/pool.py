@@ -286,7 +286,7 @@ class Pool:
 
     def status(self, job):
         with self.db() as db:
-            row = db.execute('SELECT id,status,attempt,tries,cancel,result FROM jobs WHERE id=?', (job,)).fetchone()
+            row = db.execute('SELECT id,status,attempt,tries,cancel,result,heartbeat,created,deadline FROM jobs WHERE id=?', (job,)).fetchone()
             return dict(row) if row else None
 
     def receipts(self):

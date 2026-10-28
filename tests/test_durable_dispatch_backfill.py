@@ -344,7 +344,7 @@ def test_inspect_marks_which_pending_receipts_are_deliverable(tmp_path):
 def test_real_host_public_injection_receives_the_persisted_route(tmp_path):
     """Run the plugin inside the real Hermes interpreter with its public injector API."""
     host = Path(os.environ.get('HERMES_SOURCE', Path.home() / '.hermes' / 'hermes-agent'))
-    runtime = host / '.venv' / 'bin' / 'python'
+    runtime = host / 'venv' / 'bin' / 'python' if (host / 'venv' / 'bin' / 'python').is_file() else host / '.venv' / 'bin' / 'python'
     if not (host / 'hermes_cli' / 'plugins.py').is_file():
         pytest.skip('Hermes host source unavailable')
     if not runtime.is_file():

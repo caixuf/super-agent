@@ -65,7 +65,7 @@ def test_direct_visibility_patch_is_scoped_and_idempotent(tmp_path):
 
 def test_real_registry_exposes_only_enabled_durable_tools_directly(tmp_path):
     staged, overlay = _stage_patched_host(tmp_path)
-    runtime = HOST / ".venv" / "bin" / "python"
+    runtime = HOST / "venv" / "bin" / "python" if (HOST / "venv" / "bin" / "python").is_file() else HOST / ".venv" / "bin" / "python"
     if not runtime.is_file():
         pytest.skip("Hermes host interpreter unavailable")
     plugin_path = REPO / "plugins" / "durable_dispatch" / "__init__.py"

@@ -137,3 +137,128 @@ def test_timeout_120_does_not_background_short_read_queries(command):
 
 def test_timeout_alone_does_not_background_unknown_command():
     assert _hit("custom-runner --check", timeout=580) is None
+
+
+# ── 执行期心跳与活体账本 ──────────────────────────────────────────
+def test_conversion_arms_heartbeat(monkeypatch):
+    monkeypatch.delenv("LONGTASK_GUARD_HEARTBEAT", raising=False)
+    out = guard._on_pre_tool_call(tool_name="terminal", args={"command": "pytest tests -q"})
+    assert out and out["args"]["heartbeat"] == 120
+
+
+def test_heartbeat_can_be_disabled_or_clamped(monkeypatch):
+    monkeypatch.setenv("LONGTASK_GUARD_HEARTBEAT", "0")
+    out = guard._on_pre_tool_call(tool_name="terminal", args={"command": "pytest tests -q"})
+    assert "heartbeat" not in out["args"]
+    monkeypatch.setenv("LONGTASK_GUARD_HEARTBEAT", "5")
+    assert guard._heartbeat_seconds() == 60
+    monkeypatch.setenv("LONGTASK_GUARD_HEARTBEAT", "garbage")
+    assert guard._heartbeat_seconds() == 120
+
+
+class _FakeLedger:
+    def __init__(self):
+        self.register_calls = []
+        self.exit_calls = []
+
+    def register(self, *args, **kwargs):
+        self.register_calls.append((args, kwargs))
+
+    def record_exit(self, *args, **kwargs):
+        self.exit_calls.append((args, kwargs))
+
+
+class _Ctx:
+    profile_name = "p"
+
+
+def test_post_hook_registers_background_process(monkeypatch):
+    fake = _FakeLedger()
+    monkeypatch.setattr(guard, "_ledger", lambda: fake)
+    monkeypatch.setattr(guard, "_CTX", _Ctx())
+    guard._on_post_tool_call(
+        tool_name="terminal", args={"command": "pytest tests", "background": True},
+        result={"session_id": "proc_1", "pid": 123, "status": "yielded_to_background", "exit_code": 0},
+        session_id="s1")
+    assert len(fake.register_calls) == 1
+    args, kwargs = fake.register_calls[0]
+    assert args == ("proc_1",)
+    assert kwargs["kind"] == "terminal"
+    assert kwargs["owner"] == "p:s1"
+    assert kwargs["pid"] == 123
+    assert kwargs["state"] == "running"
+    assert fake.exit_calls == []  # background receipts carry exit_code=0 while alive
+
+
+def test_post_hook_records_exit_only_for_completion(monkeypatch):
+    fake = _FakeLedger()
+    monkeypatch.setattr(guard, "_ledger", lambda: fake)
+    monkeypatch.setattr(guard, "_CTX", _Ctx())
+    guard._on_post_tool_call(
+        tool_name="terminal",
+        args={"command": "pytest tests", "background": True},
+        result={"session_id": "proc_2", "status": "exited", "exit_code": 0, "output": "ok"},
+        session_id="s1")
+    assert fake.register_calls and fake.exit_calls
+    assert fake.exit_calls[0][0] == ("proc_2", 0)
+
+
+def test_post_hook_ignores_foreground_and_never_raises(monkeypatch):
+    fake = _FakeLedger()
+    monkeypatch.setattr(guard, "_ledger", lambda: fake)
+    guard._on_post_tool_call(tool_name="terminal", args={"command": "ls"},
+                             result={"session_id": "proc_1"}, session_id="s1")
+    assert fake.register_calls == []
+
+    def boom():
+        raise RuntimeError("ledger unavailable")
+
+    monkeypatch.setattr(guard, "_ledger", boom)
+    assert guard._on_post_tool_call(
+        tool_name="terminal", args={"command": "pytest", "background": True},
+        result={"session_id": "proc_1"}, session_id="s1") is None
+
+
+def test_post_hook_writes_a_real_ledger_row(monkeypatch, tmp_path):
+    from agentcore.liveness import LivenessLedger
+
+    class Ctx:
+        profile_name = "p"
+
+        def get_config(self, key, default=None):
+            if key == "liveness_db":
+                return str(tmp_path / "liveness.db")
+            if key == "engine_root":
+                return str(ROOT)
+            return default
+
+    guard._CACHE.clear()
+    monkeypatch.setattr(guard, "_CTX", Ctx())
+    guard._on_post_tool_call(
+        tool_name="terminal", args={"command": "pytest tests", "background": True},
+        result={"session_id": "proc_1", "pid": None, "status": "yielded_to_background"},
+        session_id="s1")
+    store = LivenessLedger(tmp_path / "liveness.db")
+    row = store.get("proc_1", require_owner="p:s1")
+    assert row is not None
+    assert row["state"] == "running"
+    assert row["label"] == "pytest tests"
+
+
+def test_register_wires_both_hooks():
+    class Ctx:
+        profile_name = "p"
+
+        def __init__(self):
+            self.hooks = {}
+
+        def get_config(self, key, default=None):
+            return default
+
+        def register_hook(self, name, fn):
+            self.hooks[name] = fn
+
+    ctx = Ctx()
+    guard.register(ctx)
+    assert set(ctx.hooks) == {"pre_tool_call", "post_tool_call"}
+    assert ctx.hooks["post_tool_call"] is guard._on_post_tool_call

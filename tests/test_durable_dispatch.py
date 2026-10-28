@@ -275,7 +275,7 @@ def test_cancel_terminal_task_does_not_claim_a_new_request(tmp_path, terminal):
 
 def test_real_hermes_runtime_without_engine_package(tmp_path):
     host = Path(os.environ.get('HERMES_SOURCE', Path.home() / '.hermes/hermes-agent'))
-    runtime = host / '.venv/bin/python'
+    runtime = host / 'venv/bin/python' if (host / 'venv/bin/python').is_file() else host / '.venv/bin/python'
     if not runtime.is_file():
         pytest.skip('Actual isolated host interpreter unavailable')
     code = '''
@@ -339,3 +339,39 @@ def test_origin_records_which_session_owns_each_task(tmp_path):
     # Addressability does not weaken the access check.
     assert not call(context, 'status', {'task_id': mine}, session_id='session-two')['ok']
     assert call(context, 'status', {'task_id': mine}, session_id='session-one')['ok']
+
+
+def test_status_enriches_with_liveness_ledger(tmp_path):
+    from agentcore.liveness import LivenessLedger
+    ledger_db = tmp_path / "liveness.db"
+    ledger = LivenessLedger(ledger_db)
+
+    context, args = make_context(tmp_path)
+    service = plugin.DispatchService(
+        context.settings['queue_root'],
+        'test-profile',
+        context.settings['allowed_roots'],
+        liveness_ledger=ledger,
+    )
+    submit_res = service.submit('session-one', args)
+    task_id = submit_res['task_id']
+
+    live_entry = ledger.get(task_id)
+    assert live_entry is not None
+    assert live_entry['state'] == 'queued'
+    assert live_entry['owner'] == 'test-profile:session-one'
+
+    ledger.beat(task_id, phase='analyzing', progress=(10, 100))
+
+    status_res = service.status('session-one', {'task_id': task_id})
+    assert status_res['ok'] is True
+    assert status_res['task_id'] == task_id
+    assert status_res['phase'] == 'analyzing'
+    assert status_res['progress'] == {'done': 10, 'total': 100, 'percent': 10.0}
+    assert 'elapsed_s' in status_res
+    assert 'heartbeat_age_s' in status_res
+
+    cancel_res = service.cancel('session-one', {'task_id': task_id})
+    assert cancel_res['ok'] is True
+    live_cancelled = ledger.get(task_id)
+    assert live_cancelled['state'] == 'cancelled'

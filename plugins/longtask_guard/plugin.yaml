@@ -4,3 +4,4 @@ description: "Rewrite long-running terminal calls into background execution befo
 author: "agentcore"
 provides_hooks:
   - pre_tool_call
+  - post_tool_call

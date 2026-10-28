@@ -85,6 +85,28 @@ def _engine(engine_root=None):
         sys.modules.update(saved)
 
 
+def _load_liveness(engine_root=None):
+    """Import the ledger, falling back to the administrator checkout.
+
+    The plugin host may not have ``agentcore`` on sys.path even though the
+    engine checkout is configured; the liveness row must not silently vanish.
+    """
+    try:
+        return importlib.import_module('agentcore.liveness')
+    except ModuleNotFoundError as error:
+        if error.name not in ('agentcore', 'agentcore.liveness'):
+            raise
+    if not isinstance(engine_root, str) or not Path(engine_root).is_absolute():
+        raise ValueError('engine_root is required when agentcore is unavailable')
+    path = Path(engine_root).resolve(strict=True) / 'agentcore' / 'liveness.py'
+    spec = importlib.util.spec_from_file_location('agentcore_liveness', path)
+    if spec is None or spec.loader is None:
+        raise ImportError('cannot load agentcore.liveness')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _pool_type(engine_root=None):
     """Compatibility helper for callers that only need the queue class."""
     return _engine(engine_root)[0]
@@ -216,7 +238,8 @@ class DispatchService:
     def __init__(self, root, profile, allowed_roots, *, max_sources=8, max_lines=400,
                  denied_globs=None, pool_type=None, delivery=None, route_provider=None,
                  require_delivery_route=False, role='analysis', display_name=None,
-                 display_label=None):
+                 display_label=None, liveness_ledger=None, liveness_path=None,
+                 engine_root=None):
         if not isinstance(profile, str) or not profile:
             raise ValueError('profile identity required')
         if not isinstance(root, str) or not Path(root).is_absolute():
@@ -250,11 +273,27 @@ class DispatchService:
             '.env*', '*.pem', '*.key', '*credentials*', '*token*', 'auth.json',
             'config.yaml', 'llm_config.json',
         )
+        self._liveness_ledger = liveness_ledger
+        self._liveness_path = liveness_path
+        self._engine_root = engine_root
+
+    def _resolve_liveness(self):
+        if self._liveness_ledger is not None:
+            return self._liveness_ledger
+        try:
+            mod = _load_liveness(self._engine_root)
+            return mod.LivenessLedger(self._liveness_path)
+        except Exception:
+            return None
 
     def _owner(self, session_id):
         if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 512:
             raise PermissionError('trusted dispatcher session identity required')
         return hashlib.sha256(json.dumps([self.profile, session_id]).encode()).hexdigest()
+
+    def _liveness_owner(self, session_id):
+        """Owner string shared with the task_status tool (profile:session)."""
+        return '%s:%s' % (self.profile, session_id)
 
     def _origin(self, session_id):
         """Ownership proof stays a hash; the origin is the addressable conversation."""
@@ -322,6 +361,13 @@ class DispatchService:
         if self.require_delivery_route and not origin.get('route'):
             raise PermissionError('addressable submitting conversation required before dispatch')
         job = self.pool.submit(dedupe, payload, replay_safe=True, max_tries=2,origin=origin)
+        ledger = self._resolve_liveness()
+        if ledger is not None:
+            try:
+                ledger.register(job, kind="dispatch", owner=self._liveness_owner(session_id),
+                                label=self.display_label, state="queued")
+            except Exception:
+                pass
         return {'ok': True, 'task_id': job, 'status': self.pool.status(job)['status'],
                 'next_action': 'Return the task ID to the user and finish this turn. Do not poll.'}
 
@@ -361,6 +407,30 @@ class DispatchService:
             result['result'] = public
             if truncated:
                 result['result_truncated'] = True
+        ledger = self._resolve_liveness()
+        if ledger is not None:
+            try:
+                if status['status'] in ('queued', 'running') and status.get('created'):
+                    ledger.observe(job, heartbeat_at=status.get('heartbeat') or status['created'],
+                                   state=status['status'],
+                                   detail='pool status: ' + status['status'])
+                if status['status'] in ('completed', 'failed', 'cancelled'):
+                    term = 'done' if status['status'] == 'completed' else status['status']
+                    ledger.finish(job, term, detail="pool status: " + status['status'])
+                live = ledger.inspect(job)
+                if isinstance(live, dict) and live.get('ok'):
+                    result['elapsed_s'] = live.get('elapsed_s')
+                    result['heartbeat_age_s'] = live.get('heartbeat_age_s')
+                    if live.get('phase'):
+                        result['phase'] = live.get('phase')
+                    if live.get('progress'):
+                        result['progress'] = live.get('progress')
+                    if live.get('verdict'):
+                        result['verdict'] = live.get('verdict')
+                    if live.get('stalled'):
+                        result['stalled'] = True
+            except Exception:
+                pass
         return result
 
     def cancel(self, session_id, args):
@@ -374,6 +444,12 @@ class DispatchService:
                     'request_accepted': False, 'cancellation_requested': bool(before['cancel']),
                     'status': before['status']}
         self.pool.cancel(job)
+        ledger = self._resolve_liveness()
+        if ledger is not None:
+            try:
+                ledger.finish(job, 'cancelled', detail='cancelled by user')
+            except Exception:
+                pass
         after = self.pool.status(job)
         return {'ok': True, 'task_id': job,
                 'request_accepted': not bool(before['cancel']) and bool(after['cancel']),
@@ -497,11 +573,13 @@ Use durable_submit for bounded read-only analysis of approved files, including n
     )
     pool_type, delivery = _engine(ctx.get_config('engine_root'))
     require_route = ctx.get_config('require_delivery_route',ctx.get_config('deliver_completions',False))
+    liveness_path = ctx.get_config('liveness_db') or None
     service = DispatchService(ctx.get_config('queue_root'), ctx.profile_name,
                               ctx.get_config('allowed_roots'),
                               denied_globs=ctx.get_config('denied_globs', []),
                               pool_type=pool_type, delivery=delivery,require_delivery_route=require_route,
-                              role='analysis', display_name='主 Bot 汇总', display_label='汇总')
+                              role='analysis', display_name='主 Bot 汇总', display_label='汇总',
+                              liveness_path=liveness_path, engine_root=ctx.get_config('engine_root'))
     services = {'analysis':service}
     colleagues = ctx.get_config('colleagues',{})
     if not isinstance(colleagues,dict) or len(colleagues)>15:
@@ -516,7 +594,8 @@ Use durable_submit for bounded read-only analysis of approved files, including n
             denied_globs=settings.get('denied_globs',[]),pool_type=pool_type,delivery=delivery,
             require_delivery_route=require_route, role=role,
             display_name=settings.get('display_name', role),
-            display_label=settings.get('display_label', role))
+            display_label=settings.get('display_label', role), liveness_path=liveness_path,
+            engine_root=ctx.get_config('engine_root'))
         if candidate.pool.root.resolve() in seen_roots:
             raise ValueError('colleague queues must be distinct')
         seen_roots.add(candidate.pool.root.resolve()); services[role]=candidate

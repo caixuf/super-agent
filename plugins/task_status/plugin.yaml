@@ -1,0 +1,8 @@
+name: task-status
+version: "0.1.0"
+kind: standalone
+description: "Read-only liveness snapshots for long-running tasks: state, elapsed, heartbeat age, phase, progress and a bounded output tail."
+author: agentcore
+provides_tools:
+  - task_status
+provides_hooks: []

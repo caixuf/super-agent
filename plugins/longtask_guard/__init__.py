@@ -9,6 +9,8 @@
 本插件用 `pre_tool_call` 的 `modify` 指令，在 `terminal` 真正执行前改写参数：
 
 * 命中长任务特征 → 自动置 `background=true` + `notify_on_complete=true`（完成时通知，不守着轮询）；
+* 同时带 `heartbeat`（默认 120s，`LONGTASK_GUARD_HEARTBEAT=0` 可关），并在 `post_tool_call`
+  把返回的 `session_id/pid` 登记进 `agentcore.liveness` 账本，供 `task_status` 查询；
 * timeout/env 等包裹器会递归剥离，按实际执行的命令判断；超时数值本身不判重。
 
 判定必须"宁窄勿宽"：误拦一个 3 秒的 `git status` 比漏掉一个长任务更烦人。
@@ -19,12 +21,128 @@
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import logging
 import os
 import shlex
+import sys
+from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+#: Set by ``register``; used only to find the profile and the engine checkout.
+_CTX = None
+_CACHE: dict = {}
+_DEFAULT_HEARTBEAT_SECONDS = 120
+
+
+def _heartbeat_seconds() -> int:
+    """Mid-run heartbeat interval for converted jobs; 0 disables it.
+
+    The host clamps to its own floor (60s) and skips quiet ticks, so this is a
+    cadence, not a promise that every tick produces a message.
+    """
+    raw = os.environ.get("LONGTASK_GUARD_HEARTBEAT", str(_DEFAULT_HEARTBEAT_SECONDS))
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        value = _DEFAULT_HEARTBEAT_SECONDS
+    return max(60, value) if value > 0 else 0
+
+
+def _load_liveness(engine_root: Optional[str] = None):
+    try:
+        from agentcore import liveness  # type: ignore
+        return liveness
+    except ModuleNotFoundError as error:
+        if error.name not in ("agentcore", "agentcore.liveness"):
+            raise
+    if not isinstance(engine_root, str) or not Path(engine_root).is_absolute():
+        raise ValueError("engine_root is required when agentcore is not importable")
+    path = Path(engine_root).resolve(strict=True) / "agentcore" / "liveness.py"
+    key = ("module", str(path))
+    if key in _CACHE:
+        return _CACHE[key]
+    spec = importlib.util.spec_from_file_location("agentcore_liveness", path)
+    if spec is None or spec.loader is None:
+        raise ImportError("cannot load the liveness ledger")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["agentcore_liveness"] = module
+    spec.loader.exec_module(module)
+    _CACHE[key] = module
+    return module
+
+
+def _ledger():
+    """Ledger for this profile, or ``None`` when the engine cannot be resolved."""
+    if _CTX is None:
+        return None
+    try:
+        module = _load_liveness(_CTX.get_config("engine_root"))
+        path = _CTX.get_config("liveness_db") or None
+        key = ("ledger", str(path))
+        if key not in _CACHE:
+            _CACHE[key] = module.LivenessLedger(path)
+        return _CACHE[key]
+    except Exception:  # noqa: BLE001 — ledger absence must never block the tool
+        logger.debug("longtask-guard: liveness ledger unavailable", exc_info=True)
+        return None
+
+
+def _parse_result(result: Any) -> Optional[dict]:
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, str):
+        try:
+            value = json.loads(result)
+        except (TypeError, ValueError):
+            return None
+        return value if isinstance(value, dict) else None
+    return None
+
+
+def _on_post_tool_call(tool_name: str = "", args: Any = None, result: Any = None,
+                       session_id: str = "", **_: Any) -> None:
+    """Record a background process's identity; never raise into hook dispatch."""
+    if tool_name != "terminal" or not isinstance(args, dict):
+        return None
+    payload = _parse_result(result)
+    if payload is None:
+        return None
+    background = bool(args.get("background")) or payload.get("status") in (
+        "running", "yielded_to_background")
+    if not background:
+        return None
+    process_id = payload.get("session_id")
+    if not isinstance(process_id, str) or not process_id:
+        return None
+    try:
+        ledger = _ledger()
+        logger.debug("longtask-guard post: path=%r session=%r",
+                     getattr(ledger, "path", None), session_id)
+        if ledger is None:
+            return None
+        profile = getattr(_CTX, "profile_name", "") or "local"
+        owner = "%s:%s" % (profile, session_id or "local")
+        label = str(payload.get("command") or args.get("command") or "")[:200]
+        pid = payload.get("pid")
+        try:
+            pid = int(pid) if pid is not None else None
+        except (TypeError, ValueError):
+            pid = None
+        ledger.register(process_id, kind="terminal", owner=owner, label=label,
+                        pid=pid, host="local", phase="started", state="running")
+        # A background start receipt carries exit_code=0 even while the child is
+        # still running. Only a completion-shaped status may close the row.
+        status = payload.get("status")
+        code = payload.get("exit_code")
+        if code is not None and status not in (None, "running", "yielded_to_background"):
+            ledger.record_exit(process_id, code, tail=payload.get("output") or "")
+    except Exception:  # noqa: BLE001 — a ledger write must not fail the tool result
+        logger.warning("longtask-guard: ledger registration failed", exc_info=True)
+    return None
 
 #: 前台等不到、或等到了也把回合占死的动作特征（按 shell 片段匹配）。
 #: 每条都对应一类实测会跑很久的命令；**故意不写宽泛的 `python`/`make`**——
@@ -196,6 +314,9 @@ def _on_pre_tool_call(tool_name: str = "", args: Any = None, **_: Any) -> Option
     patched = dict(args)
     patched["background"] = True
     patched["notify_on_complete"] = True
+    heartbeat = _heartbeat_seconds()
+    if heartbeat:
+        patched["heartbeat"] = heartbeat
     # 后台跑就别再传前台 timeout（它的语义是"等这么久"，后台没有等待者）。
     patched.pop("timeout", None)
     logger.info("longtask-guard: terminal 转后台（%s）", reason)
@@ -203,4 +324,10 @@ def _on_pre_tool_call(tool_name: str = "", args: Any = None, **_: Any) -> Option
 
 
 def register(ctx) -> None:
+    global _CTX
+    logger.debug("longtask-guard register: profile=%r engine_root=%r liveness_db=%r",
+                 getattr(ctx, 'profile_name', None), ctx.get_config('engine_root'),
+                 ctx.get_config('liveness_db'))
+    _CTX = ctx
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
+    ctx.register_hook("post_tool_call", _on_post_tool_call)
