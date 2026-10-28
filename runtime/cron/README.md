@@ -17,3 +17,10 @@
 | `capability-drift.json` | 能力漂移巡检 | 每天 | 对比基线（工具面/插件启用）与现场，发现被关掉的工具 |
 | `session-archive.json` | 会话归档 | 每天 | 把长会话压成摘要清单，控制上下文增长 |
 | `job-retry-watch.json` | 失败作业巡检 | 每 2 小时 | 找出连续失败的作业并告警，避免「跑了但没人知道挂了」 |
+| `skill-distill-candidate.json` | 技能候选提炼 | 每天 04:20 | 按 `skills/skill-distillation` 的门槛从昨日任务里产出 ≤3 条候选，写到 `<profile>/skills/candidates/<日期>.md`，不直接进 `skills/` |
+
+## 候选怎么转正
+
+1. 先按 `skills/skill-distillation` 的评审四条过一遍（判据可执行、反模式有真实代价、脱敏、名字能看出何时用）；
+2. 把它挪到 `skills/<name>/SKILL.md`（技术仓）或业务叠加层技能源（业务内容）；
+3. 跑 `python3 -m pytest tests/test_generic_templates.py -q` —— frontmatter、`name`、`Use when` 三条会立即校验。
