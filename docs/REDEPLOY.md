@@ -68,6 +68,19 @@ bash install/install.sh --profile <name> --compose-soul <业务叠加层.md>
 | systemd 单元与 drop-in | `~/.config/systemd/user/` | `hermes gateway install` 生成；环境开关另加 drop-in |
 | 业务技能与角色名册 | `<profile>/skills`、`agentcore/agents` | 业务叠加层 |
 
+## 4.1 定时 AI 作业：用 autotask 契约，不写自由提示词
+
+`tools/autotask/` 把定时作业拆成五段：`collect`（只读输入）/ `judge`（唯一需要模型判断的一句）/
+`write`（固定产物路径，只允许 `state/` 或 `skills/candidates/`）/ `report`（可判定的 `ok`/`fail`）/
+`retry`（封顶）。作业是数据文件，`runtime/autotask/jobs/*.json` 有五个可直接用的模板。
+
+```bash
+python3 tools/autotask/taskfile.py validate runtime/autotask/jobs/*.json   # 契约自检
+python3 tools/autotask/taskfile.py cron runtime/autotask/jobs/memory-budget-guard.json  # 转成宿主 cron 条目
+```
+
+把 `cron` 的输出合并进 `<profile>/cron/jobs.json` 即生效；调度仍归宿主，本模块不引入第二个调度器。
+
 ## 5. 故障速查
 
 | 现象 | 原因 | 处理 |
