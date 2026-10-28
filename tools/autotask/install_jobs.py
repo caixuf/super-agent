@@ -78,7 +78,9 @@ def build(task, *, profile_path, deliver="", workdir="", date=None):
         "paused_at": "None",
         "paused_reason": "None",
         "created_at": now,
-        "next_run_at": "None",
+        # The host computes next_run_at on its next tick (cron/job_definition.py); a guessed
+        # value would schedule the job at the wrong instant or never.
+        "next_run_at": None,
         "last_run_at": "None",
         "last_status": "None",
         "last_error": "None",
@@ -94,6 +96,28 @@ def build(task, *, profile_path, deliver="", workdir="", date=None):
         "canonical_completions": [],
         "last_dispatch": "None",
     }
+
+
+def create_commands(tasks, *, profile, profile_path="", deliver="", workdir="", hermes="hermes",
+                    date_token="<date>"):
+    """Official-CLI commands to create these jobs (`cron create` is not idempotent by name).
+
+    The host computes next_run_at only for jobs it creates itself, so this — not a jobs.json
+    edit — is the supported way to enable an autotask job on a live profile.
+    """
+    import shlex
+    home = Path(os.path.expanduser("~/.hermes"))
+    resolved = profile_path or str(home / "profiles" / profile if profile else home)
+    commands = []
+    for task in tasks:
+        prompt = taskfile.render(task).replace("<profile>", resolved).replace("<date>", date_token)
+        target = deliver if task.get("notify") and deliver else "local"
+        line = [hermes, "--profile", profile, "cron", "create", task["schedule"], prompt,
+                "--name", task["id"], "--deliver", target]
+        if workdir:
+            line += ["--workdir", workdir]
+        commands.append(" ".join(shlex.quote(part) for part in line))
+    return commands
 
 
 def install(store_path: Path, tasks, *, profile_path, deliver="", workdir="", dry_run=False):
@@ -140,8 +164,16 @@ def main(argv=None) -> int:
     parser.add_argument("--deliver", default="", help="feishu chat id for notifications (optional)")
     parser.add_argument("--workdir", default="")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--create-commands", action="store_true",
+                        help="print the official `cron create` commands instead of editing jobs.json")
     args = parser.parse_args(argv)
     tasks = [taskfile.load(p) for p in sorted(Path(args.job_dir).glob("*.json"))]
+    if args.create_commands:
+        for command in create_commands(tasks, profile=Path(args.profile_path).name,
+                                       profile_path=args.profile_path,
+                                       deliver=args.deliver, workdir=args.workdir):
+            print(command)
+        return 0
     rows = install(Path(args.cron_file), tasks, profile_path=args.profile_path,
                    deliver=args.deliver, workdir=args.workdir, dry_run=args.dry_run)
     for status, name, detail in rows:

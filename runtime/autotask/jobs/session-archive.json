@@ -2,9 +2,10 @@
   "id": "session-archive",
   "schedule": "45 3 * * *",
   "collect": {
-    "kind": "none"
+    "kind": "command",
+    "command": "hermes --profile <p> sessions list --since 1d --limit 20"
   },
-  "judge": "整理昨日到今日的会话：每个会话一句话主题 + 是否有未完成事项",
+  "judge": "只针对上面列出的会话，逐个输出三行：会话标识前 8 位、一句话主题、是否有未完成事项。不打开会话全文、不做全库扫描；超出 20 条的会话不再考虑。",
   "write": {
     "kind": "file",
     "path": "<profile>/state/autotask/session-archive.json"
@@ -14,8 +15,8 @@
     "fail": "fail "
   },
   "retry": {
-    "max": 2,
-    "backoff_seconds": 300
+    "max": 1,
+    "backoff_seconds": 600
   },
   "notify": false
 }
