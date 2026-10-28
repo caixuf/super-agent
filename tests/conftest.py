@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,6 +19,39 @@ from typing import Sequence
 import pytest
 
 from agentcore.memory.config import MemoryConfig, configure, reset_config
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_agentcore_state(tmp_path_factory):
+    """Point every implicit ``agentcore`` state path at a session tmp dir.
+
+    ``agentcore.liveness.default_db_path()`` falls back to the **user's real**
+    ``~/.local/state/agentcore/liveness.db``. A test that builds a ledger — or a plugin
+    service that leaves ``liveness_path`` unset — then writes into the live ledger of
+    whatever profile happens to run on this machine: measured on 2026-10-29, 457 of the
+    561 rows in the live file carried test owners (``test-profile:*`` / ``session-one``).
+
+    The module honors ``AGENTCORE_LIVENESS_DB`` / ``AGENTCORE_STATE_DIR`` at call time and
+    subprocesses inherit this environment, so a session-scoped override covers both
+    in-process and real-host cases. ``AGENTCORE_LOCK_DIR`` is redirected for the same
+    reason (dev-colleague worktree locks default to a shared ``/tmp`` path).
+    """
+    root = tmp_path_factory.mktemp("agentcore-state")
+    overrides = {
+        "AGENTCORE_STATE_DIR": str(root),
+        "AGENTCORE_LIVENESS_DB": str(root / "liveness.db"),
+        "AGENTCORE_LOCK_DIR": str(root / "locks"),
+    }
+    saved = {key: os.environ.get(key) for key in overrides}
+    os.environ.update(overrides)
+    try:
+        yield root
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def deterministic_embed(texts: Sequence[str], dim: int | None = None):
