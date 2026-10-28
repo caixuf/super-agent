@@ -37,7 +37,15 @@
    `colleague-catalog` 可生产启用；`colleague-team` **未接实例创建/派工/发送/停用四条驱动，勿在现有系统启用**）。
 5. **测试** `tests/test_durable_dispatch_backfill.py` +5 例（真实 ledger）：积压产生**一次** fault、
    重复观察不重复入队、恢复事件需去抖、poller 端到端入队并在 unload 时停、`modules={}` 时**不抛错**。
-6. **长任务账本落账（引擎，另一处同源缺陷）** `plugins/longtask_guard/__init__.py`
+6. **测试不得写真实状态目录（引擎，同一类缺陷）** `tests/conftest.py` + `tests/test_state_isolation.py`
+   - 现场实证：`agentcore.liveness.default_db_path()` 在未给路径时落到**用户真实**的
+     `~/.local/state/agentcore/liveness.db`，于是用例构造的 ledger / 插件服务直接写进了运行中 profile 的账本 ——
+     2026-10-29 实测本机 **561 行中 457 行** owner 是 `test-profile:*`/`session-one`。
+   - 改法：会话级 autouse 夹具把 `AGENTCORE_STATE_DIR`/`AGENTCORE_LIVENESS_DB`/`AGENTCORE_LOCK_DIR`
+     整体挪进 tmp（子进程继承）；新增 `tests/test_state_isolation.py` 钉住**生效值**（夹具被删/改名即红）。
+   - 证据：相关 5 个测试文件 94 passed，且**真实账本行数与字节数前后一致**；全量 `verify.sh` 复跑同样前后一致。
+
+7. **长任务账本落账（引擎，另一处同源缺陷）** `plugins/longtask_guard/__init__.py`
    - 现场证据：emily 的守卫当天转后台 **27 次**，而该 profile 的 `liveness.db` **一条行都没有** ——
      `post_tool_call` 拿到的是**模型原始参数**（不含 `background`），旧判定直接 return，身份从未登记，
      `task_status` 因此无账可读。
@@ -64,7 +72,7 @@
 | 网关 | restart → active，插件加载失败 **0** | restart → PID 281004，加载失败 **0** |
 | 同事名册 | `colleague-catalog` 启用 **15 岗**（analysis/evidence/triage/replay/artifact/patrol/cases/memory/architect/backend/frontend/test/ops/reviewer/hr）；工具面 `✓ colleague_catalog`；工具实测返回 15 岗、单岗过滤得"阿证"、未知岗空、无 session 拒绝 | **未铺**（无同事 worker，铺了就是"派了没人干"；它的分派路径是 `delegate_task` 子 agent） |
 | **R1 端到端** | **`ops_alert_outbox` 出现 1 条 `health_fault`**（profile=<profile-b>，scope=`durable-completion-delivery`，gen=1，00:27:19，`observed={'delivered':0,'outcomes':[],'parked':18,'status':'empty'}`）+ `ops_health_conditions` 一条 active episode；`agent.log` 有 `completion delivery backlog: parked=N` | 无（`deliver_completions: false` → 根本没有投递 poller，也就没有健康记录；队列盘点 total 2 / deliverable 1） |
-| **长任务账本** | 修复前：`liveness.db` **不存在**。修复后：**出现 6 行**，含经网关真跑的一条 `('proc_ccf158b9c2ce', '<profile-b>:api-…', 'sleep 25; echo guarded-probe', 'running', 693209, 1)` | 本机账本 466 行（既有；17 条 `running` 属死进程，读取时现算 verdict） |
+| **长任务账本** | 修复前：`liveness.db` **不存在**。修复后：**出现 6 行**，含经网关真跑的一条 `('proc_ccf158b9c2ce', '<profile-b>:api-…', 'sleep 25; echo guarded-probe', 'running', 693209, 1)` | 本机账本 561 行，但其中 **457 行是测试 owner**（见 §2.7；真正的 profile 行约占 1/6），17 条 `running` 属死进程，退出读取时才现算 |
 
 > emily 的健康事件**证明了整条链**：poller 看到了 18 条永远投不出去的回执 → 去抖 60s → 入队一条
 > 持久 fault 事件。这正是过去"静默重试、没人知道"的那一段。
@@ -78,7 +86,8 @@
 2. **ops-alert 发送器**：两台机器都没有配（`OPS_ALERT_*` 未见、无发送器单元）→ 健康事件目前**只落在库里 + 一条 WARNING**，没有外部送达。
 3. **长任务账本的退出回收**：emily 的账本已从"不存在"变为**有行**（见 §3），但行停在 `state=running`
    —— 退出由 `task_status` 读取时现算；两台机器都**没有 liveness 守护单元**，无人主动 sweep。
-   本机 466 行里 17 条 `running` 是死进程，同一成因。
+   本机那份账本另有**测试污染**问题（见 §2.7 已修）：561 行里 457 行 owner 是 `test-profile:*`/`session-one`,
+   只有约 1/6 是真实 profile 的行；要不要清理这批历史噪声，属数据删除，部署方定。
 4. **同事派工纪律**：`durable_submit` 至今 0 次调用；名册与工具面现在都在，是否要求"某类活必须派"属部署方（SOUL）决定。
 5. **caixuf 的 `deliver_completions=false`**：与"回执可见"目标冲突 —— 要么打开投递，要么把 ⑫ 第 6 条体检列进常规巡检。
 
