@@ -181,12 +181,45 @@ _HEAVY_PATTERNS: tuple[tuple[str, str], ...] = (
     ("pip install", "装依赖"),
     ("npm install", "装依赖"),
     ("apt-get install", "装依赖"),
-    ("sleep ", "显式长等待"),
 )
+
+#: ``sleep`` 只有够久才值得转后台。``sleep 20`` 这类短等待转成后台，
+#: 代价是**多一次进程完成唤醒**，换来的只是省 20 秒 —— 净亏。
+_SLEEP_BACKGROUND_MIN_SECONDS = 30
+_SLEEP_UNITS: dict[str, int] = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _sleep_seconds(args: list[str]) -> Optional[float]:
+    """``sleep`` 的时长（秒）；参数无法解析时 ``None``（判不了就不动它）。"""
+    total = 0.0
+    for raw in args:
+        match = re.fullmatch(r"([0-9]*\.?[0-9]+)([smhd]?)", str(raw).strip())
+        if not match:
+            return None
+        total += float(match.group(1)) * _SLEEP_UNITS[match.group(2)]
+    return total
 
 
 def _is_off() -> bool:
     return os.environ.get("LONGTASK_GUARD_OFF", "").strip() not in ("", "0", "false", "False")
+
+
+def _notify_on_complete() -> bool:
+    """转后台后是否唤醒 agent 开一个新回合。
+
+    默认 True（保持历史行为）；profile 可在插件设置里写 ``notify_on_complete: false``
+    来只要后台、不要唤醒 —— 宿主的 ``display.background_process_notifications`` 管不住
+    ``notify_on_complete``，所以这个策略只能在这里表达。
+    环境变量 ``LONGTASK_GUARD_NOTIFY=0`` 同样可关。
+    """
+    if os.environ.get("LONGTASK_GUARD_NOTIFY", "").strip() in ("0", "false", "False", "no"):
+        return False
+    if _CTX is None:
+        return True
+    try:
+        return _CTX.get_config("notify_on_complete", True) is not False
+    except Exception:  # noqa: BLE001 — 配置读不到就按默认（唤醒）走
+        return True
 
 
 def _shell_segments(command: str) -> list[str]:
@@ -294,6 +327,13 @@ def _match_segment(segment: str, _depth: int = 0) -> Optional[str]:
             return None
         exe = tokens[0].rsplit("/", 1)[-1]
 
+    if exe == "sleep":
+        # 只有够久的等待才值得转后台；短 sleep 转后台是净亏（多一次完成唤醒）。
+        seconds = _sleep_seconds(tokens[1:])
+        if seconds is None or seconds < _SLEEP_BACKGROUND_MIN_SECONDS:
+            return None
+        return f"显式长等待（{seconds:g}s）"
+
     for pattern, label in _HEAVY_PATTERNS:
         pat = pattern.strip()
         if " " in pat:
@@ -337,10 +377,16 @@ def _on_pre_tool_call(tool_name: str = "", args: Any = None, **_: Any) -> Option
         return None
     patched = dict(args)
     patched["background"] = True
-    patched["notify_on_complete"] = True
-    heartbeat = _heartbeat_seconds()
+    # 是否唤醒 agent 是 profile 的策略，不是插件的策略：本插件只负责"别占住回合"。
+    # 关掉后仍然转后台、仍然进活体账本（task_status 可查），只是不再每次完成都开一个新回合 ——
+    # "同一件事被反复回一遍"就是这么来的。
+    notify = _notify_on_complete()
+    patched["notify_on_complete"] = notify
+    heartbeat = _heartbeat_seconds() if notify else 0
     if heartbeat:
         patched["heartbeat"] = heartbeat
+    else:
+        patched.pop("heartbeat", None)
     # 后台跑就别再传前台 timeout（它的语义是"等这么久"，后台没有等待者）。
     patched.pop("timeout", None)
     logger.info("longtask-guard: terminal 转后台（%s）", reason)

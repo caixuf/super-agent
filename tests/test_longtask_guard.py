@@ -57,7 +57,50 @@ def test_already_background_is_left_alone():
     assert _hit("pytest tests", background=True) is None
 
 
-# ── 负例：这些要么很快、要么只是"提到"长任务的名字，绝不能动 ─────────────
+# ── sleep：短等待不转后台（转后台 = 多一次完成唤醒，净亏）────────────────
+@pytest.mark.parametrize("command", [
+    "sleep 5",
+    "sleep 20",
+    "sleep 29",
+    "sleep 0.5",
+    "sleep 20; ls -la",
+])
+def test_short_sleeps_are_never_converted(command):
+    """20 秒的等待转后台，省下的 20 秒不值得多开一个回合。"""
+    assert _hit(command) is None, f"短 sleep 不应转后台：{command}"
+
+
+@pytest.mark.parametrize("command", [
+    "sleep 30",
+    "sleep 120",
+    "echo start; sleep 120; echo done",
+    "sleep 2m",
+    "sleep 1h",
+])
+def test_long_sleeps_are_converted(command):
+    assert _hit(command), f"长等待应转后台：{command}"
+
+
+def test_sleep_with_unparsable_duration_is_left_alone():
+    """判不了时长就不动 —— 转错比漏转更烦人。"""
+    assert _hit("sleep $DELAY") is None
+
+
+# ── 唤醒策略归 profile，不归插件 ──────────────────────────────────────
+class _CtxNotify:
+    """只提供 get_config 的最小插件上下文。"""
+
+    def __init__(self, settings: dict):
+        self._settings = settings
+        self.profile_name = "test"
+
+    def get_config(self, key, default=None):
+        return self._settings.get(key, default)
+
+    def register_hook(self, *_a, **_k):
+        return None
+
+
 @pytest.mark.parametrize("command", [
     "git status --short",
     "ls -la",
@@ -311,3 +354,39 @@ def test_post_hook_ignores_a_foreground_result_quoting_the_spawn_note(monkeypatc
                              result={"output": "Background process started\nok", "session_id": "proc_1"},
                              session_id="s1")
     assert fake.register_calls == []
+
+# ── 唤醒策略：profile 说不要，就别每次完成都开新回合 ──────────────────
+def test_notify_defaults_to_on(monkeypatch):
+    monkeypatch.setattr(guard, "_CTX", None)
+    out = guard._on_pre_tool_call(tool_name="terminal", args={"command": "pytest tests -q"})
+    assert out and out["args"]["notify_on_complete"] is True
+
+
+def test_profile_can_request_silent_background(monkeypatch):
+    monkeypatch.setattr(guard, "_CTX", _CtxNotify({"notify_on_complete": False}))
+    out = guard._on_pre_tool_call(tool_name="terminal", args={"command": "pytest tests -q"})
+    assert out and out["action"] == "modify"
+    assert out["args"]["background"] is True          # 仍然转后台
+    assert out["args"]["notify_on_complete"] is False # 但不唤醒
+    assert "heartbeat" not in out["args"]             # 心跳也是唤醒源，一并关掉
+
+
+def test_env_switch_disables_notification(monkeypatch):
+    monkeypatch.setattr(guard, "_CTX", None)
+    monkeypatch.setenv("LONGTASK_GUARD_NOTIFY", "0")
+    out = guard._on_pre_tool_call(tool_name="terminal", args={"command": "pytest tests -q"})
+    assert out and out["args"]["notify_on_complete"] is False
+
+
+def test_silent_background_still_reaches_the_ledger(monkeypatch):
+    """关掉唤醒不等于放弃可观测性：账本照记，task_status 仍能查到。"""
+    fake = _FakeLedger()
+    monkeypatch.setattr(guard, "_ledger", lambda: fake)
+    monkeypatch.setattr(guard, "_CTX", _Ctx())
+    guard._on_post_tool_call(
+        tool_name="terminal",
+        args={"command": "pytest tests -q"},
+        result={"output": "Background process started", "session_id": "proc_beef1234",
+                "pid": 42, "exit_code": 0, "error": None, "notify_on_complete": False},
+        session_id="session-one")
+    assert len(fake.register_calls) == 1
