@@ -1,6 +1,6 @@
 {
   "id": "failed-job-watch",
-  "schedule": "0 */2 * * *",
+  "schedule": "10 9 * * *",
   "collect": {
     "kind": "command",
     "command": "hermes --profile <p> cron list"

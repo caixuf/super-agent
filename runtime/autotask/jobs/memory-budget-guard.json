@@ -1,6 +1,6 @@
 {
   "id": "memory-budget-guard",
-  "schedule": "0 * * * *",
+  "schedule": "0 */12 * * *",
   "collect": {
     "kind": "files",
     "paths": [
