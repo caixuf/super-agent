@@ -1,0 +1,21 @@
+{
+  "id": "session-archive",
+  "schedule": "45 3 * * *",
+  "collect": {
+    "kind": "none"
+  },
+  "judge": "整理昨日到今日的会话：每个会话一句话主题 + 是否有未完成事项",
+  "write": {
+    "kind": "file",
+    "path": "<profile>/state/autotask/session-archive.json"
+  },
+  "report": {
+    "ok": "ok ",
+    "fail": "fail "
+  },
+  "retry": {
+    "max": 2,
+    "backoff_seconds": 300
+  },
+  "notify": false
+}

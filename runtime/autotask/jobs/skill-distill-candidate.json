@@ -1,0 +1,21 @@
+{
+  "id": "skill-distill-candidate",
+  "schedule": "20 4 * * *",
+  "collect": {
+    "kind": "none"
+  },
+  "judge": "按 skills/skill-distillation 的门槛与结构，从昨日任务里提炼 ≤3 条技能候选（含反模式与验收）",
+  "write": {
+    "kind": "file",
+    "path": "<profile>/skills/candidates/<date>.md"
+  },
+  "report": {
+    "ok": "ok ",
+    "fail": "fail "
+  },
+  "retry": {
+    "max": 2,
+    "backoff_seconds": 300
+  },
+  "notify": true
+}
