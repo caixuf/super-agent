@@ -282,3 +282,17 @@ def test_unshared_document_is_not_reported_as_delivered(monkeypatch, source):
     with pytest.raises(RuntimeError) as error:
         md.deliver_markdown(source, authorization=AUTH)
     assert "document share rejected" in str(error.value)
+
+
+def test_resolve_also_shares_the_document_before_reporting_delivered(monkeypatch):
+    """A pending import finished on the next turn must not hand out a closed link."""
+    calls = []
+    monkeypatch.setattr(md, "poll", lambda ticket, **kw: {"document_id": "doc_11",
+                                                          "url": "https://x/docx/doc_11"})
+    monkeypatch.setattr(md, "_call", lambda method, path, **kw: calls.append((method, path))
+                        or {"permission_public": {"link_share_entity": "tenant_readable"}})
+
+    outcome = md.resolve_import("ticket_11", authorization=AUTH)
+
+    assert outcome["state"] == "delivered"
+    assert calls == [("PATCH", "/drive/v2/permissions/doc_11/public")]

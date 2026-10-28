@@ -204,5 +204,8 @@ def deliver_markdown(source, *, authorization, title="", parent_token="",
 def resolve_import(ticket, *, authorization, wait_seconds=DEFAULT_POLL_SECONDS):
     """Finish an import started earlier; the caller owns removing the source file."""
     outcome = poll(ticket, authorization=authorization, wait_seconds=wait_seconds)
+    # A pending import resolved on the next turn must be shared exactly like a direct one:
+    # the app owns the document, so without this the link is closed to the requester.
+    share_with_org(outcome["document_id"], authorization=authorization)
     outcome.update(state="delivered", ticket=ticket)
     return outcome
