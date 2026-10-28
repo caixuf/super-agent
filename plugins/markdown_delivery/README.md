@@ -46,6 +46,12 @@ token inside the process and are never logged or returned.
 * The document platform is Feishu. The app needs the import scope (`docs:document:import`,
   or `drive:drive`); without it the import task returns `1069902` and `md_deliver` reports
   `state: "error"`.
+* Imported documents belong to the app, so a link is unreadable until it is shared. Both
+  `md_deliver` and `md_resolve` PATCH `/drive/v2/permissions/<id>/public?type=docx` to
+  `link_share_entity=tenant_readable` and verify the returned value before reporting
+  `delivered`; a rejected share fails the delivery instead of handing out a closed link.
+  `external_access_entity` stays `closed` (same-tenant readers only); opening it for
+  cross-tenant readers is a separate, explicit decision.
 * Markdown import limits: 20MB, 20,000 blocks, 2,000 cells and 100 columns per table.
   When the service truncates content it reports warning codes, forwarded verbatim in the
   result's `warnings` field so the answer can say so.
