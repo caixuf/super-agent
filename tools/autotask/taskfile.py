@@ -22,12 +22,16 @@ def load(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def _write_path_problems(path):
+def _write_path_problems(path, profile=""):
     """Writes stay under the autotask state dir or the candidates dir; no traversal, no absolutes."""
     if not path:
         return ["write.path is empty"]
-    if path.startswith("/") or ".." in Path(path).parts:
-        return ["write.path must be relative to the profile and free of '..'"]
+    if ".." in Path(path).parts:
+        return ["write.path must be free of '..'"]
+    if path.startswith("/") and profile:
+        resolved = Path(path).resolve()
+        if Path(profile).resolve() not in resolved.parents:
+            return ["write.path must stay inside the profile (%s)" % profile]
     tail = path.replace("<profile>/", "", 1)
     if any(tail.startswith(root) for root in ALLOWED_WRITE_ROOTS):
         return []
@@ -55,7 +59,7 @@ def validate(task):
     if not isinstance(write, dict) or write.get("kind") != "file":
         problems.append("write.kind must be file")
     else:
-        problems.extend(_write_path_problems(str(write.get("path", ""))))
+        problems.extend(_write_path_problems(str(write.get("path", "")), task.get("_profile", "")))
     report = task["report"]
     if not isinstance(report, dict) or not report.get("ok") or not report.get("fail"):
         problems.append("report.ok and report.fail are required (the checkable verdict)")

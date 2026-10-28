@@ -65,3 +65,50 @@ def test_cron_adapter_keeps_name_schedule_and_prompt():
     assert set(job) == {"name", "schedule", "prompt", "notify"}
     assert job["notify"] is False and job["name"] == "x"
     json.dumps(job)  # must be writable into jobs.json
+
+
+# ---- installer into a live cron store ------------------------------------------------
+
+sys.path.insert(0, str(REPO / "tools" / "autotask"))
+import install_jobs  # noqa: E402
+
+
+def _store(tmp_path, *jobs):
+    path = tmp_path / "cron" / "jobs.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"jobs": list(jobs), "updated_at": "x"}), encoding="utf-8")
+    return path
+
+
+def _task(**overrides):
+    task = {"id": "memory-budget-guard", "schedule": "0 * * * *", "collect": {"kind": "none"},
+            "judge": "判 ok", "write": {"kind": "file", "path": "<profile>/state/autotask/x.json"},
+            "report": {"ok": "ok ", "fail": "fail "}, "retry": {"max": 2, "backoff_seconds": 60}}
+    task.update(overrides)
+    return task
+
+
+def test_installer_adds_job_with_placeholders_resolved(tmp_path):
+    store = _store(tmp_path)
+    profile = "/home/u/.hermes/profiles/p"
+    rows = install_jobs.install(store, [_task()], profile_path=profile)
+    assert rows == [("ADD", "memory-budget-guard", "cron 0 * * * *")]
+    job = json.loads(store.read_text())["jobs"][0]
+    assert profile + "/state/autotask/x.json" in job["prompt"] and "<profile>" not in job["prompt"]
+    assert job["origin"] == "autotask:memory-budget-guard" and job["enabled"] is True
+
+
+def test_second_install_is_idempotent(tmp_path):
+    store = _store(tmp_path)
+    install_jobs.install(store, [_task()], profile_path="/p")
+    rows = install_jobs.install(store, [_task()], profile_path="/p")
+    assert rows == [("UNCHANGED", "memory-budget-guard", "cron 0 * * * *")]
+    assert len(json.loads(store.read_text())["jobs"]) == 1
+
+
+def test_human_jobs_are_never_rewritten(tmp_path):
+    human = {"id": "human1", "name": "memory-budget-guard", "origin": "None", "prompt": "mine"}
+    store = _store(tmp_path, human)
+    rows = install_jobs.install(store, [_task()], profile_path="/p")
+    assert rows[0][0] == "CONFLICT"
+    assert json.loads(store.read_text())["jobs"][0]["prompt"] == "mine"
