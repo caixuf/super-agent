@@ -169,6 +169,24 @@ def poll(ticket, *, authorization, wait_seconds=DEFAULT_POLL_SECONDS):
         time.sleep(min(2.0, max(0.2, deadline - time.monotonic())))
 
 
+def share_with_org(document_id, *, authorization):
+    """Make a bot-created document readable by colleagues in the same organisation.
+
+    Documents created with tenant credentials belong to the app, so without this step even
+    the person who asked cannot open the link. Best-effort: callers surface a failure instead
+    of handing out a link that does not open.
+    """
+    body = {"external_access_entity": "closed", "security_entity": "anyone_can_view",
+            "comment_entity": "anyone_can_view", "share_entity": "same_tenant",
+            "manage_collaborator_entity": "collaborator_can_view",
+            "link_share_entity": "tenant_readable", "copy_entity": "anyone_can_view"}
+    data = _call("PATCH", "/drive/v2/permissions/" + document_id + "/public",
+                 authorization=authorization, body=body, params={"type": "docx"})
+    entity = ((data.get("permission_public") or {}).get("link_share_entity"))
+    if entity != "tenant_readable":
+        raise RuntimeError("document share rejected (link_share_entity=%s)" % (entity,))
+
+
 def deliver_markdown(source, *, authorization, title="", parent_token="",
                      wait_seconds=DEFAULT_POLL_SECONDS):
     """Import ``source``; returns ``{"state": "delivered", "url", "document_id", ...}``."""
@@ -177,6 +195,8 @@ def deliver_markdown(source, *, authorization, title="", parent_token="",
     ticket = create_task(file_token, extension=extension, title=title or source.stem,
                          parent_token=parent_token, authorization=authorization)
     outcome = poll(ticket, authorization=authorization, wait_seconds=wait_seconds)
+    # A link nobody can open is worse than no link: share first, then report delivered.
+    share_with_org(outcome["document_id"], authorization=authorization)
     outcome.update(state="delivered", ticket=ticket, source=str(source))
     return outcome
 

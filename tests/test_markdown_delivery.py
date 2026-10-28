@@ -39,13 +39,14 @@ def test_import_runs_upload_create_poll_in_order(monkeypatch, source):
                         lambda token, **kw: calls.append(("create", token, kw["extension"], kw["title"])) or "ticket_1")
     monkeypatch.setattr(md, "poll", lambda ticket, **kw: calls.append(("poll", ticket)) or
                         {"document_id": "doc_1", "url": "https://feishu.cn/docx/doc_1"})
+    monkeypatch.setattr(md, "share_with_org", lambda *a, **kw: calls.append(("share", a[0])))
 
     outcome = md.deliver_markdown(source, authorization=AUTH, title="7116756543 缺口盘点")
 
     assert outcome["state"] == "delivered" and outcome["url"] == "https://feishu.cn/docx/doc_1"
     assert calls == [("upload", "gap-report.md"),
                      ("create", "file_tok", "md", "7116756543 缺口盘点"),
-                     ("poll", "ticket_1")]
+                     ("poll", "ticket_1"), ("share", "doc_1")]
 
 
 def test_import_task_declares_docx_and_the_root_mount(monkeypatch):
@@ -253,3 +254,31 @@ def test_upload_rejection_surfaces_the_platform_code_and_message(monkeypatch, tm
     message = str(error.value)
     assert "99991672" in message and "scopes" in message
     assert "Bearer" not in message
+
+
+def test_document_is_shared_with_the_org_before_reporting_delivered(monkeypatch, source):
+    """A bot-owned document is invisible to the requester until the link is shared."""
+    calls = []
+    monkeypatch.setattr(md, "upload_material", lambda path, **kw: ("file_tok", "md"))
+    monkeypatch.setattr(md, "create_task", lambda token, **kw: "ticket_9")
+    monkeypatch.setattr(md, "poll", lambda ticket, **kw: {"document_id": "doc_9",
+                                                          "url": "https://x/docx/doc_9"})
+    monkeypatch.setattr(md, "_call", lambda method, path, **kw: calls.append((method, path, kw.get("params")))
+                        or {"permission_public": {"link_share_entity": "tenant_readable"}})
+
+    outcome = md.deliver_markdown(source, authorization=AUTH)
+
+    assert outcome["state"] == "delivered"
+    assert calls == [("PATCH", "/drive/v2/permissions/doc_9/public", {"type": "docx"})]
+
+
+def test_unshared_document_is_not_reported_as_delivered(monkeypatch, source):
+    monkeypatch.setattr(md, "upload_material", lambda path, **kw: ("file_tok", "md"))
+    monkeypatch.setattr(md, "create_task", lambda token, **kw: "ticket_10")
+    monkeypatch.setattr(md, "poll", lambda ticket, **kw: {"document_id": "doc_10",
+                                                          "url": "https://x/docx/doc_10"})
+    monkeypatch.setattr(md, "_call", lambda *a, **kw: {"permission_public": {"link_share_entity": "closed"}})
+
+    with pytest.raises(RuntimeError) as error:
+        md.deliver_markdown(source, authorization=AUTH)
+    assert "document share rejected" in str(error.value)
