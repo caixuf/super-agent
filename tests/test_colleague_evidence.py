@@ -93,3 +93,55 @@ def test_handoff_rejects_stale_attempt_identity(tmp_path):
     path.write_text(json.dumps(manifest))
     with pytest.raises(HandoffEvidenceError, match='manifest_identity_mismatch'):
         verify_internal_result(pool, job)
+
+
+def test_handoff_validates_dev_colleague_receipt(tmp_path):
+    pool = Pool(tmp_path / 'dev_queue')
+    job = pool.submit('dev-1', {'goal': 'Write IMFL case', 'role': 'cases'}, replay_safe=True)
+    row, fd = pool.claim()
+    try:
+        attempt = row['attempt']
+        attempt_dir = pool.root / 'attempts' / attempt
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            'job': job,
+            'attempt': attempt,
+            'role': 'cases',
+            'verification': 'dev_traceability_v1',
+            'worktree': '/tmp/mock-worktree',
+            'modified_files': ['case_set/djs/wiper.imfl'],
+            'artifacts': ['report.json', 'manifest.json', 'report.md'],
+        }
+        report = {
+            'job': job,
+            'attempt': attempt,
+            'role': 'cases',
+            'verification': 'dev_traceability_v1',
+            'summary': 'Wrote 1 case and passed syntax check.',
+            'success': True,
+        }
+        (attempt_dir / 'manifest.json').write_text(json.dumps(manifest))
+        (attempt_dir / 'report.json').write_text(json.dumps(report))
+        receipt = {
+            'ok': True,
+            'result': {
+                'job': job,
+                'attempt': attempt,
+                'verification': 'dev_traceability_v1',
+                'status': 'success',
+                'summary': report['summary'],
+                'worktree': manifest['worktree'],
+                'artifacts': manifest['artifacts'],
+            }
+        }
+        assert pool.finish(job, attempt, True, receipt)
+    finally:
+        os.close(fd)
+
+    evidence = verify_internal_result(pool, job)
+    assert evidence['attempt_id'] == attempt
+    assert evidence['summary'] == 'Wrote 1 case and passed syntax check.'
+    assert evidence['verification'] == 'dev_traceability_v1'
+    assert evidence['modified_files'] == ['case_set/djs/wiper.imfl']
+    assert evidence['success'] is True
+

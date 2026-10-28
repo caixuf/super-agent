@@ -66,3 +66,10 @@ def select_catalog(roles, args):
     if requested is not None:
         payload["colleagues"] = [r for r in payload["colleagues"] if r["role"] == requested]
     return payload
+
+
+def default_dev_catalog() -> dict:
+    """Return the normalized catalog for the official IMFL development team."""
+    from agentcore.colleague_dev import get_dev_roles
+    return normalize_catalog(get_dev_roles())
+

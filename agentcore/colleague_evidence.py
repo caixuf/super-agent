@@ -67,8 +67,9 @@ def verify_internal_result(pool, job_id):
         raise HandoffEvidenceError("invalid_job_record") from exc
     result = receipt.get("result") if isinstance(receipt, dict) and receipt.get("ok") is True else None
     if (not isinstance(result, dict) or result.get("job") != job_id or result.get("attempt") != attempt
-            or result.get("verification") != "citation_traceability_only"):
+            or result.get("verification") not in ("citation_traceability_only", "dev_traceability_v1")):
         raise HandoffEvidenceError("receipt_identity_mismatch")
+    verification_mode = result.get("verification")
     try:
         root = os.open(Path(pool.root) / "attempts", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
@@ -83,6 +84,26 @@ def verify_internal_result(pool, job_id):
         report, manifest = json.loads(report_raw), json.loads(manifest_raw)
     except (OSError, ValueError, UnicodeError) as exc:
         raise HandoffEvidenceError("invalid_artifact") from exc
+
+    if verification_mode == "dev_traceability_v1":
+        if (not isinstance(manifest, dict) or manifest.get("job") != job_id or manifest.get("attempt") != attempt
+                or manifest.get("verification") != "dev_traceability_v1"):
+            raise HandoffEvidenceError("manifest_identity_mismatch")
+        if (not isinstance(report, dict) or report.get("job") != job_id or report.get("attempt") != attempt
+                or report.get("verification") != "dev_traceability_v1"):
+            raise HandoffEvidenceError("report_receipt_mismatch")
+        summary_text = (report.get("summary") or "")[:_MAX_SUMMARY]
+        return {
+            "attempt_id": attempt,
+            "report_sha256": hashlib.sha256(report_raw).hexdigest(),
+            "source_manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+            "summary": summary_text,
+            "verification": "dev_traceability_v1",
+            "worktree": manifest.get("worktree"),
+            "modified_files": manifest.get("modified_files", []),
+            "success": report.get("success", False),
+        }
+
     if (not isinstance(manifest, dict) or manifest.get("job") != job_id or manifest.get("attempt") != attempt
             or manifest.get("verification") != "citation_traceability_only"):
         raise HandoffEvidenceError("manifest_identity_mismatch")
