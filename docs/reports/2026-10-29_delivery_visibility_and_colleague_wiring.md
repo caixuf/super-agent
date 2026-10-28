@@ -71,6 +71,7 @@
 | 部署件含新代码 | `grep -c _report_delivery_health` = **2** | **2** |
 | 网关 | restart → active，插件加载失败 **0** | restart → PID 281004，加载失败 **0** |
 | 同事名册 | `colleague-catalog` 启用 **15 岗**（analysis/evidence/triage/replay/artifact/patrol/cases/memory/architect/backend/frontend/test/ops/reviewer/hr）；工具面 `✓ colleague_catalog`；工具实测返回 15 岗、单岗过滤得"阿证"、未知岗空、无 session 拒绝 | **未铺**（无同事 worker，铺了就是"派了没人干"；它的分派路径是 `delegate_task` 子 agent） |
+| **存量修复 SOP** | 生产库副本实测：`attach_origin` 成功 + 幂等 + `deliverable` false→true；拒绝路径 3/3 正确 | 同上流程通用（本机队列 total 2 / deliverable 1） |
 | **R1 端到端** | **`ops_alert_outbox` 出现 1 条 `health_fault`**（profile=<profile-b>，scope=`durable-completion-delivery`，gen=1，00:27:19，`observed={'delivered':0,'outcomes':[],'parked':18,'status':'empty'}`）+ `ops_health_conditions` 一条 active episode；`agent.log` 有 `completion delivery backlog: parked=N` | 无（`deliver_completions: false` → 根本没有投递 poller，也就没有健康记录；队列盘点 total 2 / deliverable 1） |
 | **长任务账本** | 修复前：`liveness.db` **不存在**。修复后：**出现 6 行**，含经网关真跑的一条 `('proc_ccf158b9c2ce', '<profile-b>:api-…', 'sleep 25; echo guarded-probe', 'running', 693209, 1)` | 本机账本 561 行，但其中 **457 行是测试 owner**（见 §2.7；真正的 profile 行约占 1/6），17 条 `running` 属死进程，退出读取时才现算 |
 
@@ -82,7 +83,11 @@
 ## 4. 未做 / 待决策
 
 1. **21 条存量回执的修复**：按 `docs/COMPLETION_DELIVERY.md` §2 需要**取证**（原会话路由 + payload sha256 + 取证人签核）。
-   其中 4 条无主、其余目标会话已死 —— 能不能修由部署方定；工具与流程已就绪。
+   **实测更正**：未 ACK 21 条里 **18 条无 route**（早前只抽样到 4 条），其余目标会话已死。
+能不能修由部署方定；**流程本身已在生产库副本上验过**：
+`attach_origin` → `attached=true`、重放幂等（`already_attached=true`）、修完 `deliverable` 由 **false 翻 true**；
+三条拒绝路径也验过（payload sha 不符 / origin 无 route / 已被占用且证明冲突）。
+副本在 `/tmp/qcopy`（一次性，验完即删）。
 2. **ops-alert 发送器**：两台机器都没有配（`OPS_ALERT_*` 未见、无发送器单元）→ 健康事件目前**只落在库里 + 一条 WARNING**，没有外部送达。
 3. **长任务账本的退出回收**：emily 的账本已从"不存在"变为**有行**（见 §3），但行停在 `state=running`
    —— 退出由 `task_status` 读取时现算；两台机器都**没有 liveness 守护单元**，无人主动 sweep。
