@@ -9,8 +9,9 @@ import pytest
 
 def test_real_host_stages_lossy_cron_writes_and_allows_lossless_or_reviewed_changes(tmp_path):
     host=Path(os.environ.get('HERMES_SOURCE',Path.home()/'.hermes/hermes-agent'))
-    runtime=host/'.venv/bin/python'
-    if not runtime.is_file():pytest.skip('Hermes host interpreter unavailable')
+    candidates=[host/'.venv/bin/python',host/'venv/bin/python']
+    runtime=next((candidate for candidate in candidates if candidate.is_file()),None)
+    if runtime is None:pytest.skip('Hermes host interpreter unavailable')
     engine=Path(__file__).resolve().parents[1]
     code=r'''
 import importlib.util,json,sys,types

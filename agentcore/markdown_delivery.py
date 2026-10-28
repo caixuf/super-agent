@@ -169,12 +169,13 @@ def poll(ticket, *, authorization, wait_seconds=DEFAULT_POLL_SECONDS):
         time.sleep(min(2.0, max(0.2, deadline - time.monotonic())))
 
 
-def share_with_org(document_id, *, authorization):
+def share_with_org(document_id, *, authorization, allow_fallback: bool = False):
     """Make a bot-created document readable by colleagues in the same organisation.
 
     Documents created with tenant credentials belong to the app, so without this step even
     the person who asked cannot open the link. Best-effort: callers surface a failure instead
-    of handing out a link that does not open.
+    of handing out a link that does not open. When allow_fallback is True, tenant policy
+    rejections are returned as warning strings instead of raising RuntimeError.
     """
     body = {"external_access_entity": "closed", "security_entity": "anyone_can_view",
             "comment_entity": "anyone_can_view", "share_entity": "same_tenant",
@@ -184,11 +185,15 @@ def share_with_org(document_id, *, authorization):
                  authorization=authorization, body=body, params={"type": "docx"})
     entity = ((data.get("permission_public") or {}).get("link_share_entity"))
     if entity != "tenant_readable":
-        raise RuntimeError("document share rejected (link_share_entity=%s)" % (entity,))
+        msg = "document share rejected (link_share_entity=%s)" % (entity,)
+        if not allow_fallback:
+            raise RuntimeError(msg)
+        return msg
+    return None
 
 
 def deliver_markdown(source, *, authorization, title="", parent_token="",
-                     wait_seconds=DEFAULT_POLL_SECONDS):
+                     wait_seconds=DEFAULT_POLL_SECONDS, allow_unshared_fallback: bool = False):
     """Import ``source``; returns ``{"state": "delivered", "url", "document_id", ...}``."""
     source = Path(source)
     file_token, extension = upload_material(source, authorization=authorization)
@@ -196,16 +201,20 @@ def deliver_markdown(source, *, authorization, title="", parent_token="",
                          parent_token=parent_token, authorization=authorization)
     outcome = poll(ticket, authorization=authorization, wait_seconds=wait_seconds)
     # A link nobody can open is worse than no link: share first, then report delivered.
-    share_with_org(outcome["document_id"], authorization=authorization)
+    warning = share_with_org(outcome["document_id"], authorization=authorization, allow_fallback=allow_unshared_fallback)
+    if warning:
+        outcome.setdefault("warnings", []).append(warning)
     outcome.update(state="delivered", ticket=ticket, source=str(source))
     return outcome
 
 
-def resolve_import(ticket, *, authorization, wait_seconds=DEFAULT_POLL_SECONDS):
+def resolve_import(ticket, *, authorization, wait_seconds=DEFAULT_POLL_SECONDS, allow_unshared_fallback: bool = False):
     """Finish an import started earlier; the caller owns removing the source file."""
     outcome = poll(ticket, authorization=authorization, wait_seconds=wait_seconds)
     # A pending import resolved on the next turn must be shared exactly like a direct one:
     # the app owns the document, so without this the link is closed to the requester.
-    share_with_org(outcome["document_id"], authorization=authorization)
+    warning = share_with_org(outcome["document_id"], authorization=authorization, allow_fallback=allow_unshared_fallback)
+    if warning:
+        outcome.setdefault("warnings", []).append(warning)
     outcome.update(state="delivered", ticket=ticket)
     return outcome

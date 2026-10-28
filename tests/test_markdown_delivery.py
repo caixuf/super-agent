@@ -284,6 +284,19 @@ def test_unshared_document_is_not_reported_as_delivered(monkeypatch, source):
     assert "document share rejected" in str(error.value)
 
 
+def test_unshared_document_with_fallback_reports_warning(monkeypatch, source):
+    monkeypatch.setattr(md, "upload_material", lambda path, **kw: ("file_tok", "md"))
+    monkeypatch.setattr(md, "create_task", lambda token, **kw: "ticket_10")
+    monkeypatch.setattr(md, "poll", lambda ticket, **kw: {"document_id": "doc_10",
+                                                          "url": "https://x/docx/doc_10"})
+    monkeypatch.setattr(md, "_call", lambda *a, **kw: {"permission_public": {"link_share_entity": "closed"}})
+
+    outcome = md.deliver_markdown(source, authorization=AUTH, allow_unshared_fallback=True)
+    assert outcome["state"] == "delivered"
+    assert outcome["document_id"] == "doc_10"
+    assert any("document share rejected" in w for w in outcome.get("warnings", []))
+
+
 def test_resolve_also_shares_the_document_before_reporting_delivered(monkeypatch):
     """A pending import finished on the next turn must not hand out a closed link."""
     calls = []
