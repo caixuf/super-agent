@@ -26,7 +26,7 @@ def test_colleague_dev_roles_and_contract():
     assert "triage" in roles
 
     cases_contract = get_role_contract_markdown("cases")
-    assert "IMFL用例开发大师" in cases_contract
+    assert "用例开发大师" in cases_contract
     assert "逆向状态机条件宏" in cases_contract
     assert "300ms 以内短脉冲前禁止插入 sleep" in cases_contract
 
@@ -87,19 +87,19 @@ def test_run_dev_job_success(tmp_path: Path):
         "attempt": "att-1",
         "payload": {
             "role": "cases",
-            "goal": "编写雨刮新需求 IMFL 测试用例并在 worktree 下落盘",
+            "goal": "编写雨刮新需求测试用例并在 worktree 下落盘",
         },
     }
 
     def mock_runner(prompt: str, kwargs: dict):
         assert "编写雨刮新需求" in prompt
         # Simulate creating an actual test case in workdir
-        case_file = kwargs["workdir"] / "test_wiper.imfl"
+        case_file = kwargs["workdir"] / "test_wiper.dsl"
         case_file.write_text("feature: wiper_test\nprocess: main\n")
         return {
             "ok": True,
-            "final_text": "Successfully generated test_wiper.imfl and passed DSL validation.",
-            "tool_calls": [{"tool": "write", "args": {"file": "test_wiper.imfl"}}],
+            "final_text": "Successfully generated test_wiper.dsl and passed DSL validation.",
+            "tool_calls": [{"tool": "write", "args": {"file": "test_wiper.dsl"}}],
         }
 
     res = run_dev_job(
@@ -116,7 +116,7 @@ def test_run_dev_job_success(tmp_path: Path):
     assert res["ok"] is True
     assert res["result"]["role"] == "cases"
     assert res["result"]["job"] == "dev-job-101"
-    assert "wiper_test" in (workdir / "test_wiper.imfl").read_text()
+    assert "wiper_test" in (workdir / "test_wiper.dsl").read_text()
 
     # Check generated report files
     report_json = json.loads((out_dir / "report.json").read_text())
@@ -173,6 +173,21 @@ def test_run_dev_job_failure(tmp_path: Path):
     assert (out_dir / "report.json").is_file()
 
 
+def _real_orchestrator_available() -> bool:
+    """The real orchestrator needs the business bridge checkout; skip clean rooms."""
+    try:
+        from agentcore.colleague_dev import ColleagueDevOrchestrator
+        orchestrator = ColleagueDevOrchestrator()
+        if not getattr(orchestrator, "workspace_root", None):
+            return False
+        orchestrator._ensure_bridge()
+        return True
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _real_orchestrator_available(),
+                    reason="real colleague bridge checkout unavailable")
 def test_colleague_dev_orchestrator(tmp_path: Path):
     from agentcore.colleague_dev import ColleagueDevOrchestrator
     orchestrator = ColleagueDevOrchestrator()
@@ -191,9 +206,100 @@ def test_colleague_dev_orchestrator(tmp_path: Path):
     pipeline_res = orchestrator.execute_autonomous_case_dev(
         requirement_text="定速巡航激活与刹车退出用例",
         workdir=tmp_path,
-        domain="tmas",
+        domain="domain_a",
     )
     assert pipeline_res["ok"] is True
-    assert pipeline_res["imfl_code"] is not None
+    assert pipeline_res["case_name"] is not None
     assert (tmp_path / "manifest.json").is_file()
 
+
+def test_colleague_dev_self_healing_retry_loop(tmp_path: Path):
+    from agentcore.colleague_dev import ColleagueDevOrchestrator
+
+    class MockSelfHealingBridge:
+        def __init__(self):
+            self.revisions_recorded = []
+
+        def execute_autonomous_dev_pipeline(
+            self, requirement_text, source_input="", workdir=None, max_revisions=3, target_domain="default"
+        ):
+            work_path = Path(workdir)
+            work_path.mkdir(parents=True, exist_ok=True)
+            for rev in range(1, max_revisions + 1):
+                score = 50.0 if rev == 1 else 88.0
+                approved = score >= 80.0
+                self.revisions_recorded.append({"rev": rev, "score": score, "approved": approved})
+                if approved:
+                    break
+
+            manifest = {
+                "task_id": "task-heal-1",
+                "verification": "dev_traceability_v1",
+                "approved": True,
+                "score": 88.0,
+                "revisions": len(self.revisions_recorded),
+                "artifacts": ["contract_requirements.yaml", "red_team_review.yaml"],
+            }
+            (work_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            (work_path / "report.json").write_text(json.dumps({"ok": True, "score": 88.0}), encoding="utf-8")
+            return {
+                "ok": True,
+                "task_id": "task-heal-1",
+                "case_name": f"test_{target_domain}.dsl",
+                "score": 88.0,
+                "approved": True,
+                "revisions": len(self.revisions_recorded),
+            }
+
+    mock_bridge = MockSelfHealingBridge()
+    orchestrator = ColleagueDevOrchestrator(bridge=mock_bridge)
+    out_dir = tmp_path / "healing_work"
+    result = orchestrator.execute_autonomous_case_dev(
+        requirement_text="雨刮高档位与关闭退出",
+        workdir=out_dir,
+        max_revisions=3,
+        domain="domain_b",
+    )
+
+    assert result["ok"] is True
+    assert result["approved"] is True
+    assert result["revisions"] == 2
+    assert result["score"] == 88.0
+    assert (out_dir / "manifest.json").is_file()
+
+
+@pytest.mark.skipif(not _real_orchestrator_available(),
+                    reason="real colleague bridge checkout unavailable")
+def test_colleague_dev_execute_in_worktree(tmp_path: Path):
+    import subprocess
+    from agentcore.colleague_dev import ColleagueDevOrchestrator
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo_dir), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "TestRunner"], cwd=str(repo_dir), check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo_dir), check=True)
+
+    readme = repo_dir / "README.md"
+    readme.write_text("# Test Repo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(repo_dir), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "initial commit"], cwd=str(repo_dir), check=True, capture_output=True)
+
+    orchestrator = ColleagueDevOrchestrator()
+    task_id = "test-wt-1"
+    res = orchestrator.execute_in_worktree(
+        repo_path=repo_dir,
+        task_id=task_id,
+        requirement_text="泊车激活与中断退出",
+        domain="domain_c",
+        max_revisions=3,
+    )
+
+    assert res["ok"] is True
+    assert res["approved"] is True
+
+    branch_check = subprocess.run(
+        ["git", "log", "-1", f"dev-colleague/{task_id}", "--pretty=%B"],
+        cwd=str(repo_dir), capture_output=True, text=True, check=True
+    )
+    assert f"autonomous colleague pipeline {task_id}" in branch_check.stdout

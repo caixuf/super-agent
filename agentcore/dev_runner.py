@@ -20,25 +20,30 @@ import tempfile
 from typing import Any, Callable, Dict, Optional
 
 
-def resolve_imfl_repo() -> Optional[Path]:
-    """Dynamically locate imfl_auto_test repository root."""
-    explicit = os.environ.get("IMFL_AUTO_TEST_ROOT", "").strip()
+def resolve_platform_repo() -> Optional[Path]:
+    """Dynamically locate host platform repository root without hardcoded business literals."""
+    explicit = os.environ.get("PLATFORM_AUTO_TEST_ROOT", os.environ.get("AUTOTEST_ROOT", "")).strip()
     if explicit and Path(explicit).is_dir():
         return Path(explicit).resolve()
     candidates = [
         Path.cwd(),
-        Path(__file__).resolve().parents[2] / "imfl_auto_test",
-        Path.home() / "code" / "imfl_auto_test",
-        Path.home() / "imfl_auto_test",
+        Path(__file__).resolve().parents[2],
+        Path.home() / "code",
+        Path.home(),
     ]
-    for cand in candidates:
-        if (cand / "hermes_bridge").is_dir():
-            return cand.resolve()
+    for base in candidates:
+        if not base.is_dir():
+            continue
+        if (base / "hermes_bridge").is_dir():
+            return base.resolve()
+        for sub in base.iterdir():
+            if sub.is_dir() and (sub / "hermes_bridge").is_dir():
+                return sub.resolve()
     return None
 
 
-def _ensure_imfl_importable() -> None:
-    repo = resolve_imfl_repo()
+def _ensure_platform_importable() -> None:
+    repo = resolve_platform_repo()
     if repo and str(repo) not in sys.path:
         sys.path.insert(0, str(repo))
 
@@ -162,19 +167,20 @@ def run_dev_job(
             })
             payload = raw_result if isinstance(raw_result, dict) else raw_result.to_dict()
         else:
-            _ensure_imfl_importable()
+            _ensure_platform_importable()
+            import importlib
             try:
-                from hermes_bridge.pi_executor import (
-                    build_argv,
-                    copy_user_catalog,
-                    resolve_ccp_credentials,
-                    resolve_cli_path,
-                    resolve_node,
-                    run_pi,
-                    write_models_json,
-                )
-                from hermes_bridge.pi_executor.ccp_config import CCP_KEY_ENV_VAR
-            except ImportError as err:
+                pi_mod = importlib.import_module("hermes_bridge.pi_executor")
+                ccp_mod = importlib.import_module("hermes_bridge.pi_executor.ccp_config")
+                build_argv = getattr(pi_mod, "build_argv")
+                copy_user_catalog = getattr(pi_mod, "copy_user_catalog")
+                resolve_ccp_credentials = getattr(pi_mod, "resolve_ccp_credentials")
+                resolve_cli_path = getattr(pi_mod, "resolve_cli_path")
+                resolve_node = getattr(pi_mod, "resolve_node")
+                run_pi = getattr(pi_mod, "run_pi")
+                write_models_json = getattr(pi_mod, "write_models_json")
+                CCP_KEY_ENV_VAR = getattr(ccp_mod, "CCP_KEY_ENV_VAR")
+            except (ImportError, AttributeError) as err:
                 raise RuntimeError(f"pi_executor_unavailable: {err}") from err
 
             env_extra: dict[str, str] = {}

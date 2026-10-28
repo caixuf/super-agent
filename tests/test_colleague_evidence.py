@@ -97,7 +97,7 @@ def test_handoff_rejects_stale_attempt_identity(tmp_path):
 
 def test_handoff_validates_dev_colleague_receipt(tmp_path):
     pool = Pool(tmp_path / 'dev_queue')
-    job = pool.submit('dev-1', {'goal': 'Write IMFL case', 'role': 'cases'}, replay_safe=True)
+    job = pool.submit('dev-1', {'goal': 'Write test case', 'role': 'cases'}, replay_safe=True)
     row, fd = pool.claim()
     try:
         attempt = row['attempt']
@@ -109,7 +109,7 @@ def test_handoff_validates_dev_colleague_receipt(tmp_path):
             'role': 'cases',
             'verification': 'dev_traceability_v1',
             'worktree': '/tmp/mock-worktree',
-            'modified_files': ['case_set/djs/wiper.imfl'],
+            'modified_files': ['case_set/domain_a/wiper.dsl'],
             'artifacts': ['report.json', 'manifest.json', 'report.md'],
         }
         report = {
@@ -142,6 +142,6 @@ def test_handoff_validates_dev_colleague_receipt(tmp_path):
     assert evidence['attempt_id'] == attempt
     assert evidence['summary'] == 'Wrote 1 case and passed syntax check.'
     assert evidence['verification'] == 'dev_traceability_v1'
-    assert evidence['modified_files'] == ['case_set/djs/wiper.imfl']
+    assert evidence['modified_files'] == ['case_set/domain_a/wiper.dsl']
     assert evidence['success'] is True
 

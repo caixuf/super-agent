@@ -69,7 +69,7 @@ def select_catalog(roles, args):
 
 
 def default_dev_catalog() -> dict:
-    """Return the normalized catalog for the official IMFL development team."""
+    """Return the normalized catalog for the official development team."""
     from agentcore.colleague_dev import get_dev_roles
     return normalize_catalog(get_dev_roles())
 
