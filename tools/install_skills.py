@@ -32,9 +32,10 @@ def generic_skills(only=None):
     return found
 
 
-def skill_dest(profile, name):
-    home = Path(os.path.expanduser("~/.hermes"))
-    base = home / "profiles" / profile if profile else home
+def skill_dest(profile, name, home=""):
+    """``--home`` targets a bare Hermes home (installer's ``--hermes-home``); else a profile."""
+    base = Path(os.path.expanduser(home)) if home else (
+        Path(os.path.expanduser("~/.hermes")) / "profiles" / profile)
     return base / "skills" / name
 
 
@@ -45,10 +46,10 @@ def _same(source, target):
     return all(_same(source / d, target / d) for d in comparison.common_dirs)
 
 
-def install(profile, *, dry_run=False, only=None):
+def install(profile, *, dry_run=False, only=None, home=""):
     rows = []
     for source in generic_skills(only):
-        target = skill_dest(profile, source.name)
+        target = skill_dest(profile, source.name, home)
         if target.exists() and _same(source, target):
             rows.append(("UNCHANGED", source.name, "", str(target)))
             continue
@@ -66,10 +67,13 @@ def install(profile, *, dry_run=False, only=None):
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--profile", default="", help="profile name under ~/.hermes/profiles")
+    parser.add_argument("--home", default="", help="a bare Hermes home (same as the installer's --hermes-home)")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--only", nargs="*", default=None)
     args = parser.parse_args(argv)
-    rows = install(args.profile, dry_run=args.dry_run, only=args.only)
+    if not args.profile and not args.home:
+        parser.error("need --profile or --home")
+    rows = install(args.profile, dry_run=args.dry_run, only=args.only, home=args.home)
     for status, name, _note, target in rows:
         print("%-9s %-28s %s" % (status, name, target))
     conflicts = [row for row in rows if row[0] == "CONFLICT"]

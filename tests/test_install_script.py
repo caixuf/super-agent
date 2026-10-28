@@ -110,6 +110,12 @@ def test_real_install_lands_hyphenated_plugin_dirs(tmp_path):
     assert not list(plugins.rglob("__pycache__"))
     assert not list(plugins.rglob("*.pyc"))
 
+    # generic skills land under the target profile; examples stay templates
+    skills = home / "skills"
+    assert (skills / "research-before-build" / "SKILL.md").is_file()
+    assert (skills / "im-card-markdown" / "SKILL.md").is_file()
+    assert not (skills / "examples").exists(), "examples are templates, never installed"
+
     agentcore = home / "agentcore"
     for relative in ("tools/arch_doc.py", "tools/doc_browser.py",
                      "tools/assets/mermaid.min.js",

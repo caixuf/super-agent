@@ -500,6 +500,23 @@ else
 fi
 warn "**不要**整文件覆盖现场 config.yaml（会冲掉内联的密钥）；按 runtime/README.md 逐键补齐。"
 
+step "⑥b 通用技能 -> $TARGET_HOME/skills（示例技能不装）"
+if [ "$DO_SKILLS" = "1" ]; then
+  # --hermes-home puts the profile directly under that path; otherwise <home>/profiles/<profile>.
+  if [ -n "$HERMES_HOME_ARG" ] && [ "$TARGET_HOME" = "$HERMES_HOME_ARG" ]; then
+    SKILLS_TARGET=(--home "$TARGET_HOME")
+  else
+    SKILLS_TARGET=(--profile "$(basename "$TARGET_HOME")")
+  fi
+  if [ "$DRY_RUN" = "1" ]; then
+    python3 "$REPO_ROOT/tools/install_skills.py" "${SKILLS_TARGET[@]}" --dry-run | while IFS= read -r line; do log "    [plan] $line"; done
+  else
+    python3 "$REPO_ROOT/tools/install_skills.py" "${SKILLS_TARGET[@]}" | while IFS= read -r line; do log "  $line"; done
+  fi
+else
+  skip "通用技能（--skip-skills）"
+fi
+
 step "⑦ 补丁文件 -> $DEPLOY_DIR/patches"
 install_tree "$REPO_ROOT/patches" "$DEPLOY_DIR/patches"
 
