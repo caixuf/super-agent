@@ -175,7 +175,7 @@ def test_run_dev_job_failure(tmp_path: Path):
 
 def test_colleague_dev_orchestrator(tmp_path: Path):
     from agentcore.colleague_dev import ColleagueDevOrchestrator
-    orchestrator = ColleagueDevOrchestrator(workspace_root="/home/caixuf/code/imfl_auto_test")
+    orchestrator = ColleagueDevOrchestrator()
 
     # 1. Test role execution
     res = orchestrator.execute_role_task(

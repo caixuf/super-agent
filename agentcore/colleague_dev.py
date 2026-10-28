@@ -161,15 +161,15 @@ class ColleagueDevOrchestrator:
     """
 
     def __init__(self, workspace_root: Optional[Union[str, Path]] = None):
-        if workspace_root:
+        candidates = [
+            Path("/home/caixuf/code/imfl_auto_test"),
+            Path("/home/emily/imfl_auto_test"),
+            Path.cwd(),
+            Path.cwd().parent / "imfl_auto_test",
+        ]
+        if workspace_root and Path(workspace_root).is_dir():
             self.workspace_root = Path(workspace_root).resolve()
         else:
-            # Auto-detect common IMFL workspace paths
-            candidates = [
-                Path("/home/caixuf/code/imfl_auto_test"),
-                Path("/home/emily/imfl_auto_test"),
-                Path.cwd(),
-            ]
             self.workspace_root = next((p for p in candidates if (p / "autotest_server").is_dir()), None)
 
     def _ensure_bridge(self):
