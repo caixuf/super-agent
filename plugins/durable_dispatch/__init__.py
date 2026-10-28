@@ -32,19 +32,26 @@ _BOUND_ROUTE = (
 )
 _ENGINE_MODULES = ('pool.py', 'ops_alerts.py', 'completion_delivery.py',
                    'completion_backfill.py')
+_ENGINE_MODULE_NAMES = tuple(name[:-3] for name in _ENGINE_MODULES)
 _DEFAULT_DELIVERY_INTERVAL = 5.0
+#: Durable ops-health scope for the completion queue: one episode per stuck backlog.
+_DELIVERY_HEALTH_SCOPE = 'durable-completion-delivery'
+#: Backlog must persist this long before the fault event is enqueued.
+_DEFAULT_DELIVERY_HEALTH_FAULT_GRACE = 60.0
+_MAX_DELIVERY_HEALTH_FAULT_GRACE = 3600.0
+#: A drained backlog must stay clean this long before the recovery event is enqueued.
+_DELIVERY_HEALTH_RECOVERY_GRACE = 10.0
 
 
-def _engine(engine_root=None):
-    """Resolve the canonical engine modules without changing interpreter search paths.
+def _engine_modules(engine_root=None):
+    """``{name: module}`` for the canonical engine modules, without touching ``sys.path``.
 
     Plugin import itself must work in an isolated host runtime. Administrator
     settings supply the checkout fallback; job arguments never enter resolution.
     """
     try:
-        pool = importlib.import_module('agentcore.pool')
-        backfill = importlib.import_module('agentcore.completion_backfill')
-        return pool.Pool, backfill
+        return {name: importlib.import_module('agentcore.' + name)
+                for name in _ENGINE_MODULE_NAMES}
     except ModuleNotFoundError as error:
         if error.name not in ('agentcore', 'agentcore.pool', 'agentcore.completion_backfill',
                               'agentcore.completion_delivery', 'agentcore.ops_alerts'):
@@ -67,7 +74,7 @@ def _engine(engine_root=None):
     sys.modules['agentcore'] = package
     loaded = {}
     try:
-        for name in ('pool', 'ops_alerts', 'completion_delivery', 'completion_backfill'):
+        for name in _ENGINE_MODULE_NAMES:
             spec = importlib.util.spec_from_file_location(
                 'agentcore.' + name, directory / (name + '.py'))
             if spec is None or spec.loader is None:
@@ -77,12 +84,18 @@ def _engine(engine_root=None):
             sys.modules['agentcore.' + name] = module
             spec.loader.exec_module(module)
             loaded[name] = module
-        return loaded['pool'].Pool, loaded['completion_backfill']
+        return dict(loaded)
     finally:
         for name in [name for name in list(sys.modules)
                      if name == 'agentcore' or name.startswith('agentcore.')]:
             del sys.modules[name]
         sys.modules.update(saved)
+
+
+def _engine(engine_root=None):
+    """``(Pool, completion_backfill)`` — the pair the dispatcher builds services from."""
+    modules = _engine_modules(engine_root)
+    return modules['pool'].Pool, modules['completion_backfill']
 
 
 def _load_liveness(engine_root=None):
@@ -500,6 +513,67 @@ def _delivery_interval(ctx):
     return value
 
 
+def _delivery_health_fault_grace(ctx):
+    """``delivery_health_fault_grace``: seconds a stuck backlog must persist to alert."""
+    try:
+        value = float(ctx.get_config('delivery_health_fault_grace',
+                                     _DEFAULT_DELIVERY_HEALTH_FAULT_GRACE))
+    except (TypeError, ValueError):
+        value = _DEFAULT_DELIVERY_HEALTH_FAULT_GRACE
+    if not 0.0 <= value <= _MAX_DELIVERY_HEALTH_FAULT_GRACE:
+        raise ValueError('delivery_health_fault_grace must be between 0 and 3600 seconds')
+    return value
+
+
+def _delivery_summary(status):
+    """Sanitized counters for one drain pass; job ids, routes and text never enter."""
+    row = status if isinstance(status, dict) else {}
+    outcomes = row.get('outcomes') if isinstance(row.get('outcomes'), list) else []
+    notable = sorted({str(item.get('status')) for item in outcomes
+                      if isinstance(item, dict)
+                      and item.get('status') not in (None, 'delivered', 'empty')})
+    parked = row.get('parked') if isinstance(row.get('parked'), (list, tuple)) else ()
+    try:
+        delivered = max(0, int(row.get('delivered') or 0))
+    except (TypeError, ValueError):
+        delivered = 0
+    return {'status': str(row.get('status') or 'unknown'),
+            'delivered': delivered,
+            'parked': len(parked),
+            'notable': sum(1 for item in outcomes
+                           if isinstance(item, dict)
+                           and item.get('status') not in (None, 'delivered', 'empty')),
+            'outcomes': notable[:8]}
+
+
+def _report_delivery_health(service, status, *, modules=None, fault_grace=None, now=None):
+    """Record one pass as a durable ops-health observation; never raises.
+
+    A parked receipt or a refused delivery is a *stuck* completion: it will never reach
+    its conversation by itself. ``observe_health`` debounces that condition and enqueues a
+    fault (and later a recovery) event in the shared alert outbox, so the host's alert
+    transport reports it instead of the poller retrying silently forever.
+    """
+    summary = _delivery_summary(status)
+    healthy = summary['parked'] == 0 and summary['notable'] == 0
+    try:
+        if modules is None:
+            modules = _engine_modules(_CTX.get_config('engine_root') if _CTX is not None else None)
+        outbox = modules['ops_alerts'].AlertOutbox(str(service.pool.root), pool=service.pool)
+        outbox.observe_health(
+            service.profile, _DELIVERY_HEALTH_SCOPE, healthy=healthy,
+            expected={'parked': 0, 'outcomes': []},
+            observed={'status': summary['status'], 'parked': summary['parked'],
+                      'delivered': summary['delivered'], 'outcomes': summary['outcomes']},
+            fault_grace=(_DEFAULT_DELIVERY_HEALTH_FAULT_GRACE if fault_grace is None
+                         else fault_grace),
+            recovery_grace=_DELIVERY_HEALTH_RECOVERY_GRACE, now=now)
+    except Exception:
+        # A broken health record must never stop delivery or hold the queue.
+        logging.getLogger(__name__).debug('delivery health observation failed', exc_info=True)
+    return summary
+
+
 def start_backfill(ctx, service):
     """Poll the queue and deliver routable completions until the plugin unloads.
 
@@ -507,6 +581,10 @@ def start_backfill(ctx, service):
     ``plugins.entries.durable-dispatch.allow_gateway_injection: true``. The thread holds
     no delivery state: every pass re-reads the ledger, so a restart, reconnect or a
     second gateway resumes the same pending receipts without replaying delivered ones.
+
+    ``report_delivery_health`` (default true) additionally records each pass in the
+    shared ops-alert outbox, so a backlog that cannot be delivered becomes a reported
+    fault instead of a silent one.
     """
     if ctx.get_config('deliver_completions', False) is not True:
         return None
@@ -528,13 +606,26 @@ def start_backfill(ctx, service):
         if not callable(inject):
             return None
         transport = InjectionTransport(inject, service.profile)
+    report_health = ctx.get_config('report_delivery_health', True) is not False
+    health_modules = None
+    fault_grace = None
+    if report_health:
+        try:
+            health_modules = _engine_modules(ctx.get_config('engine_root'))
+            fault_grace = _delivery_health_fault_grace(ctx)
+        except Exception:
+            # The queue still delivers; only the durable health record is skipped.
+            logging.getLogger(__name__).warning('delivery health disabled: engine root unusable',
+                                                exc_info=True)
+            report_health = False
     stop = threading.Event()
 
     def loop():
         last_error = None
+        last_summary = None
         while not stop.is_set():
             try:
-                service.drain_delivery(transport, not_before=not_before)
+                status = service.drain_delivery(transport, not_before=not_before)
                 last_error = None
             except Exception as exc:
                 # A broken pass must not kill the poller; the next pass retries from
@@ -543,6 +634,16 @@ def start_backfill(ctx, service):
                 if name != last_error:
                     logging.getLogger(__name__).warning('completion backfill failed: %s', name)
                 last_error = name
+            else:
+                if report_health:
+                    summary = _report_delivery_health(service, status, modules=health_modules,
+                                                      fault_grace=fault_grace)
+                    if summary != last_summary:
+                        if summary['parked'] or summary['notable']:
+                            logging.getLogger(__name__).warning(
+                                'completion delivery backlog: parked=%d outcomes=%s status=%s',
+                                summary['parked'], summary['outcomes'] or '-', summary['status'])
+                        last_summary = summary
             if stop.wait(interval):
                 break
 

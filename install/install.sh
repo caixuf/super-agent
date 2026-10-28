@@ -222,21 +222,37 @@ PLUGIN_ENABLE_ROOT=""
 PLUGIN_ENABLE_PROFILE=""
 PLUGIN_ENABLE_BIN=""
 
+plugin_manifest_name() {  # plugin.yaml 里的 name:（去引号/空白）；空表示没有
+  local f="$1" line name=""
+  [ -f "$f" ] || return 0
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    case "$line" in name:*) name="${line#name:}"; break ;; esac
+  done < "$f"
+  name="${name#"${name%%[![:space:]]*}"}"
+  name="${name%"${name##*[![:space:]]}"}"
+  name="${name%\"}"; name="${name#\"}"
+  name="${name%\'}"; name="${name#\'}"
+  printf '%s' "$name"
+}
+
 plugin_enable_names() {  # 带 manifest 的插件名（localvec 没有 manifest，不在此列）
-  local f line name
+  local f name
   for f in "$REPO_ROOT"/plugins/*/plugin.yaml; do
     [ -f "$f" ] || continue
-    name=""
-    while IFS= read -r line; do
-      line="${line%$'\r'}"
-      case "$line" in name:*) name="${line#name:}"; break ;; esac
-    done < "$f"
-    [ -n "$name" ] || continue
-    name="${name#"${name%%[![:space:]]*}"}"
-    name="${name%"${name##*[![:space:]]}"}"
-    name="${name%\"}"; name="${name#\"}"
-    name="${name%\'}"; name="${name#\'}"
+    name="$(plugin_manifest_name "$f")"
     [ -n "$name" ] && printf '%s\n' "$name"
+  done
+}
+
+plugin_settings_gated_names() {  # 以 settings.enabled 为总开关的插件：只在 plugins.enabled 里不算生效
+  local d name
+  for d in "$REPO_ROOT"/plugins/*/; do
+    [ -f "$d/__init__.py" ] || continue
+    grep -qE "get_config\(['\"]enabled['\"]" "$d/__init__.py" 2>/dev/null || continue
+    name="$(plugin_manifest_name "$d/plugin.yaml")"
+    [ -n "$name" ] || name="$(basename "$d")"
+    printf '%s\n' "$name"
   done
 }
 
@@ -530,6 +546,16 @@ if [ "$DO_PLUGINS" = "1" ]; then
   else
     enable_profile_plugins
   fi
+  mapfile -t PLUGIN_SETTINGS_GATED < <(plugin_settings_gated_names)
+  if [ "${#PLUGIN_SETTINGS_GATED[@]}" -gt 0 ]; then
+    log "  以下插件以 settings.enabled 为总开关：只在 plugins.enabled 里**不算生效**，还要"
+    log "  写 plugins.entries.<name>.settings.enabled: true（并按模板补 engine_root/queue_root/roles 等）："
+    for name in "${PLUGIN_SETTINGS_GATED[@]}"; do
+      log "    - $name    → plugins.entries.$name.settings   （模板见 plugins/*/README.md）"
+    done
+    log "  验收口径：**工具面里出现该工具**才算生效；配置文件里那一行不是证据："
+    log "    hermes ${PROFILE:+-p $PROFILE }tools list   |   hermes ${PROFILE:+-p $PROFILE }plugins list"
+  fi
 else
   step "⑧ 跳过插件（--skip-plugins）：不落插件副本，也不写 plugins.enabled"
 fi
@@ -654,6 +680,15 @@ cat <<EOF
   #    - plugins.entries.<name>.settings（engine_root / queue_root / allowed_roots 等）
   #      仍是部署配置，按 plugins/<name>/README.md 的模板补齐；本脚本只写 enabled/disabled
   #    - localvec 不是 plugins.enabled 项：配 memory.provider: localvec 及其 recall_cmd
+
+  # 6) 升级后首查：后台完成回执有没有真的回到会话（只读，逐个 durable 队列根跑）
+  #    PYTHONPATH=<agentcore checkout> python3 -m agentcore.completion_backfill \
+  #      --root <queue_root> --profile ${PROFILE:-default}
+  #    - 队列根 = plugins.entries.durable-dispatch.settings.queue_root，以及每个 colleague 的 queue_root
+  #    - deliverable=false 的条目 = **永远不会自动投递的存量无主回执**（历史遗留 / 别的 profile）
+  #      → 按 docs/COMPLETION_DELIVERY.md 的 §2 走带证明的管理性修复
+  #    - 投递健康：积压连续 60s 未清会在共享 ops-alert outbox 入一条 fault 事件；
+  #      宿主需跑 agentcore.ops_alert_daemon/发送器才会真正送达（否则只堆在库里 + 一条 WARNING）
 EOF
 
 step "完成"

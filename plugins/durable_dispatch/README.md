@@ -152,6 +152,35 @@ Semantics and limits:
   gap, not as proof of same-session delivery.
 - Enabling this changes user-visible behavior. Verify in an isolated profile
   first; installing or reloading the plugin is a deployment action, not a test.
+
+### Delivery health
+
+A backlog that cannot be delivered is a *stuck* completion: no pass will ever
+clear it on its own. Each poll pass is therefore recorded as a durable health
+observation (`report_delivery_health`, default true) in the shared ops-alert
+outbox, under the scope `durable-completion-delivery`:
+
+```yaml
+        report_delivery_health: true        # default; false disables the record
+        delivery_health_fault_grace: 60     # seconds a backlog must persist to alert
+```
+
+`observe_health` debounces the condition: one fault event per episode (a
+`health_fault` payload with `expected.parked: 0` and `observed.parked` /
+`observed.outcomes` counters), and one `health_recovery` event after the backlog
+clears. Observations carry counters and outcome *names* only — never a route, a
+job id, task text or a file path. The queue itself is unchanged: the plugin
+still parks unroutable receipts and never guesses a conversation.
+
+Delivery of those events belongs to the host: it must run an alert transport
+(`agentcore.ops_alert_senders` webhook, or its own `Sender`) over the same queue
+database, for example through `agentcore.ops_alert_daemon`. Without a host
+sender the events accumulate in the outbox undelivered — bounded, but unseen.
+The plugin also logs one WARNING per changed backlog summary, which is what an
+operator reading `agent.log` sees when no sender is configured.
+
+Repairing a stuck receipt is an administrative action, not an automatic one; see
+`docs/COMPLETION_DELIVERY.md`.
 - Plugin host isolation (`plugins.isolation: host`) runs the plugin in a separate
   process, so the gateway's bound session ContextVars are not visible there and
   route capture yields no route; completions then park. The current host serves this

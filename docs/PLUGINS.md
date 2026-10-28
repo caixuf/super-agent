@@ -51,3 +51,24 @@
 
 > 验收口径（一句话）：**「插件装上了」= 工具面里看得见它；「MCP 配好了」= 工具调用真返回业务数据**。
 > 配置文件里的那一行不算证据。
+
+## 5. 带 `settings.enabled` 总开关的插件（"看着启用"与"真的启用"）
+
+下面这些插件**即使名字进了 `plugins.enabled` 也还不生效** —— `register()` 第一行就检查
+`plugins.entries.<name>.settings.enabled: true`，缺了就静默 return（不报错、不注册工具）：
+
+`colleague-catalog` · `colleague-team` · `durable-dispatch` · `illustrated-delivery` ·
+`local-model-grounding` · `markdown-delivery` · `memory-bridge` · `task-status`
+
+`install/install.sh` 的 ⑧ 步会把这份名单打出来（只写 `plugins.enabled`/`disabled`，不猜业务参数）。
+
+## 6. 同事类插件的当前就绪度（两件，别混）
+
+| 插件 | 状态 | 说明 |
+| :--- | :--- | :--- |
+| `colleague-catalog` | **可生产启用** | 只读名册：把管理员配置的岗位（`display_name`/`duty`/`can_do`/`boundaries`）暴露成 `colleague_catalog` 工具。**不授权、不派工、不落队列**；角色 id 必须与派工插件里的角色对得上，否则派工仍然会拒。 |
+| `colleague-team` | **未接驱动，勿在现有系统启用** | 登记库（`agentcore/colleague_registry.py`）与 `colleague_list/define_role/hire/grant/retire` 工具都已实现，但**实例创建、岗位派工、最终消息发送、生产停用四条驱动尚未接上**（见 `plugins/colleague_team/README.md` 的「当前边界」）。启用只能记账，**不要对外宣称"招聘完成/成员在岗"**。 |
+
+要真的让同事干活，当前可用的两条链是：**durable-dispatch 名册**（只读分析岗，按 `queue_root` +
+worker 单元跑）与 **`delegate_task` 子 agent**（一次性叶子工人，深度 1）。
+回执能不能回到会话见 `docs/COMPLETION_DELIVERY.md`。

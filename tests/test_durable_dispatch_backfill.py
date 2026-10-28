@@ -424,3 +424,124 @@ print('public injection delivery passed')
     )
     assert result.returncode == 0, result.stderr[-4000:]
     assert 'public injection delivery passed' in result.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Delivery health: a backlog that cannot be delivered must become a reported fault
+# instead of a silently retrying poller.
+# --------------------------------------------------------------------------- #
+
+def _alert_events(pool):
+    import sqlite3
+    with pool.db() as db:
+        try:
+            rows = db.execute('SELECT payload FROM ops_alert_outbox ORDER BY created, event_id').fetchall()
+        except sqlite3.OperationalError:  # the outbox is created by the first observation
+            return []
+    return [json.loads(row['payload']) for row in rows]
+
+
+def _stuck_service(tmp_path):
+    """A service whose only receipt is a legacy, origin-less (undeliverable) one."""
+    service = _service(tmp_path)
+    legacy = service.pool.submit('legacy', {'goal': 'old'}, replay_safe=True,
+                                origin={'profile': 'test-profile', 'session': 'old-session'})
+    _finish(service.pool, legacy)
+    return service, legacy
+
+
+def test_stuck_receipt_records_one_fault_event_and_recovery(tmp_path):
+    import agentcore.ops_alerts as ops_alerts
+
+    service, legacy = _stuck_service(tmp_path)
+    transport = Transport()
+    stuck = drain(service.pool, transport, profile='test-profile')
+    assert stuck['parked'] == [legacy] and transport.calls == []
+
+    modules = {'ops_alerts': ops_alerts}
+    first = plugin._report_delivery_health(service, stuck, modules=modules,
+                                           fault_grace=0, now=1000.0)
+    assert first['parked'] == 1 and first['notable'] == 0
+    events = _alert_events(service.pool)
+    assert [event['kind'] for event in events] == ['health_fault']
+    assert events[0]['scope'] == plugin._DELIVERY_HEALTH_SCOPE
+    assert events[0]['observed']['parked'] == 1
+    # The observation carries counters only: no route, no job id, no task text.
+    assert legacy not in json.dumps(events[0])
+
+    # Repeated passes debounce into the same episode; no second fault event.
+    plugin._report_delivery_health(service, stuck, modules=modules, fault_grace=0, now=1005.0)
+    assert [event['kind'] for event in _alert_events(service.pool)] == ['health_fault']
+
+    # A drained queue (nothing pending at all) closes the episode after the grace.
+    clean = drain(service.pool, transport, profile='test-profile')
+    assert clean['parked'] == [legacy]  # still parked: it cannot be delivered, only repaired
+    with service.pool.db() as db:
+        db.execute('DELETE FROM outbox WHERE job=?', (legacy,))
+    healthy = plugin._report_delivery_health(service, drain(service.pool, transport,
+                                                           profile='test-profile'),
+                                             modules=modules, now=1011.0)
+    assert healthy['parked'] == 0 and healthy['notable'] == 0
+    # Recovery is debounced too: the first clean observation only opens the window.
+    plugin._report_delivery_health(service, drain(service.pool, transport, profile='test-profile'),
+                                  modules=modules,
+                                  now=1011.0 + plugin._DELIVERY_HEALTH_RECOVERY_GRACE)
+    assert [event['kind'] for event in _alert_events(service.pool)] == ['health_fault',
+                                                                       'health_recovery']
+
+
+def test_refused_delivery_is_a_stuck_backlog_not_a_silent_retry(tmp_path):
+    import agentcore.ops_alerts as ops_alerts
+
+    service = _service(tmp_path)
+    job = service.submit('session-one', _args(tmp_path))['task_id']
+    _finish(service.pool, job)
+    with service.pool.db() as db:  # an unusable route: the transport refuses it
+        db.execute('UPDATE jobs SET origin=? WHERE id=?',
+                   (json.dumps(dict(ORIGIN, route='')), job))
+
+    summary = plugin._report_delivery_health(
+        service, drain(service.pool, Transport(), profile='test-profile'),
+        modules={'ops_alerts': ops_alerts}, fault_grace=0, now=2000.0)
+    assert summary['parked'] >= 1 or summary['notable'] >= 1
+    assert [event['kind'] for event in _alert_events(service.pool)] == ['health_fault']
+
+
+def test_backfill_poller_reports_a_stuck_backlog_and_stops_on_unload(tmp_path):
+    service, legacy = _stuck_service(tmp_path)
+    context = Context({'deliver_completions': True, 'delivery_interval': 1.0,
+                       'delivery_health_fault_grace': 0, 'engine_root': str(REPO)})
+    thread = plugin.start_backfill(context, service)
+    assert thread is not None
+
+    deadline = time.time() + 15
+    while time.time() < deadline and not _alert_events(service.pool):
+        time.sleep(0.1)
+    events = _alert_events(service.pool)
+    assert [event['kind'] for event in events] == ['health_fault'], events
+    assert events[0]['observed']['parked'] == 1
+
+    for callback in context.unload_callbacks:
+        callback()
+    assert not thread.is_alive()
+
+
+def test_backfill_poller_reports_nothing_when_the_queue_is_clean(tmp_path):
+    service = _service(tmp_path)
+    context = Context({'deliver_completions': True, 'delivery_interval': 1.0,
+                       'delivery_health_fault_grace': 0, 'engine_root': str(REPO)})
+    thread = plugin.start_backfill(context, service)
+    assert thread is not None
+    time.sleep(1.5)
+    assert _alert_events(service.pool) == []
+    for callback in context.unload_callbacks:
+        callback()
+
+
+def test_delivery_health_never_raises_into_the_poller(tmp_path):
+    service, _legacy = _stuck_service(tmp_path)
+    stuck = drain(service.pool, Transport(), profile='test-profile')
+    # No engine modules at all: the observation is skipped, the summary still returns.
+    summary = plugin._report_delivery_health(service, stuck, modules={}, fault_grace=0)
+    assert summary['parked'] == 1
+    assert _alert_events(service.pool) == []
