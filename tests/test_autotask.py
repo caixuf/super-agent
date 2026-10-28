@@ -115,14 +115,14 @@ def test_human_jobs_are_never_rewritten(tmp_path):
 
 
 def test_create_commands_use_the_official_cli_with_resolved_paths():
-    commands = install_jobs.create_commands([_task(notify=False)], profile="imfl",
-                                            profile_path="/home/u/.hermes/profiles/imfl",
+    commands = install_jobs.create_commands([_task(notify=False)], profile="prod",
+                                            profile_path="/home/u/.hermes/profiles/prod",
                                             deliver="feishu:oc_x", workdir="/w")
     line = commands[0]
     assert "cron create" in line and "--name memory-budget-guard" in line
     assert "--deliver local" in line, "a non-notifying job must not page anyone"
-    assert "/home/u/.hermes/profiles/imfl/state/autotask/x.json" in line
-    notifying = install_jobs.create_commands([_task(notify=True)], profile="imfl",
-                                             profile_path="/home/u/.hermes/profiles/imfl",
+    assert "/home/u/.hermes/profiles/prod/state/autotask/x.json" in line
+    notifying = install_jobs.create_commands([_task(notify=True)], profile="prod",
+                                             profile_path="/home/u/.hermes/profiles/prod",
                                              deliver="feishu:oc_x")
     assert "--deliver feishu:oc_x" in notifying[0]
