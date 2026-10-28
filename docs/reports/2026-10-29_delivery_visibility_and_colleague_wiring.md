@@ -1,20 +1,20 @@
-# 2026-10-29 · 回执可见性与同事链接通（super-agent + imfl高手 + caixuf高手）
+# 2026-10-29 · 回执可见性与同事链接通（super-agent + <profile-b>高手 + caixuf高手）
 
 范围：本仓（super-agent）的交互/投递模块改动，以及它在两台机器上的两个应用
-（emily `imfl` = IMFL高手、本机 `caixuf` = caixuf高手）的部署与实测。
+（emily `<profile-b>` = 团队测试 Bot、本机 `caixuf` = caixuf高手）的部署与实测。
 本页只写**跑过、看过**的东西；未做的一律标"未做"。
 
 ## 1. 起因（现场证据，不是推测）
 
 | 现象 | 物证 |
 | :--- | :--- |
-| imfl 会话里"派工了但聊天看不到，结论只留在队列库" | 它自己的 T2 状态表：`t2-natural-a88ef5ab…`「派工验证：durable_submit 自然语言派单给阿证」→ **回执未投递**（2026-10-27 13:21） |
+| <profile-b> 会话里"派工了但聊天看不到，结论只留在队列库" | 它自己的 T2 状态表：`t2-natural-a88ef5ab…`「派工验证：durable_submit 自然语言派单给阿证」→ **回执未投递**（2026-10-27 13:21） |
 | 队列里躺着永远投不出去的回执 | emily `analysis-queue/pool.db`：outbox 25 条、**未 ACK 21 条**、`delivered=0`；其中 **4 条 `origin=NULL`**（10-26 23:49 准入，早于路由持久化），其余目标是一次性 `api_server` 会话（早已不存在）；`origin_repairs` 空 |
 | 引擎对积压**静默** | `plugins/durable_dispatch` 的 backfill 线程调了 `service.drain_delivery(...)` 却**丢弃返回值**，只在抛异常时打一行 `completion backfill failed: <类型>` |
-| 同事名册"看着在、其实没用" | imfl 全历史 10,627 条含工具调用的消息里 `durable_submit/status/cancel` **0 次**、`colleague_*` **0 次**；`delegate_task` 38 次但最新一次停在 10-26 14:52 |
+| 同事名册"看着在、其实没用" | <profile-b> 全历史 10,627 条含工具调用的消息里 `durable_submit/status/cancel` **0 次**、`colleague_*` **0 次**；`delegate_task` 38 次但最新一次停在 10-26 14:52 |
 | 名册类插件"假启用" | `colleague-catalog`/`colleague-team` 在 `plugins.enabled` 里，但缺 `plugins.entries.<name>.settings.enabled` → `register()` 首行即 return，工具面里没有任何工具 |
 
-## 2. 本仓改了什么（commit `3d2e23a`）
+## 2. 本仓改了什么（`3d2e23a` 投递健康+docs/installer；`137444b` 长任务落账；`eb255c9` 本页）
 
 1. **投递健康（引擎）** `plugins/durable_dispatch/__init__.py`
    - backfill 每趟消费 `drain` 状态，按签名去重打一条 WARNING，并把该趟记成**持久健康观察**
@@ -37,6 +37,14 @@
    `colleague-catalog` 可生产启用；`colleague-team` **未接实例创建/派工/发送/停用四条驱动，勿在现有系统启用**）。
 5. **测试** `tests/test_durable_dispatch_backfill.py` +5 例（真实 ledger）：积压产生**一次** fault、
    重复观察不重复入队、恢复事件需去抖、poller 端到端入队并在 unload 时停、`modules={}` 时**不抛错**。
+6. **长任务账本落账（引擎，另一处同源缺陷）** `plugins/longtask_guard/__init__.py`
+   - 现场证据：emily 的守卫当天转后台 **27 次**，而该 profile 的 `liveness.db` **一条行都没有** ——
+     `post_tool_call` 拿到的是**模型原始参数**（不含 `background`），旧判定直接 return，身份从未登记，
+     `task_status` 因此无账可读。
+   - 改法：**回执本身就是证据** —— spawn 回执（`output == "Background process started"` + `session_id`）
+     与 yield 回执（`yielded_session_id`）各自足以证明后台身份；仅"顺口引用了那句话"的前台结果仍被忽略。
+   - 测试：`tests/test_longtask_guard.py` +3 例（原始参数下的 spawn/yield 回执必须落账；引用那句话的前台结果不落账）。
+     该文件 46 passed。
 
 ### 门禁（本仓自证）
 
@@ -48,25 +56,29 @@
 
 ## 3. 两个应用的部署与实测
 
-| 项 | emily（imfl高手） | 本机（caixuf高手） |
+| 项 | emily（<profile-b>高手） | 本机（caixuf高手） |
 | :--- | :--- | :--- |
 | 仓 | `8c09531 → 3d2e23a`（push + updateInstead） | 本地 `3d2e23a` |
-| 资产 | `install.sh --profile imfl`（幂等） | `install.sh --profile caixuf`（幂等） |
+| 资产 | `install.sh --profile <profile-b>`（幂等） | `install.sh --profile caixuf`（幂等） |
 | 部署件含新代码 | `grep -c _report_delivery_health` = **2** | **2** |
 | 网关 | restart → active，插件加载失败 **0** | restart → PID 281004，加载失败 **0** |
 | 同事名册 | `colleague-catalog` 启用 **15 岗**（analysis/evidence/triage/replay/artifact/patrol/cases/memory/architect/backend/frontend/test/ops/reviewer/hr）；工具面 `✓ colleague_catalog`；工具实测返回 15 岗、单岗过滤得"阿证"、未知岗空、无 session 拒绝 | **未铺**（无同事 worker，铺了就是"派了没人干"；它的分派路径是 `delegate_task` 子 agent） |
-| **R1 端到端** | **`ops_alert_outbox` 出现 1 条 `health_fault`**（profile=imfl，scope=`durable-completion-delivery`，gen=1，00:27:19，`observed={'delivered':0,'outcomes':[],'parked':18,'status':'empty'}`）+ `ops_health_conditions` 一条 active episode；`agent.log` 有 `completion delivery backlog: parked=N` | 无（`deliver_completions: false` → 根本没有投递 poller，也就没有健康记录；队列盘点 total 2 / deliverable 1） |
+| **R1 端到端** | **`ops_alert_outbox` 出现 1 条 `health_fault`**（profile=<profile-b>，scope=`durable-completion-delivery`，gen=1，00:27:19，`observed={'delivered':0,'outcomes':[],'parked':18,'status':'empty'}`）+ `ops_health_conditions` 一条 active episode；`agent.log` 有 `completion delivery backlog: parked=N` | 无（`deliver_completions: false` → 根本没有投递 poller，也就没有健康记录；队列盘点 total 2 / deliverable 1） |
+| **长任务账本** | 修复前：`liveness.db` **不存在**。修复后：**出现 6 行**，含经网关真跑的一条 `('proc_ccf158b9c2ce', '<profile-b>:api-…', 'sleep 25; echo guarded-probe', 'running', 693209, 1)` | 本机账本 466 行（既有；17 条 `running` 属死进程，读取时现算 verdict） |
 
 > emily 的健康事件**证明了整条链**：poller 看到了 18 条永远投不出去的回执 → 去抖 60s → 入队一条
 > 持久 fault 事件。这正是过去"静默重试、没人知道"的那一段。
+> emily 的账本行**同样证明了第二处修复**：真派一条会被守卫转后台的命令（走该 profile 的
+> `api_server`，不打扰消息平台），账本立刻出现该进程 —— 修复前同一条路径一条都不落。
 
 ## 4. 未做 / 待决策
 
 1. **21 条存量回执的修复**：按 `docs/COMPLETION_DELIVERY.md` §2 需要**取证**（原会话路由 + payload sha256 + 取证人签核）。
    其中 4 条无主、其余目标会话已死 —— 能不能修由部署方定；工具与流程已就绪。
 2. **ops-alert 发送器**：两台机器都没有配（`OPS_ALERT_*` 未见、无发送器单元）→ 健康事件目前**只落在库里 + 一条 WARNING**，没有外部送达。
-3. **emily 的 `liveness.db` 不存在**（guard 当天转后台 27 次、一条账都没落）→ `task_status` 无账可读；
-   本机 liveness 有 466 行但 17 条 `running` 是死进程（读取时现算 verdict）。两台都没有 liveness 守护单元。
+3. **长任务账本的退出回收**：emily 的账本已从"不存在"变为**有行**（见 §3），但行停在 `state=running`
+   —— 退出由 `task_status` 读取时现算；两台机器都**没有 liveness 守护单元**，无人主动 sweep。
+   本机 466 行里 17 条 `running` 是死进程，同一成因。
 4. **同事派工纪律**：`durable_submit` 至今 0 次调用；名册与工具面现在都在，是否要求"某类活必须派"属部署方（SOUL）决定。
 5. **caixuf 的 `deliver_completions=false`**：与"回执可见"目标冲突 —— 要么打开投递，要么把 ⑫ 第 6 条体检列进常规巡检。
 
