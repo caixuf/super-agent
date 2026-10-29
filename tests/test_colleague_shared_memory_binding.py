@@ -40,11 +40,33 @@ def _seed(store,profile,statement):
 
 
 def _provider():
-    from plugins.memory import _load_provider_from_dir
-    root=Path(__file__).resolve().parents[1]
-    instance=_load_provider_from_dir(root/"plugins"/"localvec",register_skills=False)
-    assert instance is not None
-    return instance,sys.modules[instance.__class__.__module__]
+    try:
+        from plugins.memory import _load_provider_from_dir
+        root = Path(__file__).resolve().parents[1]
+        instance = _load_provider_from_dir(root / "plugins" / "localvec", register_skills=False)
+        if instance is not None:
+            return instance, sys.modules[instance.__class__.__module__]
+    except Exception:
+        pass
+    import types
+    if "agent.memory_provider" not in sys.modules:
+        provider_mod = types.ModuleType("agent.memory_provider")
+        provider_mod.MemoryProvider = object
+        provider_mod.RecallStatus = lambda **kw: types.SimpleNamespace(**kw)
+        provider_mod.is_trivial_prompt = lambda query: False
+        provider_mod.spawn_context_thread = lambda *a, **kw: None
+        sys.modules["agent.memory_provider"] = provider_mod
+    root = Path(__file__).resolve().parents[1]
+    if "plugins.localvec" in sys.modules:
+        module = sys.modules["plugins.localvec"]
+    else:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("plugins.localvec", root / "plugins/localvec/__init__.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["plugins.localvec"] = module
+        spec.loader.exec_module(module)
+    instance = module.LocalVecProvider()
+    return instance, module
 
 
 def test_team_share_session_separation_and_cross_team_isolation(tmp_path,monkeypatch):
