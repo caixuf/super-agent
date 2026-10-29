@@ -54,7 +54,13 @@ def advise_delivery(user_message, *, planned_structure=None, recent_messages=Non
     regenerate = _match(r'重画|重新生成|更新文档|修改文档|整篇|完整文档|regenerate|update (?:the )?document|whole document|entire document', text)
     if not regenerate and _match(r'这一步|这一行|这个箭头|这个词|第二步|第\d+步|this step|that line|this arrow|this term', text):
         return _result('inline', 'explanation', 'local_followup', local=True)
-    if _match(r'完成了吗|现在状态|当前状态|现在怎么样|进度如何|current status|is .{0,30}(?:done|finished)|how many|which command|what (?:is|s) .{0,30}(?:port|version)|(?:端口|版本号|文件路径)(?:是多少|是什么|在哪)|只给.{0,10}命令', text):
+    bounded = _match(r'完成了吗|现在状态|当前状态|现在怎么样|进度如何|current status|is .{0,30}(?:done|finished)|how many|which command|what (?:is|s) .{0,30}(?:port|version)|(?:端口|版本号|文件路径)(?:是多少|是什么|在哪)|只给.{0,10}命令', text)
+    # A report is not a one-line status query: it is a recurring deliverable
+    # that people forward, archive, or reopen. Keep direct status questions
+    # inline, but treat an explicit report request as an illustrated document.
+    if not bounded and _match(r'汇报|报告|周报|日报|进度报告|状态报告|status report|progress report|weekly report|daily report', text):
+        return _result('artifact', 'plan', 'progress_report_intent')
+    if bounded:
         return _result('inline', 'document', 'bounded_fact_or_status')
     if _match(r'是什么意思|定义一下|一句定义|\bdefine\b|meaning of|what does .{0,50} mean', text):
         return _result('inline', 'explanation', 'term_definition')
@@ -98,6 +104,14 @@ def delivery_context(advice):
     if mode == 'inline':
         return ('Delivery advice: answer this bounded request directly in text. '
                 'For a local follow-up, explain the relevant part without regenerating the whole document. ' + common)
+    if advice.get('reason_code') == 'progress_report_intent':
+        return ('Delivery advice: deliver this as an illustrated progress report, not a chat-only audit. '
+                'Lead with the overall status in one line, then a per-item table (item / what is done / '
+                'what is verified / what is blocked / next owner and date). Keep internal gate vocabulary '
+                '(for example sidecar files, Gate0, RP/TP) out of the main table; explain any necessary '
+                'term on first use or move it to an appendix. State which snapshot the numbers come from. '
+                'Use the existing illustrated-doc-rendering skill and tools/arch_doc.py, then deliver the '
+                'document with md_deliver; keep the chat message to a short summary plus the link. ' + common)
     if mode == 'artifact':
         return ('Delivery advice: an illustrated ' + advice['kind'] + ' is likely useful. '
                 'Read and apply the existing illustrated-doc-rendering skill; use the existing tools/arch_doc.py renderer. '

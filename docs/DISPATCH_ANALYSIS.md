@@ -107,3 +107,51 @@ with synthetic fixtures. See reports/2026-10-26_core_activation.md. Human busine
 acceptance is pending. Automated outbound delivery remains a host integration;
 status exposes a bounded summary and verified artifact references. For one-card delivery, reuse the existing CardStore/CardEmitter and
 outbox protocols rather than creating another task state machine.
+
+## CCP flash/main wiring for durable read-only logs
+
+The queue and worker already accept an administrator-selected runner argv. To
+use the existing CCP adapter, point that argv at `agentcore.analysis_runner`
+and set the policy's `model_options.alias` to `flash` (default) or `main`:
+
+```json
+{
+  "allowed_roots": ["/absolute/read-only/log-root"],
+  "denied_globs": ["*.secret.log"],
+  "model_options": {"alias": "flash", "timeout_seconds": 90},
+  "fallback_model_options": {"alias": "main", "timeout_seconds": 90}
+}
+```
+
+Runner argv example for the administrator-owned `runner.json`:
+
+```json
+[
+  "/absolute/python",
+  "/absolute/super-agent/agentcore/analysis_runner.py",
+  "--policy", "/absolute/private/analysis-policy.json",
+  "--model-adapter", "agentcore.ccp_analysis_model:model"
+]
+```
+
+`flash` is the CCP logical route; `main` may be selected in the same trusted
+policy. The model receives only bounded file snapshots and no tool/function
+schema. CCP credentials are resolved in process by the existing resolver. The
+Worker's existing process timeout and output budgets still apply. Failed model
+requests return `model_call_failed`; invalid evidence is reported as a bounded
+runner error such as `unverified_citation` in durable status.
+
+`fallback_model_options` is optional and host-owned. When configured, a failed
+model call or invalid report triggers exactly one call using those options. The
+fallback must pass the same citation checks; if it fails, the job fails. The
+artifact manifest records `fallback_used` without storing credentials. Increase
+the worker timeout to cover both calls. Citation checks do not detect every
+semantic error or automatically decide whether an uncertain answer needs review.
+CCP may map `main` and `flash` to the same underlying model, so a second route
+does not itself guarantee a more capable result.
+
+This configuration is opt-in and does not alter any profile. It only wires the
+separate read-only analysis queue. It does not upgrade the primary chat model or
+change the main Bot's normal responses. The isolated integration test uses a
+loopback fake CCP endpoint; a separate synthetic `flash` smoke was run against
+the local CCP service, with no production configuration edits or messages.

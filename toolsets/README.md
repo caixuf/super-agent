@@ -31,7 +31,7 @@
 1. **设置环境变量**（本目录的代码用它们定位 Hermes 配置与隔离目录，不再硬编码画像名）：
    - `HERMES_HOME` —— 宿主 Hermes home（首选）；
    - `HERMES_PROFILE` —— 无 `HERMES_HOME` 时的画像名，缺省 `default`；
-   - 另有 `PI_EXECUTOR_*` 系列覆盖项（见 `pi_executor/ccp_config.py` 与 `driver.py` 里各 `os.environ.get`）。
+   - 另有 `PI_EXECUTOR_*` 系列覆盖项（CCP 凭据解析唯一实现位于 `agentcore/ccp_config.py`；`pi_executor/ccp_config.py` 仅保留兼容导出；其余开关见 `driver.py` 里的 `os.environ.get`）。
 2. **改导入路径**：`pi_executor` 是纯标准库的相对导入包，可直接用；把执行器包进工具面的那层
    **胶水**属于业务工具，宿主按自己的包布局写。
 

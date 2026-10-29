@@ -9,4 +9,6 @@ provides_tools:
   - colleague_hire
   - colleague_grant
   - colleague_retire
+  - colleague_assign
+  - colleague_task_status
 provides_hooks: []

@@ -182,9 +182,10 @@ def unconfirmed_quote_context(user_message,quote):
 
 def extract_facts(user_message: str, assistant_reply: str = "",
                   context: str = "", *, strict: bool = False,
-                  require_user_evidence: bool = False) -> List[Dict[str, Any]]:
+                  require_user_evidence: bool = False,
+                  chat_completions=None) -> List[Dict[str, Any]]:
     """调 LLM 抽取事实。任何异常都返回空列表（调用方据此跳过），不抛。"""
-    chat_completions = _load_chat_completions()
+    chat_completions = chat_completions if chat_completions is not None else _load_chat_completions()
     if chat_completions is None:
         logger.warning("LLM 客户端不可用，跳过抽取")
         return []
@@ -244,6 +245,39 @@ def extract_facts(user_message: str, assistant_reply: str = "",
                 fact['statement'] = original['user_quote'].strip()
         return facts
     return parse_facts(raw)
+
+
+def propose_facts(user_message: str, assistant_reply: str = "", *, model,
+                  turn_status: str = "completed") -> Dict[str, Any]:
+    """Produce evidence-bound candidates without writing or changing memory.
+
+    ``model`` is a trusted callable following the analysis model contract. The
+    caller decides whether and how to review candidates; an exact quote is not
+    proof that a statement is true, durable, or free of conflict.
+    """
+    if not callable(model):
+        raise ValueError("trusted_candidate_model_required")
+    if turn_status != "completed":
+        return {"ok": True, "reason": "turn_not_completed", "candidates": []}
+    decision = should_consider(user_message, "")
+    if not decision["consider"]:
+        return {"ok": True, "reason": decision["reason"], "candidates": []}
+
+    def chat(messages, **_options):
+        try:
+            return {"content": model(messages, timeout_seconds=45)}
+        except Exception:
+            raise RuntimeError("candidate_model_failed") from None
+
+    try:
+        facts = extract_facts(user_message, assistant_reply, strict=True,
+                              require_user_evidence=True, chat_completions=chat)
+    except ExtractionError as error:
+        return {"ok": False, "reason": str(error), "candidates": []}
+    candidates = [fact for fact in facts
+                  if not unconfirmed_quote_context(user_message, fact["statement"])
+                  and not turn_scoped_constraint(fact["statement"])]
+    return {"ok": True, "reason": "review_required", "candidates": candidates}
 
 
 def parse_facts(raw: str) -> List[Dict[str, Any]]:

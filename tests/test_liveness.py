@@ -61,6 +61,30 @@ def test_terminal_state_is_write_once(ledger):
     assert store.beat("t1", phase="late") is None
 
 
+
+def test_owner_bound_finish_and_record_exit_do_not_modify_reassigned_task(ledger):
+    store, _ = ledger
+    store.register("owned", kind="terminal", owner="profile:session-a",
+                   state="running", label="a")
+    rejected_exit = store.record_exit("owned", 1, tail="foreign output",
+                                     require_owner="profile:session-b")
+    assert rejected_exit == {"ok": False, "changed": False, "error": "unknown_task",
+                             "task_id": "owned"}
+    row = store.get("owned")
+    assert row["owner"] == "profile:session-a"
+    assert row["state"] == "running"
+    assert row["tail"] == ""
+
+    store.register("owned", kind="terminal", owner="profile:session-b",
+                   state="running", label="b")
+    rejected_finish = store.finish("owned", "done", require_owner="profile:session-a")
+    assert rejected_finish == {"ok": False, "changed": False, "error": "unknown_task",
+                               "task_id": "owned"}
+    row = store.get("owned")
+    assert row["owner"] == "profile:session-b"
+    assert row["state"] == "running"
+
+
 def test_sweep_marks_pidless_silence_stalled_once(ledger):
     store, clock = ledger
     store.register("t1", kind="durable", state="running")

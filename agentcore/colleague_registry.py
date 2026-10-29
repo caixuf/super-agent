@@ -138,6 +138,11 @@ class Registry:
                   work_id TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('open','closed')),
                   PRIMARY KEY(profile_id,member_id,generation,work_id),
                   FOREIGN KEY(profile_id,member_id) REFERENCES colleague_members(profile_id,member_id));
+                CREATE TABLE IF NOT EXISTS colleague_exclusive_work (
+                  profile_id TEXT NOT NULL, member_id TEXT NOT NULL, generation INTEGER NOT NULL,
+                  work_id TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('open','closed')),
+                  PRIMARY KEY(profile_id,member_id),
+                  FOREIGN KEY(profile_id,member_id) REFERENCES colleague_members(profile_id,member_id));
                 CREATE TABLE IF NOT EXISTS colleague_history (
                   sequence INTEGER PRIMARY KEY AUTOINCREMENT, profile_id TEXT NOT NULL,
                   action TEXT NOT NULL, actor_id TEXT NOT NULL, target_id TEXT NOT NULL,
@@ -403,6 +408,10 @@ class Registry:
             row = self._member(db, member_id)
             if row["generation"] != generation:
                 raise ValueError("stale_member_generation")
+            exclusive = db.execute("SELECT work_id,status FROM colleague_exclusive_work WHERE profile_id=? AND member_id=?",
+                                   (self.profile_id, member_id)).fetchone()
+            if exclusive is not None and exclusive["status"] == "open":
+                raise ValueError("member_has_exclusive_work")
             existing = db.execute("SELECT status FROM colleague_work WHERE profile_id=? AND member_id=? AND generation=? AND work_id=?",
                                   (self.profile_id, member_id, generation, work_id)).fetchone()
             if existing:
@@ -417,6 +426,60 @@ class Registry:
                 raise ValueError("member_work_capacity")
             db.execute("INSERT INTO colleague_work VALUES (?,?,?,?,'open')", (self.profile_id, member_id, generation, work_id))
             self._event(db, "work_reserved", "host:supervisor", member_id, generation, {"work_id": work_id})
+            return {"work_id": work_id, "reserved": True, "created": True}
+
+    def reserve_work_exclusive(self, *, supervisor, member_id, generation, work_id):
+        """Atomically reserve a member's sole open execution across host paths.
+
+        Unlike reserve_work (which retains its historical capacity semantics), this
+        entry point serializes Gateway and CLI runners through the Registry database.
+        Repeating the exact open work_id is idempotent; every different open work
+        blocks admission, regardless of which dispatcher-local lock it used.
+        """
+        self._host(supervisor)
+        member_id, work_id = _identity(member_id, "member_id"), _request(work_id)
+        if type(generation) is not int or generation < 1:
+            raise ValueError("invalid_generation")
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = self._member(db, member_id)
+            if row["generation"] != generation:
+                raise ValueError("stale_member_generation")
+            fence = db.execute(
+                "SELECT generation,work_id,status FROM colleague_exclusive_work WHERE profile_id=? AND member_id=?",
+                (self.profile_id, member_id),
+            ).fetchone()
+            existing = db.execute(
+                "SELECT status FROM colleague_work WHERE profile_id=? AND member_id=? AND generation=? AND work_id=?",
+                (self.profile_id, member_id, generation, work_id),
+            ).fetchone()
+            if existing:
+                if existing["status"] == "closed":
+                    raise ValueError("settled_work_cannot_reopen")
+                if fence is None:
+                    # Pre-fence reservations cannot be proven to belong to this
+                    # exclusive executor; keep them open for explicit reconciliation.
+                    raise ValueError("exclusive_work_unfenced_reservation")
+                if fence["status"] != "open" or (fence["generation"], fence["work_id"]) != (generation, work_id):
+                    raise ValueError("exclusive_work_identity_mismatch")
+                return {"work_id": work_id, "reserved": True, "created": False}
+            if fence is not None and fence["status"] == "open":
+                raise ValueError("member_has_exclusive_work")
+            if row["status"] != "active":
+                raise ValueError("member_not_accepting_work")
+            open_row = db.execute(
+                "SELECT work_id FROM colleague_work WHERE profile_id=? AND member_id=? AND status='open' LIMIT 1",
+                (self.profile_id, member_id),
+            ).fetchone()
+            if open_row is not None:
+                raise ValueError("member_has_unresolved_work")
+            db.execute("INSERT INTO colleague_work VALUES (?,?,?,?,'open')",
+                       (self.profile_id, member_id, generation, work_id))
+            db.execute("""INSERT INTO colleague_exclusive_work(profile_id,member_id,generation,work_id,status)
+                VALUES(?,?,?,?, 'open') ON CONFLICT(profile_id,member_id) DO UPDATE SET
+                generation=excluded.generation,work_id=excluded.work_id,status='open'""",
+                (self.profile_id, member_id, generation, work_id))
+            self._event(db, "work_reserved", "host:supervisor", member_id, generation, {"work_id": work_id, "exclusive": True})
             return {"work_id": work_id, "reserved": True, "created": True}
 
     def settle_work(self, *, supervisor, member_id, generation, work_id):
@@ -435,6 +498,9 @@ class Registry:
                 raise ValueError("unknown_work")
             if current["status"] == "open":
                 db.execute("UPDATE colleague_work SET status='closed' WHERE profile_id=? AND member_id=? AND generation=? AND work_id=?",
+                           (self.profile_id, member_id, generation, work_id))
+                db.execute("DELETE FROM colleague_exclusive_work WHERE profile_id=? AND member_id=? "
+                           "AND generation=? AND work_id=? AND status='open'",
                            (self.profile_id, member_id, generation, work_id))
                 self._event(db, "work_settled", "host:supervisor", member_id, generation, {"work_id": work_id})
             return {"work_id": work_id, "settled": True}

@@ -22,6 +22,20 @@ def _hit(command: str, **extra) -> str | None:
     return guard.classify({"command": command, **extra})
 
 
+@pytest.fixture(autouse=True)
+def _isolated_env(monkeypatch):
+    """断言\"默认行为\"的用例不能被宿主 profile 的 .env 污染。
+
+    插件开关是给网关进程用的（``LONGTASK_GUARD_*`` 落在 profile 的 .env 里），
+    但 ``pytest`` 继承同一个环境 —— 不隔离的话，机器上装了开关就会把
+    \"默认值\"的用例判红，红得还很像回归。每个用例自己决定要不要设。
+    """
+    for name in ("LONGTASK_GUARD_OFF", "LONGTASK_GUARD_NOTIFY", "LONGTASK_GUARD_HEARTBEAT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(guard, "_CTX", None)
+    yield
+
+
 # ── 正例：这些确实会跑很久，必须转后台 ──────────────────────────────
 @pytest.mark.parametrize("command", [
     "python3 -m pytest tests -q",

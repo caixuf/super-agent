@@ -23,6 +23,11 @@ from agentcore.document_intent import advise_delivery, delivery_context
     ('这个计划完成了吗', 'inline', 'document'),
     ('What is the current port?', 'inline', 'document'),
     ('服务端口是多少', 'inline', 'document'),
+    ('汇报下<business-domain>新需求用例进度，昨天跟进的八个', 'artifact', 'plan'),
+    ('汇报进度', 'artifact', 'plan'),
+    ('汇报下这八条需求的情况', 'artifact', 'plan'),
+    ('汇报一下服务端口是多少', 'inline', 'document'),
+    ('现在进度如何', 'inline', 'document'),
     ('这个词是什么意思', 'inline', 'explanation'),
     ('什么是幂等', 'inline', 'explanation'),
     ('What is idempotency?', 'inline', 'explanation'),
@@ -84,3 +89,13 @@ def test_unknown_intent_is_model_judgment_not_veto():
     result = advise_delivery('讲解一下这个')
     assert result['requires_model_judgment']
     assert 'decide whether' in delivery_context(result)
+
+
+def test_progress_report_advice_requires_plain_language_document():
+    result = advise_delivery('汇报下<business-domain>新需求用例进度，昨天跟进的八个')
+    assert result['mode'] == 'artifact'
+    context = delivery_context(result)
+    assert 'progress report' in context
+    assert 'md_deliver' in context
+    assert 'appendix' in context
+    assert 'first use' in context

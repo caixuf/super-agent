@@ -19,7 +19,14 @@ class RealHermesTaskStatus(unittest.TestCase):
             home.mkdir(mode=0o700)
             (home / "config.yaml").write_text("{}")
             env = os.environ.copy()
+            # Hermes resolves the profile root from both HOME and HERMES_HOME. Inherit neither
+            # the invoking account's profile root nor process-scoped ledger overrides: a full
+            # suite may run after tests that changed these values in the parent process.
+            env["HOME"] = str(Path(temp).resolve())
             env["HERMES_HOME"] = str(home)
+            for key in ("HERMES_PROFILE", "HERMES_TIMEZONE", "AGENTCORE_LIVENESS_DB",
+                        "AGENTCORE_STATE_DIR"):
+                env.pop(key, None)
             env["HERMES_SOURCE"] = str(Path(HERMES_SOURCE).resolve())
             env["PYTHONPATH"] = os.pathsep.join([env["HERMES_SOURCE"], str(ROOT)])
             env["HERMES_ENABLE_PROJECT_PLUGINS"] = "0"
@@ -66,6 +73,7 @@ def worker():
                                    scope=manager.scope_key, session_id="session")
         data = json.loads(result) if isinstance(result, str) else result
         assert data["ok"] is True, data
+        assert data["owner"] == "canary:session", data
         assert data["verdict"] == "running", data
         assert data["progress"]["percent"] == 50.0, data
         denied = registry.dispatch("task_status", {"action": "inspect", "task_id": "t1"},

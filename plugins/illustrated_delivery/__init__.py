@@ -1,8 +1,36 @@
-"""Per-turn illustrated-delivery advice through the public Hermes hook API."""
+"""Per-turn illustrated-delivery advice plus a post-turn delivery guard.
+
+The advice is the existing conservative ``pre_llm_call`` context. The guard is
+deliberately narrow: when the advisor classified the turn as ``artifact``, a
+final answer without a document link is not a completed delivery. Hermes's
+``post_llm_call`` is observer-only, so enforcement happens in
+``transform_llm_output``; ``post_llm_call`` records the verdict for the turn
+ledger.
+"""
 from __future__ import annotations
 
 import importlib.util
+import json
+import logging
+import re
+import threading
+import time
 from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+# A delivered document is either a bridge file marker or a document URL.
+# Ordinary code/review URLs deliberately do not count.
+_DOC_LINK = re.compile(
+    r'(?m)^\s*##FILE:\s*\S+'
+    r'|https?://[^\s]*(?:/docx/|/wiki/|/docs/|/drive/|/sheets/|/slides/)'
+)
+_GUARD_NOTE = (
+    "\n\n---\n"
+    "⚠️ 交付校验未通过：本轮要求图文文档，但最终回复里没有检测到文档链接或 `##FILE`。"
+    "这不是完成态；请重试，或让运维检查渲染/投递链路。"
+)
+_PENDING_TTL_SECONDS = 600
 
 
 def _engine(ctx):
@@ -44,20 +72,126 @@ def _location_hint(ctx):
             'Keep internal installation paths out of the delivered artifact.')
 
 
+def _audit_path(ctx):
+    configured = ctx.get_config('audit_path', '')
+    if isinstance(configured, str) and configured:
+        return Path(configured)
+    manager = getattr(ctx, '_manager', None)
+    home = getattr(manager, 'home_path', None)
+    if home:
+        return Path(home) / 'plugin-data' / 'illustrated-delivery' / 'delivery_guard.jsonl'
+    return None
+
+
+class _DeliveryGuard:
+    """Advice, enforcement, and a small per-turn audit record."""
+
+    def __init__(self, advise_delivery, delivery_context, location_hint, *,
+                 include_delegated=False, audit_path=None):
+        self._advise_delivery = advise_delivery
+        self._delivery_context = delivery_context
+        self._location_hint = location_hint
+        self._include_delegated = include_delegated
+        self._audit_path = audit_path
+        self._pending = {}
+        self._lock = threading.Lock()
+
+    def _store(self, session_id, advice):
+        now = time.time()
+        with self._lock:
+            stale = [key for key, entry in self._pending.items()
+                     if now - entry['ts'] > _PENDING_TTL_SECONDS]
+            for key in stale:
+                self._pending.pop(key, None)
+            self._pending[session_id] = {'advice': advice, 'ts': now, 'warned': False}
+
+    def _entry(self, session_id):
+        with self._lock:
+            entry = self._pending.get(session_id)
+            if entry and time.time() - entry['ts'] > _PENDING_TTL_SECONDS:
+                self._pending.pop(session_id, None)
+                return None
+            return entry
+
+    def _pop(self, session_id):
+        with self._lock:
+            return self._pending.pop(session_id, None)
+
+    def before(self, *, user_message='', conversation_history=None,
+               parent_session_id='', session_id='', **_kwargs):
+        # Internal delegated calls should not recursively turn every tool task
+        # into another document. The top-level caller owns the final deliverable.
+        if parent_session_id and not self._include_delegated:
+            return None
+        if not isinstance(user_message, str):
+            advice = self._advise_delivery('')
+            self._store(session_id, advice)
+            return {'context': self._delivery_context(advice) + self._location_hint}
+        advice = self._advise_delivery(user_message, recent_messages=conversation_history)
+        self._store(session_id, advice)
+        return {'context': self._delivery_context(advice) + self._location_hint}
+
+    def transform(self, *, response_text='', session_id='', **_kwargs):
+        entry = self._entry(session_id)
+        if not entry:
+            return None
+        advice = entry['advice']
+        if advice.get('mode') != 'artifact':
+            return None
+        if _DOC_LINK.search(response_text or ''):
+            return None
+        if entry['warned']:
+            return None
+        entry['warned'] = True
+        return (response_text or '') + _GUARD_NOTE
+
+    def after(self, *, session_id='', turn_id='', user_message='',
+              assistant_response='', model='', platform='', **_kwargs):
+        entry = self._pop(session_id)
+        if not entry:
+            return
+        advice = entry['advice']
+        record = {
+            'ts': time.time(),
+            'session_id': session_id,
+            'turn_id': turn_id,
+            'platform': platform,
+            'model': model,
+            'mode': advice.get('mode'),
+            'kind': advice.get('kind'),
+            'reason_code': advice.get('reason_code'),
+            'artifact_expected': advice.get('mode') == 'artifact',
+            'artifact_present': bool(_DOC_LINK.search(assistant_response or '')),
+            'guard_warned': entry['warned'],
+            'user_chars': len(user_message) if isinstance(user_message, str) else 0,
+            'response_chars': len(assistant_response or ''),
+        }
+        self._write(record)
+
+    def _write(self, record):
+        if self._audit_path is None:
+            return
+        try:
+            self._audit_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._lock, self._audit_path.open('a', encoding='utf-8') as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + '\n')
+        except OSError as exc:
+            log.warning('delivery guard audit failed: %s', type(exc).__name__)
+
+
 def register(ctx):
     if ctx.get_config('enabled', False) is not True:
         return
     advise_delivery, delivery_context = _engine(ctx)
-    location_hint = _location_hint(ctx)
-
-    def advise(*, user_message='', conversation_history=None, parent_session_id='', **kwargs):
-        # Internal delegated calls should not recursively turn every tool task into
-        # another document. The top-level caller owns the final deliverable.
-        if parent_session_id and ctx.get_config('include_delegated', False) is not True:
-            return None
-        if not isinstance(user_message, str):
-            return {'context': delivery_context(advise_delivery('')) + location_hint}
-        decision = advise_delivery(user_message, recent_messages=conversation_history)
-        return {'context': delivery_context(decision) + location_hint}
-
-    ctx.register_hook('pre_llm_call', advise)
+    guard = _DeliveryGuard(
+        advise_delivery,
+        delivery_context,
+        _location_hint(ctx),
+        include_delegated=ctx.get_config('include_delegated', False) is True,
+        audit_path=_audit_path(ctx),
+    )
+    ctx.register_hook('pre_llm_call', guard.before)
+    # post_llm_call is observer-only in Hermes; the enforceable seam is the
+    # output transform. Keep both so the audit sees the text the user saw.
+    ctx.register_hook('transform_llm_output', guard.transform)
+    ctx.register_hook('post_llm_call', guard.after)

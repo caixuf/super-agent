@@ -9,6 +9,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import re
 import time
 from typing import Any, Dict, List, Optional, Union
 import uuid
@@ -319,37 +320,43 @@ class ColleagueDevOrchestrator:
         max_revisions: int = 3,
         branch: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Execute autonomous colleague development in an isolated git worktree with locks."""
+        """Run a colleague task in a new worktree, preserving any failed workspace."""
         import subprocess
         repo = Path(repo_path).resolve()
+        if not isinstance(task_id, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", task_id):
+            raise ValueError("invalid_task_id")
         target_branch = branch or f"dev-colleague/{task_id}"
+        if (not isinstance(target_branch, str)
+                or subprocess.run(["git", "check-ref-format", "--branch", target_branch],
+                                  cwd=str(repo), capture_output=True).returncode != 0):
+            raise ValueError("invalid_worktree_branch")
         worktree_dir = repo.parent / f"worktree-{task_id}"
-
+        def git_run(*args: str, check: bool = True):
+            return subprocess.run(["git", *args], cwd=str(repo), check=check, capture_output=True, text=True)
+        if worktree_dir.exists() or worktree_dir.is_symlink():
+            raise FileExistsError(f"worktree_path_exists: {worktree_dir}")
+        branch_exists = git_run("show-ref", "--verify", "--quiet", f"refs/heads/{target_branch}", check=False)
+        if branch_exists.returncode == 0:
+            raise ValueError(f"worktree_branch_exists: {target_branch}")
         dev_runner_mod = importlib.import_module("agentcore.dev_runner")
         worktree_lock = getattr(dev_runner_mod, "worktree_lock")
-
-        subprocess.run(
-            ["git", "worktree", "add", "-B", target_branch, str(worktree_dir), "HEAD"],
-            cwd=str(repo), check=True, capture_output=True, text=True
-        )
+        git_run("worktree", "add", "-b", target_branch, str(worktree_dir), "HEAD")
         try:
             with worktree_lock(worktree_dir):
                 result = self.execute_autonomous_case_dev(
-                    requirement_text=requirement_text,
-                    source_input=source_input,
-                    workdir=worktree_dir,
-                    max_revisions=max_revisions,
-                    domain=domain,
+                    requirement_text=requirement_text, source_input=source_input,
+                    workdir=worktree_dir, max_revisions=max_revisions, domain=domain,
                 )
                 manifest_file = worktree_dir / "manifest.json"
                 if manifest_file.is_file():
                     subprocess.run(["git", "add", "."], cwd=str(worktree_dir), check=True, capture_output=True)
-                    subprocess.run(
-                        ["git", "commit", "-m", f"chore(dev): autonomous colleague pipeline {task_id}"],
-                        cwd=str(worktree_dir), check=True, capture_output=True
-                    )
+                    subprocess.run(["git", "commit", "-m", f"chore(dev): autonomous colleague pipeline {task_id}"],
+                                   cwd=str(worktree_dir), check=True, capture_output=True)
+                    git_run("worktree", "remove", str(worktree_dir))
+                    return result
+                result = dict(result)
+                result["worktree_path"] = str(worktree_dir)
+                result["worktree_preserved"] = True
                 return result
-        finally:
-            subprocess.run(["git", "worktree", "remove", "--force", str(worktree_dir)],
-                           cwd=str(repo), capture_output=True)
-
+        except Exception as exc:
+            raise RuntimeError(f"colleague_worktree_failed: {exc}; preserved at {worktree_dir} (branch {target_branch})") from exc

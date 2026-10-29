@@ -86,3 +86,19 @@ def test_aggregate_reports_the_worst_unfinished_story_without_hiding_failures():
     assert "本轮 2 个后台任务" in text and "pytest tests" in text and "npm build" in text
     assert "%%" not in text.replace("100%", "") or True
     assert "已用（最长）" in text
+
+def test_foreground_and_background_terminal_aggregation():
+    from agentcore.task_progress import aggregate_with_foreground, foreground_snapshot
+
+    fg = foreground_snapshot({"task_id": "turn_x", "state": "done", "started_at": 1}, now=10)
+    bg_done = snapshot({"task_id": "proc_x", "state": "done", "started_at": 1}, now=10)
+    both_done = aggregate_with_foreground([bg_done], fg)
+    assert both_done["terminal"] and both_done["verdict"] == "done" and both_done["tasks"] == 2
+
+    bg_running = snapshot({"task_id": "proc_y", "state": "running", "started_at": 1}, now=10)
+    still_running = aggregate_with_foreground([bg_running], fg)
+    assert not still_running["terminal"] and still_running["verdict"] == "running"
+
+    bg_failed = snapshot({"task_id": "proc_z", "state": "failed", "started_at": 1}, now=10)
+    failed = aggregate_with_foreground([bg_failed], fg)
+    assert failed["terminal"] and failed["verdict"] == "failed"

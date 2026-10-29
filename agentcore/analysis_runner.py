@@ -57,7 +57,12 @@ def _policy(policy):
     model_options = policy.get('model_options', {})
     if not isinstance(model_options, dict) or not all(isinstance(key, str) for key in model_options):
         raise AnalysisError('invalid_model_options')
+    fallback_options = policy.get('fallback_model_options')
+    if fallback_options is not None and (not isinstance(fallback_options, dict)
+            or not all(isinstance(key, str) for key in fallback_options)):
+        raise AnalysisError('invalid_fallback_model_options')
     return dict(policy, roots=roots, denied_globs=denied, model_options=dict(model_options),
+                fallback_model_options=None if fallback_options is None else dict(fallback_options),
                 max_files=_positive(policy.get('max_files', 8), 'max_files'),
                 max_file_bytes=_positive(policy.get('max_file_bytes', 262144), 'max_file_bytes'),
                 max_total_bytes=_positive(policy.get('max_total_bytes', 1048576), 'max_total_bytes'),
@@ -252,15 +257,27 @@ def run_analysis(job, policy, model, output_dir='.'):
          'verbatim quote from a supplied line. State uncertainty and distinguish observation '
          'from hypotheses. Do not claim a fix, test run, or cause without supporting evidence.'},
         {'role': 'user', 'content': json.dumps({'goal': goal, 'sources': snapshots}, ensure_ascii=False)}]
+    fallback_used = False
     try:
-        response = model(messages, **policy['model_options'])
-    except Exception:
-        raise AnalysisError('model_call_failed') from None
-    report = validate_report(response, snapshots)
+        try:
+            response = model(messages, **policy['model_options'])
+        except Exception:
+            raise AnalysisError('model_call_failed') from None
+        report = validate_report(response, snapshots)
+    except AnalysisError:
+        if policy['fallback_model_options'] is None:
+            raise
+        fallback_used = True
+        try:
+            response = model(messages, **policy['fallback_model_options'])
+        except Exception:
+            raise AnalysisError('model_call_failed') from None
+        report = validate_report(response, snapshots)
     out = Path(output_dir).resolve()
     out.mkdir(parents=True, exist_ok=True, mode=0o700)
     manifest = {'job': job.get('job'), 'attempt': job.get('attempt'),
-                'sources': snapshots, 'verification': report['verification']}
+                'sources': snapshots, 'verification': report['verification'],
+                'fallback_used': fallback_used}
     markdown = ['# Failure analysis', '', report['conclusion'], '']
     for claim in report['claims']:
         markdown += ['- ' + claim['statement']]

@@ -326,7 +326,8 @@ class LivenessLedger:
 
     def finish(self, task_id: str, state: str = "done", *, exit_code: Optional[int] = None,
                detail: Optional[str] = None, artifacts: Optional[Sequence[str]] = None,
-               tail: Optional[str] = None) -> Dict[str, Any]:
+               tail: Optional[str] = None,
+               require_owner: Optional[str] = None) -> Dict[str, Any]:
         """Write a terminal state exactly once. Later calls report ``changed=False``."""
         if state not in TERMINAL_STATES:
             raise ValueError("finish state must be one of " + ", ".join(sorted(TERMINAL_STATES)))
@@ -334,7 +335,7 @@ class LivenessLedger:
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM task_liveness WHERE task_id=?", (task_id,)).fetchone()
-            if row is None:
+            if row is None or (require_owner is not None and row["owner"] != require_owner):
                 db.rollback()
                 return {"ok": False, "changed": False, "error": "unknown_task",
                         "task_id": task_id}
@@ -361,13 +362,14 @@ class LivenessLedger:
         return {"ok": True, "changed": True, "task": _row_dict(row)}
 
     def record_exit(self, task_id: str, exit_code: Optional[int], *,
-                    tail: Optional[str] = None, detail: Optional[str] = None) -> Dict[str, Any]:
+                    tail: Optional[str] = None, detail: Optional[str] = None,
+                    require_owner: Optional[str] = None) -> Dict[str, Any]:
         """Convenience: exit 0 is done, any other observed exit is failed."""
         ok = exit_code == 0
         return self.finish(
             task_id, "done" if ok else "failed", exit_code=exit_code,
             detail=detail or ("exited 0" if ok else "exited %r" % (exit_code,)),
-            tail=tail)
+            tail=tail, require_owner=require_owner)
 
     def record_tail(self, task_id: str, text: Any, *, limit: int = 4000) -> bool:
         """Replace the bounded output tail without touching state or heartbeat."""

@@ -324,3 +324,99 @@ def test_invalid_member_identifiers_rejected(env, bad):
     role(registry, leader)
     with pytest.raises(ValueError):
         registry.hire(actor=leader, member_id=bad, role_id="review", display_name="Name", request_id="one")
+
+
+def test_exclusive_work_reservation_is_atomic_across_registry_instances(tmp_path):
+    path = tmp_path / "exclusive.sqlite"
+    registry = Registry(path, profile_id="team", primary_id="leader")
+    other = Registry(path, profile_id="team", primary_id="leader")
+    leader, host = Actor("team", "leader"), Supervisor("team")
+    role(registry, leader); hire(registry, leader)
+    barrier = threading.Barrier(2)
+    def reserve(store, work_id):
+        barrier.wait(timeout=5)
+        try:
+            result = store.reserve_work_exclusive(supervisor=host, member_id="reviewer",
+                                                   generation=1, work_id=work_id)
+            return ("reserved", result)
+        except ValueError as exc:
+            return ("denied", str(exc))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(reserve, registry, "gateway-work")
+        second = pool.submit(reserve, other, "cli-work")
+        results = [first.result(timeout=10), second.result(timeout=10)]
+    admitted = [value for kind,value in results if kind == "reserved"]
+    denied = [value for kind,value in results if kind == "denied"]
+    assert len(admitted) == len(denied) == 1
+    assert denied == ["member_has_exclusive_work"]
+    winner_id = admitted[0]["work_id"]
+    replay = registry.reserve_work_exclusive(supervisor=host, member_id="reviewer",
+                                               generation=1, work_id=winner_id)
+    assert replay == {"work_id":winner_id,"reserved":True,"created":False}
+    assert registry.work_status(supervisor=host, member_id="reviewer", generation=1)["tracked_open"] == 1
+
+
+def test_legacy_and_exclusive_reservations_are_fenced_in_both_orders(env):
+    registry, leader, host = env
+    role(registry, leader); hire(registry, leader)
+    # Legacy queues retain their pre-existing multi-reservation behavior until an
+    # exclusive execution enters the durable fence.
+    registry.reserve_work(supervisor=host,member_id="reviewer",generation=1,work_id="legacy-a")
+    registry.reserve_work(supervisor=host,member_id="reviewer",generation=1,work_id="legacy-b")
+    with pytest.raises(ValueError,match="member_has_unresolved_work"):
+        registry.reserve_work_exclusive(supervisor=host,member_id="reviewer",generation=1,work_id="exclusive-blocked")
+
+    registry.settle_work(supervisor=host,member_id="reviewer",generation=1,work_id="legacy-a")
+    registry.settle_work(supervisor=host,member_id="reviewer",generation=1,work_id="legacy-b")
+    exclusive=registry.reserve_work_exclusive(supervisor=host,member_id="reviewer",generation=1,work_id="exclusive-one")
+    assert exclusive["created"] is True
+    other=Registry(registry.path,profile_id="team",primary_id="leader")
+    with pytest.raises(ValueError,match="member_has_exclusive_work"):
+        other.reserve_work(supervisor=host,member_id="reviewer",generation=1,work_id="legacy-after-exclusive")
+    with pytest.raises(ValueError,match="member_has_exclusive_work"):
+        other.reserve_work(supervisor=host,member_id="reviewer",generation=1,work_id="exclusive-one")
+
+    # The fence survives Registry reconstruction and is released atomically with
+    # settlement; repeated settlement is harmless, then legacy admission resumes.
+    other.settle_work(supervisor=host,member_id="reviewer",generation=1,work_id="exclusive-one")
+    other.settle_work(supervisor=host,member_id="reviewer",generation=1,work_id="exclusive-one")
+    with other._db() as db:
+        assert db.execute("SELECT 1 FROM colleague_exclusive_work WHERE profile_id=? AND member_id=?",
+                          ("team","reviewer")).fetchone() is None
+    assert other.reserve_work(supervisor=host,member_id="reviewer",generation=1,work_id="legacy-after-close")["created"] is True
+
+def test_legacy_and_exclusive_race_cannot_cross_the_durable_fence(tmp_path):
+    path=tmp_path / "mixed-exclusive.sqlite"
+    legacy=Registry(path,profile_id="team",primary_id="leader")
+    exclusive=Registry(path,profile_id="team",primary_id="leader")
+    leader,host=Actor("team","leader"),Supervisor("team")
+    role(legacy,leader);hire(legacy,leader)
+    barrier=threading.Barrier(2)
+    def reserve(store, exclusive_path, work_id):
+        barrier.wait(timeout=5)
+        try:
+            method=store.reserve_work_exclusive if exclusive_path else store.reserve_work
+            return "won",method(supervisor=host,member_id="reviewer",generation=1,work_id=work_id)
+        except ValueError as exc:
+            return "lost",str(exc)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        a=pool.submit(reserve,legacy,False,"legacy-racer")
+        b=pool.submit(reserve,exclusive,True,"exclusive-racer")
+        outcomes=[a.result(timeout=10),b.result(timeout=10)]
+    assert sum(kind=="won" for kind,_ in outcomes)==1
+    assert sum(kind=="lost" for kind,_ in outcomes)==1
+    loser=next(value for kind,value in outcomes if kind=="lost")
+    assert loser in {"member_has_unresolved_work","member_has_exclusive_work"}
+    assert legacy.work_status(supervisor=host,member_id="reviewer",generation=1)["tracked_open"]==1
+
+
+def test_legacy_open_reservation_cannot_be_silently_upgraded_to_exclusive(env):
+    registry, leader, host = env
+    role(registry,leader);hire(registry,leader)
+    registry.reserve_work(supervisor=host,member_id="reviewer",generation=1,work_id="same-id")
+    with pytest.raises(ValueError,match="exclusive_work_unfenced_reservation"):
+        registry.reserve_work_exclusive(supervisor=host,member_id="reviewer",generation=1,work_id="same-id")
+    assert registry.work_status(supervisor=host,member_id="reviewer",generation=1)["tracked_open"]==1
+    with registry._db() as db:
+        assert db.execute("SELECT 1 FROM colleague_exclusive_work WHERE profile_id=? AND member_id=?",
+                          ("team","reviewer")).fetchone() is None

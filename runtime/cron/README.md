@@ -24,3 +24,12 @@
 1. 先按 `skills/skill-distillation` 的评审四条过一遍（判据可执行、反模式有真实代价、脱敏、名字能看出何时用）；
 2. 把它挪到 `skills/<name>/SKILL.md`（技术仓）或业务叠加层技能源（业务内容）；
 3. 跑 `python3 -m pytest tests/test_generic_templates.py -q` —— frontmatter、`name`、`Use when` 三条会立即校验。
+
+## 夜间会话复盘模板
+
+nightly-self-review.json 是不绑定机器或业务 profile 的模板；安装器默认只检查，不创建。先确认目标 profile、工作目录和时区，再显式使用 --install：
+
+    python3 tools/install_nightly_review.py --profile PROFILE --profile-home /absolute/profile/path --workdir /absolute/repository/path --timezone Asia/Shanghai
+    python3 tools/install_nightly_review.py --profile PROFILE --profile-home /absolute/profile/path --workdir /absolute/repository/path --timezone Asia/Shanghai --install
+
+安装器只通过 Hermes cron create 添加作业；它不改全局时区，不覆写已有作业。它要求 profile 配置里有明确 timezone 且与参数相同。Hermes cron 没有单作业时区：当前 caixuf profile 的 timezone 查询为空，因此该 profile 会被拒绝安装，不能据服务器当前偏移推断配置。即使 profile 配置明确，运行中 Gateway 的 HERMES_TIMEZONE 服务环境仍可能覆盖它；成功状态会标为 ADDED_PENDING_RUNTIME_TZ_CHECK，需由部署者核对活动 service 环境后再视为确认。已知旧作业名“夜间会话复盘与改进”会返回 LEGACY_CONFLICT，须人工检查/迁移，安装器不会另建重复作业。

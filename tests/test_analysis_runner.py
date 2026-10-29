@@ -129,6 +129,39 @@ def test_admin_model_options_forwarded_and_payload_cannot_override(tmp_path):
     assert received == [options]
 
 
+def test_explicit_fallback_retries_only_once_after_invalid_citation(tmp_path):
+    job, policy, _ = case(tmp_path)
+    policy['model_options'] = {'alias': 'flash'}
+    policy['fallback_model_options'] = {'alias': 'main'}
+    calls = []
+    def model(messages, **options):
+        calls.append(options['alias'])
+        result = report(messages)
+        if options['alias'] == 'flash':
+            result['claims'][0]['evidence'][0]['quote'] = 'not present in the source'
+        return result
+    output = tmp_path / 'fallback-output'
+    assert run_analysis(job, policy, model, output)['ok'] is True
+    assert calls == ['flash', 'main']
+    assert json.loads((output / 'manifest.json').read_text())['fallback_used'] is True
+
+
+def test_fallback_not_selected_by_task_payload_or_repeated(tmp_path):
+    job, policy, _ = case(tmp_path)
+    job['payload']['fallback_model_options'] = {'alias': 'main'}
+    calls = []
+    def model(messages, **options):
+        calls.append(options)
+        raise RuntimeError('private detail')
+    with pytest.raises(AnalysisError, match='^model_call_failed$'):
+        run_analysis(job, policy, model, tmp_path / 'no-fallback')
+    assert calls == [{}]
+    policy['fallback_model_options'] = {'alias': 'main'}
+    with pytest.raises(AnalysisError, match='^model_call_failed$'):
+        run_analysis(job, policy, model, tmp_path / 'failed-fallback')
+    assert len(calls) == 3
+
+
 @pytest.mark.parametrize('options', [None, [], 'options', {1: 'not a string key'}])
 def test_invalid_admin_model_options_fail_before_model_call(tmp_path, options):
     job, policy, _ = case(tmp_path)

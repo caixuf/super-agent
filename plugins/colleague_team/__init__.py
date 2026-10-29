@@ -129,6 +129,76 @@ def register(ctx):
                           schema={'name': name, 'description': description, 'parameters': {
                               'type': 'object', 'additionalProperties': False, 'properties': properties,
                               'required': [] if action == 'list' else list(properties)}}, handler=handle(action))
+
+    # Dispatch is a separate opt-in capability. The plugin never constructs a
+    # Provisioner, Gateway connection, owner identity or session binding itself.
+    if ctx.get_config('gateway_dispatch.enabled', False) is True:
+        from gateway.session_context import get_session_env
+        from agentcore import colleague_gateway_service as gateway_service
+
+        gateway_service.configure_session_env(get_session_env)
+
+        def dispatch_context(session_id):
+            if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 512:
+                raise PermissionError('trusted_session_context_required')
+            profile = ctx.profile_name
+            if not isinstance(profile, str) or not profile:
+                raise PermissionError('trusted_profile_context_required')
+            context_session = get_session_env('HERMES_SESSION_ID', '')
+            context_profile = get_session_env('HERMES_SESSION_PROFILE', '')
+            if context_session != session_id:
+                raise PermissionError('session_context_mismatch')
+            if context_profile and context_profile != profile:
+                raise PermissionError('profile_context_mismatch')
+            return profile, context_profile, context_session
+
+        def dispatch_tool(action):
+            def invoke(args, *, session_id=None, **_kwargs):
+                if ctx.get_config('enabled', False) is not True or ctx.get_config('gateway_dispatch.enabled', False) is not True:
+                    return gateway_service.json_result({'state': 'unavailable', 'error': 'dispatch_disabled'})
+                if not isinstance(args, dict):
+                    return gateway_service.json_result({'state': 'unavailable', 'error': 'invalid_arguments'})
+                try:
+                    profile, context_profile, context_session = dispatch_context(session_id)
+                    if action == 'assign':
+                        if set(args) != {'colleague', 'request_id', 'task'}:
+                            raise ValueError('invalid_arguments')
+                        result = gateway_service.assign(profile, session_id, context_profile, context_session,
+                                                        args['colleague'], args['request_id'], args['task'])
+                    else:
+                        if 'request_id' not in args or set(args) - {'request_id', 'response_offset', 'response_revision'}:
+                            raise ValueError('invalid_arguments')
+                        result = gateway_service.inspect(profile, session_id, context_profile, context_session,
+                                                         args['request_id'], args.get('response_offset', 0),
+                                                         args.get('response_revision'))
+                    return gateway_service.json_result(result)
+                except (ValueError, PermissionError, RuntimeError) as error:
+                    code = str(error)
+                    return gateway_service.json_result({'state': 'unavailable',
+                        'error': code if re.fullmatch(r'[a-z_]{1,64}', code) else 'gateway_dispatch_unavailable'})
+                except Exception:
+                    return gateway_service.json_result({'state': 'unavailable', 'error': 'gateway_dispatch_unavailable'})
+            return invoke
+
+        dispatch_defs = [
+            ('assign', 'Assign a task to an active colleague. The host binds this request to the current Hermes profile and session; task status is queryable in that same conversation.',
+             {'colleague': {'type': 'string', 'minLength': 1, 'maxLength': 80,
+                            'description': 'Exact colleague member ID or unique registered display name.'},
+              'request_id': request,
+              'task': {'type': 'string', 'minLength': 1, 'maxLength': 12000}}),
+            ('task_status', 'Check a colleague task submitted from this same conversation. To read the next page, pass response_next_offset as response_offset and preserve response_revision.',
+             {'request_id': request, 'response_offset': {'type': 'integer', 'minimum': 0,
+                 'description': 'Optional character offset returned by the previous page.'},
+              'response_revision': {'type': 'string', 'pattern': '^[0-9a-f]{64}$',
+                 'description': 'Response revision returned by the previous page; required when offset is nonzero.'}}),
+        ]
+        for action, description, properties in dispatch_defs:
+            name = 'colleague_' + action
+            ctx.register_tool(name=name, toolset='colleague_team', description=description,
+                              schema={'name': name, 'description': description, 'parameters': {
+                                  'type': 'object', 'additionalProperties': False, 'properties': properties,
+                                  'required': [key for key in properties if key not in ('response_offset', 'response_revision')]}}, handler=dispatch_tool(action))
+
     ctx.register_system_prompt_section(
         'colleague-team-operations',
         'The team registry can define roles, register colleagues, delegate management and request retirement. '

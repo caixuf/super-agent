@@ -18,6 +18,8 @@ import threading
 import time
 import uuid
 
+from agentcore import colleague_containment as containment
+
 
 ORIGIN_FIELDS = ('profile', 'session', 'route', 'channel', 'chat', 'thread', 'turn')
 # The dispatcher is only guaranteed to hold these two; the rest are recorded when
@@ -82,7 +84,7 @@ class Pool:
             db.execute('BEGIN IMMEDIATE')
             columns = {r[1] for r in db.execute('PRAGMA table_info(jobs)')}
             for name, kind in [('pid', 'INTEGER'), ('pid_start', 'TEXT'), ('deadline', 'REAL'),
-                               ('origin', 'TEXT')]:
+                               ('origin', 'TEXT'), ('containment_token', 'TEXT')]:
                 if name not in columns:
                     db.execute('ALTER TABLE jobs ADD COLUMN ' + name + ' ' + kind)
             outbox_columns = {r[1] for r in db.execute('PRAGMA table_info(outbox)')}
@@ -221,10 +223,13 @@ class Pool:
                     if any(s != 'completed' for s in deps):
                         continue
                     token = uuid.uuid4().hex
-                    db.execute("UPDATE jobs SET status='running',attempt=?,heartbeat=?,tries=tries+1,pid=NULL,pid_start=NULL,deadline=NULL WHERE id=?",
-                               (token, time.time(), row['id']))
+                    # The attempt token travels in the child environment, so even
+                    # descendants that leave the process group can be found later.
+                    attempt_token = containment.new_token()
+                    db.execute("UPDATE jobs SET status='running',attempt=?,heartbeat=?,tries=tries+1,pid=NULL,pid_start=NULL,deadline=NULL,containment_token=? WHERE id=?",
+                               (token, time.time(), attempt_token, row['id']))
                     keep = True
-                    return dict(row, attempt=token), fd
+                    return dict(row, attempt=token, containment_token=attempt_token), fd
                 finally:
                     if not keep:
                         os.close(fd)
@@ -248,6 +253,10 @@ class Pool:
         """
         if not row['cancel'] and (not row['deadline'] or row['deadline'] > time.time()):
             return
+        token = row['containment_token'] if 'containment_token' in row.keys() else None
+        if token:
+            # Covers descendants whose worker died before it could sweep them.
+            containment.sweep(token)
         pid = row['pid']
         if not pid or not row['pid_start'] or self._process_start(pid) != row['pid_start']:
             return
@@ -365,6 +374,7 @@ class Pool:
         """Execute a claim owned by this process; caller transfers lock ownership here."""
         row, fd = claimed
         job, attempt = row['id'], row['attempt']
+        token = row.get('containment_token')
         directory = self.root / 'attempts' / attempt
         proc = None
         try:
@@ -379,8 +389,11 @@ class Pool:
                 import sys
                 guarded_command = [sys.executable, str(Path(__file__).with_name('exec_runner.py')),
                                    str(max_file)] + command
+                env = dict(os.environ)
+                if token:
+                    env[containment.ENV] = token
                 proc = subprocess.Popen(guarded_command, stdin=inp, stdout=out, stderr=err, cwd=directory,
-                                        start_new_session=True, pass_fds=(fd,))
+                                        start_new_session=True, pass_fds=(fd,), env=env)
                 with self.db() as db:
                     db.execute("UPDATE jobs SET pid=?,pid_start=?,deadline=? WHERE id=? AND attempt=? AND status='running'",
                                (proc.pid, self._process_start(proc.pid), time.time() + timeout, job, attempt))
@@ -435,6 +448,14 @@ class Pool:
                             result['runner_error'] = code
                     except (ValueError, UnicodeError, AttributeError):
                         pass
+                evidence = containment.sweep(token) if token else None
+                if evidence is not None:
+                    result['attempt_quiescent'] = evidence['quiescent']
+                    if not evidence['quiescent']:
+                        # A survivor means the attempt outlived its lease; never
+                        # report success for work that may still be running.
+                        ok = False
+                        result.setdefault('reason', 'attempt did not quiesce')
                 self.finish(job, attempt, ok, result)
         except Exception as exc:
             self.finish(job, attempt, False, {'reason': 'execution error', 'type': type(exc).__name__,

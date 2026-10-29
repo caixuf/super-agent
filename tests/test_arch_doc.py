@@ -43,6 +43,11 @@ echo hi
 """
 
 
+def _capture_ready() -> bool:
+    """浏览器截图还要 ``websocket-client`` —— 两者任一缺失都是环境缺失，不是渲染链故障。"""
+    return _browser() is not None and importlib.util.find_spec("websocket") is not None
+
+
 def _browser() -> str | None:
     for b in arch_doc.BROWSERS:
         p = shutil.which(b) or (b if Path(b).exists() else None)
@@ -143,7 +148,7 @@ def test_missing_vendor_never_silently_uses_network_script(tmp_path, monkeypatch
         arch_doc.load_mermaid_script()
 
 
-@pytest.mark.skipif(_browser() is None, reason="本机没有 chromium/google-chrome")
+@pytest.mark.skipif(not _capture_ready(), reason="本机没有 chromium/google-chrome 或 websocket-client")
 def test_render_end_to_end_produces_selfcontained_html_and_png(tmp_path, monkeypatch):
     monkeypatch.setattr(arch_doc, "VIRTUAL_TIME_BUDGET_MS", 8000)
     html, png = tmp_path / "d.html", tmp_path / "d.png"

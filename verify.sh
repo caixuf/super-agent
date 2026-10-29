@@ -8,6 +8,8 @@
 #   bash verify.sh --with-docker  # 加跑干净室部署验证（建镜像，几分钟）
 #   bash verify.sh --with-checks  # 加跑宿主特性矩阵（需 Hermes 树 / Node，缺依赖的组降级 WARN）
 #
+#   模型上下文体检每次都会跑：有 profile 配置就探测端点，没有配置或端点不可达则 SKIP。
+#
 # 退出码约定：0 = 全过；非 0 = 失败项数（三块相加）。缺依赖导致的 SKIP 不算失败，
 # 但会在末尾明说 —— 「环境缺失」不许伪装成「通过」。
 set -u
@@ -21,7 +23,7 @@ for arg in "$@"; do
   case "$arg" in
     --with-docker) WITH_DOCKER=1 ;;
     --with-checks) WITH_CHECKS=1 ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "未知参数：$arg（--help 看用法）" >&2; exit 1 ;;
   esac
 done
@@ -97,6 +99,39 @@ fi
 if [ "$WITH_CHECKS" = "1" ]; then
   section "⑤ 宿主特性矩阵（checks/feature_check.sh）"
   bash checks/feature_check.sh && pass "特性矩阵通过（含降级 WARN）" || fail "特性矩阵有失败项"
+fi
+
+# ── ⑥ 真实通道交付：消息真的发到消息平台并在平台回读（需 app 凭据 + bot 专属测试群）
+# 未配置凭据时记一笔跳过，不让「环境缺失」看起来像「通过」。
+section "⑥ 真实通道交付（消息平台 open platform）"
+if [ -n "${FEISHU_APP_ID:-}" ] && [ -n "${FEISHU_APP_SECRET:-}" ] && [ -n "${FEISHU_TEST_CHAT_ID:-}" ]; then
+  if "$PY" -m pytest tests/test_feishu_transport_real.py tests/test_feishu_delivery_real.py -q \
+      >/tmp/verify_feishu.log 2>&1; then
+    pass "$(tail -n 1 /tmp/verify_feishu.log | tr -d '\n')"
+  else
+    tail -n 20 /tmp/verify_feishu.log | sed 's/^/    /'
+    fail "真实消息平台交付未过（完整输出：/tmp/verify_feishu.log）"
+  fi
+else
+  skipped+=("真实消息平台交付（未设置 FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_TEST_CHAT_ID）")
+fi
+
+# ── ⑦ 模型上下文体检：端点必须说清窗口，不能靠手写 pin
+# 退出码 0 = 拿到窗口；1 = 端点可达但契约不满足；2 = 无配置/不可达，记为 SKIP。
+section "⑦ 模型上下文体检（端点契约）"
+if [ -f checks/model_context_check.sh ]; then
+  bash checks/model_context_check.sh >/tmp/verify_model_context.log 2>&1
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    pass "$(awk '/^context:/{print; exit}' /tmp/verify_model_context.log | sed 's/^context:  //')"
+  elif [ "$rc" -eq 2 ]; then
+    skipped+=("模型上下文体检（无 profile 配置或端点不可达）")
+  else
+    tail -n 20 /tmp/verify_model_context.log | sed 's/^/    /'
+    fail "模型上下文契约未满足（完整输出：/tmp/verify_model_context.log）"
+  fi
+else
+  fail "缺 checks/model_context_check.sh"
 fi
 
 section "结果"

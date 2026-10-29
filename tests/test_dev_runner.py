@@ -303,3 +303,76 @@ def test_colleague_dev_execute_in_worktree(tmp_path: Path):
         cwd=str(repo_dir), capture_output=True, text=True, check=True
     )
     assert f"autonomous colleague pipeline {task_id}" in branch_check.stdout
+
+
+def _init_worktree_test_repo(tmp_path: Path) -> Path:
+    import subprocess
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "TestRunner"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    (repo / "README.md").write_text("# repo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True)
+    return repo
+
+
+def test_execute_in_worktree_refuses_existing_branch_without_reset(tmp_path: Path):
+    import subprocess
+    from agentcore.colleague_dev import ColleagueDevOrchestrator
+
+    repo = _init_worktree_test_repo(tmp_path)
+    branch = "dev-colleague/existing"
+    subprocess.run(["git", "branch", branch], cwd=repo, check=True)
+    before = subprocess.run(["git", "rev-parse", branch], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    with pytest.raises(ValueError, match="worktree_branch_exists"):
+        ColleagueDevOrchestrator().execute_in_worktree(repo, "existing", "task", branch=branch)
+    after = subprocess.run(["git", "rev-parse", branch], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    assert after == before
+    assert not (tmp_path / "worktree-existing").exists()
+
+
+def test_execute_in_worktree_preserves_failed_worktree(tmp_path: Path):
+    import subprocess
+    from agentcore.colleague_dev import ColleagueDevOrchestrator
+
+    repo = _init_worktree_test_repo(tmp_path)
+    orchestrator = ColleagueDevOrchestrator()
+
+    def fail_after_writing(**kwargs):
+        workdir = Path(kwargs["workdir"])
+        (workdir / "recovery.txt").write_text("keep me", encoding="utf-8")
+        raise RuntimeError("simulated execution failure")
+
+    orchestrator.execute_autonomous_case_dev = fail_after_writing
+    with pytest.raises(RuntimeError, match="preserved at"):
+        orchestrator.execute_in_worktree(repo, "failure", "task")
+
+    preserved = tmp_path / "worktree-failure"
+    assert (preserved / "recovery.txt").read_text(encoding="utf-8") == "keep me"
+    assert subprocess.run(["git", "rev-parse", "--verify", "dev-colleague/failure"],
+                         cwd=repo, capture_output=True).returncode == 0
+
+
+def test_execute_in_worktree_preserves_existing_path(tmp_path: Path):
+    from agentcore.colleague_dev import ColleagueDevOrchestrator
+
+    repo = _init_worktree_test_repo(tmp_path)
+    existing = tmp_path / "worktree-collision"
+    existing.mkdir()
+    marker = existing / "user.txt"
+    marker.write_text("keep", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="worktree_path_exists"):
+        ColleagueDevOrchestrator().execute_in_worktree(repo, "collision", "task")
+    assert marker.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize("task_id", ["../escape", "nested/path", "x/../../escape", "/absolute", "a\\b", "."])
+def test_execute_in_worktree_rejects_unsafe_task_id(tmp_path: Path, task_id: str):
+    from agentcore.colleague_dev import ColleagueDevOrchestrator
+
+    repo = _init_worktree_test_repo(tmp_path)
+    with pytest.raises(ValueError, match="invalid_task_id"):
+        ColleagueDevOrchestrator().execute_in_worktree(repo, task_id, "task")
+    assert not (tmp_path.parent / "worktree-escape").exists()
