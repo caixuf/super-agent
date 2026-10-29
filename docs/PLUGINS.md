@@ -58,7 +58,7 @@
 `plugins.entries.<name>.settings.enabled: true`，缺了就静默 return（不报错、不注册工具）：
 
 `colleague-catalog` · `colleague-team` · `durable-dispatch` · `illustrated-delivery` ·
-`local-model-grounding` · `markdown-delivery` · `memory-bridge` · `task-status`
+`local-model-grounding` · `markdown-delivery` · `memory-bridge` · `task-status` · `task-progress`
 
 `install/install.sh` 的 ⑧ 步会把这份名单打出来（只写 `plugins.enabled`/`disabled`，不猜业务参数）。
 
