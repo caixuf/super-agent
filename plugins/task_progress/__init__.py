@@ -469,7 +469,7 @@ def register(ctx) -> None:
     def _cmd_task(raw_args: str = "") -> str:
         task = (raw_args or "").strip().split()[0] if (raw_args or "").strip() else ""
         if not task:
-            return "用法：/task <任务号>（任务号见 /tasks）"
+            return "用法：/longtask <任务号>（任务号见 /longtasks）"
         row = ledger.get(task, require_owner=_owner())
         if row is None:
             return "unknown_task：本会话没有这个任务（不会替你猜别的会话的任务）。"
@@ -478,8 +478,8 @@ def register(ctx) -> None:
 
     register_command = getattr(ctx, "register_command", None)
     if callable(register_command):
-        register_command("tasks", _cmd_tasks, "本会话的长任务进度（不启动模型回合）")
-        register_command("task", _cmd_task, "一个长任务的当前状态：/task <任务号>", args_hint="<任务号>")
+        register_command("longtasks", _cmd_tasks, "本会话的长任务进度（不启动模型回合）")
+        register_command("longtask", _cmd_task, "一个长任务的当前状态：/longtask <任务号>", args_hint="<任务号>")
 
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     thread = threading.Thread(target=_loop, name="task-progress-poller", daemon=True)

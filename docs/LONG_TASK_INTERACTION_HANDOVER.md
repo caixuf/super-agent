@@ -39,7 +39,8 @@
   复用 `card_store`（身份/序号/终态）、`card_emit`（视图）、`liveness`（证据）。
 
 - `plugins/task_progress` 另外注册**两个不进模型的命令**（阶段二的第一小块）：
-  `/tasks`（本会话长任务清单：状态·已用·阶段）与 `/task <任务号>`（单任务状态，跨会话一律 `unknown_task`）。
+  `/longtasks`（本会话长任务清单：状态·已用·阶段）与 `/longtask <任务号>`（单任务状态，跨会话一律 `unknown_task`）。
+  名字带 `long` 前缀是**实测撞名后的修正**：宿主已有 `/tasks`、`/task`、`/status`、`/progress`、`/goal`，内置优先。
   宿主在回合前分发 slash 命令并在会话作用域内调用，因此查进度不产生模型回合 —— 这是对"别依赖模型
   被动发现"的机制回应。
 
@@ -55,6 +56,7 @@
 | 仓门禁 | `bash verify.sh`（静态 + 全量 pytest + 安装器 dry-run） | 见 §6 |
 | 真实（CLI 回合） | `hermes -p caixuf -z` 触发后台 spawn → 插件 post 成功（`ok=True`，`message_id=plugin-message:task-progress:…`），`cards.db` 落绑定 | 通过 |
 | 真实（API 回合） | 同一条命令走 `api_server`：**`post_tool_call` 钩子未分发**（宿主行为），因此该平台不会开条目 | 已记录（见下） |
+| 真实（slash 命令） | `hermes -p caixuf -z "/longtasks"` → 「本会话没有登记过的长任务。」；`/longtask proc_deadbeef0000` → `unknown_task`；`/longtask`（无参）→ 用法 | 通过（宿主在回合前分发，未产生模型回合） |
 | 真实端到端（消息平台） | 消息平台真发一个长任务、中途插话、终态核对 | **未验证**（需用户手动发；步骤见 §5） |
 
 ### 已记录的宿主行为

@@ -303,19 +303,19 @@ def test_slash_commands_answer_from_the_ledger_without_a_model_turn(tmp_path, mo
 
     ctx = CommandCtx(tmp_path, _settings(tmp_path))
     plugin.register(ctx)
-    assert set(ctx.commands) == {"tasks", "task"}
+    assert set(ctx.commands) == {"longtasks", "longtask"}
 
     ledger = LivenessLedger(ctx.settings["liveness_db"])
     ledger.register("proc_zzz", kind="terminal", owner="p:sess-1", label="pytest tests",
                     pid=999999, pid_start="dead:1", state="running", phase="compile")
     ledger.register("proc_other", kind="terminal", owner="p:another", state="running")
-    listed = ctx.commands["tasks"]()
+    listed = ctx.commands["longtasks"]()
     assert "proc_zzz" in listed and "compile" in listed
     assert "proc_other" not in listed, "a session must not see another session's tasks"
 
-    detail = ctx.commands["task"]("proc_zzz")
+    detail = ctx.commands["longtask"]("proc_zzz")
     assert "状态：进行中" in detail and "proc_zzz" in detail and "pytest tests" in detail
-    assert "unknown_task" in ctx.commands["task"]("proc_other")
-    assert "用法" in ctx.commands["task"]("")
+    assert "unknown_task" in ctx.commands["longtask"]("proc_other")
+    assert "用法" in ctx.commands["longtask"]("")
     for callback in ctx.unload_callbacks:
         callback()
