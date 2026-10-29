@@ -506,3 +506,40 @@ __all__ = [
     "LivenessLedger", "open_ledger", "default_db_path", "is_pid_alive",
     "pid_start_time", "TERMINAL_STATES", "KNOWN_STATES", "DEFAULT_STALL_SECONDS",
 ]
+
+
+def main(argv=None) -> int:
+    """Operator CLI: classify stale rows from evidence and print what changed.
+
+    ``python3 -m agentcore.liveness --db <ledger> [--stall-seconds N] [--json]``
+
+    Sweep is the only action on purpose: it writes only rows whose classification
+    changed (live pid stays ``running``, a gone pid becomes ``lost``, no pid plus a
+    stale heartbeat becomes ``stalled``) and never infers a successful exit.
+    Suitable for a periodic systemd timer — a long-lived reader is not required.
+    """
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(
+        description="Sweep stale task liveness rows (pid evidence; never guesses success).")
+    parser.add_argument("--db", default=None, help="ledger path (default: per-user state dir)")
+    parser.add_argument("--stall-seconds", type=float, default=None,
+                        help="silence threshold for a pid-less row (default: ledger default)")
+    parser.add_argument("--json", action="store_true", help="print the changed rows as JSON")
+    args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+
+    ledger = LivenessLedger(args.db, **({} if args.stall_seconds is None
+                                        else {"stall_seconds": args.stall_seconds}))
+    changed = ledger.sweep(stall_seconds=args.stall_seconds)
+    if args.json:
+        print(json.dumps({"db": str(ledger.path), "changed": changed,
+                          "counts": ledger.counts()}, ensure_ascii=False))
+    else:
+        print("swept %d row(s) from %s; counts=%s"
+              % (len(changed), ledger.path, json.dumps(ledger.counts(), sort_keys=True)))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
