@@ -163,6 +163,46 @@ class _Transport:
         return result
 
 
+def _registry():
+    """The host's process registry, when this runtime has one (evidence, never a guess)."""
+    try:
+        from tools.process_registry import process_registry  # type: ignore
+        return process_registry
+    except Exception:  # host surface absent in an isolated runtime
+        return None
+
+
+def _reconcile(ledger, task_id: str) -> None:
+    """Persist the *real* exit the host registry observed; silence proves nothing.
+
+    Without ``notify_on_complete`` nothing else closes the ledger row, so a finished job
+    would otherwise stay ``running`` until a sweep could only call it ``lost``. The
+    registry is the evidence: it either has an exit code or it does not.
+    """
+    registry = _registry()
+    if registry is None:
+        return
+    try:
+        result = registry.poll(task_id)
+    except Exception:
+        logger.debug("task-progress: poll failed for %s", task_id, exc_info=True)
+        return
+    if not isinstance(result, dict):
+        return
+    status = result.get("status")
+    code = result.get("exit_code")
+    if status == "running":
+        return
+    tail = result.get("output_preview") or result.get("output") or ""
+    try:
+        if code is not None and status not in (None, "not_found", "unknown"):
+            ledger.record_exit(task_id, int(code), tail=tail, detail="host process %s" % status)
+        elif status in ("completed", "success"):
+            ledger.finish(task_id, "done", tail=tail, detail="host process %s" % status)
+    except Exception:
+        logger.debug("task-progress: reconcile write failed for %s", task_id, exc_info=True)
+
+
 def _settings(ctx) -> dict:
     return {
         "enabled": ctx.get_config("enabled", False) is True,
@@ -312,6 +352,7 @@ def register(ctx) -> None:
         for task_id, entry in current:
             if entry.final:
                 continue
+            _reconcile(ledger, task_id)
             row = ledger.get(task_id)
             snap = progress.snapshot(row, now=now)
             if not progress.should_emit(entry.snap, snap, last_emit_at=entry.last_emit_at,

@@ -227,3 +227,31 @@ def test_a_task_that_finished_before_the_entry_opened_is_terminal_immediately(tm
     assert ctx.messages[0].edits == [], "an already-terminal entry is never edited again"
     for callback in ctx.unload_callbacks:
         callback()
+
+
+def test_the_real_exit_from_the_host_registry_is_recorded_and_shown(tmp_path, monkeypatch):
+    """With notify off nothing else closes the row; the registry's exit is the evidence."""
+    class Registry:
+        def __init__(self):
+            self.calls = []
+
+        def poll(self, task_id):
+            self.calls.append(task_id)
+            return {"status": "exited", "exit_code": 0, "output_preview": "ok"}
+
+    registry = Registry()
+    monkeypatch.setattr(plugin, "_registry", lambda: registry)
+
+    ctx = Ctx(tmp_path, _settings(tmp_path))
+    plugin.register(ctx)
+    _row(ctx.settings["liveness_db"], "proc_ggg", phase="run")
+    ctx.hooks["post_tool_call"](tool_name="terminal", args={"command": "pytest"},
+                                result={"session_id": "proc_ggg"}, session_id="s")
+    assert len(ctx.messages) == 1
+
+    assert _wait(lambda: any("已完成" in edit for edit in ctx.messages[0].edits)), \
+        (ctx.messages[0].edits, registry.calls)
+    assert registry.calls and registry.calls[0] == "proc_ggg"
+    assert LivenessLedger(ctx.settings["liveness_db"]).get("proc_ggg")["state"] == "done"
+    for callback in ctx.unload_callbacks:
+        callback()
