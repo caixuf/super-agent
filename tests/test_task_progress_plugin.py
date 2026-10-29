@@ -10,6 +10,8 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location(
     "task_progress_plugin", ROOT / "plugins" / "task_progress" / "__init__.py")
@@ -18,6 +20,22 @@ plugin = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(plugin)
 
 from agentcore.liveness import LivenessLedger  # noqa: E402
+
+
+_LIVE: list = []
+
+
+@pytest.fixture(autouse=True)
+def _always_unload():
+    """A leaked poller thread would poll into the next test's fake registry."""
+    yield
+    for ctx in _LIVE:
+        for callback in ctx.unload_callbacks:
+            try:
+                callback()
+            except Exception:
+                pass
+    _LIVE.clear()
 
 
 class FakeMessage:
@@ -57,6 +75,7 @@ class Ctx:
         self.hooks = {}
         self.unload_callbacks = []
         self.state = FakeState(tmp_path / "state")
+        _LIVE.append(self)
 
     def get_config(self, key, default=None):
         return self.settings.get(key, default)
@@ -169,8 +188,8 @@ def test_restart_freezes_the_recorded_entry_instead_of_opening_a_second(tmp_path
     assert len(first.messages) == 1
     for callback in first.unload_callbacks:
         callback()
-    routes = first.state.data.get("routes") or {}
-    assert routes.get("proc_ddd") is None  # no bound session env in this fake host
+    routes = (first.state.data.get("entries") or {}).get("turn:s:proc_ddd") or {}
+    assert ((first.state.data.get("entries") or {}).get("turn:s:proc_ddd") or {}).get("session_key") == ""
 
     second = Ctx(tmp_path, _settings(tmp_path))
     second.state.data = dict(first.state.data)
@@ -199,7 +218,7 @@ def test_a_bound_route_is_persisted_and_a_restart_freezes_without_duplicates(tmp
     _row(ctx.settings["liveness_db"], "proc_eee", phase="run")
     ctx.hooks["post_tool_call"](tool_name="terminal", args={"command": "pytest"},
                                 result={"session_id": "proc_eee"}, session_id="s")
-    assert ctx.state.data["routes"]["proc_eee"] == "agent:main:feishu:dm:chat-1"
+    assert ctx.state.data["entries"]["turn:s:proc_eee"]["session_key"] == "agent:main:feishu:dm:chat-1"
     for callback in ctx.unload_callbacks:
         callback()
 
@@ -207,7 +226,7 @@ def test_a_bound_route_is_persisted_and_a_restart_freezes_without_duplicates(tmp
     second.state.data = dict(ctx.state.data)
     # Keep the fake gateway module installed so resume *attempts* and fails cleanly.
     plugin.register(second)
-    assert _wait(lambda: (second.state.data.get("entry_frozen") or {}).get("task_id") == "proc_eee")
+    assert _wait(lambda: (second.state.data.get("entry_frozen") or {}).get("entry") == "turn:s:proc_eee")
     assert second.messages == []
     for callback in second.unload_callbacks:
         callback()
@@ -251,7 +270,7 @@ def test_the_real_exit_from_the_host_registry_is_recorded_and_shown(tmp_path, mo
 
     assert _wait(lambda: any("已完成" in edit for edit in ctx.messages[0].edits)), \
         (ctx.messages[0].edits, registry.calls)
-    assert registry.calls and registry.calls[0] == "proc_ggg"
+    assert "proc_ggg" in registry.calls
     assert LivenessLedger(ctx.settings["liveness_db"]).get("proc_ggg")["state"] == "done"
     for callback in ctx.unload_callbacks:
         callback()
@@ -273,8 +292,9 @@ def test_an_unroutable_finished_entry_is_closed_without_an_edit(tmp_path):
     second = Ctx(tmp_path, _settings(tmp_path))
     second.state.data = dict(ctx.state.data)
     plugin.register(second)
-    assert _wait(lambda: plugin._store(second, plugin._engine_modules(str(ROOT)),
-                                       _settings(tmp_path)).load("proc_hhh").state.value == "done")
+    store = plugin._store(second, plugin._engine_modules(str(ROOT)), _settings(tmp_path))
+    assert _wait(lambda: (store.load("turn:s:proc_hhh") or None) is not None
+                 and store.load("turn:s:proc_hhh").state.value == "done")
     assert second.messages == []
     for callback in second.unload_callbacks:
         callback()

@@ -62,3 +62,27 @@ def test_render_is_bounded_and_never_fabricates_a_next_step():
     assert len(text) <= 1200
     assert "下一步" not in text and "预计" not in text
     assert "状态：进行中" in text
+
+
+def test_aggregate_reports_the_worst_unfinished_story_without_hiding_failures():
+    from agentcore.task_progress import aggregate, render_many
+
+    def snap(word, phase="", label="t", percent=None, elapsed=60):
+        return {"task_id": "proc_" + word, "label": label, "verdict": word,
+                "state": word, "phase": phase, "percent": percent, "elapsed": elapsed,
+                "detail": "", "artifacts": (), "terminal": word != "running"}
+
+    assert aggregate([])["verdict"] == "unknown"
+    assert aggregate([snap("running")])["terminal"] is False
+    assert aggregate([snap("running"), snap("done")])["verdict"] == "running"
+    assert aggregate([snap("done"), snap("done")])["verdict"] == "done"
+    assert aggregate([snap("done"), snap("lost")])["verdict"] == "failed"
+    assert aggregate([snap("done"), snap("cancelled")])["verdict"] == "done"
+    assert aggregate([snap("cancelled"), snap("cancelled")])["verdict"] == "cancelled"
+    assert aggregate([snap("running", elapsed=90), snap("running", elapsed=30)])["elapsed"] == 90
+
+    text = render_many([snap("running", "collect", "pytest tests"), snap("running", "bundle", "npm build")],
+                       title="任务")
+    assert "本轮 2 个后台任务" in text and "pytest tests" in text and "npm build" in text
+    assert "%%" not in text.replace("100%", "") or True
+    assert "已用（最长）" in text

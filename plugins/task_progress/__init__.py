@@ -6,21 +6,27 @@ A long task today is either silent (the user asks "还在做吗") or noisy (one 
 event). This plugin gives every tracked long task **one message** that is *edited in place*
 as the task actually changes, and nothing else:
 
-* the entry is opened once, at the moment a background process is spawned;
-* updates come from ``agentcore.liveness`` evidence only (state / phase / progress /
-  heartbeat) — no percentages or finish times are invented;
+* the entry opens once, when a background process is spawned; all background jobs spawned
+  in the same turn share **one** entry (a turn is what the user asked for);
+* updates come from ``agentcore.liveness`` evidence (state / phase / progress / heartbeat)
+  plus the host registry's *real* exit — no percentage, finish time or next step is invented;
 * interim tool output never opens a message: updates are edits, deduplicated by
-  :mod:`agentcore.task_progress` and ordered/terminal-locked by :mod:`agentcore.card_store`
-  + :mod:`agentcore.card_emit`;
+  :mod:`agentcore.task_progress` and ordered/terminal-locked by :mod:`agentcore.card_store`;
 * a terminal state is write-once, so a late progress frame cannot overwrite a result.
+
+Non-model queries
+-----------------
+``/longtasks`` and ``/longtask <id>`` are registered as slash commands. The host dispatches
+them **before** the turn and inside the session's env scope, so asking for progress costs no
+model call and does not depend on the model remembering to look.
 
 Transport
 ---------
 The host's public ``PluginContext.post_message`` handle (``message.edit``) is the only
-sender; one handle per process, one message per task. A restart loses the in-memory
+sender; one handle per process, one message per entry. A restart loses the in-memory
 handle, so the plugin re-resolves the recorded route once through the host's plugin-message
-bridge and edits the *same* message instead of posting a second one; if that is not
-available it records ``entry_frozen`` and never posts a duplicate.
+bridge and edits the *same* message; if that is unavailable it records ``entry_frozen`` and
+never posts a duplicate.
 """
 from __future__ import annotations
 
@@ -34,21 +40,23 @@ import threading
 import time
 import types
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 _CTX = None
-_CACHE: dict = {}
-_ENGINE = ("liveness", "task_card", "card_store", "card_emit", "task_progress")
+_ENGINE = ("liveness", "task_card", "card_store", "task_progress")
 _DEFAULT_POLL_SECONDS = 10.0
 _DEFAULT_MIN_INTERVAL = 60.0
 _DEFAULT_MAX_TRACKED = 20
 _DEFAULT_RECONCILE_LIMIT = 20
 
 
+# --------------------------------------------------------------------------- #
+# Engine loading (installed package first, administrator checkout second)
+# --------------------------------------------------------------------------- #
+
 def _engine_modules(engine_root: Optional[str] = None) -> dict:
-    """``{name: module}`` for the canonical engine modules, without touching ``sys.path``."""
     try:
         return {name: importlib.import_module("agentcore." + name) for name in _ENGINE}
     except ModuleNotFoundError as error:
@@ -108,67 +116,12 @@ def _background_id(payload: dict) -> Optional[str]:
     return None
 
 
-class _Entry:
-    """In-memory bookkeeping for one open entry (the durable identity is in CardStore)."""
-
-    __slots__ = ("task_id", "message", "emitter", "snap", "last_emit_at", "final", "errors")
-
-    def __init__(self, task_id: str, message: Any):
-        self.task_id = task_id
-        self.message = message
-        self.emitter = None
-        self.snap = None
-        self.last_emit_at = 0.0
-        self.final = False
-        self.errors = 0
-
-
-def _text_for(view: Any) -> str:
-    """Render a ``CardView`` into the one editable entry's text."""
-    lines = ["**%s**" % (view.title or "任务")[:90]]
-    word = {"queued": "已接收", "running": "进行中", "done": "已完成",
-            "failed": "未完成", "cancelled": "已取消"}.get(view.state, view.state or "进行中")
-    lines.append("状态：%s" % word)
-    if view.phase:
-        lines.append("当前：%s" % view.phase)
-    if view.note:
-        lines.append("已用：%s" % view.note)
-    if view.artifacts:
-        lines.append("产物：%s" % "、".join(view.artifacts))
-    return "\n".join(lines)
-
-
-class _Transport:
-    """Publishes card views onto the entry's single message."""
-
-    def __init__(self, entry: _Entry, *, on_result):
-        self._entry = entry
-        self._on_result = on_result
-
-    def emit(self, handle, view, *, final: bool = False):
-        if self._entry.final:
-            return {"ok": False, "error": "entry_terminal"}
-        text = _text_for(view)
-        try:
-            result = self._entry.message.edit(text) if self._entry.message else None
-        except Exception as exc:  # a transport failure must not kill the poller
-            self._on_result(self._entry, {"ok": False, "error": type(exc).__name__})
-            return {"ok": False, "error": type(exc).__name__}
-        if result is None:
-            self._on_result(self._entry, {"ok": False, "error": "no_live_handle"})
-            return {"ok": False, "error": "no_live_handle"}
-        self._on_result(self._entry, result)
-        if final:
-            self._entry.final = True
-        return result
-
-
 def _registry():
     """The host's process registry, when this runtime has one (evidence, never a guess)."""
     try:
         from tools.process_registry import process_registry  # type: ignore
         return process_registry
-    except Exception:  # host surface absent in an isolated runtime
+    except Exception:
         return None
 
 
@@ -176,8 +129,7 @@ def _reconcile(ledger, task_id: str) -> None:
     """Persist the *real* exit the host registry observed; silence proves nothing.
 
     Without ``notify_on_complete`` nothing else closes the ledger row, so a finished job
-    would otherwise stay ``running`` until a sweep could only call it ``lost``. The
-    registry is the evidence: it either has an exit code or it does not.
+    would otherwise stay ``running`` until a sweep could only call it ``lost``.
     """
     registry = _registry()
     if registry is None:
@@ -201,6 +153,25 @@ def _reconcile(ledger, task_id: str) -> None:
             ledger.finish(task_id, "done", tail=tail, detail="host process %s" % status)
     except Exception:
         logger.debug("task-progress: reconcile write failed for %s", task_id, exc_info=True)
+
+
+# --------------------------------------------------------------------------- #
+# Per-entry bookkeeping
+# --------------------------------------------------------------------------- #
+
+class _Entry:
+    """One editable entry: all background tasks spawned in one turn."""
+
+    __slots__ = ("key", "message", "writer", "tasks", "snap", "last_emit_at", "final")
+
+    def __init__(self, key: str, message: Any, tasks):
+        self.key = key
+        self.message = message
+        self.writer = None
+        self.tasks = list(tasks)
+        self.snap = None
+        self.last_emit_at = 0.0
+        self.final = False
 
 
 def _settings(ctx) -> dict:
@@ -228,7 +199,6 @@ def _store(ctx, modules: dict, settings: dict):
 
 
 def _resolve_target(ctx, session_key: str):
-    """Resolve the recorded route back to a conversation (restart resume only)."""
     from gateway import plugin_messages
     from gateway.run import _gateway_runner_ref
     runner = _gateway_runner_ref()
@@ -251,7 +221,7 @@ def _run_on_loop(coro, timeout: float = 15.0):
     return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout)
 
 
-def _resume_edit(ctx, task_id: str, session_key: str, message_id: str, text: str) -> dict:
+def _resume_edit(ctx, session_key: str, message_id: str, text: str) -> dict:
     """Edit the recorded message after a restart; never posts a second entry."""
     from gateway import plugin_messages
     target, error = _resolve_target(ctx, session_key)
@@ -259,6 +229,19 @@ def _resume_edit(ctx, task_id: str, session_key: str, message_id: str, text: str
         return {"ok": False, "error": error or "no_conversation"}
     return _run_on_loop(plugin_messages.edit(target, message_id, text, plugin_id=ctx.plugin_id))
 
+
+def _entry_key(turn_id: str, session_id: str, task_id: str) -> str:
+    """One entry per turn; without a turn id, one entry per task."""
+    if isinstance(turn_id, str) and turn_id.strip():
+        return "turn:%s" % turn_id.strip()[:64]
+    if isinstance(session_id, str) and session_id.strip():
+        return "turn:%s:%s" % (session_id.strip()[:48], task_id)
+    return "task:%s" % task_id
+
+
+# --------------------------------------------------------------------------- #
+# Registration
+# --------------------------------------------------------------------------- #
 
 def register(ctx) -> None:
     global _CTX
@@ -268,146 +251,178 @@ def register(ctx) -> None:
     modules = _engine_modules(settings["engine_root"])
     store = _store(ctx, modules, settings)
     ledger = modules["liveness"].LivenessLedger(settings["liveness_db"])
-    emitter_cls = modules["card_emit"].CardEmitter
     progress = modules["task_progress"]
+    card_state = modules["task_card"].CardState
     state = getattr(ctx, "state", None)
-    routes = {}  # task_id -> session_key, persisted in plugin state for restart resume
-    if state is not None:
-        routes = dict(state.get("routes", {}) or {})
-    entries: dict[str, _Entry] = {}
+    entries: Dict[str, _Entry] = {}
     lock = threading.Lock()
     stop = threading.Event()
 
+    def _state_get(key, default):
+        if state is None:
+            return default
+        try:
+            return state.get(key, default)
+        except Exception:
+            return default
+
+    def _state_set(key, value):
+        if state is None:
+            return
+        try:
+            state.set(key, value)
+        except Exception:
+            logger.debug("task-progress: state write failed (%s)", key, exc_info=True)
+
     def _record_result(entry: _Entry, result: dict) -> None:
         ok = bool((result or {}).get("ok"))
-        if not ok:
-            entry.errors += 1
-        if state is not None:
-            try:
-                state.set("last_delivery", {
-                    "task_id": entry.task_id, "ok": ok,
-                    "error": (result or {}).get("error"),
-                    "edited": bool((result or {}).get("edited")),
-                    "at": time.time(),
-                })
-            except Exception:
-                logger.debug("task-progress: delivery record failed", exc_info=True)
+        _state_set("last_delivery", {"entry": entry.key, "ok": ok,
+                                     "error": (result or {}).get("error"),
+                                     "edited": bool((result or {}).get("edited")),
+                                     "at": time.time()})
 
-    def _open(payload: dict) -> None:
+    def _publish(entry: _Entry, text: str, *, final: bool) -> dict:
+        if entry.final:
+            return {"ok": False, "error": "entry_terminal"}
+        try:
+            result = entry.message.edit(text) if entry.message is not None else None
+        except Exception as exc:
+            result = {"ok": False, "error": type(exc).__name__}
+        if result is None:
+            result = {"ok": False, "error": "no_live_handle"}
+        if final:
+            entry.final = True
+        _record_result(entry, result)
+        return result
+
+    def _snaps(entry: _Entry) -> list:
+        snaps = []
+        for task_id in entry.tasks:
+            _reconcile(ledger, task_id)
+            row = ledger.get(task_id)
+            snaps.append(progress.snapshot(row, now=time.time()) if row else
+                         {"task_id": task_id, "verdict": "unknown", "state": "unknown",
+                          "label": "", "phase": "", "percent": None, "elapsed": 0,
+                          "detail": "", "artifacts": (), "terminal": False})
+        return snaps
+
+    def _title(entry: _Entry, snaps: list) -> str:
+        for snap in snaps:
+            if snap.get("label"):
+                return snap["label"][:80]
+        return "任务"
+
+    def _open(payload: dict, *, turn_id: str, session_id: str) -> None:
         task_id = _background_id(payload)
-        if not task_id or task_id in entries:
+        if not task_id:
             return
+        key = _entry_key(turn_id, session_id, task_id)
         with lock:
+            existing = entries.get(key)
+            if existing is not None:
+                if task_id not in existing.tasks:
+                    existing.tasks.append(task_id)
+                    existing.snap = None  # force an update for the new member
+                return
             if len(entries) >= int(settings["max_tracked"]):
                 logger.debug("task-progress: tracking bound reached, skipping %s", task_id)
                 return
-        row = ledger.get(task_id)
-        snap = progress.snapshot(row, now=time.time()) if row else None
-        text = progress.render(snap or {"task_id": task_id}, title="") if snap else \
-            "**任务**\n状态：已接收\n`%s`" % task_id
+        snaps = [_first_snap(ledger, progress, task_id)]
+        # A turn's later members are discovered by the poller; opening now keeps the entry
+        # born with the task instead of after its first phase change.
+        text = progress.render_many(snaps, title=_snaps_label(snaps))
         message = ctx.post_message(text)
         if message is None or not getattr(message, "ok", False):
             logger.info("task-progress: no conversation for %s (%s)", task_id,
                         getattr(message, "error", None))
             return
-        entry = _Entry(task_id, message)
-        transport = _Transport(entry, on_result=_record_result)
+        entry = _Entry(key, message, [task_id])
         try:
-            store.bind(task_id, "", str(getattr(message, "message_id", "") or ""))
-            entry.emitter = emitter_cls(store, task_id, transport, clock=time.time,
-                                        title=snap["label"] if snap and snap.get("label") else "任务")
+            store.bind(key, "", str(getattr(message, "message_id", "") or ""))
+            entry.writer = store.writer(key)
         except Exception:
-            logger.warning("task-progress: could not bind %s", task_id, exc_info=True)
+            logger.warning("task-progress: could not bind %s", key, exc_info=True)
             return
-        entry.snap = snap
+        entry.snap = progress.aggregate(snaps)
         entry.last_emit_at = time.time()
-        if snap is not None and snap.get("terminal"):
-            # The process already finished before the entry opened: the first post already
-            # carried the terminal text (rendered from this snapshot), so there is nothing
-            # left to update and no second edit to send.
+        if entry.snap.get("terminal"):
+            # The process finished before the entry opened: the first text is the last one.
             entry.final = True
-            try:
-                handle = store.load(task_id)
-                if handle is not None:
-                    handle.state = progress.card_state(snap)
-                    store.save(handle)
-            except Exception:
-                logger.debug("task-progress: terminal-at-open save failed", exc_info=True)
+            _close_card(store, entry, card_state, progress)
         with lock:
-            entries[task_id] = entry
+            entries[key] = entry
         session_key = ""
         try:
             from gateway.session_context import get_session_env
             session_key = get_session_env("HERMES_SESSION_KEY", "") or ""
         except Exception:
             session_key = ""
-        if state is not None and session_key:
-            routes[task_id] = session_key
-            state.set("routes", routes)
+        members = dict(_state_get("entries", {}) or {})
+        members[key] = {"session_key": session_key, "tasks": list(entry.tasks),
+                        "opened_at": time.time()}
+        _state_set("entries", members)
+
+    def _close_card(store, entry: _Entry, card_state, progress) -> None:
+        snap = entry.snap or {}
+        try:
+            handle = store.load(entry.key)
+            if handle is not None and not handle.state.terminal:
+                handle.state = progress.card_state({"state": snap.get("verdict")})
+                store.save(handle)
+        except Exception:
+            logger.debug("task-progress: closing %s failed", entry.key, exc_info=True)
 
     def _poll_once() -> None:
         now = time.time()
         with lock:
             current = list(entries.items())
-        for task_id, entry in current:
+        for key, entry in current:
             if entry.final:
                 continue
-            _reconcile(ledger, task_id)
-            row = ledger.get(task_id)
-            snap = progress.snapshot(row, now=now)
-            if not progress.should_emit(entry.snap, snap, last_emit_at=entry.last_emit_at,
+            snaps = _snaps(entry)
+            head = progress.aggregate(snaps)
+            if not progress.should_emit(entry.snap, head, last_emit_at=entry.last_emit_at,
                                         now=now, min_interval=float(settings["min_interval"])):
                 continue
-            entry.snap = snap
+            text = progress.render_many(snaps, title=_title(entry, snaps))
+            final = bool(head.get("terminal"))
+            result = _publish(entry, text, final=final)
+            entry.snap = head
             entry.last_emit_at = now
-            try:
-                if snap["terminal"]:
-                    verdict = snap["verdict"]
-                    if verdict == "done":
-                        entry.emitter.finish(phase=snap["phase"], artifacts=snap["artifacts"])
-                    elif verdict == "cancelled":
-                        entry.emitter.cancel(detail=snap["detail"])
-                    else:
-                        entry.emitter.fail(detail=snap["detail"] or verdict)
-                else:
-                    entry.emitter.update(phase=snap["phase"], detail=snap["detail"],
-                                         artifacts=snap["artifacts"])
-            except Exception:
-                entry.errors += 1
-                logger.warning("task-progress: emit failed for %s", task_id, exc_info=True)
+            if final:
+                if not result.get("ok"):
+                    # Delivery is unproven: keep it open so the next pass retries the edit.
+                    entry.final = False
+                    continue
+                _close_card(store, entry, card_state, progress)
 
     def _resume() -> None:
         """After a restart: edit the recorded entry once instead of opening a new one."""
         if not settings["resume_after_restart"]:
             return
+        members = dict(_state_get("entries", {}) or {})
         for handle in store.active()[:_DEFAULT_RECONCILE_LIMIT]:
-            session_key = routes.get(handle.task_id, "")
-            row = ledger.get(handle.task_id)
-            snap = progress.snapshot(row, now=time.time())
+            record = members.get(handle.task_id) or {}
+            tasks = [t for t in (record.get("tasks") or []) if isinstance(t, str)]
+            session_key = record.get("session_key") or ""
+            snaps = [_first_snap(ledger, progress, task) for task in tasks]
+            head = progress.aggregate(snaps)
             if not session_key or not handle.message_id:
-                # No route to edit through: the entry cannot be updated, but a finished
-                # task must not stay "active" in the store (that would be rewritten on
-                # every restart). Close the handle from ledger evidence instead.
-                if snap.get("terminal"):
-                    handle.state = progress.card_state(snap)
+                if head.get("terminal"):
+                    handle.state = progress.card_state({"state": head.get("verdict")})
                     store.save(handle)
                 continue
-            text = progress.render(snap, title=snap.get("label") or "任务")
+            text = progress.render_many(snaps, title=_snaps_label(snaps))
             try:
-                result = _resume_edit(ctx, handle.task_id, session_key, handle.message_id, text)
+                result = _resume_edit(ctx, session_key, handle.message_id, text)
             except Exception as error:
                 result = {"ok": False, "error": type(error).__name__}
-            if not (result or {}).get("ok"):
-                if state is not None:
-                    try:
-                        state.set("entry_frozen", {"task_id": handle.task_id,
-                                                   "error": (result or {}).get("error"),
-                                                   "at": time.time()})
-                    except Exception:
-                        logger.debug("task-progress: freeze record failed", exc_info=True)
+            if not result.get("ok"):
+                _state_set("entry_frozen", {"entry": handle.task_id,
+                                            "error": result.get("error"), "at": time.time()})
                 continue
-            if snap["terminal"]:
-                handle.state = progress.card_state(snap)
+            if head.get("terminal"):
+                handle.state = progress.card_state({"state": head.get("verdict")})
                 store.save(handle)
 
     def _loop() -> None:
@@ -423,21 +438,19 @@ def register(ctx) -> None:
                 logger.warning("task-progress: poll pass failed", exc_info=True)
 
     def _on_post_tool_call(tool_name: str = "", args: Any = None, result: Any = None,
-                           session_id: str = "", **_: Any) -> None:
+                           session_id: str = "", turn_id: str = "", **_: Any) -> None:
         if tool_name != "terminal":
             return None
         payload = _parse_result(result)
         if payload is None:
             return None
         try:
-            _open(payload)
+            _open(payload, turn_id=turn_id or "", session_id=session_id or "")
         except Exception:
             logger.warning("task-progress: open failed", exc_info=True)
         return None
 
     # ── 不进模型的查询入口 ────────────────────────────────────────────────
-    # 宿主把已注册的 `/name` 命令在**回合之前**分发，并在会话环境作用域内调用处理器：
-    # 因此"看一眼进度"不会启动一次模型回合（这正是"别依赖模型被动发现"的可靠路径）。
     def _session_id() -> str:
         try:
             from gateway.session_context import get_session_env
@@ -445,32 +458,28 @@ def register(ctx) -> None:
         except Exception:
             return ""
 
-    def _owner() -> str:
-        return "%s:%s" % (getattr(ctx, "profile_name", "") or "local", _session_id() or "local")
-
-    def _cmd_tasks(raw_args: str = "") -> str:
-        sid = _session_id()
-        rows = ledger.list_tasks(owner="%s:%s" % (getattr(ctx, "profile_name", "") or "local",
-                                                  sid or "local"),
-                                 active_only=False, limit=20)
+    def _cmd_longtasks(raw_args: str = "") -> str:
+        owner = "%s:%s" % (getattr(ctx, "profile_name", "") or "local", _session_id() or "local")
+        rows = ledger.list_tasks(owner=owner, active_only=False, limit=20)
         if not rows:
             return "本会话没有登记过的长任务。"
         lines = []
         for row in rows:
             snap = progress.snapshot(row, now=time.time())
-            lines.append("· `%s` %s · 已用 %s%s" % (
-                snap["task_id"][:20],
-                {"queued": "已接收", "running": "进行中"}.get(snap["verdict"], snap["verdict"]),
-                "%d分%02d秒" % divmod(snap["elapsed"], 60) if snap["elapsed"] >= 60
-                else "%d秒" % snap["elapsed"],
-                (" · " + snap["phase"]) if snap.get("phase") else ""))
+            word = {"queued": "已接收", "running": "进行中"}.get(snap["verdict"], snap["verdict"])
+            minutes, seconds = divmod(int(snap["elapsed"]), 60)
+            elapsed = "%d分%02d秒" % (minutes, seconds) if minutes else "%d秒" % seconds
+            lines.append("· `%s` %s · 已用 %s%s" % (snap["task_id"][:20], word, elapsed,
+                                                    (" · " + snap["phase"]) if snap.get("phase") else ""))
         return "本会话的长任务（%d）：\n%s" % (len(lines), "\n".join(lines))
 
-    def _cmd_task(raw_args: str = "") -> str:
-        task = (raw_args or "").strip().split()[0] if (raw_args or "").strip() else ""
+    def _cmd_longtask(raw_args: str = "") -> str:
+        text = (raw_args or "").strip()
+        task = text.split()[0] if text else ""
         if not task:
             return "用法：/longtask <任务号>（任务号见 /longtasks）"
-        row = ledger.get(task, require_owner=_owner())
+        owner = "%s:%s" % (getattr(ctx, "profile_name", "") or "local", _session_id() or "local")
+        row = ledger.get(task, require_owner=owner)
         if row is None:
             return "unknown_task：本会话没有这个任务（不会替你猜别的会话的任务）。"
         return progress.render(progress.snapshot(row, now=time.time()),
@@ -478,8 +487,9 @@ def register(ctx) -> None:
 
     register_command = getattr(ctx, "register_command", None)
     if callable(register_command):
-        register_command("longtasks", _cmd_tasks, "本会话的长任务进度（不启动模型回合）")
-        register_command("longtask", _cmd_task, "一个长任务的当前状态：/longtask <任务号>", args_hint="<任务号>")
+        register_command("longtasks", _cmd_longtasks, "本会话的长任务进度（不启动模型回合）")
+        register_command("longtask", _cmd_longtask, "一个长任务的当前状态：/longtask <任务号>",
+                         args_hint="<任务号>")
 
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     thread = threading.Thread(target=_loop, name="task-progress-poller", daemon=True)
@@ -498,3 +508,19 @@ def register(ctx) -> None:
     _CTX = ctx
     logger.debug("task-progress registered: db=%s poll=%ss", settings["liveness_db"],
                  settings["poll_seconds"])
+
+
+def _first_snap(ledger, progress, task_id: str) -> dict:
+    row = ledger.get(task_id)
+    if row is None:
+        return {"task_id": task_id, "verdict": "unknown", "state": "unknown", "label": "",
+                "phase": "", "percent": None, "elapsed": 0, "detail": "", "artifacts": (),
+                "terminal": False}
+    return progress.snapshot(row, now=time.time())
+
+
+def _snaps_label(snaps) -> str:
+    for snap in snaps or ():
+        if snap.get("label"):
+            return snap["label"][:80]
+    return "任务"

@@ -163,7 +163,7 @@ def changed(prev: Optional[Dict[str, Any]], snap: Dict[str, Any]) -> bool:
     """Whether ``snap`` is a *different claim* from ``prev`` (state/phase/progress/verdict)."""
     if not prev:
         return True
-    for key in ("state", "verdict", "phase", "percent", "detail", "terminal"):
+    for key in ("state", "verdict", "phase", "percent", "detail", "terminal", "signature"):
         if prev.get(key) != snap.get(key):
             return True
     return False
@@ -185,3 +185,58 @@ def should_emit(prev: Optional[Dict[str, Any]], snap: Dict[str, Any], *,
     if min_interval <= 0:
         return False
     return (now - last_emit_at) >= min_interval
+
+
+# --------------------------------------------------------------------------- #
+# One entry over several tasks (one turn can spawn more than one background job)
+# --------------------------------------------------------------------------- #
+
+def aggregate(snaps) -> Dict[str, Any]:
+    """Collapse per-task snapshots into the single claim one entry may make.
+
+    ``any task still running`` → running (the entry is not finished);
+    otherwise failed wins over cancelled, which wins over done. Elapsed is the longest.
+    """
+    items = [s for s in (snaps or ()) if isinstance(s, dict)]
+    if not items:
+        return {"verdict": "unknown", "terminal": False, "elapsed": 0, "tasks": 0}
+    words = [s.get("verdict") or "unknown" for s in items]
+    if any(w in ("running", "unknown") for w in words):
+        verdict = "running"
+    elif any(w in ("failed", "lost", "stalled") for w in words):
+        verdict = "failed"          # a failure is never hidden behind a success
+    elif any(w == "done" for w in words):
+        verdict = "done"            # part of the work landed; one cancelled sibling is not the story
+    elif any(w == "cancelled" for w in words):
+        verdict = "cancelled"
+    else:
+        verdict = "done"
+    signature = "|".join("%s:%s:%s:%s" % (s.get("task_id") or "", s.get("verdict") or "",
+                                          s.get("phase") or "", s.get("percent")) for s in items)
+    return {"verdict": verdict, "terminal": verdict != "running",
+            "elapsed": max(int(s.get("elapsed") or 0) for s in items), "tasks": len(items),
+            "signature": signature}
+
+
+def render_many(snaps, *, title: str = "任务") -> str:
+    """One entry over several tasks: a header, one line per task, and the longest elapsed."""
+    items = [s for s in (snaps or ()) if isinstance(s, dict)]
+    if not items:
+        return "**%s**\n状态：已接收\n（暂无新进展，收到进度会更新这一条）" % title
+    head = aggregate(items)
+    lines = ["**%s%s**" % (title, "" if head["tasks"] == 1 else "（本轮 %d 个后台任务）" % head["tasks"])]
+    lines.append("状态：%s" % _STATE_WORD[card_state({"state": head["verdict"]})])
+    for snap in items[:6]:
+        bits = [snap.get("label") or snap.get("task_id") or "任务"]
+        word = {"running": "进行中", "queued": "已接收", "done": "已完成",
+                "failed": "未完成", "cancelled": "已取消"}.get(snap.get("verdict"), snap.get("verdict"))
+        bits.append(word)
+        if snap.get("phase"):
+            bits.append(snap["phase"])
+        if snap.get("percent") is not None:
+            bits.append("%.0f%%" % snap["percent"])
+        lines.append("· " + " · ".join(str(b) for b in bits if b))
+    if len(items) > 6:
+        lines.append("· …另有 %d 个" % (len(items) - 6))
+    lines.append("已用（最长）：%s" % _clock_text(int(head["elapsed"])))
+    return "\n".join(lines)[:MAX_TEXT]
