@@ -278,3 +278,44 @@ def test_an_unroutable_finished_entry_is_closed_without_an_edit(tmp_path):
     assert second.messages == []
     for callback in second.unload_callbacks:
         callback()
+
+
+def test_slash_commands_answer_from_the_ledger_without_a_model_turn(tmp_path, monkeypatch):
+    """`/tasks` and `/task` are the reliable, non-model progress path."""
+    import sys
+    import types as _types
+
+    gateway = _types.ModuleType("gateway")
+    gateway.__path__ = []
+    session_context = _types.ModuleType("gateway.session_context")
+    session_context.get_session_env = lambda key, default="": (
+        "sess-1" if key == "HERMES_SESSION_ID" else default)
+    monkeypatch.setitem(sys.modules, "gateway", gateway)
+    monkeypatch.setitem(sys.modules, "gateway.session_context", session_context)
+
+    class CommandCtx(Ctx):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.commands = {}
+
+        def register_command(self, name, handler, description, **kwargs):
+            self.commands[name] = handler
+
+    ctx = CommandCtx(tmp_path, _settings(tmp_path))
+    plugin.register(ctx)
+    assert set(ctx.commands) == {"tasks", "task"}
+
+    ledger = LivenessLedger(ctx.settings["liveness_db"])
+    ledger.register("proc_zzz", kind="terminal", owner="p:sess-1", label="pytest tests",
+                    pid=999999, pid_start="dead:1", state="running", phase="compile")
+    ledger.register("proc_other", kind="terminal", owner="p:another", state="running")
+    listed = ctx.commands["tasks"]()
+    assert "proc_zzz" in listed and "compile" in listed
+    assert "proc_other" not in listed, "a session must not see another session's tasks"
+
+    detail = ctx.commands["task"]("proc_zzz")
+    assert "状态：进行中" in detail and "proc_zzz" in detail and "pytest tests" in detail
+    assert "unknown_task" in ctx.commands["task"]("proc_other")
+    assert "用法" in ctx.commands["task"]("")
+    for callback in ctx.unload_callbacks:
+        callback()

@@ -435,6 +435,52 @@ def register(ctx) -> None:
             logger.warning("task-progress: open failed", exc_info=True)
         return None
 
+    # ── 不进模型的查询入口 ────────────────────────────────────────────────
+    # 宿主把已注册的 `/name` 命令在**回合之前**分发，并在会话环境作用域内调用处理器：
+    # 因此"看一眼进度"不会启动一次模型回合（这正是"别依赖模型被动发现"的可靠路径）。
+    def _session_id() -> str:
+        try:
+            from gateway.session_context import get_session_env
+            return get_session_env("HERMES_SESSION_ID", "") or ""
+        except Exception:
+            return ""
+
+    def _owner() -> str:
+        return "%s:%s" % (getattr(ctx, "profile_name", "") or "local", _session_id() or "local")
+
+    def _cmd_tasks(raw_args: str = "") -> str:
+        sid = _session_id()
+        rows = ledger.list_tasks(owner="%s:%s" % (getattr(ctx, "profile_name", "") or "local",
+                                                  sid or "local"),
+                                 active_only=False, limit=20)
+        if not rows:
+            return "本会话没有登记过的长任务。"
+        lines = []
+        for row in rows:
+            snap = progress.snapshot(row, now=time.time())
+            lines.append("· `%s` %s · 已用 %s%s" % (
+                snap["task_id"][:20],
+                {"queued": "已接收", "running": "进行中"}.get(snap["verdict"], snap["verdict"]),
+                "%d分%02d秒" % divmod(snap["elapsed"], 60) if snap["elapsed"] >= 60
+                else "%d秒" % snap["elapsed"],
+                (" · " + snap["phase"]) if snap.get("phase") else ""))
+        return "本会话的长任务（%d）：\n%s" % (len(lines), "\n".join(lines))
+
+    def _cmd_task(raw_args: str = "") -> str:
+        task = (raw_args or "").strip().split()[0] if (raw_args or "").strip() else ""
+        if not task:
+            return "用法：/task <任务号>（任务号见 /tasks）"
+        row = ledger.get(task, require_owner=_owner())
+        if row is None:
+            return "unknown_task：本会话没有这个任务（不会替你猜别的会话的任务）。"
+        return progress.render(progress.snapshot(row, now=time.time()),
+                               title=str(row.get("label") or task))
+
+    register_command = getattr(ctx, "register_command", None)
+    if callable(register_command):
+        register_command("tasks", _cmd_tasks, "本会话的长任务进度（不启动模型回合）")
+        register_command("task", _cmd_task, "一个长任务的当前状态：/task <任务号>", args_hint="<任务号>")
+
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     thread = threading.Thread(target=_loop, name="task-progress-poller", daemon=True)
     thread.start()
