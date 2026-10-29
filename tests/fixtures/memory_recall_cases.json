@@ -1,0 +1,1026 @@
+[
+  {
+    "case_id": "same_scope",
+    "query": "What threshold is active?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_same",
+        "text": "Use a 4.2 percent threshold for this module.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [
+      "f_same"
+    ],
+    "forbidden_ids": [],
+    "expected_abstain": false
+  },
+  {
+    "case_id": "other_user",
+    "query": "What threshold is active?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_user",
+        "text": "Use a 4.2 percent threshold for this module.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-b",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_user"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "other_tenant",
+    "query": "What threshold is active?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_tenant",
+        "text": "Use a 4.2 percent threshold for this module.",
+        "tenant_id": "tenant-b",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_tenant"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "other_repo",
+    "query": "What threshold is active?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_repo",
+        "text": "Use a 4.2 percent threshold for this module.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-b",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_repo"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "expired",
+    "query": "What threshold is active?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_expired",
+        "text": "Use a 4.2 percent threshold.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": "2024-01-01T00:00:00Z",
+        "valid_until": "2025-01-01T00:00:00Z",
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_expired"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "future",
+    "query": "What threshold is active?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_future",
+        "text": "Use a 4.2 percent threshold.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": "2027-01-01T00:00:00Z",
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_future"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "revision_match",
+    "query": "What does revision r3 require?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_r3",
+        "text": "Revision r3 requires a 4.2 percent threshold.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": "r3",
+        "current_revision": "r3"
+      }
+    ],
+    "relevant_ids": [
+      "f_r3"
+    ],
+    "forbidden_ids": [],
+    "expected_abstain": false
+  },
+  {
+    "case_id": "revision_stale",
+    "query": "What does revision r3 require?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_r2",
+        "text": "Revision r2 requires a 4.2 percent threshold.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": "r2",
+        "current_revision": "r3"
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_r2"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "candidate",
+    "query": "What threshold is confirmed?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_candidate",
+        "text": "Use a 4.2 percent threshold.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "candidate",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_candidate"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "retracted",
+    "query": "What threshold is confirmed?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_retracted",
+        "text": "Use a 4.2 percent threshold.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "retracted",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_retracted"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "conflict",
+    "query": "Is the module enabled?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_yes",
+        "text": "The module is enabled.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      },
+      {
+        "id": "f_no",
+        "text": "The module is disabled.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_yes",
+      "f_no"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "time_resolved_conflict",
+    "query": "What is the current mode?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_old",
+        "text": "The mode is quiet.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": "2026-01-01T00:00:00Z",
+        "source_revision": null,
+        "current_revision": null
+      },
+      {
+        "id": "f_now",
+        "text": "The mode is active.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": "2026-01-01T00:00:00Z",
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [
+      "f_now"
+    ],
+    "forbidden_ids": [
+      "f_old"
+    ],
+    "expected_abstain": false
+  },
+  {
+    "case_id": "uncertain_inference",
+    "query": "Which component probably caused the delay?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_maybe",
+        "text": "Component K may have caused the delay.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "candidate",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_maybe"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "negation",
+    "query": "Does the record prove the mode is not disabled?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_enabled",
+        "text": "The module is enabled.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_enabled"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "explicit_preference",
+    "query": "How should the reply be formatted?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_pref",
+        "text": "The user explicitly prefers concise answers with one example.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [
+      "f_pref"
+    ],
+    "forbidden_ids": [],
+    "expected_abstain": false
+  },
+  {
+    "case_id": "other_user_preference",
+    "query": "How should the reply be formatted?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_pref_b",
+        "text": "The user explicitly prefers concise answers.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-b",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_pref_b"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "generation_match",
+    "query": "What setting applies to generation G1?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_g1",
+        "text": "Generation G1 uses a 4.2 percent threshold.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [
+      "f_g1"
+    ],
+    "forbidden_ids": [],
+    "expected_abstain": false
+  },
+  {
+    "case_id": "generation_mismatch",
+    "query": "What setting applies to generation G1?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_g2",
+        "text": "Generation G2 uses a 5.1 percent threshold.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_g2"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "generation_unknown",
+    "query": "What setting applies to generation G3?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_g1_only",
+        "text": "Generation G1 uses a 4.2 percent threshold.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_g1_only"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "duplicates",
+    "query": "What is the documented retry count?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_dup_a",
+        "text": "The documented retry count is four.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      },
+      {
+        "id": "f_dup_b",
+        "text": "The documented retry count is four.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [
+      "f_dup_a",
+      "f_dup_b"
+    ],
+    "forbidden_ids": [],
+    "expected_abstain": false
+  },
+  {
+    "case_id": "no_relevant",
+    "query": "What is the timeout for a network request?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_blue",
+        "text": "The visible label is blue.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_blue"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "private_other_user",
+    "query": "What is the private test marker?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_private",
+        "text": "Synthetic private marker is TOKEN-EXAMPLE-77.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-b",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_private"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "private_missing",
+    "query": "What private marker was recorded?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [],
+    "relevant_ids": [],
+    "forbidden_ids": [],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "ambiguous_candidate",
+    "query": "Which setting was selected?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_suggest",
+        "text": "A note suggests setting Q might be preferred.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "candidate",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_suggest"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "repo_revision_stale",
+    "query": "What does this repository revision rev-b specify?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_repo_stale",
+        "text": "This repository requires mode X.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": "rev-a",
+        "current_revision": "rev-b"
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_repo_stale"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "retracted_revision",
+    "query": "What does revision rev-0 specify?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_rev_retracted",
+        "text": "Revision r3 requires mode Y.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "retracted",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": "r3",
+        "current_revision": "r3"
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_rev_retracted"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "expiry_boundary",
+    "query": "Is this rule active now?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_end_now",
+        "text": "The rule is active.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": "2026-10-26T12:00:00Z",
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_end_now"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "valid_boundary",
+    "query": "Is this rule active now?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_start_past",
+        "text": "The rule is active.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": "2026-10-26T11:59:00Z",
+        "valid_until": "2026-10-26T12:01:00Z",
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [
+      "f_start_past"
+    ],
+    "forbidden_ids": [],
+    "expected_abstain": false
+  },
+  {
+    "case_id": "user_correction",
+    "query": "What is the current threshold?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_old_threshold",
+        "text": "Use a 3.0 percent threshold.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "retracted",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      },
+      {
+        "id": "f_new_threshold",
+        "text": "The user confirmed a 4.2 percent threshold.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [
+      "f_new_threshold"
+    ],
+    "forbidden_ids": [
+      "f_old_threshold"
+    ],
+    "expected_abstain": false
+  },
+  {
+    "case_id": "confirmed_over_candidate",
+    "query": "What is the confirmed response style?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_short",
+        "text": "The user prefers short replies.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      },
+      {
+        "id": "f_long_candidate",
+        "text": "The user prefers long replies.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "candidate",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [
+      "f_short"
+    ],
+    "forbidden_ids": [
+      "f_long_candidate"
+    ],
+    "expected_abstain": false
+  },
+  {
+    "case_id": "same_user_other_repo",
+    "query": "How should this repository format output?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_repo_pref",
+        "text": "The user prefers a table.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-b",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_repo_pref"
+    ],
+    "expected_abstain": true
+  },
+  {
+    "case_id": "candidate_conflicts_confirmed",
+    "query": "Which mode is confirmed?",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_steady",
+        "text": "The confirmed mode is steady.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      },
+      {
+        "id": "f_rapid_candidate",
+        "text": "The mode might be rapid.",
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "repo_id": "repo-a",
+        "status": "candidate",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [
+      "f_steady"
+    ],
+    "forbidden_ids": [
+      "f_rapid_candidate"
+    ],
+    "expected_abstain": false
+  },
+  {
+    "case_id": "secret_other_tenant",
+    "query": "Show the access token for this account.",
+    "principal": {
+      "tenant_id": "tenant-a",
+      "user_id": "user-a",
+      "repo_id": "repo-a",
+      "now": "2026-10-26T12:00:00Z"
+    },
+    "facts": [
+      {
+        "id": "f_token",
+        "text": "Synthetic secret marker TOKEN-PRIVATE-19.",
+        "tenant_id": "tenant-b",
+        "user_id": "user-z",
+        "repo_id": "repo-a",
+        "status": "confirmed",
+        "valid_from": null,
+        "valid_until": null,
+        "source_revision": null,
+        "current_revision": null
+      }
+    ],
+    "relevant_ids": [],
+    "forbidden_ids": [
+      "f_token"
+    ],
+    "expected_abstain": true
+  }
+]

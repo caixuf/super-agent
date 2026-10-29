@@ -1,0 +1,35 @@
+[Unit]
+Description=Hermes Agent (常驻对话入口)
+Documentation=https://hermes-agent.nousresearch.com/docs
+After=network-online.target
+
+[Service]
+Type=simple
+# 关键：user 级服务（有 DBUS），不是系统级 —— 系统级 systemd 无 DBUS/keyring，
+# 需要凭据的 CLI（如外部工作流平台客户端）在其内部会 authenticated:false。
+# 将来若接消息平台回填，同理会踩这个坑。
+WorkingDirectory=%h
+# 凭据与模型 key 走这两个 600 文件；不使用 Environment 内联值（值可能含空格）。
+# 文件名是**占位**：业务键的真实文件由业务叠加层给出。
+EnvironmentFile=%h/.hermes/<mcp-env-name>.env
+EnvironmentFile=%h/.hermes/channels.env
+# 用 Hermes gateway 常驻（多平台消息入口）。CLI 模式是前台交互，不适合常驻。
+# 注意：这里按 Hermes 官方 CLI 命名；首次部署请用 `hermes --help` 确认子命令名
+# （不同版本可能是 `gateway start` / `serve`）。确认后回来改这一行。
+ExecStart=%h/.local/bin/hermes gateway
+Restart=always
+RestartSec=10
+# 不抢资源：宿主上跑重型编译/跑批时 Hermes 应让路
+Nice=10
+# 日志走 journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-agent
+
+[Install]
+WantedBy=default.target
+
+# 注：现场更常用的做法不是拷本文件，而是让 Hermes 自己生成带 profile 的单元：
+#     hermes -p <profile> gateway install --start-on-login
+#     然后 loginctl enable-linger <user>
+# 本文件是骨架/参照，不构成部署脚本的一部分。

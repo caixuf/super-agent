@@ -1,0 +1,177 @@
+{
+  "passed": 14,
+  "total": 14,
+  "results": [
+    {
+      "id": "architecture",
+      "request": "介绍下我们的自动测试平台架构",
+      "expected": "artifact",
+      "actual": "artifact",
+      "pass": true
+    },
+    {
+      "id": "journey",
+      "request": "我想知道按下提交后到报告出来，中间有哪些人和程序参与，各自做什么",
+      "expected": "artifact",
+      "actual": "artifact",
+      "pass": true
+    },
+    {
+      "id": "mechanism",
+      "request": "给团队讲清楚任务重试为什么不会重复跑，正常和失联的时候分别怎么处理",
+      "expected": "artifact",
+      "actual": "artifact",
+      "pass": true
+    },
+    {
+      "id": "rollout",
+      "request": "下月准备把这套能力推广到两个团队，帮我安排步骤、依赖和验收",
+      "expected": "artifact",
+      "actual": "artifact",
+      "pass": true
+    },
+    {
+      "id": "compare",
+      "request": "比较两种执行方案的适用条件和代价，给团队一份选型建议",
+      "expected": "artifact",
+      "actual": "artifact",
+      "pass": true
+    },
+    {
+      "id": "definition",
+      "request": "FIFO是什么意思，一句话",
+      "expected": "inline",
+      "actual": "inline",
+      "pass": true
+    },
+    {
+      "id": "status",
+      "request": "现在服务开着吗",
+      "expected": "inline",
+      "actual": "inline",
+      "pass": true
+    },
+    {
+      "id": "local",
+      "request": "刚才图里左边那个箭头具体表示什么",
+      "expected": "inline",
+      "actual": "inline",
+      "pass": true
+    },
+    {
+      "id": "plain",
+      "request": "只用文字解释一下系统架构，不要生成附件",
+      "expected": "inline",
+      "actual": "inline",
+      "pass": true
+    },
+    {
+      "id": "command",
+      "request": "只给我查看日志的命令",
+      "expected": "inline",
+      "actual": "inline",
+      "pass": true
+    },
+    {
+      "id": "plan",
+      "request": "把完整计划重新整理一版，目标、先后顺序和完成标准要一眼看明白",
+      "expected": "artifact",
+      "actual": "artifact",
+      "pass": true
+    },
+    {
+      "id": "handoff",
+      "request": "我明天要给新同事讲从接到需求到交付报告的全过程，帮我准备能转发的说明",
+      "expected": "artifact",
+      "actual": "artifact",
+      "pass": true
+    },
+    {
+      "id": "short",
+      "request": "上次那个日期是哪一天",
+      "expected": "inline",
+      "actual": "inline",
+      "pass": true
+    },
+    {
+      "id": "english",
+      "request": "Walk the team through how a request moves between components and how a failure returns to the caller.",
+      "expected": "artifact",
+      "actual": "artifact",
+      "pass": true
+    }
+  ],
+  "choices": [
+    {
+      "id": "architecture",
+      "mode": "artifact",
+      "reason": "组件职责与协作关系适合用总览图和责任边界说明呈现。"
+    },
+    {
+      "id": "journey",
+      "mode": "artifact",
+      "reason": "提交到报告的跨角色流程适合用时序图配合分步说明。"
+    },
+    {
+      "id": "mechanism",
+      "mode": "artifact",
+      "reason": "重试去重和失联分支需要流程图与分场景解释。"
+    },
+    {
+      "id": "rollout",
+      "mode": "artifact",
+      "reason": "推广计划需要把阶段顺序、依赖和验收标准整合成路线图。"
+    },
+    {
+      "id": "compare",
+      "mode": "artifact",
+      "reason": "两种方案的取舍适合用决策矩阵和条件化建议呈现。"
+    },
+    {
+      "id": "definition",
+      "mode": "inline",
+      "reason": "这是单句术语定义，直接在聊天中回答最合适。"
+    },
+    {
+      "id": "status",
+      "mode": "inline",
+      "reason": "这是当前运行状态的事实查询，适合直接回复。"
+    },
+    {
+      "id": "local",
+      "mode": "inline",
+      "reason": "这是针对现有图中单个箭头的就地解释，无需重建文档。"
+    },
+    {
+      "id": "plain",
+      "mode": "inline",
+      "reason": "用户明确要求只用文字且不要附件。"
+    },
+    {
+      "id": "command",
+      "mode": "inline",
+      "reason": "用户只需要一条命令，直接在聊天中给出即可。"
+    },
+    {
+      "id": "plan",
+      "mode": "artifact",
+      "reason": "完整计划需要清楚呈现目标、先后顺序、依赖和完成标准。"
+    },
+    {
+      "id": "handoff",
+      "mode": "artifact",
+      "reason": "可转发的全过程说明适合制作为便于保存和分享的图文文档。"
+    },
+    {
+      "id": "short",
+      "mode": "inline",
+      "reason": "这是对先前具体日期的简短回查，适合直接回复。"
+    },
+    {
+      "id": "english",
+      "mode": "artifact",
+      "reason": "Component handoffs and failure paths are easier to understand with a sequence diagram and concise walkthrough."
+    }
+  ],
+  "scope": "curated delivery-choice probe; not a guarantee over arbitrary requests"
+}

@@ -1,0 +1,11 @@
+name: durable-dispatch
+label: Durable Dispatch
+kind: standalone
+version: "0.3.0"
+description: "Persist scoped read-only analysis requests, expose status and cancellation, and route each completion back to the conversation that submitted it."
+author: agentcore
+provides_tools:
+  - durable_submit
+  - durable_status
+  - durable_cancel
+provides_hooks: []

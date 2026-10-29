@@ -1,0 +1,14 @@
+name: colleague-team
+version: "0.1.0"
+kind: standalone
+description: "Profile-bound team membership and delegated management."
+author: agentcore
+provides_tools:
+  - colleague_list
+  - colleague_define_role
+  - colleague_hire
+  - colleague_grant
+  - colleague_retire
+  - colleague_assign
+  - colleague_task_status
+provides_hooks: []

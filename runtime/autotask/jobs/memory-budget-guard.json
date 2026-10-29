@@ -1,0 +1,25 @@
+{
+  "id": "memory-budget-guard",
+  "schedule": "0 */12 * * *",
+  "collect": {
+    "kind": "files",
+    "paths": [
+      "<profile>/memories/MEMORY.md",
+      "<profile>/memories/USER.md"
+    ]
+  },
+  "judge": "统计两份记忆的字符数与上限；超过上限 90% 时按『同类合并、保留判据、删除过程』压缩并备份，未超限直接判 ok",
+  "write": {
+    "kind": "file",
+    "path": "<profile>/state/autotask/memory-budget.json"
+  },
+  "report": {
+    "ok": "ok ",
+    "fail": "fail "
+  },
+  "retry": {
+    "max": 2,
+    "backoff_seconds": 300
+  },
+  "notify": true
+}

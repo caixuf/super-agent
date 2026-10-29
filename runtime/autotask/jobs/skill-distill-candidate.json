@@ -1,0 +1,25 @@
+{
+  "id": "skill-distill-candidate",
+  "schedule": "20 4 * * *",
+  "collect": {
+    "kind": "files",
+    "paths": [
+      "<profile>/state/autotask/failed-jobs.json",
+      "<profile>/state/autotask/capability-drift.json"
+    ]
+  },
+  "judge": "只从上面两份报告里提炼，最多 3 条候选；每条含触发时机、判据、3-6 步、一条真实反模式、一条可执行验收。没有合格的就判 ok candidates none。",
+  "write": {
+    "kind": "file",
+    "path": "<profile>/skills/candidates/<date>.md"
+  },
+  "report": {
+    "ok": "ok ",
+    "fail": "fail "
+  },
+  "retry": {
+    "max": 1,
+    "backoff_seconds": 600
+  },
+  "notify": true
+}

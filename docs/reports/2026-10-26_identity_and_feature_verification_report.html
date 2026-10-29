@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>干净室部署验证报告 · super-agent</title>
+<style>
+:root{--fg:#1f2328;--mut:#59636e;--line:#d1d9e0;--ok:#1a7f37;--bg:#fff}
+*{box-sizing:border-box}
+body{margin:0;background:#f6f8fa;color:var(--fg);
+     font:15px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,Helvetica,sans-serif}
+.wrap{max-width:900px;margin:0 auto;padding:40px 28px 80px;background:var(--bg);
+      min-height:100vh;box-shadow:0 0 0 1px var(--line)}
+h1{font-size:26px;margin:0 0 4px;padding-bottom:12px;border-bottom:2px solid var(--line)}
+h2{font-size:19px;margin:34px 0 12px;padding-top:6px}
+h3{font-size:16px;margin:24px 0 8px;color:#0a3069}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
+th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+th{background:#f0f3f6;font-weight:600}
+tr:nth-child(even) td{background:#fbfcfd}
+code{background:#f0f3f6;padding:2px 5px;border-radius:4px;font-size:13px;
+     font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+pre{background:#0d1117;color:#e6edf3;padding:14px 16px;border-radius:8px;overflow-x:auto;
+    font-size:13px;line-height:1.55}
+pre code{background:none;color:inherit;padding:0}
+blockquote{margin:14px 0;padding:8px 14px;border-left:4px solid var(--line);color:var(--mut);background:#fbfcfd}
+ul,ol{padding-left:22px}
+li{margin:3px 0}
+strong{font-weight:600}
+hr{border:0;border-top:1px solid var(--line);margin:28px 0}
+</style></head>
+<body><div class="wrap"><h1>第二轮验证报告 —— 机器人「特性」与「身份注入」实测（2026-10-26）</h1>
+<blockquote>
+<p>对象：<code>git archive</code> 导出的干净检出（排除未提交改动），<code>python:3.12-slim</code> 容器 + 宿主侧两套检查。
+只有本报告里的数字来自真实执行；未覆盖项见 §六。</p>
+</blockquote>
+<h2>结论先行</h2>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">检查</th>
+<th style="text-align: left;">结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">特性矩阵（宿主侧，9 组）</td>
+<td style="text-align: left;"><strong>31 PASS / 0 FAIL / 0 WARN</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">身份注入判定（宿主侧）</td>
+<td style="text-align: left;"><strong>14 PASS / 0 FAIL</strong> —— 拿到请求转储，骨架独有句 ×3 + 叠加层独有句 + <strong>逐字节等式</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">干净室部署（容器，空 HOME / 无 Hermes / 无凭据）</td>
+<td style="text-align: left;"><strong>28 PASS / 0 FAIL</strong>，退出码 0</td>
+</tr>
+<tr>
+<td style="text-align: left;">仓自检门禁</td>
+<td style="text-align: left;"><strong>39 passed</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">本轮修掉的<strong>真缺陷</strong></td>
+<td style="text-align: left;"><strong>7 个</strong>（其中 2 个属于「检查过了但机制其实是坏的」假绿）</td>
+</tr>
+</tbody>
+</table>
+<h2>一、为什么必须有这一轮</h2>
+<p>上一轮的干净室只证明了「<strong>装得上、装完引擎能用</strong>」。这一轮补的是更难的一问：
+<strong>装出来的东西，各项特性是不是真的成立</strong>。第一刀就砍出一个假绿 ——</p>
+<blockquote>
+<p>骨架里<strong>根本没有业务叠加层的注入点</strong>：<code>{{BUSINESS_OVERLAY}}</code> 只出现在某节的<strong>散文说明</strong>里。
+安装器替换它，等于把叠加层内容塞进那句说明里；生成出来的「生效身份」是坏的，而所有检查都报 PASS。</p>
+</blockquote>
+<p>结论：<strong>「文件落位」≠「机制成立」</strong>。于是本轮把断言从「装到了吗」改成「语义对不对」。</p>
+<h2>二、特性矩阵（9 组，31 项断言）</h2>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">组</th>
+<th style="text-align: left;">测什么</th>
+<th style="text-align: left;">关键证据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">F1</td>
+<td style="text-align: left;">身份骨架八节纪律项齐备</td>
+<td style="text-align: left;">八节全在位</td>
+</tr>
+<tr>
+<td style="text-align: left;">F2</td>
+<td style="text-align: left;">合成语义</td>
+<td style="text-align: left;">注入点<strong>恰好 1 处</strong>；骨架前 2000 字节原样；体积等式 <code>17290 + 108 − 20 = 17378</code>；标记无残留</td>
+</tr>
+<tr>
+<td style="text-align: left;">F3</td>
+<td style="text-align: left;">派工契约</td>
+<td style="text-align: left;">角色契约 6 个，均含「回执字段」与「派工卡」</td>
+</tr>
+<tr>
+<td style="text-align: left;">F4</td>
+<td style="text-align: left;">示例技能规范</td>
+<td style="text-align: left;">2 个示例：<code>name</code> 与目录一致、<code>description</code> 可被触发词匹配</td>
+</tr>
+<tr>
+<td style="text-align: left;">F5</td>
+<td style="text-align: left;"><strong>业务叠加钩子</strong></td>
+<td style="text-align: left;">钩子关着 → 业务技能<strong>未装</strong>；钩子打开 → 装进技能目录（迁移时不会静默丢失）</td>
+</tr>
+<tr>
+<td style="text-align: left;">F6</td>
+<td style="text-align: left;"><strong>记忆闭环</strong></td>
+<td style="text-align: left;">8 项：首用目录直接可用 / <code>pending=0</code> 汇合干净 / 召回命中 / <strong>改写查询也命中</strong> / 代际硬隔离 / <code>empty_reason=below_score_floor</code> / 新事实只落本代际 / 换 <code>data_dir</code> 是独立空库</td>
+</tr>
+<tr>
+<td style="text-align: left;">F7</td>
+<td style="text-align: left;">平台适配补丁</td>
+<td style="text-align: left;"><code>--check</code> 幂等在位；<code>--config</code> <strong>读到生效值</strong>：<code>card_replies=True</code>、<code>exec_approval_text=True</code></td>
+</tr>
+<tr>
+<td style="text-align: left;">F8</td>
+<td style="text-align: left;"><strong>外部执行器</strong></td>
+<td style="text-align: left;">真跑一个小任务：<code>ok=True exit=0 settled=True stop=stop model=main tools=2</code>，并<strong>回读产物</strong>内容一致</td>
+</tr>
+<tr>
+<td style="text-align: left;">F9</td>
+<td style="text-align: left;">运行时骨架</td>
+<td style="text-align: left;">服务单元不含写死的 profile 目录；<code>EnvironmentFile</code>/<code>ExecStart</code> 在位</td>
+</tr>
+<tr>
+<td style="text-align: left;">F10</td>
+<td style="text-align: left;">未覆盖清单</td>
+<td style="text-align: left;">显式打印，防止把绿当全能</td>
+</tr>
+</tbody>
+</table>
+<h2>三、身份注入的判定链（不需要任何可用凭据）</h2>
+<p>命题：<strong>生效身份是否真的进了发给模型的 prompt？</strong> 判定链：</p>
+<ol>
+<li>在<strong>隔离 profile</strong> 里合成身份（骨架 + 叠加层）；</li>
+<li>用<strong>真 provider + 占位/无效 key</strong> 打一次调用（不能用「自定义 provider + 死端口」：CLI 在预检阶段
+   就退出了，根本走不到 API 调用，于是没有转储可判 —— 实测踩过）；</li>
+<li>调用必然失败（<code>HTTP 401</code>）→ Hermes 在 API 出错时<strong>无条件</strong>写<strong>已脱敏的请求转储</strong>；</li>
+<li>在转储里断言：骨架独有句 ×3 ✓、叠加层独有句 ✓、<strong>生效身份逐字节等于「骨架 + 叠加层」</strong> ✓。</li>
+</ol>
+<p><strong>隔离保证</strong>（同一次运行里断言）：生产 profile 与顶层的 <code>config.yaml</code> 均<strong>无变化</strong>；
+备份故意保留在不随清理删除的目录，并打印人工 <code>diff -u</code> 命令 ——
+「我这次跑不影响你的现场」不是口头承诺，是可复核的断言。</p>
+<h2>四、本轮修掉的 7 个缺陷</h2>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">#</th>
+<th style="text-align: left;">级别</th>
+<th style="text-align: left;">缺陷</th>
+<th style="text-align: left;">修法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">1</td>
+<td style="text-align: left;">🔴</td>
+<td style="text-align: left;"><strong>骨架无注入点</strong>（叠加层被塞进散文），而检查报 PASS</td>
+<td style="text-align: left;">骨架新增<strong>唯一</strong>注入点；安装器替换前断言<strong>恰好出现 1 次</strong>，否则拒绝合成；检查改为语义断言（骨架原样 + 体积等式 + 标记无残留）</td>
+</tr>
+<tr>
+<td style="text-align: left;">2</td>
+<td style="text-align: left;">🔴</td>
+<td style="text-align: left;"><strong>门禁在导出目录里红自己</strong>：<code>git archive</code> 不带 <code>.git</code> → <code>git ls-files</code> 失败 → 退化成递归遍历 → 把 pytest 收集阶段写的缓存（内含参数化用例名）当源文件。本地绿、干净室红</td>
+<td style="text-align: left;">门禁显式排除生成物目录 + 生成物判定函数 + 自检测试「生成物目录必须被排除」</td>
+</tr>
+<tr>
+<td style="text-align: left;">3</td>
+<td style="text-align: left;">🔴</td>
+<td style="text-align: left;"><strong>执行器凭据解析静默失败</strong>：<code>_load_yaml</code> 在解释器缺 PyYAML 时静默返回 <code>{}</code>，上层于是报「解析不到凭据」—— 排障方向直接跑偏</td>
+<td style="text-align: left;">改成<strong>响亮失败</strong>，点名缺 PyYAML，并给出三条替代来源</td>
+</tr>
+<tr>
+<td style="text-align: left;">4</td>
+<td style="text-align: left;">🔴</td>
+<td style="text-align: left;"><strong>补丁 <code>--config</code> 假绿</strong>：读不到配置却打 <code>[SKIP]</code> 并 <code>return 0</code>，而它自己的约定是 <code>0=在位</code></td>
+<td style="text-align: left;"><code>return 2</code>，并区分「缺解析器」与「目录不对」；调用侧必须同时满足「退出码 0」且「输出里真报出键」</td>
+</tr>
+<tr>
+<td style="text-align: left;">5</td>
+<td style="text-align: left;">🟡</td>
+<td style="text-align: left;"><strong>地板语义写错</strong>：基线会把现场已有的<strong>高值改小</strong>（实测现场 <code>max_turns=100000</code>）</td>
+<td style="text-align: left;"><strong>只抬不降</strong>：数值型比较，已 ≥ 地板即不动</td>
+</tr>
+<tr>
+<td style="text-align: left;">6</td>
+<td style="text-align: left;">🟡</td>
+<td style="text-align: left;"><strong>新写的检查脚本自己带业务词表 + 硬编码 profile 名</strong>（被自家门禁抓到）</td>
+<td style="text-align: left;">改成<strong>结构性断言</strong>：不写死画像名、不复制词表（等价性用逐字节比对表达）</td>
+</tr>
+<tr>
+<td style="text-align: left;">7</td>
+<td style="text-align: left;">🟡</td>
+<td style="text-align: left;"><strong>热删隔离 profile</strong> 留下的 WAL inode 被宿主网关持有 → 该 profile 下次启动 <code>profile_parked</code></td>
+<td style="text-align: left;">不再热删；遇到时<strong>换一个新 profile 名</strong>；<strong>不要停网关</strong>（那是生产服务）、不要手删 WAL</td>
+</tr>
+</tbody>
+</table>
+<h2>五、本轮新增交付</h2>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">交付</th>
+<th style="text-align: left;">作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><code>checks/feature_check.sh</code></td>
+<td style="text-align: left;">宿主侧特性矩阵（9 组），一律用临时 home，不碰生产</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>checks/identity_injection_check.sh</code></td>
+<td style="text-align: left;">身份注入判定（14 项）+ 隔离断言（现场配置零变化，备份留证）</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>docker/memory_features.py</code></td>
+<td style="text-align: left;">记忆<strong>特性</strong>验证（写入 → 汇合 → 召回 → 改写命中 → 代际隔离 → 空结果语义 → 换目录）</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>runtime/BASELINE.md</code></td>
+<td style="text-align: left;">能力地板与无人值守档：通用键名 / 地板值 / 「两个门别混」/ 守卫方式</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>runtime/CONFIG_MAP.md</code></td>
+<td style="text-align: left;">段级归属表 + <strong>并行会话真实语义</strong> + 派工协议陷阱（api_mode 与协议错配）</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>docs/PLUGINS.md</code></td>
+<td style="text-align: left;">插件 / MCP / 工具集注册的住址、归属、迁移清单与<strong>验收口径</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>install/install.sh --apply-baseline</code></td>
+<td style="text-align: left;">一键落地通用能力基线（默认不动配置；<strong>地板只抬不降</strong>；不碰安全开关）</td>
+</tr>
+<tr>
+<td style="text-align: left;">门禁增强</td>
+<td style="text-align: left;">生成物目录显式排除（导出目录里不再自伤）</td>
+</tr>
+</tbody>
+</table>
+<h2>六、明确<strong>未</strong>覆盖（别把绿当全能）</h2>
+<ol>
+<li><strong>网关能否启动、消息能否收发</strong> —— 需要真凭据与平台回调，属部署后验收；</li>
+<li><strong>多路由 / fallback 是否可用</strong> —— 本轮只在本机已有路由上跑通执行器一步；</li>
+<li><strong>业务叠加层的「内容」</strong>（业务工具面 / 知识库 / 业务身份段）—— 本仓不含业务内容；</li>
+<li><strong>真机迁移彩排</strong> —— 本轮全部在<strong>本机</strong>跑；干净室覆盖了「装」这一半，另一半（账号级配置、
+   systemd linger、凭据）仍需一台干净机器；</li>
+<li><strong>记忆数据的搬运</strong> —— 口径已写进 <code>MIGRATION.md</code>（库 + 突触账本 + <strong>同源嵌入后端</strong>，
+   否则召回全空但服务看起来正常），但<strong>没有实测搬库</strong>。</li>
+</ol>
+<h2>七、证据索引</h2>
+<ul>
+<li>特性矩阵：<code>$HERMES_HOME/profiles/&lt;profile&gt;/cache/scratch/feature_check3.log</code>（31 PASS / 0 FAIL / 0 WARN）</li>
+<li>注入判定：同目录 <code>inject_check3.log</code>（14 PASS / 0 FAIL）+ 请求转储副本在 <code>sa-inject-bak.*/</code></li>
+<li>干净室：同目录 <code>docker_run5.log</code>（28 PASS / 0 FAIL，退出码 0）</li>
+<li>迁移演练（上轮）：<code>install.sh --hermes-home &lt;隔离&gt; --skip-patch</code> 资产落位、示例技能 0 个进生产、第二遍幂等</li>
+</ul></div></body></html>
