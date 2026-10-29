@@ -133,8 +133,8 @@ def run_dev_job(
     role: str,
     workdir: Path,
     agent_dir: Path,
-    model: str = "deepseek-v4.1-flash",
-    provider: str = "qianfan",
+    model: str = "flash",
+    provider: str = "ccp",
     tools: str = "read,write,edit,bash",
     timeout: float = 900.0,
     memory_file: str = "",
@@ -272,8 +272,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--role-contract", required=True, help="Path to role contract markdown")
     parser.add_argument("--workdir", required=True, help="Isolated working directory")
     parser.add_argument("--agent-dir", required=True, help="Agent configuration and cache dir")
-    parser.add_argument("--model", default="deepseek-v4.1-flash")
-    parser.add_argument("--provider", default="qianfan")
+    parser.add_argument("--model", default="flash")
+    parser.add_argument("--provider", default="ccp")
     parser.add_argument("--tools", default="read,write,edit,bash")
     parser.add_argument("--timeout", type=float, default=900.0)
     parser.add_argument("--memory-file", default="")
