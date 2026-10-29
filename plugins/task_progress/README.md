@@ -12,7 +12,7 @@
 | 账本无记录 | 显示「暂无新进展」并附任务 id，不猜 |
 | 宿主没有会话（无 conversation） | 不发、不崩，日志留一行 |
 
-写入顺序与终态锁定复用 `agentcore.card_store` + `agentcore.card_emit`；"能说什么"的判据在
+身份与终态持久化复用 `agentcore.card_store`（`cards.db`：任务/消息 id/终态）；编辑顺序由单线程 poll 保证；"能说什么"的判据在
 `agentcore.task_progress`（纯逻辑，单测覆盖）。
 
 ## 命令（不进模型回合）

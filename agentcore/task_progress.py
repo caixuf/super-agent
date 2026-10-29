@@ -111,6 +111,42 @@ def snapshot(row: Optional[Dict[str, Any]], *, now: float) -> Dict[str, Any]:
     }
 
 
+def foreground_snapshot(event: Optional[Dict[str, Any]], *, now: float) -> Dict[str, Any]:
+    """Project trusted turn lifecycle and safe phase hints onto the card schema.
+
+    event is host lifecycle evidence; callers must not pass model/user text or tool
+    arguments. Unknown terminal evidence remains active with an explicit waiting detail.
+    """
+    data = event if isinstance(event, dict) else {}
+    state = data.get("state")
+    if state not in {"queued", "running", "done", "failed", "cancelled"}:
+        state = "unknown"
+    row = {
+        "task_id": str(data.get("task_id") or ""),
+        "kind": "foreground",
+        "label": str(data.get("label") or "前台回合"),
+        "state": state,
+        "started_at": data.get("started_at"),
+        "phase": str(data.get("phase") or ""),
+        "detail": str(data.get("detail") or ""),
+        "progress_done": None,
+        "progress_total": None,
+    }
+    result = snapshot(row, now=now)
+    if state == "unknown":
+        result["verdict"] = "running"
+        result["terminal"] = False
+    return result
+
+
+def aggregate_with_foreground(task_snaps, foreground: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate tracked background jobs with one foreground turn in the same card."""
+    items = list(task_snaps or ())
+    if isinstance(foreground, dict):
+        items.insert(0, foreground)
+    return aggregate(items)
+
+
 def _clock_text(seconds: int) -> str:
     minutes, rest = divmod(max(0, int(seconds)), 60)
     if minutes >= 60:
@@ -218,20 +254,26 @@ def aggregate(snaps) -> Dict[str, Any]:
             "signature": signature}
 
 
+#: Ledger phases that carry no information for a reader.
+_QUIET_PHASES = frozenset({"", "started", "queued", "running"})
+
+
 def render_many(snaps, *, title: str = "任务") -> str:
     """One entry over several tasks: a header, one line per task, and the longest elapsed."""
     items = [s for s in (snaps or ()) if isinstance(s, dict)]
     if not items:
         return "**%s**\n状态：已接收\n（暂无新进展，收到进度会更新这一条）" % title
     head = aggregate(items)
-    lines = ["**%s%s**" % (title, "" if head["tasks"] == 1 else "（本轮 %d 个后台任务）" % head["tasks"])]
+    heading = ("任务" if head["tasks"] == 1
+               else "任务（本轮 %d 个后台任务）" % head["tasks"])
+    lines = ["**%s**" % heading]
     lines.append("状态：%s" % _STATE_WORD[card_state({"state": head["verdict"]})])
     for snap in items[:6]:
         bits = [snap.get("label") or snap.get("task_id") or "任务"]
         word = {"running": "进行中", "queued": "已接收", "done": "已完成",
                 "failed": "未完成", "cancelled": "已取消"}.get(snap.get("verdict"), snap.get("verdict"))
         bits.append(word)
-        if snap.get("phase"):
+        if snap.get("phase") and snap["phase"] not in _QUIET_PHASES:
             bits.append(snap["phase"])
         if snap.get("percent") is not None:
             bits.append("%.0f%%" % snap["percent"])

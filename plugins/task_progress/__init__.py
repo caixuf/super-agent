@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.util
+import hashlib
 import json
 import logging
 import sys
@@ -160,15 +161,18 @@ def _reconcile(ledger, task_id: str) -> None:
 # --------------------------------------------------------------------------- #
 
 class _Entry:
-    """One editable entry: all background tasks spawned in one turn."""
+    """One editable entry shared by a foreground turn and its background tasks."""
 
-    __slots__ = ("key", "message", "writer", "tasks", "snap", "last_emit_at", "final")
+    __slots__ = ("key", "message", "writer", "tasks", "foreground", "session_key",
+                 "snap", "last_emit_at", "final")
 
-    def __init__(self, key: str, message: Any, tasks):
+    def __init__(self, key: str, message: Any, tasks, *, foreground=None, session_key=""):
         self.key = key
         self.message = message
         self.writer = None
         self.tasks = list(tasks)
+        self.foreground = dict(foreground) if isinstance(foreground, dict) else None
+        self.session_key = session_key
         self.snap = None
         self.last_emit_at = 0.0
         self.final = False
@@ -184,6 +188,7 @@ def _settings(ctx) -> dict:
         "max_tracked": ctx.get_config("max_tracked", _DEFAULT_MAX_TRACKED),
         "store_path": ctx.get_config("store_path"),
         "resume_after_restart": ctx.get_config("resume_after_restart", True) is not False,
+        "foreground_min_seconds": ctx.get_config("foreground_min_seconds", 12),
     }
 
 
@@ -230,9 +235,53 @@ def _resume_edit(ctx, session_key: str, message_id: str, text: str) -> dict:
     return _run_on_loop(plugin_messages.edit(target, message_id, text, plugin_id=ctx.plugin_id))
 
 
+def _capture_session_key() -> str:
+    try:
+        from gateway.session_context import get_session_env
+        return get_session_env("HERMES_SESSION_KEY", "") or ""
+    except Exception:
+        return ""
+
+
+def _post_to_session(ctx, session_key: str, text: str) -> dict:
+    if not session_key:
+        # Synchronous hooks already run in the host's bound conversation scope.
+        try:
+            handle = ctx.post_message(text)
+            return {"ok": bool(getattr(handle, "ok", False)),
+                    "message_id": getattr(handle, "message_id", None), "handle": handle}
+        except Exception:
+            return {"ok": False, "error": "no_conversation"}
+    from gateway import plugin_messages
+    target, error = _resolve_target(ctx, session_key)
+    if target is None:
+        return {"ok": False, "error": error or "no_conversation"}
+    return _run_on_loop(plugin_messages.post(target, text, plugin_id=ctx.plugin_id))
+
+
+def _edit_to_session(ctx, session_key: str, message_id: str, text: str) -> dict:
+    if not session_key:
+        return {"ok": False, "error": "no_conversation"}
+    from gateway import plugin_messages
+    target, error = _resolve_target(ctx, session_key)
+    if target is None:
+        return {"ok": False, "error": error or "no_conversation"}
+    return _run_on_loop(plugin_messages.edit(target, message_id, text, plugin_id=ctx.plugin_id))
+
+
+class _RouteMessage:
+    def __init__(self, ctx, session_key: str, message_id: str):
+        self.ctx, self.session_key, self.message_id = ctx, session_key, message_id
+
+    def edit(self, text: str):
+        return _edit_to_session(self.ctx, self.session_key, self.message_id, text)
+
+
 def _entry_key(turn_id: str, session_id: str, task_id: str) -> str:
-    """One entry per turn; without a turn id, one entry per task."""
+    """One entry per session turn; without a turn id, one entry per task."""
     if isinstance(turn_id, str) and turn_id.strip():
+        if isinstance(session_id, str) and session_id.strip():
+            return "turn:%s:%s" % (session_id.strip()[:48], turn_id.strip()[:64])
         return "turn:%s" % turn_id.strip()[:64]
     if isinstance(session_id, str) and session_id.strip():
         return "turn:%s:%s" % (session_id.strip()[:48], task_id)
