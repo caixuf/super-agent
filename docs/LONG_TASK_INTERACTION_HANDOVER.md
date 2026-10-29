@@ -59,7 +59,14 @@
 | 真实（CLI 回合） | `hermes -p caixuf -z` 触发后台 spawn → 插件 post 成功（`ok=True`，`message_id=plugin-message:task-progress:…`），`cards.db` 落绑定 | 通过 |
 | 真实（API 回合） | 同一条命令走 `api_server`：**`post_tool_call` 钩子未分发**（宿主行为），因此该平台不会开条目 | 已记录（见下） |
 | 真实（slash 命令） | `hermes -p caixuf -z "/longtasks"` → 「本会话没有登记过的长任务。」；`/longtask proc_deadbeef0000` → `unknown_task`；`/longtask`（无参）→ 用法 | 通过（宿主在回合前分发，未产生模型回合） |
-| 真实端到端（消息平台） | 消息平台真发一个长任务、中途插话、终态核对 | **未验证**（需用户手动发；步骤见 §5） |
+| 真实端到端（消息平台） | 用户在消息平台发 `pytest -q（timeout 300）`：10:35:17 **一条**条目（命令 + 状态），10:38:38 **同一条被原地更新**为「状态：已完成 · 已用（最长）3分20秒」；平台 `update_time` 与插件 `last_delivery.edited=true` 双证；全程无第二条进度消息 | **通过** |
+
+### 这次真跑暴露并已修的两处
+
+1. 单任务条目的标题与成员行**重复**显示同一条命令（`_title` 与成员行各一次）→ 改为标题固定「任务」、成员行承载命令；
+   账本里无信息量的阶段（`started`/`queued`/`running`）不再展示。
+2. **"已完成"指进程退出成功，不等于业务结论**：该次任务是 `pytest -q | tail -1`，管道退出码来自 `tail`（0），
+   所以条目如实报"已完成"，而 bot 在正文里报"2 failed"。条目只声明它有的证据；业务结论仍由正文承载。
 
 ### 已记录的宿主行为
 
