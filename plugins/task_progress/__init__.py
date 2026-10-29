@@ -382,10 +382,16 @@ def register(ctx) -> None:
             return
         for handle in store.active()[:_DEFAULT_RECONCILE_LIMIT]:
             session_key = routes.get(handle.task_id, "")
-            if not session_key or not handle.message_id:
-                continue
             row = ledger.get(handle.task_id)
             snap = progress.snapshot(row, now=time.time())
+            if not session_key or not handle.message_id:
+                # No route to edit through: the entry cannot be updated, but a finished
+                # task must not stay "active" in the store (that would be rewritten on
+                # every restart). Close the handle from ledger evidence instead.
+                if snap.get("terminal"):
+                    handle.state = progress.card_state(snap)
+                    store.save(handle)
+                continue
             text = progress.render(snap, title=snap.get("label") or "任务")
             try:
                 result = _resume_edit(ctx, handle.task_id, session_key, handle.message_id, text)

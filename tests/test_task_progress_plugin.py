@@ -255,3 +255,26 @@ def test_the_real_exit_from_the_host_registry_is_recorded_and_shown(tmp_path, mo
     assert LivenessLedger(ctx.settings["liveness_db"]).get("proc_ggg")["state"] == "done"
     for callback in ctx.unload_callbacks:
         callback()
+
+
+def test_an_unroutable_finished_entry_is_closed_without_an_edit(tmp_path):
+    """No route to edit through, but a finished task must not stay active in the store."""
+    ctx = Ctx(tmp_path, _settings(tmp_path))
+    plugin.register(ctx)
+    ledger = _row(ctx.settings["liveness_db"], "proc_hhh", phase="run")
+    spawn = {"session_id": "proc_hhh"}
+    ctx.hooks["post_tool_call"](tool_name="terminal", args={"command": "pytest"},
+                                result=spawn, session_id="s")
+    assert len(ctx.messages) == 1
+    for callback in ctx.unload_callbacks:
+        callback()
+    ledger.finish("proc_hhh", "done", tail="ok")
+
+    second = Ctx(tmp_path, _settings(tmp_path))
+    second.state.data = dict(ctx.state.data)
+    plugin.register(second)
+    assert _wait(lambda: plugin._store(second, plugin._engine_modules(str(ROOT)),
+                                       _settings(tmp_path)).load("proc_hhh").state.value == "done")
+    assert second.messages == []
+    for callback in second.unload_callbacks:
+        callback()
