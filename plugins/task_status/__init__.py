@@ -150,9 +150,21 @@ def _handle(args, *, session_id=None, task_id=None, user_task=None):
                 limit = int(args.get("limit", 50))
             except (TypeError, ValueError):
                 limit = 50
+            # Classify the non-terminal rows before reporting them. Without this, a row whose
+            # process died keeps claiming ``running`` until someone happens to inspect *that*
+            # task; the caller asking "what am I running" is exactly the moment to fix it.
+            # ``sweep`` writes only rows whose classification changed and never guesses from
+            # silence: a live pid stays ``running``, a gone pid becomes ``lost``, and no pid
+            # plus a stale heartbeat becomes ``stalled``.
+            try:
+                ledger.sweep()
+            except Exception:  # noqa: BLE001 — a failed sweep must not break the read
+                logger.debug("task_status sweep failed", exc_info=True)
             tasks = ledger.list_tasks(owner=owner,
                                       active_only=bool(args.get("active_only", True)),
                                       limit=limit)
+            # The host registry can still know the real exit; that beats a bare ``lost``.
+            tasks = [_reconcile(ledger, row) for row in tasks]
             tasks = [ledger.inspect(row["task_id"], require_owner=owner) for row in tasks]
             return json.dumps({"ok": True, "owner": owner, "tasks": tasks},
                               ensure_ascii=False)
