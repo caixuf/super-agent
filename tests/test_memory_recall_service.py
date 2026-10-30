@@ -2,13 +2,14 @@ import json
 from pathlib import Path
 import sqlite3
 import time
+import threading
 
 import pytest
 
 from agentcore.memory import change_journal as journal,memory_store as store
 from agentcore.memory.read_view import MemoryReadView,ViewInvalid
 from agentcore.memory.recovery_checkpoint import RecoveryCheckpoint
-from agentcore.memory.recall_service import ServingMemory,validate_request,private_lock
+from agentcore.memory.recall_service import ServingMemory,validate_request,private_lock,serve,request,RecallUnavailable
 
 
 def seed(engine):
@@ -86,6 +87,19 @@ def test_idle_maintenance_renews_lease_and_captures_external_retirement(engine,t
     finally:serving.close();source.close()
 
 
+def test_pending_health_exposes_only_known_reason_codes(engine,tmp_path):
+    from agentcore.memory.read_view import ViewPending
+    source,_=seed(engine); serving=ServingMemory(tmp_path/'private/state.json',initialize=True)
+    try:
+        serving._state('pending',ViewPending('memory_view_embedding_pending'))
+        assert serving.health()['reason_code']=='memory_view_embedding_pending'
+        serving._state('pending',ViewPending('sensitive arbitrary text'))
+        assert serving.health()['reason_code'] is None
+        serving._state('ready')
+        assert serving.health()['reason_code'] is None
+    finally:serving.close();source.close()
+
+
 def test_delta_payload_limit_restores_source_limit_and_withdraws_readiness(engine):
     source,fid=seed(engine);view=MemoryReadView(source,max_delta_bytes=4096)
     limit=source.getlimit(sqlite3.SQLITE_LIMIT_LENGTH)
@@ -124,3 +138,100 @@ def test_same_checkpoint_lock_cannot_have_two_writers(tmp_path):
     with private_lock(path):
         with pytest.raises(BlockingIOError):
             with private_lock(path):pytest.fail('second writer must not enter')
+
+
+def test_health_remains_responsive_and_overload_is_bounded_during_slow_recall(tmp_path):
+    entered=threading.Event();release=threading.Event();stop=threading.Event()
+    class SlowEngine:
+        identity={'user_id':'owner','agent_id':'agent','database_sha256':'hash'}
+        build='build'
+        def health(self):return {'ready':True,'state':'ready','error_type':None}
+        def maintain(self):pass
+        def dispatch(self,payload):
+            entered.set();release.wait(5)
+            return {'results':[]}
+    engine=SlowEngine();path=tmp_path/'socket'
+    server=threading.Thread(target=serve,args=(engine,path,stop),daemon=True);server.start()
+    for _ in range(100):
+        if path.exists():break
+        time.sleep(.01)
+    payload={'op':'recall','query':'test','identity':engine.identity,'build_sha256':engine.build}
+    errors=[]
+    def run():
+        try:request(path,payload,timeout=4)
+        except Exception as exc:errors.append(exc)
+    first=threading.Thread(target=run);first.start()
+    try:
+        assert entered.wait(2)
+        health=request(path,{'op':'health'},timeout=1)
+        assert health['ready'] is False and health['state']=='busy'
+        second=threading.Thread(target=run);second.start()
+        time.sleep(.1)
+        with pytest.raises(RecallUnavailable,match='resident_recall_unavailable') as exc:
+            request(path,payload,timeout=1)
+        assert exc.value.error_type=='Busy'
+        release.set();first.join(3);second.join(3)
+        assert not errors
+        assert request(path,{'op':'health'},timeout=1)['ready'] is True
+    finally:
+        release.set();stop.set();server.join(3)
+    assert not server.is_alive()
+
+
+def test_socket_service_uses_real_memory_on_its_owning_thread(engine,tmp_path):
+    source,_=seed(engine);stop=threading.Event();started=threading.Event();errors=[];info={}
+    path=tmp_path/'socket';checkpoint=tmp_path/'private/state.json'
+    def run():
+        try:
+            memory=ServingMemory(checkpoint,initialize=True)
+            info.update(identity=memory.identity,build=memory.build)
+            started.set()
+            try:serve(memory,path,stop)
+            finally:memory.close()
+        except Exception as exc:
+            errors.append(exc);started.set()
+    thread=threading.Thread(target=run);thread.start()
+    try:
+        assert started.wait(10) and not errors
+        for _ in range(100):
+            if path.exists():break
+            time.sleep(.01)
+        result=request(path,{'op':'recall','query':'服务预算',
+            'identity':info['identity'],'build_sha256':info['build']},timeout=5)
+        assert result['results']
+    finally:
+        stop.set();thread.join(5);source.close()
+    assert not thread.is_alive() and not errors
+
+
+def test_expired_queued_recall_is_not_executed(tmp_path):
+    entered=threading.Event();release=threading.Event();stop=threading.Event();calls=[]
+    class SlowEngine:
+        identity={'user_id':'owner','agent_id':'agent','database_sha256':'hash'}
+        build='build'
+        def health(self):return {'ready':True,'state':'ready','error_type':None}
+        def maintain(self):pass
+        def dispatch(self,payload):
+            calls.append(payload['query']);entered.set();release.wait(4);return {'results':[]}
+    engine=SlowEngine();path=tmp_path/'socket'
+    server=threading.Thread(target=serve,args=(engine,path,stop),daemon=True);server.start()
+    for _ in range(100):
+        if path.exists():break
+        time.sleep(.01)
+    def submit(query,timeout):
+        try:request(path,{'op':'recall','query':query,'identity':engine.identity,
+                          'build_sha256':engine.build},timeout=timeout)
+        except (TimeoutError,OSError,RecallUnavailable):pass
+    first=threading.Thread(target=submit,args=('first',3));first.start()
+    second=None
+    try:
+        assert entered.wait(2)
+        second=threading.Thread(target=submit,args=('expired',.2));second.start();second.join(2)
+        assert not second.is_alive()
+        release.set();first.join(3)
+        time.sleep(.3)
+        assert calls==['first']
+    finally:
+        release.set();stop.set();server.join(3)
+        if second is not None:second.join(1)
+    assert not server.is_alive()

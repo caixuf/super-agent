@@ -53,6 +53,8 @@ logger = logging.getLogger(__name__)
 
 NAME = "localvec"
 GLYPH = "🧠"
+MAX_INFLIGHT_RECALLS = 8
+RECALL_UNAVAILABLE = '自动记忆召回暂不可用或超时，不能据此认定没有相关记忆。'
 
 
 def format_recall(rows, *, limit=3, max_chars=1800):
@@ -124,6 +126,7 @@ class LocalVecProvider(MemoryProvider):
         self._timeout = 8.0
         self._cache: dict[str, tuple[str, int]] = {}
         self._lock = threading.Lock()
+        self._inflight: dict[str, threading.Event] = {}
         self._last: Optional[RecallStatus] = None
 
     # -- 生命周期 ---------------------------------------------------------
@@ -157,10 +160,21 @@ class LocalVecProvider(MemoryProvider):
         """后台先算好 —— prefetch() 必须快，所以这里只排队、不阻塞。"""
         if not self._cmd or is_trivial_prompt(query):
             return
+        with self._lock:
+            if query in self._inflight or query in self._cache:
+                return
+            if len(self._inflight) >= MAX_INFLIGHT_RECALLS:
+                logger.warning('localvec: recall capacity reached')
+                return
+            event = self._inflight[query] = threading.Event()
         try:
-            th = spawn_context_thread(self._recall, name="localvec-prefetch", args=(query,))
+            th = spawn_context_thread(self._recall_tracked, name="localvec-prefetch", args=(query,event))
             th.start()
         except Exception as exc:  # pragma: no cover
+            with self._lock:
+                if self._inflight.get(query) is event:
+                    del self._inflight[query]
+                event.set()
             logger.debug("[localvec] 后台召回排队失败：%s", exc)
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
@@ -169,11 +183,34 @@ class LocalVecProvider(MemoryProvider):
             self._last = None
             return ""
         with self._lock:
-            hit = self._cache.pop(query, None)
+            event = self._inflight.get(query)
+            # The producer may have populated the cache but not yet published
+            # its result to the event. Wait until publication so one caller
+            # cannot consume the entry before the other waiters see it.
+            hit = None if event is not None else self._cache.pop(query, None)
+            if hit is None and event is None:
+                if len(self._inflight) >= MAX_INFLIGHT_RECALLS:
+                    self._last = None
+                    logger.warning('localvec: recall capacity reached')
+                    return RECALL_UNAVAILABLE
+                event = self._inflight[query] = threading.Event()
+                owner = True
+            else:
+                owner = False
         if hit is None:
-            self._recall(query)
+            if owner:
+                self._recall_tracked(query, event)
+            else:
+                event.wait(self._timeout)
             with self._lock:
-                hit = self._cache.pop(query, None)
+                # All waiters of the same in-flight request receive its result,
+                # even if another waiter already consumed the cache entry.
+                hit = getattr(event, 'recall_result', None)
+                if hit is not None:
+                    self._cache.pop(query, None)
+            if hit is None and (not event.is_set() or not getattr(event, 'recall_ok', False)):
+                self._last = None
+                return RECALL_UNAVAILABLE
         text, count = hit or ("", 0)
         self._last = RecallStatus(provider_label="自研记忆库", count=count, glyph=GLYPH) if text else None
         return text
@@ -181,34 +218,51 @@ class LocalVecProvider(MemoryProvider):
     def recall_status(self) -> Optional[RecallStatus]:
         return self._last
 
-    def _recall(self, query: str) -> None:
+    def _recall_tracked(self, query: str, event: threading.Event) -> None:
+        ok = False
+        try:
+            ok = self._recall(query) is True
+        finally:
+            with self._lock:
+                event.recall_result = self._cache.get(query)
+                event.recall_ok = ok
+                if self._inflight.get(query) is event:
+                    del self._inflight[query]
+                event.set()
+
+    def _recall(self, query: str) -> bool:
         """子进程召回 + 格式化。任何异常都只记 debug —— 召回失败绝不能影响用户这一轮。"""
         if not self._cmd:
-            return
+            return False
         argv = [p.replace("{query}", query) for p in self._cmd]
         try:
             proc = subprocess.run(argv, capture_output=True, text=True,
                                   timeout=self._timeout, cwd=self._cfg.get("cwd") or None)
         except Exception as exc:
             logger.debug("[localvec] 召回子进程失败：%s", exc)
-            return
+            return False
         if proc.returncode != 0:
             logger.warning('[localvec] recall subprocess failed: exit_code=%s', proc.returncode)
-            return
+            return False
         try:
             res = json.loads(proc.stdout or "{}")
         except Exception as exc:
             logger.warning('[localvec] recall response is not JSON: %s', type(exc).__name__)
-            return
+            return False
+        if (not isinstance(res, dict) or res.get('ok') is False
+                or not isinstance(res.get('results'), list)):
+            logger.warning('[localvec] recall response has invalid shape')
+            return False
         rows = res.get("results") or []
         block, count = format_recall(rows, limit=self._limit,
                                     max_chars=int(self._cfg.get('max_chars') or 1800))
         if not block:
             logger.debug("[localvec] 空召回（%s）", res.get("empty_reason") or "no_match")
-            return
+            return True
         with self._lock:
             self._cache[query] = (block, count)
         logger.info('[localvec] recall ready: count=%s chars=%s', count, len(block))
+        return True
 
     # -- 其余留给核心（本插件只补"自动召回"这一段）-------------------------
     def get_tool_schemas(self) -> list[dict[str, Any]]:

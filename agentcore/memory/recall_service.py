@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import json
 import os
+import queue
 from pathlib import Path
 import re
 import signal
@@ -78,7 +79,7 @@ def validate_request(payload,identity,build):
 class ServingMemory:
     def __init__(self,checkpoint,*,initialize=False,max_bytes=3*1024**3,max_delta_bytes=64*1024**2,
                  lease_seconds=300,event_sink=None,progress=None):
-        self.source=memory_store._connect();self.view=None;self.state='starting';self.error_type=None
+        self.source=memory_store._connect();self.view=None;self.state='starting';self.error_type=None;self.reason_code=None
         self.identity=principal();self.build=build_fingerprint();self.event_sink=event_sink
         try:
             self.checkpoint=RecoveryCheckpoint(checkpoint,initialize=initialize)
@@ -90,12 +91,16 @@ class ServingMemory:
 
     def _state(self,state,error=None):
         kind=type(error).__name__ if error is not None else None
-        changed=(state,kind)!=(self.state,self.error_type);self.state=state;self.error_type=kind
-        if changed and self.event_sink is not None:self.event_sink(dict(state=state,error_type=kind,at=time.time()))
+        # Never expose arbitrary backend exception text in the health response.
+        allowed={'memory_view_embedding_pending','memory_view_catchup_budget'}
+        reason=str(error) if isinstance(error,read_view.ViewPending) and str(error) in allowed else None
+        changed=(state,kind,reason)!=(self.state,self.error_type,self.reason_code)
+        self.state=state;self.error_type=kind;self.reason_code=reason
+        if changed and self.event_sink is not None:self.event_sink(dict(state=state,error_type=kind,reason_code=reason,at=time.time()))
 
     def health(self):
         return dict(ready=self.state=='ready' and self.view is not None and self.view.ready,
-                    state=self.state,error_type=self.error_type,identity=self.identity,build_sha256=self.build,
+                    state=self.state,error_type=self.error_type,reason_code=self.reason_code,identity=self.identity,build_sha256=self.build,
                     seq=self.checkpoint.record['seq'] if self.checkpoint.record else None,
                     view_bytes=self.view.bytes() if self.view is not None and self.view.conn is not None else None)
 
@@ -133,32 +138,86 @@ def private_lock(path):
 
 
 def serve(engine,path,stop,*,maintenance_seconds=5):
+    """Serve bounded clients while all memory operations stay on the owning thread.
+
+    Health is a cached observation: while a recall or maintenance call is in
+    progress it reports busy, never a stale ready result. At most one request
+    waits for the engine and excess clients receive an explicit busy error.
+    """
     path=Path(path)
     if path.is_symlink():raise ValueError('socket path redirected')
     if path.exists():
         if not stat.S_ISSOCK(path.lstat().st_mode):raise ValueError('socket path occupied')
         path.unlink()
+    requests=queue.Queue(maxsize=1)
+    slots=threading.BoundedSemaphore(16)
+    guard=threading.Lock()
+    snapshot=engine.health()
+    busy=False
+    def publish(value,working):
+        nonlocal snapshot,busy
+        with guard:
+            snapshot=value;busy=working
+    def client_loop(client):
+        try:
+            with client:
+                client.settimeout(2)
+                try:
+                    with client.makefile('rb') as stream:raw=stream.readline(MAX_REQUEST+1)
+                    if len(raw)>MAX_REQUEST or not raw.endswith(b'\n'):raise ValueError('recall request budget')
+                    payload=json.loads(raw)
+                    validate_request(payload,engine.identity,engine.build)
+                    if payload['op']=='health':
+                        with guard:
+                            result=dict(snapshot)
+                            if busy:result.update(ready=False,state='busy',error_type=None,reason_code=None)
+                        reply=dict(ok=True,result=result)
+                    else:
+                        item=(payload,threading.Event(),{})
+                        try:requests.put_nowait(item)
+                        except queue.Full:raise RecallUnavailable('Busy')
+                        remaining=max(0,min(30,payload['deadline']-time.time()))
+                        if not item[1].wait(remaining):raise TimeoutError('recall deadline')
+                        reply=item[2]
+                except Exception as exc:
+                    reply=dict(ok=False,error_type=exc.error_type if isinstance(exc,RecallUnavailable) else type(exc).__name__)
+                raw=json.dumps(reply,ensure_ascii=False,default=str).encode()+b'\n'
+                if len(raw)>MAX_REPLY:raw=b'{"ok":false,"error_type":"ResponseBudget"}\n'
+                try:client.sendall(raw)
+                except OSError:pass
+        finally:slots.release()
     with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as listener:
-        listener.bind(str(path));path.chmod(0o600);listener.listen(16);listener.settimeout(min(1,maintenance_seconds))
+        listener.bind(str(path));path.chmod(0o600);listener.listen(16);listener.settimeout(.2)
+        def accept_loop():
+            while not stop.is_set():
+                try:client,_=listener.accept()
+                except socket.timeout:continue
+                except OSError:break
+                if not slots.acquire(blocking=False):client.close();continue
+                threading.Thread(target=client_loop,args=(client,),daemon=True).start()
+        acceptor=threading.Thread(target=accept_loop,name='recall-accept',daemon=True);acceptor.start()
         next_maintenance=time.monotonic()+maintenance_seconds
         try:
             while not stop.is_set():
                 if time.monotonic()>=next_maintenance:
-                    engine.maintain();next_maintenance=time.monotonic()+maintenance_seconds
-                try:client,_=listener.accept()
-                except socket.timeout:continue
-                with client:
-                    client.settimeout(2)
-                    try:
-                        with client.makefile('rb') as stream:raw=stream.readline(MAX_REQUEST+1)
-                        if len(raw)>MAX_REQUEST or not raw.endswith(b'\n'):raise ValueError('recall request budget')
-                        result=engine.dispatch(json.loads(raw));reply=dict(ok=True,result=result)
-                    except Exception as exc:reply=dict(ok=False,error_type=type(exc).__name__)
-                    raw=json.dumps(reply,ensure_ascii=False,default=str).encode()+b'\n'
-                    if len(raw)>MAX_REPLY:raw=b'{"ok":false,"error_type":"ResponseBudget"}\n'
-                    try:client.sendall(raw)
-                    except OSError as exc:print(json.dumps(dict(state='client_disconnected',error_type=type(exc).__name__)),flush=True)
-        finally:path.unlink(missing_ok=True)
+                    publish(snapshot,True)
+                    try:engine.maintain()
+                    finally:publish(engine.health(),False)
+                    next_maintenance=time.monotonic()+maintenance_seconds
+                try:item=requests.get(timeout=.2)
+                except queue.Empty:continue
+                payload,done,reply=item
+                publish(snapshot,True)
+                try:
+                    # Recheck the deadline after queueing, before any work begins.
+                    validate_request(payload,engine.identity,engine.build)
+                    reply.update(ok=True,result=engine.dispatch(payload))
+                except Exception as exc:
+                    reply.update(ok=False,error_type=exc.error_type if isinstance(exc,RecallUnavailable) else type(exc).__name__)
+                finally:
+                    publish(engine.health(),False);done.set();requests.task_done()
+        finally:
+            listener.close();acceptor.join(timeout=1);path.unlink(missing_ok=True)
 
 
 def main():

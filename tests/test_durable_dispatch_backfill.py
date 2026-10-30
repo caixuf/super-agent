@@ -538,6 +538,18 @@ def test_backfill_poller_reports_nothing_when_the_queue_is_clean(tmp_path):
         callback()
 
 
+def test_backlog_warning_is_rate_limited_even_when_outcomes_alternate():
+    limiter = plugin._BacklogWarningLimiter(interval=60)
+    parked = {'parked': 2, 'notable': 0}
+    deferred = {'parked': 4, 'notable': 1}
+    healthy = {'parked': 0, 'notable': 0}
+    assert limiter.should_warn(parked, 0)
+    assert not limiter.should_warn(deferred, 5)
+    assert not limiter.should_warn(healthy, 10)
+    assert not limiter.should_warn(parked, 15)
+    assert limiter.should_warn(deferred, 60)
+
+
 def test_delivery_health_never_raises_into_the_poller(tmp_path):
     service, _legacy = _stuck_service(tmp_path)
     stuck = drain(service.pool, Transport(), profile='test-profile')
