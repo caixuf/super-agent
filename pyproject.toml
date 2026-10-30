@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentcore"
+version = "0.1.0"
+description = "通用智能体本体：记忆引擎（SQLite 双路召回 + 向量索引）+ 身份纪律骨架 / 工具面 / 运行时骨架 / 平台适配补丁；业务约定由宿主注入，业务内容一律不进本仓"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "agentcore" }]
+keywords = ["memory", "sqlite", "vector-search", "agent", "embedding"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# markdown 是 tools/arch_doc.py 的可选依赖：缺它时该脚本无法渲染 HTML，相关测试应整体 skip。
+# 干净室必须装上它，否则「文档渲染链」这条能力在容器里从未被真正验证过（曾是发布红的根因之一）。
+# pyyaml 不是 agentcore 的运行时依赖（本仓零依赖），但「业务 bridge 存在时」
+# 那一组 colleague/dev 用例会走到 bridge 的 yaml rubric：缺 yaml 时评分静默降级
+# 到 75 分 → 红队驳回 → 用例假红。系统级 python 通常自带 yaml，所以本机不易发现，
+# 干净室（CI）会暴露。实测：装 pyyaml 后 test_colleague_dev_execute_in_worktree 通过。
+test = ["pytest>=7.0", "markdown>=3.4", "pyyaml>=6.0"]
+documents = ["markdown>=3.4", "Pygments>=2.15", "Pillow>=10", "websocket-client>=1.6"]
+
+[project.urls]
+Homepage = "https://github.com/caixuf/super-agent"
+Repository = "https://github.com/caixuf/super-agent"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["agentcore*"]
+
+# sqlite-vec 扩展必须随包分发：召回时按包相对路径查找，不依赖 CWD。
+[tool.setuptools.package-data]
+"agentcore.memory" = ["vendor/*.so", "vendor/vec0", "vendor/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

@@ -1,0 +1,5 @@
+name: capability-alert-outbox
+version: "0.1.0"
+description: "Persist capability drift episodes and lease-fenced alert delivery using the shared durable database; consumes an existing inspector result and has no messaging target by default."
+author: "agentcore"
+provides_hooks: []

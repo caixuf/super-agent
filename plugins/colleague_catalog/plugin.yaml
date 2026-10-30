@@ -1,0 +1,8 @@
+name: colleague-catalog
+version: "0.1.0"
+kind: standalone
+description: "Read-only directory of administrator-configured colleague roles."
+author: agentcore
+provides_tools:
+  - colleague_catalog
+provides_hooks: []

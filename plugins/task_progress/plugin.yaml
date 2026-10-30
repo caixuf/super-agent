@@ -1,0 +1,11 @@
+name: task-progress
+version: "0.1.0"
+kind: standalone
+description: "One editable chat entry per long foreground turn or background task: foreground turns open only after a configurable threshold, and trusted lifecycle hooks update the same entry. Terminal states require host evidence; tool arguments are never displayed."
+author: agentcore
+provides_tools: []
+provides_hooks:
+  - pre_llm_call
+  - pre_tool_call
+  - post_tool_call
+  - on_session_end

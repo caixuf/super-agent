@@ -1,0 +1,19 @@
+--- a/b/gateway/run_turn.py	2026-10-24 10:36:14.998705387 +0800
++++ b/gateway/run_turn.py	2026-10-26 01:33:45.706809772 +0800
+@@ -2162,6 +2162,16 @@
+         Failed runs keep them as breadcrumbs. Only on adapters with ``delete_message``; failures swallowed."""
+         from gateway.run import safe_schedule_threadsafe
+         _cleanup_msg_ids, session_key = turn_ctx._cleanup_msg_ids, turn_ctx.session_key
++        # 终稿是「另发的一条新消息」时（未被抑制），先前那条流式预览就是冗余的：连它一起删。
++        # 不补这段，用户会同时看到「预览」与「终稿」两条 —— 卡片预览（card_replies）正是那一条。
++        # 抑制成立（already_sent）时预览即终稿本身，绝不能删。
++        with suppress(Exception):
++            if not (isinstance(response, dict) and response.get("already_sent")):
++                _holder = getattr(turn_ctx, "stream_consumer_holder", None)
++                _sc_preview = _holder[0] if _holder else None
++                _pid = str(getattr(_sc_preview, "message_id", "") or "")
++                if _pid and _pid != "__no_edit__" and _pid not in _cleanup_msg_ids:
++                    _cleanup_msg_ids = [*_cleanup_msg_ids, _pid]
+         if not (
+             turn_ctx._cleanup_progress
+             and _cleanup_adapter is not None

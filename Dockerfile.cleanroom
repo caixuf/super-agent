@@ -1,0 +1,13 @@
+FROM python:3.12-slim
+
+WORKDIR /workspace
+
+# Install git and python test dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/* \
+    && git config --global --add safe.directory '*' \
+    && pip install --no-cache-dir pytest anyio pytest-xdist
+
+ENV PYTHONPATH=/workspace
+
+CMD ["pytest", "-o", "cache_dir=/tmp/.pytest_cache", "-v", "tests/test_repo_neutrality.py", "tests/test_pool.py", "tests/test_colleague_containment.py", "tests/test_colleague_worker.py"]

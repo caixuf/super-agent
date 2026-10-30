@@ -1,0 +1,66 @@
+name: verify
+
+# 为什么只有这一条 workflow：仓库把「clone 之后怎么开始」收成了一个入口 verify.sh，
+# CI 的职责就是替外部贡献者把那个入口跑一遍 —— 本地没有特权，绿色才可信。
+# 不装 docker、不连消息平台：那两段在 verify.sh 里本来就是「缺依赖记 SKIP」，
+# 让它们在这里静默跳过，比用假凭据跑出假绿更诚实。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # pyproject 声明 requires-python >= 3.9；两端各跑一次，防止只兼容自己那版。
+        python: ["3.9", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install test extras
+        # 用仓库自己声明的 test extra，而不是手写包名：
+        #   test = ["pytest>=7.0", "markdown>=3.4"]
+        # 另外显式装 setuptools —— pyproject 用 setuptools 做 build backend，而
+        # Python 3.12 的 venv 不再自带它，测试里有 setuptools.find_packages 的
+        # 包发现断言。缺它会以 ModuleNotFoundError 直接失败（本仓实测过）：
+        #   184 passed, 1 failed  ->  test_ccp_config_import.py:54
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]" setuptools
+
+      - name: Show interpreter identity
+        # verify.sh 会挑「身上带 pytest 的解释器」；这里把选中者打出来，
+        # 免得红的时候先去怀疑代码而不是环境。
+        run: |
+          python -c "import sys, pytest; print(sys.version); print('pytest', pytest.__version__)"
+
+      - name: Static + unit tests + installer dry-run
+        # TMPDIR 指向短路径：memory recall 的 unix socket 有 108 字节上限，
+        # 长路径会让三条 socket 用例假红（本地实测过，换短 TMPDIR 即过）。
+        env:
+          TMPDIR: /tmp/ck
+        run: |
+          mkdir -p /tmp/ck
+          bash verify.sh
+
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-logs-py${{ matrix.python }}
+          path: |
+            /tmp/verify_unit.log
+            /tmp/verify_dryrun.log
+          if-no-files-found: ignore
