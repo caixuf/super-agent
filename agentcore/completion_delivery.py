@@ -144,7 +144,8 @@ def _colleague_identity(pool: Pool, job: str) -> tuple[str | None, str | None]:
 
 
 def deliver_once(pool: Pool, transport: Optional[Transport], *, lease: float = 60,
-                 limit: int = MAX_SUMMARY_CHARS, skip=(), not_before=None) -> dict[str, Any]:
+                 limit: int = MAX_SUMMARY_CHARS, skip=(), not_before=None,
+                 origin_filter=None) -> dict[str, Any]:
     """Deliver at most one pending completion. Returns a status record, never raises.
 
     ``skip`` is forwarded to the ledger so a caller can leave a receipt it already knows
@@ -152,7 +153,10 @@ def deliver_once(pool: Pool, transport: Optional[Transport], *, lease: float = 6
     """
     if transport is None:
         return {'status': 'unavailable', 'reason': 'no transport configured'}
-    claim = pool.claim_receipt(lease, skip=skip, **({'not_before': not_before} if not_before is not None else {}))
+    claim_options = {'not_before': not_before} if not_before is not None else {}
+    if origin_filter is not None:
+        claim_options['origin_filter'] = origin_filter
+    claim = pool.claim_receipt(lease, skip=skip, **claim_options)
     if claim is None:
         return {'status': 'empty'}
     job, token = claim['receipt'].get('job'), claim['token']
@@ -160,7 +164,7 @@ def deliver_once(pool: Pool, transport: Optional[Transport], *, lease: float = 6
         # A malformed receipt cannot be addressed or acknowledged; leave it pending and say so.
         return {'status': 'invalid_receipt'}
     address = pool.origin(job)
-    if not address:
+    if not address or (origin_filter is not None and not origin_filter(address)):
         return {'status': 'unowned', 'task_id': job,
                 'reason': 'task has no persisted origin; refusing to guess a conversation'}
     try:

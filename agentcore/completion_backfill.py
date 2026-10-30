@@ -90,7 +90,8 @@ def drain(pool: Pool, transport: Any, *, profile: Optional[str] = None,
                  if not routable(address, profile=profile))
     outcomes: list[dict[str, Any]] = []
     for _ in range(limit):
-        outcome = deliver_once(pool, transport, lease=lease, limit=max_summary, skip=skip, not_before=not_before)
+        outcome = deliver_once(pool, transport, lease=lease, limit=max_summary, skip=skip,
+                               not_before=not_before, origin_filter=lambda address: routable(address, profile=profile))
         if outcome['status'] == 'empty':
             if not outcomes:
                 outcomes.append(outcome)

@@ -557,3 +557,46 @@ def test_delivery_health_never_raises_into_the_poller(tmp_path):
     summary = plugin._report_delivery_health(service, stuck, modules={}, fault_grace=0)
     assert summary['parked'] == 1
     assert _alert_events(service.pool) == []
+
+
+def test_routable_receipt_beyond_parked_scan_limit_is_not_blocked(tmp_path, monkeypatch):
+    import agentcore.completion_backfill as backfill
+    pool = Pool(str(tmp_path / 'queue'))
+    # Make the scan page small so this exercises the same boundary without
+    # creating hundreds of workers or sending any real messages.
+    monkeypatch.setattr(backfill, 'pending_addresses',
+                        lambda pool: backfill_pending_with_limit(pool, limit=2))
+    parked = []
+    for n in range(5):
+        job = pool.submit('old-%d' % n, {'goal': 'old'}, replay_safe=True,
+                          origin={'profile': 'test-profile', 'session': 'old'})
+        _finish(pool, job)
+        parked.append(job)
+    deliverable = pool.submit('new', {'goal': 'new'}, replay_safe=True, origin=ORIGIN)
+    _finish(pool, deliverable)
+    transport = Transport()
+    result = drain(pool, transport, profile='test-profile', limit=2)
+    assert result['delivered'] == 1
+    assert [call['idempotency_key'] for call in transport.calls] == [deliverable]
+    assert all(not pool.delivery_record(job)['acknowledged'] for job in parked)
+    with pool.db() as db:
+        assert db.execute('SELECT count(*) FROM outbox WHERE acknowledged=0 AND lease_token IS NOT NULL').fetchone()[0] == 0
+
+
+def backfill_pending_with_limit(pool, *, limit):
+    # The caller monkeypatches pending_addresses, so use the original saved at module load.
+    return _original_pending_addresses(pool, limit=limit)
+
+
+from agentcore.completion_backfill import pending_addresses as _original_pending_addresses
+
+
+def test_changed_origin_is_rechecked_before_transport(tmp_path, monkeypatch):
+    pool = Pool(str(tmp_path / 'queue'))
+    job = pool.submit('routed', {'goal': 'new'}, replay_safe=True, origin=ORIGIN)
+    _finish(pool, job)
+    monkeypatch.setattr(pool, 'origin', lambda _job: dict(ORIGIN, profile='different-profile'))
+    transport = Transport()
+    result = drain(pool, transport, profile='test-profile')
+    assert transport.calls == []
+    assert result['delivered'] == 0 and not pool.delivery_record(job)['acknowledged']

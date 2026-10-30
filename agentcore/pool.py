@@ -302,7 +302,7 @@ class Pool:
         with self.db() as db:
             return [json.loads(r[0]) for r in db.execute('SELECT receipt FROM outbox WHERE acknowledged=0')]
 
-    def claim_receipt(self, lease=60, skip=(), *, not_before=None):
+    def claim_receipt(self, lease=60, skip=(), *, not_before=None, origin_filter=None):
         """Single-consumer lease; transport must dedupe by job across crash windows.
 
         ``skip`` names receipts the caller already knows it cannot address (for example
@@ -317,10 +317,25 @@ class Pool:
         skip = tuple(skip)
         if any(not isinstance(job, str) or not job for job in skip):
             raise ValueError('skip must contain task ids')
+        if origin_filter is not None and not callable(origin_filter):
+            raise ValueError('origin_filter must be callable')
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             query = 'SELECT * FROM outbox WHERE acknowledged=0 AND (lease_until IS NULL OR lease_until<?)'
             values = [time.time()]
+            if origin_filter is not None:
+                # Apply the address policy inside the same transaction as the
+                # claim. No unaddressable receipt is leased merely because it
+                # lies beyond an operator inspection page.
+                def allowed(raw):
+                    try:
+                        address = json.loads(raw) if raw else None
+                        return int(bool(origin_filter(address)))
+                    except (TypeError, ValueError):
+                        return 0
+                db.create_function('agentcore_receipt_addressable', 1, allowed)
+                query += (' AND EXISTS (SELECT 1 FROM jobs WHERE jobs.id=outbox.job '
+                          'AND agentcore_receipt_addressable(jobs.origin)=1)')
             if not_before is not None:
                 query += ' AND EXISTS (SELECT 1 FROM jobs WHERE jobs.id=outbox.job AND jobs.created>=?)'
                 values.append(not_before)
