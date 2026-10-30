@@ -45,3 +45,19 @@ def test_process_reuse_is_not_reported_as_one_sample(tmp_path):
 def test_invalid_interval_is_rejected_before_reading(tmp_path):
     with pytest.raises(ValueError, match='scope'):
         process_pressure.sample(123, interval=60, proc_root=tmp_path)
+
+
+def test_process_reuse_inside_snapshot_is_rejected(tmp_path, monkeypatch):
+    from pathlib import Path
+    write_snapshot(tmp_path)
+    read_text = Path.read_text
+    switched = []
+    def read_and_replace(path, *args, **kwargs):
+        text = read_text(path, *args, **kwargs)
+        if path.name == 'vmstat' and not switched:
+            switched.append(True)
+            write_snapshot(tmp_path, start=200)
+        return text
+    monkeypatch.setattr(Path, 'read_text', read_and_replace)
+    with pytest.raises(ValueError, match='during snapshot'):
+        process_pressure._snapshot(123, tmp_path)

@@ -36,6 +36,13 @@ def _snapshot(pid: int, proc_root: Path):
             host[parts[0]] = int(parts[1])
     if set(host) != {'pswpin', 'pswpout', 'pgmajfault'}:
         raise ValueError('host counters unavailable')
+    # The process can exit and its PID be reused between reading stat and
+    # status. Check the identity again before reporting status values.
+    last_stat = (path / 'stat').read_text()
+    last_end = last_stat.rfind(')')
+    last_fields = last_stat[last_end + 2:].split() if last_end >= 0 else []
+    if len(last_fields) < 20 or last_fields[19] != fields[19]:
+        raise ValueError('process identity changed during snapshot')
     return {'state': fields[0], 'major_faults': int(fields[9]),
             'cpu_ticks': int(fields[11]) + int(fields[12]), 'start_ticks': int(fields[19]),
             'rss_kib': status.get('VmRSS'), 'swap_kib': status.get('VmSwap'), 'host': host}
