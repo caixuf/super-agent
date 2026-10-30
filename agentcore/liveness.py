@@ -421,8 +421,18 @@ class LivenessLedger:
             verdict = "stalled"
         else:
             verdict = "running"
+        note = None
+        if verdict == "running" and alive is True and heartbeat_age > self.stall_seconds:
+            note = ("进程仍可见，但最后心跳已是 %.0f 秒前；仅凭进程存在不能确认任务仍有进展。"
+                    % heartbeat_age)
+        elif verdict == "stalled":
+            note = ("最后心跳已是 %.0f 秒前，且没有可核验的进程；任务结果尚未确认。"
+                    % heartbeat_age)
+        elif verdict == "lost":
+            note = "无法确认原进程仍在；仅凭进程不可见不能判断任务最终结果。"
         row.update({
             "ok": True,
+            "liveness_note": note,
             "elapsed_s": round(elapsed, 1),
             "heartbeat_age_s": round(heartbeat_age, 1),
             "pid_alive": alive,

@@ -94,6 +94,7 @@ def test_sweep_marks_pidless_silence_stalled_once(ledger):
     assert changed[0]["previous_state"] == "running"
     assert changed[0]["state"] == "stalled"
     assert "no heartbeat" in changed[0]["detail"]
+    assert "任务结果尚未确认" in store.inspect("t1")["liveness_note"]
     assert store.sweep() == []
 
 
@@ -118,6 +119,7 @@ def test_live_pid_is_not_marked_stalled(ledger):
     assert got["verdict"] == "running"
     assert got["pid_alive"] is True
     assert got["quiet"] is True
+    assert "进程仍可见" in got["liveness_note"] and "不能确认任务仍有进展" in got["liveness_note"]
 
 
 def test_dead_pid_becomes_lost_not_done(ledger):
@@ -126,7 +128,9 @@ def test_dead_pid_becomes_lost_not_done(ledger):
     clock.advance(5)
     changed = store.sweep(pid_alive=lambda pid, start: False)
     assert changed and changed[0]["state"] == "lost"
-    assert store.inspect("t1", pid_alive=lambda pid, start: False)["verdict"] == "lost"
+    result = store.inspect("t1", pid_alive=lambda pid, start: False)
+    assert result["verdict"] == "lost"
+    assert "不能判断任务最终结果" in result["liveness_note"]
 
 
 def test_heartbeat_clears_stalled_observation(ledger):
