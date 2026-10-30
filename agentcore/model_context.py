@@ -352,6 +352,24 @@ def check_config(catalog: Catalog, config: Dict[str, Any], model: str) -> List[s
     return warnings
 
 
+
+def check_compression_budget(config: Dict[str, Any], budget_tokens: int) -> List[str]:
+    """Compare a user-chosen performance budget with the configured trigger.
+
+    The trigger is not a hard ceiling: one large turn can overshoot it and
+    compression can fail. This check never changes a profile.
+    """
+    if isinstance(budget_tokens, bool) or not isinstance(budget_tokens, int) or budget_tokens <= 0:
+        raise ValueError('budget_tokens must be a positive integer')
+    if _lookup(config, 'compression', 'enabled') is False:
+        return ['compression is disabled; the chosen performance budget is not enforced']
+    threshold = _positive_int(_lookup(config, 'compression', 'threshold_tokens'))
+    if threshold is not None and threshold > budget_tokens:
+        return [f'compression.threshold_tokens={threshold} exceeds the chosen '
+                f'performance budget {budget_tokens}; compression may not start before that budget']
+    return []
+
+
 def _print_report(catalog: Catalog, model: str, warnings: List[str]) -> None:
     window = catalog.effective(model)
     print(f"base_url: {catalog.base_url}")
@@ -373,6 +391,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--model", default="")
     parser.add_argument("--config", default="", help="profile config.yaml used for model/provider defaults")
     parser.add_argument("--timeout", type=float, default=_DEFAULT_TIMEOUT)
+    parser.add_argument("--performance-budget-tokens", type=int, default=None,
+                        help="optional workload budget to compare with compression trigger")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
@@ -394,6 +414,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"probe failed: {error}", file=sys.stderr)
         return 2
     warnings = check_config(catalog, config, model) if config else []
+    if args.performance_budget_tokens is not None:
+        try:
+            warnings.extend(check_compression_budget(config, args.performance_budget_tokens))
+        except ValueError as error:
+            parser.error(str(error))
     if args.json:
         window = catalog.effective(model)
         payload = {

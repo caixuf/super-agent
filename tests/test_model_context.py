@@ -175,3 +175,19 @@ def test_cli_returns_one_when_the_model_has_no_window(tmp_path, monkeypatch, cap
 
     assert code == 1
     assert payload['context_length'] is None
+
+
+def test_performance_budget_is_independent_of_catalog_window():
+    config = {'compression': {'threshold_tokens': 900000}}
+    warnings = mc.check_compression_budget(config, 200000)
+    assert len(warnings) == 1 and '900000' in warnings[0] and '200000' in warnings[0]
+    assert mc.check_compression_budget(config, 900000) == []
+    assert mc.check_compression_budget({}, 200000) == []
+    assert 'disabled' in mc.check_compression_budget({'compression': {'enabled': False}}, 200000)[0]
+
+
+def test_performance_budget_rejects_non_positive_and_boolean():
+    import pytest
+    for value in (0, -1, True):
+        with pytest.raises(ValueError):
+            mc.check_compression_budget({}, value)
