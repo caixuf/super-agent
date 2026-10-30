@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import socket
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
@@ -16,6 +17,7 @@ class CcpAnalysisModelError(RuntimeError):
 
 
 _MAX_RESPONSE_BYTES = 512_000
+_logger = logging.getLogger(__name__)
 
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, msg, headers, newurl):
@@ -122,9 +124,32 @@ def model(messages, **options):
         with _open_request(request, timeout) as response:
             body = response.read(_MAX_RESPONSE_BYTES + 1)
         return _response(body)
-    except CcpAnalysisModelError:
+    except CcpAnalysisModelError as exc:
+        code = str(exc)
+        allowed = {"unsafe_ccp_endpoint", "response_too_large",
+                   "invalid_provider_response", "provider_output_truncated",
+                   "tool_response_rejected"}
+        _logger.warning("CCP analysis model failure: %s",
+                        code if code in allowed else "adapter_error")
         raise
     except RuntimeError:
+        _logger.warning("CCP analysis model failure: credentials_unavailable")
         raise CcpAnalysisModelError("ccp_credentials_unavailable") from None
-    except (HTTPError, URLError, TimeoutError, socket.timeout, OSError, ValueError):
+    except HTTPError as exc:
+        # Only an explicit allowlist of categories: never log URL, headers or body.
+        category = ("rate_limited" if exc.code == 429 else
+                    "auth_rejected" if exc.code in (401, 403) else
+                    "provider_5xx" if isinstance(exc.code, int) and 500 <= exc.code <= 599 else
+                    "http_other")
+        _logger.warning("CCP analysis model failure: %s", category)
+        raise CcpAnalysisModelError("ccp_request_failed") from None
+    except (TimeoutError, socket.timeout):
+        _logger.warning("CCP analysis model failure: timeout")
+        raise CcpAnalysisModelError("ccp_request_failed") from None
+    except URLError as exc:
+        category = "timeout" if isinstance(exc.reason, (TimeoutError, socket.timeout)) else "connection"
+        _logger.warning("CCP analysis model failure: %s", category)
+        raise CcpAnalysisModelError("ccp_request_failed") from None
+    except (OSError, ValueError):
+        _logger.warning("CCP analysis model failure: connection")
         raise CcpAnalysisModelError("ccp_request_failed") from None
