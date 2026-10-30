@@ -8,15 +8,20 @@ from agentcore.colleague_provisioner import InstanceSpec, Provisioner
 from agentcore.colleague_registry import Registry, Actor, Supervisor
 
 
-SOURCE = Path('<hermes-install>')
+SOURCE = Path(os.environ.get('HERMES_STAGING_SOURCE', '~/.hermes/hermes-agent')).expanduser()
 PYTHON = SOURCE / 'venv/bin/python'
 SITES = list((SOURCE / 'venv/lib').glob('python*/site-packages'))
 
 
 @pytest.fixture
 def backend(tmp_path):
+    # Host-coupled by design: the sandbox needs a real Hermes install to copy in, and bubblewrap
+    # to isolate it. Point HERMES_STAGING_SOURCE at an install (any path, not a personal one) to
+    # exercise this; the default is the standard install location. A skip here means "no runtime
+    # to test against", never "the sandbox works".
     if not (SOURCE.is_dir() and PYTHON.exists() and SITES and Path('/usr/bin/bwrap').is_file()):
-        pytest.skip('local Hermes runtime and bubblewrap are not installed')
+        pytest.skip('no Hermes install with a venv, or no bubblewrap: set HERMES_STAGING_SOURCE '
+                    '(looked at %s)' % SOURCE)
     registry = Registry(tmp_path / 'registry.sqlite', profile_id='team', primary_id='leader')
     actor, host = Actor('team', 'leader'), Supervisor('team')
     registry.define_role(actor=actor, role_id='review', label='Review', duty='Check reports',
