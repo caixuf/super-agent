@@ -35,7 +35,7 @@
 | 运维与审计工具 | `tools/` | —— | 部署复验 `redeploy_check.py`、T6 缺口审计 `t6_gap_audit.py`、AI 定时作业编译器 `tools/autotask/`、文档架构浏览器等 |
 | 文档 | `docs/` | —— | `MIGRATION.md`（八层迁移清单 + 资产表）、`PLUGINS.md`（插件/MCP/工具集注册）、`POOL_RUNTIME.md`、`DISPATCH_ANALYSIS.md`、`REDEPLOY.md` |
 | 平台适配补丁 | `patches/` | `<HERMES_HOME>/agentcore/patches/` | 消息平台适配：Card 2.4 流式卡片 + 纯文字审批；幂等重放与内容探针校验 |
-| 插件集 | `plugins/` | `<HERMES_HOME>/plugins/<name>` + profile `config.yaml` 的 `plugins.enabled` | `longtask_guard/`（前台长任务自动转后台 + 心跳/账本登记）、`task_status/`（长任务活体快照：state/elapsed/heartbeat age/tail）、`durable_dispatch/`（持久任务提交与状态查询）、`colleague_team/` 与 `colleague_catalog/`（研发团队管理与目录呈现）、`markdown_delivery/`（大文档直发与租户级共享）、`write_guard/`（写保护门禁）等 12 款通用插件 |
+| 插件集 | `plugins/` | `<HERMES_HOME>/plugins/<name>` + profile `config.yaml` 的 `plugins.enabled` | `longtask_guard/`（前台长任务自动转后台 + 心跳/账本登记）、`task_status/`（长任务活体快照：state/elapsed/heartbeat age/tail）、`durable_dispatch/`（持久任务提交与状态查询）、`colleague_team/` 与 `colleague_catalog/`（研发团队管理与目录呈现）、`markdown_delivery/`（大文档直发与租户级共享）、`write_guard/`（写保护门禁）等 13 款通用插件 |
 | 安装器 | `install/install.sh` | —— | 幂等、`--dry-run` 零副作用、不启停服务、不碰凭据、不覆盖现场身份 |
 | 干净室验证 | `docker/` | —— | 容器里从一个空 HOME 装一遍，20 项断言 |
 | 迁移口径 | `docs/MIGRATION.md` | —— | 「只在盘上」的漏项清单 + 可量化验收 |
