@@ -5,7 +5,7 @@
          from gateway.run import safe_schedule_threadsafe
          _cleanup_msg_ids, session_key = turn_ctx._cleanup_msg_ids, turn_ctx.session_key
 +        # 终稿是「另发的一条新消息」时（未被抑制），先前那条流式预览就是冗余的：连它一起删。
-+        # 不补这段，用户会同时看到「预览」与「终稿」两条 —— 飞书卡片预览（card_replies）正是那一条。
++        # 不补这段，用户会同时看到「预览」与「终稿」两条 —— 卡片预览（card_replies）正是那一条。
 +        # 抑制成立（already_sent）时预览即终稿本身，绝不能删。
 +        with suppress(Exception):
 +            if not (isinstance(response, dict) and response.get("already_sent")):

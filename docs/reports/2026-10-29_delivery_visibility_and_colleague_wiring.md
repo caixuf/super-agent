@@ -1,7 +1,7 @@
 # 2026-10-29 · 回执可见性与同事链接通（super-agent + <profile-b>高手 + caixuf高手）
 
 范围：本仓（super-agent）的交互/投递模块改动，以及它在两台机器上的两个应用
-（emily `<profile-b>` = 团队测试 Bot、本机 `caixuf` = caixuf高手）的部署与实测。
+（远端宿主 `<profile-b>` = 团队测试 Bot、本机 `caixuf` = caixuf高手）的部署与实测。
 本页只写**跑过、看过**的东西；未做的一律标"未做"。
 
 ## 1. 起因（现场证据，不是推测）
@@ -9,7 +9,7 @@
 | 现象 | 物证 |
 | :--- | :--- |
 | <profile-b> 会话里"派工了但聊天看不到，结论只留在队列库" | 它自己的 T2 状态表：`t2-natural-a88ef5ab…`「派工验证：durable_submit 自然语言派单给阿证」→ **回执未投递**（2026-10-27 13:21） |
-| 队列里躺着永远投不出去的回执 | emily `analysis-queue/pool.db`：outbox 25 条、**未 ACK 21 条**、`delivered=0`；其中 **4 条 `origin=NULL`**（10-26 23:49 准入，早于路由持久化），其余目标是一次性 `api_server` 会话（早已不存在）；`origin_repairs` 空 |
+| 队列里躺着永远投不出去的回执 | 远端宿主 `analysis-queue/pool.db`：outbox 25 条、**未 ACK 21 条**、`delivered=0`；其中 **4 条 `origin=NULL`**（10-26 23:49 准入，早于路由持久化），其余目标是一次性 `api_server` 会话（早已不存在）；`origin_repairs` 空 |
 | 引擎对积压**静默** | `plugins/durable_dispatch` 的 backfill 线程调了 `service.drain_delivery(...)` 却**丢弃返回值**，只在抛异常时打一行 `completion backfill failed: <类型>` |
 | 同事名册"看着在、其实没用" | <profile-b> 全历史 10,627 条含工具调用的消息里 `durable_submit/status/cancel` **0 次**、`colleague_*` **0 次**；`delegate_task` 38 次但最新一次停在 10-26 14:52 |
 | 名册类插件"假启用" | `colleague-catalog`/`colleague-team` 在 `plugins.enabled` 里，但缺 `plugins.entries.<name>.settings.enabled` → `register()` 首行即 return，工具面里没有任何工具 |
@@ -46,7 +46,7 @@
    - 证据：相关 5 个测试文件 94 passed，且**真实账本行数与字节数前后一致**；全量 `verify.sh` 复跑同样前后一致。
 
 7. **长任务账本落账（引擎，另一处同源缺陷）** `plugins/longtask_guard/__init__.py`
-   - 现场证据：emily 的守卫当天转后台 **27 次**，而该 profile 的 `liveness.db` **一条行都没有** ——
+   - 现场证据：远端宿主 的守卫当天转后台 **27 次**，而该 profile 的 `liveness.db` **一条行都没有** ——
      `post_tool_call` 拿到的是**模型原始参数**（不含 `background`），旧判定直接 return，身份从未登记，
      `task_status` 因此无账可读。
    - 改法：**回执本身就是证据** —— spawn 回执（`output == "Background process started"` + `session_id`）
@@ -64,7 +64,7 @@
 
 ## 3. 两个应用的部署与实测
 
-| 项 | emily（<profile-b>高手） | 本机（caixuf高手） |
+| 项 | 远端宿主（<profile-b>高手） | 本机（caixuf高手） |
 | :--- | :--- | :--- |
 | 仓 | `8c09531 → 3d2e23a`（push + updateInstead） | 本地 `3d2e23a` |
 | 资产 | `install.sh --profile <profile-b>`（幂等） | `install.sh --profile caixuf`（幂等） |
@@ -75,9 +75,9 @@
 | **R1 端到端** | **`ops_alert_outbox` 出现 1 条 `health_fault`**（profile=<profile-b>，scope=`durable-completion-delivery`，gen=1，00:27:19，`observed={'delivered':0,'outcomes':[],'parked':18,'status':'empty'}`）+ `ops_health_conditions` 一条 active episode；`agent.log` 有 `completion delivery backlog: parked=N` | 无（`deliver_completions: false` → 根本没有投递 poller，也就没有健康记录；队列盘点 total 2 / deliverable 1） |
 | **长任务账本** | 修复前：`liveness.db` **不存在**。修复后：**出现 6 行**，含经网关真跑的一条 `('proc_ccf158b9c2ce', '<profile-b>:api-…', 'sleep 25; echo guarded-probe', 'running', 693209, 1)` | 本机账本 561 行，但其中 **457 行是测试 owner**（见 §2.7；真正的 profile 行约占 1/6），17 条 `running` 属死进程，退出读取时才现算 |
 
-> emily 的健康事件**证明了整条链**：poller 看到了 18 条永远投不出去的回执 → 去抖 60s → 入队一条
+> 远端宿主 的健康事件**证明了整条链**：poller 看到了 18 条永远投不出去的回执 → 去抖 60s → 入队一条
 > 持久 fault 事件。这正是过去"静默重试、没人知道"的那一段。
-> emily 的账本行**同样证明了第二处修复**：真派一条会被守卫转后台的命令（走该 profile 的
+> 远端宿主 的账本行**同样证明了第二处修复**：真派一条会被守卫转后台的命令（走该 profile 的
 > `api_server`，不打扰消息平台），账本立刻出现该进程 —— 修复前同一条路径一条都不落。
 
 ## 4. 未做 / 待决策
@@ -89,7 +89,7 @@
 三条拒绝路径也验过（payload sha 不符 / origin 无 route / 已被占用且证明冲突）。
 副本在 `/tmp/qcopy`（一次性，验完即删）。
 2. **ops-alert 发送器**：两台机器都没有配（`OPS_ALERT_*` 未见、无发送器单元）→ 健康事件目前**只落在库里 + 一条 WARNING**，没有外部送达。
-3. **长任务账本的退出回收**：emily 的账本已从"不存在"变为**有行**（见 §3），但行停在 `state=running`
+3. **长任务账本的退出回收**：远端宿主 的账本已从"不存在"变为**有行**（见 §3），但行停在 `state=running`
    —— 退出由 `task_status` 读取时现算；两台机器都**没有 liveness 守护单元**，无人主动 sweep。
    本机那份账本另有**测试污染**问题（见 §2.7 已修）：561 行里 457 行 owner 是 `test-profile:*`/`session-one`,
    只有约 1/6 是真实 profile 的行；要不要清理这批历史噪声，属数据删除，部署方定。

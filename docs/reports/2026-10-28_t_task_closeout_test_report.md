@@ -1,6 +1,6 @@
 # T 任务收尾测试报告：caixuf canary + 实际 profile 实测
 
-日期：2026-10-28。范围：本地 `caixufcanary` 隔离 profile + **实际 caixuf profile**（用户授权）+ 通用仓测试；**未触碰 emily**。caixuf 侧仅补齐 liveness 插件设置并重启网关。
+日期：2026-10-28。范围：本地 `caixufcanary` 隔离 profile + **实际 caixuf profile**（用户授权）+ 通用仓测试；**未触碰 远端宿主**。caixuf 侧仅补齐 liveness 插件设置并重启网关。
 
 ## 一、结论
 
@@ -16,7 +16,7 @@
 | 宿主 | 本地 caixuf 工作站 |
 | 隔离 profile | `~/.hermes/profiles/caixufcanary`（clone 自 caixuf，插件/队列/记忆/账本指向独立 `state/`） |
 | 模型 | 继承 caixuf 的本地 provider，失败时回退第二 provider |
-| 禁用 | emily 未连接；caixuf 主 gateway 在补齐 task-status 设置后重启两次（active_agents=0）；canary 临时 gateway 在测试前清理 |
+| 禁用 | 远端宿主 未连接；caixuf 主 gateway 在补齐 task-status 设置后重启两次（active_agents=0）；canary 临时 gateway 在测试前清理 |
 | 账本 | `state/liveness.db`；队列 `state/analysis-queue`；记忆 spool `state/memory-spool` |
 
 ## 三、真实 agent 任务矩阵
@@ -50,7 +50,7 @@
 8. 实际 caixuf 队列 worker 端到端：提交 job `c5cc...`（queued）→ `agentcore.worker.Worker` 领取执行 → status `completed`、`elapsed_s=0.3`、`heartbeat_age_s=0.0`、`verdict=done`；结果 `ok=true`；ledger 同步 `done`。说明真实 caixuf 队列的 claim/lease/runner/产物/状态链路可用。
 9. 实际 caixuf 带图文档：`note.md`（标题 + 3 行表 + mermaid）→ HTML 3,584,881 B、PNG 138,808 B（1500×2125，6766 色），render.json 显示 1 diagram / 0 errors / 0 warnings；agent 还通过文档交付链路生成了一个在线文档链接。PNG 视觉像素核对仍受 vision 后端 `no_db_connection` 限制，结构/PIL 尺寸检查通过。
 
-结论：liveness 已从 canary 验证推进到**实际 caixuf 工具面**。未触碰 emily；caixuf 网关重启是本次唯一生产侧动作。
+结论：liveness 已从 canary 验证推进到**实际 caixuf 工具面**。未触碰 远端宿主；caixuf 网关重启是本次唯一生产侧动作。
 
 补充（T7 实际 profile 只读）：`python3 tools/memory_budget_report.py --profile-dir ~/.hermes/profiles/caixuf --json` → memory 1317/20000（7%）、user 71/8000（1%）、pending 0、over85=false。生产记忆处于健康区间；这不等于保全门禁已启用。
 

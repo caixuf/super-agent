@@ -5,12 +5,12 @@
 ## 先看这三件事
 
 1. super-agent 的未提交改动是**安全止损，不是可部署成品**：已实测子进程清空环境变量后，原 token 扫描会漏掉仍在运行的进程并生成错误的退出证明。当前工作树让 token 扫描不再签发完整退出证明；因此依赖该证明的同事 worker 可能返回失败或结果未知。不要直接部署，先完成可验证隔离并恢复同事功能。
-2. imfl_auto_test 工作树也包含尚未闭环的运行时实验：批次标识、报告归属、取消中/删除中、调度互斥及防误清理。这些改动有意将无法证明结束的真实任务留在待确认状态，可能阻塞队列；不能直接部署。
+2. <platform-root> 工作树也包含尚未闭环的运行时实验：批次标识、报告归属、取消中/删除中、调度互斥及防误清理。这些改动有意将无法证明结束的真实任务留在待确认状态，可能阻塞队列；不能直接部署。
 3. 两个工作树包含其他已有或并发改动，尤其业务仓库的 hermes_bridge、scripts/ci、scripts/ops 和已有交接文件；不要整仓重置、覆盖或混合提交。先逐文件核对归属。
 
 ## super-agent
 
-仓库：/home/caixuf/code/super-agent，当前 master 最新提交 deaf3a7 是模型调用失败的脱敏分类诊断。该提交在本机，是否推送或部署需独立核实。
+仓库：super-agent，当前 master 最新提交 deaf3a7 是模型调用失败的脱敏分类诊断。该提交在本机，是否推送或部署需独立核实。
 
 未提交：agentcore/colleague_containment.py、colleague_hermes_runner.py、colleague_shared_memory.py、colleague_worker.py、pool.py 及相应测试；新增 checks/systemd_containment_probe.py 与 docs/reports/2026-10-30-containment-probe.md。
 
@@ -18,9 +18,9 @@
 
 尚未完成：当前 whole_attempt 仍可能由受信任 launcher 自报，缺少独立核验；系统控制组/容器归属、崩溃恢复、同事成功结案未闭环。还发现 pool 对 replay_safe 任务在租约失效或执行失败后可能自动重派；token 扫描为空并不能证明旧任务已经停止。该重派问题尚未修改或验证，需先构造清空 token、关闭继承锁、保留后台子进程的回归，再设计保留未知状态和安全恢复；不要假设已有隔离能阻止重叠。
 
-## imfl_auto_test
+## <platform-root>
 
-仓库：/home/caixuf/code/imfl_auto_test。完整实验细节和分次验证见 docs/handover/2026-10-30_watchdog_runner_identity.md。新增未跟踪文件也必须保留，尤其 autotest_server/run/result_attempt.py、scripts/report/verify_attempt_manifest.py 和 tests/unit/test_attempt_*.py。
+仓库：<platform-root>。完整实验细节和分次验证见 docs/handover/2026-10-30_watchdog_runner_identity.md。新增未跟踪文件也必须保留，尤其 autotest_server/run/result_attempt.py、scripts/report/verify_attempt_manifest.py 和 tests/unit/test_attempt_*.py。
 
 本地尝试的保护包括：任务领取 attempt 与终态 CAS；不明进程/容器不自动回收；结果批次与分区核验；任务接口避免旧结果直接覆盖状态；取消中、删除中状态阻挡新领取；pidfd 恢复路径；按完整名称和 attempt 过滤 Docker 清理；串行/复测隔离目录。内置 demo 的启动、取消、退出和恢复队列已在本机实测。不同阶段的回归测试曾分别通过 143、225、219 等项；这些不是对当前全部业务工作树的一次完整验收。
 

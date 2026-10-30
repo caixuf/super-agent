@@ -20,7 +20,7 @@
 
 ## 开工前先核实
 
-本指导编写于 2026-10-29，WSL 主开发仓为 `/home/caixuf/code/super-agent`，当时 `master` 为 `63c0a71`，工作区干净，已与远端核对。**开始工作时重新检查，不要假定此状态仍然有效。** `/home/caixuf/code/agentcore` 是另一份较旧检出，避免在错误目录改代码。
+本指导编写于 2026-10-29，WSL 主开发仓为 `super-agent`，当时 `master` 为 `63c0a71`，工作区干净，已与远端核对。**开始工作时重新检查，不要假定此状态仍然有效。** `agentcore` 是另一份较旧检出，避免在错误目录改代码。
 
 当时本机 `caixuf` profile 的忙时输入模式为 `queue`；平台文本流式输出开启，工具进度展示关闭，`durable-dispatch` 的 `deliver_completions` 为 false。任务存活性巡检定时器已运行。上述是该 profile 的当时配置，不代表其他 profile；配置在文件里也不等于运行进程已加载。
 

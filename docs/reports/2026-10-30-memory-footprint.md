@@ -9,8 +9,8 @@
 | 进程 | RSS | Swap | 归属 |
 | --- | --- | --- | --- |
 | node（Antigravity IDE server） | 2.88 GiB | 534 MiB | 外部 IDE |
-| local_model_gateway | 1.4 GiB | 1.0 GiB | imfl_auto_test |
-| omp | 549 MiB | 42 MiB | imfl_auto_test |
+| local_model_gateway | 1.4 GiB | 1.0 GiB | <platform-root> |
+| omp | 549 MiB | 42 MiB | <platform-root> |
 | hermes 网关（pid 3131951） | 523 MiB | 61 MiB | 本仓宿主 |
 | bge-m3-sidecar | 463 MiB | 1.15 GiB | 嵌入服务 |
 

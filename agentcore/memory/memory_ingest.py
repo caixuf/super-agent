@@ -278,7 +278,7 @@ def ingest_paths(paths: Iterable[str], *, kind: str = "technical",
         return summary
 
     # 批量灌入是「可重跑」的批处理：每条记录付一次 fsync 不值得。
-    # 实测 emily 上默认 FULL 只有 1.4~8.7 条/秒（fsync 73ms/次），
+    # 实测远端宿主上默认 FULL 只有 1.4~8.7 条/秒（fsync 73ms/次），
     # 一次性灌 7 本书要跑一整天。设成 NORMAL 后 474 条/秒。
     # 必须在 import memory_store **之前**设好 —— 开关在建连接时读取。
     os.environ.setdefault("MEMORY_BULK_INGEST", "1")

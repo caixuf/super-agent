@@ -5,7 +5,7 @@
 set -euo pipefail
 
 REMOTE_HOST="${AGENTCORE_REMOTE_HOST:-remote-host}"
-REMOTE_CODE_DIR="${AGENTCORE_REMOTE_DIR:-/home/emily/code/agentcore}"
+REMOTE_CODE_DIR="${AGENTCORE_REMOTE_DIR:-$HOME/code/agentcore}"
 REMOTE_PROFILE_DIR="${AGENTCORE_PROFILE_DIR:-/mnt/nvme_ntfs/agents/hermes/profiles/remote}"
 REMOTE_SERVICE="${AGENTCORE_SERVICE:-hermes-gateway-remote.service}"
 LOCAL_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

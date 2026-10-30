@@ -175,8 +175,7 @@ class ColleagueDevOrchestrator:
             candidates = [
                 Path(os.environ.get("AUTOTEST_PLATFORM_ROOT", "")),
                 Path.home() / "code" / default_pkg,
-                Path("/home/caixuf/code") / default_pkg,
-                Path("/home/emily") / default_pkg,
+                Path.home() / "code" / default_pkg,
                 Path.cwd(),
                 Path.cwd().parent / default_pkg,
             ]

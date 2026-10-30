@@ -39,7 +39,7 @@ def read_token(token: str = "", token_file: str = "") -> str:
 #: The gateway is a private endpoint on the model host (loopback or the direct
 #: cable link). urllib honours ``http_proxy``/``https_proxy``, and the gateway
 #: process runs behind mihomo on this profile, so an inherited proxy would send
-#: 192.168.137.x through a foreign egress. Build an explicit no-proxy opener.
+#: <private-lan>/24 through a foreign egress. Build an explicit no-proxy opener.
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 

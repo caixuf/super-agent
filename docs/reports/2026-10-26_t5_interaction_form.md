@@ -219,5 +219,5 @@ QUEUED ──▶ RUNNING ──▶ DONE        （终态）
 ## 8. 参考
 
 - 本仓参考实现：`agentcore/task_card.py`、`agentcore/card_store.py`、`agentcore/card_emit.py` 及对应测试
-- 既有实现镜像：`patches/feishu_card_replies.patch`（原地编辑整卡）、`patches/feishu_preview_bubble_cleanup.patch`（终稿另发时删预览条）
+- 既有实现镜像：`patches/feishu_card_replies.patch`（原地编辑整卡）、`patches/card_preview_bubble_cleanup.patch`（终稿另发时删预览条）
 - 事故记录：`docs/handover/2026-10-23_guanguan-bridge-and-release-rerun_handover.md`（卡片三病）

@@ -83,7 +83,7 @@ def _db_path() -> Path:
 
 #: 批量灌入时放宽 SQLite 耐久性。
 #:
-#: 实测（emily，2026-10-23）：默认 synchronous=FULL 每条 commit 都要 fsync，
+#: 实测（远端宿主，2026-10-23）：默认 synchronous=FULL 每条 commit 都要 fsync，
 #: 该盘 fsync 均值 73ms、峰值 117ms，写入被钉在 1.4~8.7 条/秒；改成 NORMAL
 #: 后同一库同表跑到 474 条/秒（54 倍）。灌书是「可重跑」的批处理，崩了重灌
 #: 即可，不值得为每条记录付一次 fsync。
@@ -154,7 +154,7 @@ def _connect() -> sqlite3.Connection:
     # working_fact 曾只有 fact_id 主键索引，而几乎所有热路径都按非主键列过滤：
     #   - 每条 write_fact 先做一次 (user_id,workspace_id,subject,statement) 去重查询
     #   - 召回/统计/巡检反复 `status='active'`
-    # 没有索引就是全表扫描。实测 emily（7.5 万条）建索引前：
+    # 没有索引就是全表扫描。实测远端宿主（7.5 万条）建索引前：
     #   去重查询 7.54ms/次、status 计数 9.51ms/次 —— 灌入被钉在 2.4 条/秒；
     #   建索引后：0.01ms（754 倍）/ 0.51ms（18 倍），灌入 6.8 条/秒。
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_status ON working_fact(status)")
@@ -982,7 +982,7 @@ def recall_facts(
 # ---------------------------------------------------------------------------
 # 向量化后端
 # ---------------------------------------------------------------------------
-# 2026-10-23 实测（emily 发起，同一批文本）：
+# 2026-10-23 实测（远端宿主发起，同一批文本）：
 #   硅基流动 bge-m3（外网）  单次召回 81s
 #   本机 ollama bge-m3       热后 0.077s，维度同为 1024
 # 差 1000 倍，而且外网还会抖。默认走本地 ollama；连不上再回外网，

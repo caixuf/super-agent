@@ -39,7 +39,7 @@ already-public injection surface. The production Hermes tree was not modified.
 - At-least-once: a crash between send and ack can duplicate; the task id is the
   idempotency key.
 
-## Verification (all on emily)
+## Verification (all on 远端宿主)
 
 ```bash
 cd ~/code/agentcore

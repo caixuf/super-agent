@@ -66,8 +66,8 @@ HttpFetcher(*, allowed_hosts, timeout=5.0, max_bytes=262144,
 
 ## Verification
 ```
-ssh emily
-cd /home/emily/code/agentcore
+ssh 远端宿主
+cd agentcore
 TMPDIR=/dev/shm python3 -m pytest tests/test_learning_http_fetcher.py -q
 # 36 passed in 1.67s
 TMPDIR=/dev/shm python3 -m pytest tests/test_learning_http_fetcher.py \
