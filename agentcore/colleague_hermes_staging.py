@@ -23,7 +23,12 @@ os.umask(0o077)
 sys.path[:0] = ['/opt/hermes', sys.argv[1]]
 from hermes_cli.profiles import create_profile
 payload = json.load(sys.stdin)
-create_profile('worker', no_alias=True, no_skills=True, soul=payload['soul'])
+# create_profile() takes no soul= argument, so the role text goes in afterwards. The umask
+# above is what keeps SOUL.md at 0600: a fresh install publishes it as 0664, and the
+# verifier only accepts a private profile.
+profile = create_profile('worker', no_alias=True, no_skills=True)
+with open(os.path.join(profile, 'SOUL.md'), 'w', encoding='utf-8') as out:
+    out.write(payload['soul'])
 '''
 
 
