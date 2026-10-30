@@ -454,7 +454,8 @@ class LivenessLedger:
 
     def sweep(self, *, now: Optional[float] = None,
               pid_alive: Optional[Callable[[Optional[int], Optional[str]], bool]] = None,
-              stall_seconds: Optional[float] = None) -> List[Dict[str, Any]]:
+              stall_seconds: Optional[float] = None,
+              owner: Optional[str] = None) -> List[Dict[str, Any]]:
         """Classify non-terminal tasks; return only rows whose state changed.
 
         * live pid → stays running (silence is reported, not treated as death);
@@ -464,10 +465,15 @@ class LivenessLedger:
         at = self._now() if now is None else float(now)
         threshold = self.stall_seconds if stall_seconds is None else float(stall_seconds)
         checker = pid_alive or is_pid_alive
+        if owner is not None and (not isinstance(owner, str) or not owner):
+            raise ValueError('owner must be a nonempty string')
         with self.db() as db:
-            rows = db.execute(
-                "SELECT * FROM task_liveness WHERE state NOT IN ('done','failed','cancelled')"
-            ).fetchall()
+            sql = "SELECT * FROM task_liveness WHERE state NOT IN ('done','failed','cancelled')"
+            params = ()
+            if owner is not None:
+                sql += " AND owner=?"
+                params = (owner,)
+            rows = db.execute(sql, params).fetchall()
             changed: List[Dict[str, Any]] = []
             for row in rows:
                 old = row["state"]
@@ -482,10 +488,12 @@ class LivenessLedger:
                     detail = "no heartbeat for %ds" % int(at - float(row["heartbeat_at"]))
                 if new == old:
                     continue
-                db.execute(
+                cursor = db.execute(
                     "UPDATE task_liveness SET state=?, updated_at=?, detail=?, seq=seq+1 "
-                    "WHERE task_id=? AND state=?",
-                    (new, at, detail, row["task_id"], old))
+                    "WHERE task_id=? AND state=? AND owner IS ?",
+                    (new, at, detail, row["task_id"], old, row["owner"]))
+                if cursor.rowcount != 1:
+                    continue
                 out = _row_dict(row)
                 out.update({"previous_state": old, "state": new, "detail": detail,
                             "updated_at": at})

@@ -157,7 +157,7 @@ def _handle(args, *, session_id=None, task_id=None, user_task=None):
             # silence: a live pid stays ``running``, a gone pid becomes ``lost``, and no pid
             # plus a stale heartbeat becomes ``stalled``.
             try:
-                ledger.sweep()
+                ledger.sweep(owner=owner)
             except Exception:  # noqa: BLE001 — a failed sweep must not break the read
                 logger.debug("task_status sweep failed", exc_info=True)
             tasks = ledger.list_tasks(owner=owner,
