@@ -33,6 +33,7 @@ import atexit
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -52,6 +53,17 @@ EBM_UNKNOWN = "unknown"
 def _pack_vector(vec: Sequence[float]) -> bytes:
     """浮点列表打包为二进制 float32 字节流（小端存储）。"""
     return struct.pack(f"<{len(vec)}f", *vec)
+
+
+
+def _valid_embedding(vec: Sequence[float]) -> bool:
+    """Reject malformed vectors before they can enter the cache or database."""
+    try:
+        return (len(vec) == get_config().embed_dim
+                and all(math.isfinite(float(value)) for value in vec)
+                and len(_pack_vector(vec)) == get_config().embed_dim * 4)
+    except (TypeError, ValueError, OverflowError, struct.error):
+        return False
 
 
 def _unpack_vector(blob: bytes) -> List[float]:
@@ -1063,6 +1075,8 @@ _EMBED_BATCH = 200
 #: 嵌入结果缓存：key 是文本内容（不是 fact_id）—— 同一句话在不同事实里也只算一次
 _EMBED_CACHE: Dict[str, List[float]] = {}
 _EMBED_CACHE_LOCK = threading.Lock()
+_EMBED_CACHE_CONFIG = None
+_EMBED_CACHE_BINDING = None
 _EMBED_CACHE_MAX = 4000
 
 
@@ -1129,22 +1143,55 @@ def _text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def _persist_fact_embedding(fact_id: str, text: str, vec: Sequence[float], model: str = DEFAULT_EMBED_MODEL) -> None:
-    """将事实文本向量持久化到 fact_embeddings 表（并同步 vec0 索引）。"""
-    if not fact_id or not vec:
+_EMBEDDING_UNGUARDED = object()
+
+
+def _persist_fact_embedding(fact_id: str, text: str, vec: Sequence[float], model: str = DEFAULT_EMBED_MODEL,
+                            *, expected_user_id: Optional[str] = None,
+                            expected_embedding=_EMBEDDING_UNGUARDED,
+                            expected_index=_EMBEDDING_UNGUARDED) -> None:
+    """Persist a background result only while its source fact still matches."""
+    if not fact_id or model != DEFAULT_EMBED_MODEL or not _valid_embedding(vec):
+        logging.getLogger(logger_name("store")).warning("忽略无效或模型不匹配的记忆向量")
         return
     blob = _pack_vector(vec)
     thash = _text_hash(text)
     conn = _connect()
     try:
-        # 先确保 vec0 虚拟表存在。这个包不能假设调用方已经初始化过 ——
-        # 独立使用时没人会记得先调 ensure_table，结果是向量静默写不进去，
-        # 召回全靠回退路径（实测：新环境写入成功但召回 0 命中）。
+        # ensure_table commits internally; it must run before the write lock.
+        index_available = False
         try:
-            from . import vec_index as _vi
-            _vi.ensure_table(conn, dim=len(vec))
-        except Exception as exc:  # noqa: BLE001 —— 可选加速层
+            from . import vec_index
+            index_available = vec_index.ensure_table(conn, dim=len(vec))
+        except Exception as exc:  # noqa: BLE001 —— optional acceleration
             logging.getLogger(logger_name("store")).debug("建向量表失败: %s", exc)
+        conn.execute("BEGIN IMMEDIATE")
+        fact = conn.execute(
+            "SELECT subject,statement,status,user_id FROM working_fact WHERE fact_id=?", (fact_id,)
+        ).fetchone()
+        if (not fact or fact["status"] not in ("active", "candidate")
+                or (expected_user_id is not None and fact["user_id"] != expected_user_id)):
+            conn.rollback()
+            return
+        current_text = ((fact["subject"] or "") + " " + (fact["statement"] or "")).strip()
+        if current_text != text:
+            conn.rollback()
+            return
+        if expected_embedding is not _EMBEDDING_UNGUARDED:
+            previous = conn.execute(
+                "SELECT model,dim,vector,text_hash,updated_at FROM fact_embeddings WHERE fact_id=?",
+                (fact_id,)).fetchone()
+            if (tuple(previous) if previous is not None else None) != expected_embedding:
+                conn.rollback()
+                return
+        if expected_index is not _EMBEDDING_UNGUARDED:
+            if not index_available:
+                conn.rollback()
+                return
+            previous_index = conn.execute('SELECT embedding FROM vec_facts WHERE fact_id=?', (fact_id,)).fetchone()
+            if (previous_index[0] if previous_index is not None else None) != expected_index:
+                conn.rollback()
+                return
         conn.execute(
             "INSERT INTO fact_embeddings(fact_id, model, dim, vector, text_hash, updated_at)"
             " VALUES (?,?,?,?,?,?)"
@@ -1152,16 +1199,16 @@ def _persist_fact_embedding(fact_id: str, text: str, vec: Sequence[float], model
             " vector=excluded.vector, text_hash=excluded.text_hash, updated_at=excluded.updated_at",
             (fact_id, model, len(vec), blob, thash, time.strftime("%Y-%m-%dT%H:%M:%S")),
         )
-        # 同步写一份到 vec0 索引（可选层）：规模化后 KNN 走 C 实现，
-        # 比 Python 逐条点乘快一个数量级。写失败不影响主流程。
-        try:
-            from . import vec_index
-            vec_index.upsert(conn, [(fact_id, list(vec))], dim=len(vec))
-        except Exception as exc:  # noqa: BLE001 —— 可选加速层，失败即回退
-            logging.getLogger(logger_name("store")).debug("写向量索引失败: %s", exc)
+        if index_available:
+            # Keep the existing index and embedding together if either write
+            # fails: committing only the new embedding would leave KNN using
+            # an older vector without any persistent indication of staleness.
+            conn.execute("DELETE FROM vec_facts WHERE fact_id=?", (fact_id,))
+            conn.execute("INSERT INTO vec_facts(fact_id, embedding) VALUES (?, ?)", (fact_id, blob))
         conn.commit()
     except Exception as exc:  # noqa: BLE001
-        logging.getLogger(logger_name("store")).debug("持久化向量失败: %s", exc)
+        conn.rollback()
+        logging.getLogger(logger_name("store")).warning("持久化向量失败: %s", exc)
     finally:
         conn.close()
 
@@ -1199,6 +1246,11 @@ def reindex_embeddings(user_id: Optional[str] = None, model: str = DEFAULT_EMBED
     
     默认只对尚未生成向量或文本发生变化的事实进行向量化。
     """
+    # The configured embedder does not accept a per-call model argument. Using
+    # another label here would store vectors from that embedder under an
+    # unverified identity and can block the journal-backed read view forever.
+    if model != DEFAULT_EMBED_MODEL:
+        return {"ok": False, "error": "embedding_model_mismatch"}
     user_id = user_id or get_config().default_user
     conn = _connect()
     try:
@@ -1214,7 +1266,7 @@ def reindex_embeddings(user_id: Optional[str] = None, model: str = DEFAULT_EMBED
             text = ((r["subject"] or "") + " " + (r["statement"] or "")).strip()
             thash = _text_hash(text)
             if force or not r["text_hash"] or r["text_hash"] != thash:
-                to_embed.append((r["fact_id"], text))
+                to_embed.append((r["fact_id"], text, r["subject"], r["statement"]))
                 
         if not to_embed:
             return {"ok": True, "total": len(rows), "updated": 0, "message": "all up-to-date"}
@@ -1226,8 +1278,20 @@ def reindex_embeddings(user_id: Optional[str] = None, model: str = DEFAULT_EMBED
             return {"ok": False, "error": "向量化后端失败", "attempted": len(texts)}
             
         updated = 0
+        skipped_changed = 0
+        accepted = []
         now = time.strftime("%Y-%m-%dT%H:%M:%S")
-        for (fid, text), vec in zip(to_embed, vecs):
+        # Generation can take minutes. Hold a write transaction only during the
+        # final check and write, so a corrected or retired fact cannot receive a
+        # vector for its former contents.
+        conn.execute('BEGIN IMMEDIATE')
+        for (fid, text, subject, statement), vec in zip(to_embed, vecs):
+            current = conn.execute(
+                "SELECT 1 FROM working_fact WHERE fact_id=? AND user_id=? AND status='active' "
+                "AND subject IS ? AND statement IS ?", (fid, user_id, subject, statement)).fetchone()
+            if current is None:
+                skipped_changed += 1
+                continue
             blob = _pack_vector(vec)
             thash = _text_hash(text)
             conn.execute(
@@ -1238,21 +1302,44 @@ def reindex_embeddings(user_id: Optional[str] = None, model: str = DEFAULT_EMBED
                 (fid, model, len(vec), blob, thash, now),
             )
             updated += 1
+            accepted.append((fid, vec, subject, statement))
         conn.commit()
 
         # 同步灌进 vec0 索引：批量导入互联网数据后，这里是唯一让 KNN 生效的地方。
-        indexed = 0
+        index_result = {"available": False, "indexed": 0, "skipped_changed": 0, "failed": 0}
         try:
             from . import vec_index
-            indexed = vec_index.upsert(conn, list(zip([f for f, _ in to_embed], vecs)),
-                                       dim=len(vecs[0]) if vecs else 1024)
-        except Exception as exc:  # noqa: BLE001 —— 可选加速层，失败只影响速度
-            logging.getLogger(logger_name("store")).info("向量索引写入跳过: %s", exc)
+            index_result = vec_index.upsert_current(
+                conn, accepted, user_id=user_id, model=model,
+                dim=len(accepted[0][1]) if accepted else 1024)
+        except Exception as exc:  # noqa: BLE001 —— 可选加速层
+            logging.getLogger(logger_name("store")).warning("向量索引写入失败: %s", exc)
+            index_result["failed"] = len(accepted)
 
-        return {"ok": True, "total": len(rows), "updated": updated,
-                "indexed": indexed, "model": model}
+        complete = not (skipped_changed or index_result["skipped_changed"] or index_result["failed"])
+        result = {"ok": complete, "total": len(rows), "updated": updated,
+                  "skipped_changed": skipped_changed, "indexed": index_result["indexed"],
+                  "index_available": index_result["available"],
+                  "index_skipped_changed": index_result["skipped_changed"],
+                  "index_failed": index_result["failed"], "model": model}
+        if skipped_changed:
+            result["error"] = "facts_changed_during_embedding"
+        elif index_result["skipped_changed"] or index_result["failed"]:
+            result["error"] = "vector_index_incomplete"
+        return result
     finally:
         conn.close()
+
+
+
+def _embedding_binding(cfg):
+    return (cfg.embed_fn, tuple(cfg.embed_fallbacks or ()), cfg.embed_fallbacks_same_model,
+            cfg.embed_dim, DEFAULT_EMBED_MODEL)
+
+
+def _same_embedding_binding(left, right):
+    return (left is not None and left[0] is right[0] and len(left[1]) == len(right[1])
+            and all(a is b for a, b in zip(left[1], right[1])) and left[2:] == right[2:])
 
 
 def _embed_with_cache(texts: Sequence[str]) -> Optional[List[List[float]]]:
@@ -1260,7 +1347,14 @@ def _embed_with_cache(texts: Sequence[str]) -> Optional[List[List[float]]]:
     """带缓存的批量向量化：只有缓存未命中的部分才真正请求后端。"""
     if not texts:
         return []
+    global _EMBED_CACHE_CONFIG, _EMBED_CACHE_BINDING
+    cfg = get_config()
+    binding = _embedding_binding(cfg)
     with _EMBED_CACHE_LOCK:
+        if _EMBED_CACHE_CONFIG is not cfg or not _same_embedding_binding(_EMBED_CACHE_BINDING, binding):
+            _EMBED_CACHE.clear()
+            _EMBED_CACHE_CONFIG = cfg
+            _EMBED_CACHE_BINDING = binding
         cached = [_EMBED_CACHE.get(t) for t in texts]
     missing = [t for t, v in zip(texts, cached) if v is None]
     if not missing:
@@ -1269,7 +1363,14 @@ def _embed_with_cache(texts: Sequence[str]) -> Optional[List[List[float]]]:
     fresh = _embed_texts(missing)
     if fresh is None or len(fresh) != len(missing):
         return None
+    if not all(_valid_embedding(vec) for vec in fresh):
+        logging.getLogger(logger_name("store")).warning("嵌入后端返回了无效向量")
+        return None
     with _EMBED_CACHE_LOCK:
+        if (get_config() is not cfg or _EMBED_CACHE_CONFIG is not cfg
+                or not _same_embedding_binding(_EMBED_CACHE_BINDING, binding)
+                or not _same_embedding_binding(_embedding_binding(cfg), binding)):
+            return None
         if len(_EMBED_CACHE) > _EMBED_CACHE_MAX:
             _EMBED_CACHE.clear()
         for text, vec in zip(missing, fresh):
@@ -1281,28 +1382,32 @@ def _embed_with_cache(texts: Sequence[str]) -> Optional[List[List[float]]]:
 
 
 def _embed_texts(texts: Sequence[str]) -> Optional[List[List[float]]]:
-    """批量向量化：宿主注入的 embed_fn 优先，其次本地 ollama，最后外网，失败返回 None 降级。
+    """使用主嵌入后端；仅在宿主明确声明同模型空间时启用兜底。
 
-    注入优先是为了让宿主能：换任意嵌入后端（不限于 ollama 协议）、
-    以及在离线和测试环境里用确定性实现，不依赖内网服务。
+    未配置注入函数时，内置 Ollama 使用当前配置的模型标识。
     """
     if not texts:
         return []
-    injected = get_config().embed_fn
+    cfg = get_config()
+    injected = cfg.embed_fn
     if injected is not None:
         try:
             out = injected(list(texts))
             if out and len(out) == len(texts):
                 return [list(v) for v in out]
             logging.getLogger(logger_name("store")).warning(
-                "embed_fn 返回长度不符（%s != %s），回退内置后端",
+                "embed_fn 返回长度不符（%s != %s）",
                 len(out or []), len(texts))
-        except Exception as exc:  # noqa: BLE001 —— 注入实现失败也要能降级
-            logging.getLogger(logger_name("store")).warning("embed_fn 调用失败: %s", exc)
+        except Exception as exc:  # noqa: BLE001 —— 不暴露输入内容
+            logging.getLogger(logger_name("store")).warning("embed_fn 调用失败: %s", type(exc).__name__)
+        if not cfg.embed_fallbacks_same_model:
+            return None
     vecs = _embed_via_ollama(texts)
     if vecs is not None:
         return vecs
-    return _embed_via_host_fallbacks(texts)
+    if cfg.embed_fallbacks_same_model:
+        return _embed_via_host_fallbacks(texts)
+    return None
 
 
 def _embed_via_host_fallbacks(texts: Sequence[str]) -> Optional[List[List[float]]]:

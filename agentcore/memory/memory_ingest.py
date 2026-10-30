@@ -315,8 +315,16 @@ def ingest_paths(paths: Iterable[str], *, kind: str = "technical",
         try:
             idx_res = memory_store.reindex_embeddings()
             summary["reindexed"] = idx_res.get("updated", 0)
+            if not idx_res.get("ok"):
+                # Facts and some vectors may already be committed; expose the
+                # partial result so callers do not mistake it for a full import.
+                summary["ok"] = False
+                summary["error"] = "vector_reindex_incomplete"
+                summary["reindex_result"] = idx_res
         except Exception as exc:  # noqa: BLE001
             logger.warning("批量向量化触发失败: %s", exc)
+            summary["ok"] = False
+            summary["error"] = "vector_reindex_failed"
 
     summary.update({"written": written, "skipped": skipped})
     return summary
@@ -340,6 +348,9 @@ def main() -> int:
                        source=args.source)
     if not res.get("ok"):
         print("[ERR]", res.get("error"))
+        if res.get("written"):
+            print("部分结果已提交：写入事实 %d 条，更新向量 %d 条；请检查后再重试。" %
+                  (res["written"], res.get("reindexed", 0)))
         return 1
     print("文件数: %d  切块数: %d  模式: %s" % (
         res["files"], res["chunks"], "试运行" if res["dry_run"] else "写入"))

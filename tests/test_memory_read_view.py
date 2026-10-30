@@ -6,6 +6,187 @@ from agentcore.memory import change_journal as journal,memory_store as store
 from agentcore.memory.read_view import MemoryReadView,ViewPending,ViewInvalid
 
 
+
+
+
+@pytest.mark.parametrize('bad', ['dimension', 'nan', 'infinite', 'overflow'])
+def test_invalid_background_vector_does_not_replace_valid_embedding(engine, bad):
+    fid = seed(engine)
+    conn = engine._connect()
+    try:
+        before = conn.execute('SELECT vector,text_hash FROM fact_embeddings WHERE fact_id=?', (fid,)).fetchone()
+        vec = [0.25] * engine.get_config().embed_dim
+        if bad == 'dimension':
+            vec.pop()
+        elif bad == 'nan':
+            vec[0] = float('nan')
+        elif bad == 'infinite':
+            vec[0] = float('inf')
+        else:
+            vec[0] = 1e300
+        store._persist_fact_embedding(fid, '运行预算 并发预算固定为七个，后台任务不能阻塞主对话', vec)
+        after = conn.execute('SELECT vector,text_hash FROM fact_embeddings WHERE fact_id=?', (fid,)).fetchone()
+        assert tuple(after) == tuple(before)
+    finally:
+        conn.close()
+
+
+def test_invalid_embedding_is_not_cached(engine, monkeypatch):
+    query = 'invalid-vector-not-cached-20261030'
+    calls = []
+    def invalid(texts):
+        calls.append(texts)
+        return [[float('nan')] * engine.get_config().embed_dim]
+    monkeypatch.setattr(store, '_embed_texts', invalid)
+    assert store._embed_with_cache([query]) is None
+    assert store._embed_with_cache([query]) is None
+    assert len(calls) == 2
+
+
+def test_failed_background_index_write_does_not_commit_new_embedding(engine, monkeypatch):
+    from agentcore.memory import vec_index
+    fid = seed(engine)
+    conn = engine._connect()
+    try:
+        if not vec_index.load_into(conn):
+            pytest.skip('sqlite-vec extension unavailable')
+        before = conn.execute('SELECT vector,text_hash FROM fact_embeddings WHERE fact_id=?', (fid,)).fetchone()
+        old_index = conn.execute('SELECT embedding FROM vec_facts WHERE fact_id=?', (fid,)).fetchone()[0]
+        connect = store._connect
+        class FailingIndexConnection:
+            def __init__(self, inner):
+                self.inner = inner
+            def execute(self, sql, *args):
+                if sql.startswith('INSERT INTO vec_facts'):
+                    raise sqlite3.OperationalError('simulated index failure')
+                return self.inner.execute(sql, *args)
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+        monkeypatch.setattr(store, '_connect', lambda: FailingIndexConnection(connect()))
+        text = '运行预算 并发预算固定为七个，后台任务不能阻塞主对话'
+        store._persist_fact_embedding(fid, text, [0.25] * engine.get_config().embed_dim)
+        after = conn.execute('SELECT vector,text_hash FROM fact_embeddings WHERE fact_id=?', (fid,)).fetchone()
+        assert tuple(after) == tuple(before)
+        assert conn.execute('SELECT embedding FROM vec_facts WHERE fact_id=?', (fid,)).fetchone()[0] == old_index
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize('change', ['corrected', 'retired'])
+def test_background_embedding_discards_result_when_fact_changes(engine, monkeypatch, change):
+    fid = seed(engine)
+    conn = engine._connect()
+    try:
+        before = conn.execute('SELECT model,vector,text_hash FROM fact_embeddings WHERE fact_id=?', (fid,)).fetchone()
+        def embed(texts):
+            with conn:
+                if change == 'corrected':
+                    conn.execute('UPDATE working_fact SET statement=? WHERE fact_id=?', ('新事实', fid))
+                else:
+                    conn.execute("UPDATE working_fact SET status='deprecated' WHERE fact_id=?", (fid,))
+            return [[0.25] * engine.get_config().embed_dim]
+        monkeypatch.setattr(store, '_embed_with_cache', embed)
+        store._bg_embed(fid, '运行预算', '并发预算固定为七个，后台任务不能阻塞主对话')
+        after = conn.execute('SELECT model,vector,text_hash FROM fact_embeddings WHERE fact_id=?', (fid,)).fetchone()
+        assert tuple(after) == tuple(before)
+    finally:
+        conn.close()
+
+
+def test_background_embedding_indexes_candidate_fact(engine):
+    result = engine.write_fact('候选事实需要向量', subject='候选', initial_status='candidate',
+                               resolve_conflict=False, dedupe_by_statement=False)
+    engine.flush_background(timeout=30)
+    conn = engine._connect()
+    try:
+        row = conn.execute('SELECT text_hash FROM fact_embeddings WHERE fact_id=?', (result['fact_id'],)).fetchone()
+        assert row['text_hash'] == store._text_hash('候选 候选事实需要向量')
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='vec_facts'").fetchone():
+            assert conn.execute('SELECT 1 FROM vec_facts WHERE fact_id=?', (result['fact_id'],)).fetchone()
+    finally:
+        conn.close()
+
+
+def test_reindex_rejects_unverified_model_before_read_or_write(monkeypatch):
+    from agentcore.memory import memory_store
+    def unexpected():
+        pytest.fail('mismatched model must not access the database')
+    monkeypatch.setattr(memory_store, '_connect', unexpected)
+    result = memory_store.reindex_embeddings(model=memory_store.DEFAULT_EMBED_MODEL + '-other')
+    assert result == {'ok': False, 'error': 'embedding_model_mismatch'}
+
+
+def test_reindex_skips_fact_corrected_during_embedding(engine, monkeypatch):
+    fid = seed(engine)
+    conn = engine._connect()
+    try:
+        before = conn.execute('SELECT model,vector,text_hash FROM fact_embeddings WHERE fact_id=?', (fid,)).fetchone()
+        def embed(texts):
+            with conn:
+                conn.execute('UPDATE working_fact SET statement=? WHERE fact_id=?', ('已修正的新事实', fid))
+            return [[0.25] * engine.get_config().embed_dim for _ in texts]
+        monkeypatch.setattr(store, '_embed_with_cache', embed)
+        result = store.reindex_embeddings(force=True)
+        after = conn.execute('SELECT model,vector,text_hash FROM fact_embeddings WHERE fact_id=?', (fid,)).fetchone()
+        assert not result['ok'] and result['error'] == 'facts_changed_during_embedding'
+        assert result['updated'] == 0 and result['skipped_changed'] == 1
+        assert tuple(after) == tuple(before)
+    finally:
+        conn.close()
+
+
+
+def test_reindex_reports_partial_commit_when_only_one_fact_changes(engine, monkeypatch):
+    first = seed(engine)
+    second = engine.write_fact('新会话需要自动召回有效记忆', subject='召回规则')['fact_id']
+    engine.flush_background(timeout=30)
+    conn = engine._connect()
+    try:
+        def embed(texts):
+            with conn:
+                conn.execute('UPDATE working_fact SET statement=? WHERE fact_id=?', ('已修正的新事实', first))
+            return [[0.25] * engine.get_config().embed_dim for _ in texts]
+        monkeypatch.setattr(store, '_embed_with_cache', embed)
+        result = store.reindex_embeddings(force=True)
+        assert not result['ok']
+        assert result['error'] == 'facts_changed_during_embedding'
+        assert result['updated'] == 1 and result['skipped_changed'] == 1
+        row = conn.execute('SELECT text_hash FROM fact_embeddings WHERE fact_id=?', (second,)).fetchone()
+        assert row['text_hash'] == store._text_hash('召回规则 新会话需要自动召回有效记忆')
+    finally:
+        conn.close()
+
+
+
+def test_reindex_reports_index_race_after_embedding_commit(engine, monkeypatch):
+    from agentcore.memory import vec_index
+    seed(engine)
+    monkeypatch.setattr(store, '_embed_with_cache',
+                        lambda texts: [[0.25] * engine.get_config().embed_dim for _ in texts])
+    monkeypatch.setattr(vec_index, 'upsert_current', lambda *args, **kwargs:
+                        {'available': True, 'indexed': 0, 'skipped_changed': 1, 'failed': 0})
+    result = store.reindex_embeddings(force=True)
+    assert result['updated'] == 1
+    assert result['ok'] is False and result['error'] == 'vector_index_incomplete'
+    assert result['index_skipped_changed'] == 1
+
+
+def test_reindex_still_updates_unchanged_fact(engine, monkeypatch):
+    fid = seed(engine)
+    monkeypatch.setattr(store, '_embed_with_cache',
+                        lambda texts: [[0.25] * engine.get_config().embed_dim for _ in texts])
+    result = store.reindex_embeddings(force=True)
+    assert result['ok'] and result['updated'] == 1 and result['skipped_changed'] == 0
+    conn = engine._connect()
+    try:
+        row = conn.execute('SELECT model,dim,text_hash FROM fact_embeddings WHERE fact_id=?', (fid,)).fetchone()
+        assert row['model'] == store.DEFAULT_EMBED_MODEL
+        assert row['dim'] == engine.get_config().embed_dim
+        assert row['text_hash'] == store._text_hash('运行预算 并发预算固定为七个，后台任务不能阻塞主对话')
+    finally:
+        conn.close()
+
+
 def seed(engine):
     result=engine.write_fact('并发预算固定为七个，后台任务不能阻塞主对话',subject='运行预算')
     engine.flush_background(timeout=30)
