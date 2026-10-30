@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 tools/assets/mermaid.min.js
 !tools/assets/mermaid.min.js
+identity/manifests/
+identity/overlays/*.overlay.md
+
