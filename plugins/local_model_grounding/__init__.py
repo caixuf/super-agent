@@ -67,6 +67,9 @@ _ERROR_RE = re.compile(
 _MAX_FAILURE_CHARS = 1600
 _MAX_HISTORY_MESSAGES = 8
 _MAX_INJECTED_HASHES = 16
+#: 保留的会话级判定条数上限。两张表都按会话累积，长跑网关会一直涨。
+_MAX_VERDICT_SESSIONS = 256
+_MAX_INJECTED_SESSIONS = 256
 _INDEX_CHECK_SECONDS = 60.0
 
 
@@ -252,6 +255,18 @@ class Grounding:
             self._launch_build(ignore_throttle=False)
 
     # -- decider -----------------------------------------------------------
+    @staticmethod
+    def _trim_session_keys_locked(table: Dict[str, Any], limit: int) -> None:
+        """把会话级缓存压在上限内，丢最旧的。调用者持有 self._lock。
+
+        丢掉的只是**缓存**：判定会被重新算，注入去重集合丢了则同一段上下文
+        可能被注入两次 —— 后者由 max_context_chars 之外的事实重算成本兜住，
+        但仍优于让表无限增长。
+        """
+        while len(table) > limit:
+            oldest = next(iter(table))
+            table.pop(oldest, None)
+
     def _decide(self, failure: str, session_id: str, source: str) -> Optional[Dict[str, Any]]:
         digest = hashlib.sha256(failure.encode("utf-8", errors="replace")).hexdigest()[:16]
         with self._lock:
@@ -283,6 +298,7 @@ class Grounding:
         }
         with self._lock:
             self._verdicts[session_id] = record
+            self._trim_session_keys_locked(self._verdicts, _MAX_VERDICT_SESSIONS)
         self._audit({
             "kind": "decider", "session_id": session_id, "source": source,
             "available": True, "options": list(PRESCREEN_OPTIONS),
@@ -336,6 +352,7 @@ class Grounding:
                 seen.add(digest)
                 if len(seen) > _MAX_INJECTED_HASHES:
                     self._injected[session_id] = set(list(seen)[-_MAX_INJECTED_HASHES:])
+                self._trim_session_keys_locked(self._injected, _MAX_INJECTED_SESSIONS)
             return {"context": context}
         except Exception as exc:  # a grounding hint must never break a turn
             log.warning("local-model-grounding hook failed: %s", type(exc).__name__)

@@ -81,10 +81,15 @@ def test_worker_executes_queue_and_keeps_request_owner(tmp_path, monkeypatch, ba
     if backend == "flowcoro":
         pytest.importorskip("flowcoro_py")
     root = Path(__file__).resolve().parents[1]
+    marker = tmp_path / "runner-was-executed"
+    monkeypatch.setenv("COLLEAGUE_TEST_MARKER", str(marker))
     (tmp_path / "host_fixture.py").write_text('''
+import os
+from pathlib import Path
 class Runner:
     attempt_containment = "runner_and_descendants"
     def run(self, **kwargs):
+        Path(os.environ["COLLEAGUE_TEST_MARKER"]).write_text("executed")
         return {"execution_state": "fixture", "request_id": kwargs["request_id"],
                 "executed_by": {"member_id": kwargs["member_id"], "generation": kwargs["generation"]},
                 "requested_by": {"profile": kwargs["owner_profile"], "session": kwargs["owner_session"]},
@@ -101,13 +106,12 @@ def bootstrap():
     command = [sys.executable, "-m", "agentcore.colleague_worker", "--bootstrap", "host_fixture:bootstrap"]
     assert Worker(pool, command, workers=1, backend=backend).run(drain=True)["attempts_finished"] == 1
     observed = dispatch.inspect(owner=OWNER, job_id=job)
-    assert observed["state"] == "result_unverified"
-    assert observed["queue_state"] == "completed"
-    assert observed["result"]["result"] == {
-        "execution_state": "fixture", "request_id": "request-1",
-        "executed_by": {"member_id": "alice", "generation": 1},
-        "requested_by": {"profile": "leader", "session": "conversation-a"},
-        "text": "Review the project"}
+    # The self-reported runner contract and empty token scan cannot prove the
+    # whole attempt stopped. Fail closed until a real containment source exists.
+    assert observed["state"] == "failed"
+    assert observed["queue_state"] == "failed"
+    assert observed["result"]["runner_error"] == "colleague_execution_failed_or_unknown"
+    assert not marker.exists(), "uncontained work must be rejected before execution"
     assert pool.origin(job) is None
 
 
@@ -153,7 +157,7 @@ from agentcore.colleague_registry import Registry, Supervisor
 from agentcore.colleague_hermes_runner import HermesColleagueRunner, ProfileBinding, ProcessResult
 def QUIESCED(code, stdout, stderr):
     return ProcessResult(code, stdout, stderr, quiescent=True,
-        containment={"token": "0" * 32, "signalled": [], "survivors": [], "quiescent": True})
+        containment={"token": "0" * 32, "signalled": [], "survivors": [], "quiescent": True, "proof_scope": "whole_attempt"})
 class Ready:
     def status(self, member_id, generation):
         return {"ready": True}

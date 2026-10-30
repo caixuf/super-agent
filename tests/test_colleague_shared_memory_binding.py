@@ -273,8 +273,8 @@ def test_host_supervises_the_memory_runtime_and_stops_it_cleanly(tmp_path):
     finally:
         stopped=supervisor.stop()
     assert stopped["returncode"]==0
-    assert stopped["quiescent"] is True
-    assert stopped["quiescence_evidence_id"]
+    assert stopped["quiescent"] is False
+    assert stopped["quiescence_evidence_id"] is None
     assert supervisor.running() is False
     assert containment.tagged(started["token"])==[]
     assert supervisor.log_path.stat().st_mode&0o077==0

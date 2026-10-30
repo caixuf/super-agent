@@ -237,6 +237,22 @@ for hit in result["results"]:
 
 `docker/engine_smoke.py` 就是这个示例的可运行版本（干净室验证第 ⑦ 步用的就是它）。
 
+## 存储占用体检（只读）
+
+记忆库的**存储与常驻内存**占用由独立命令测量，不靠人猜：
+
+```bash
+python3 -m agentcore.memory_footprint --database <记忆库路径> --view-budget-mib <常驻视图预算>
+```
+
+输出只有条数与字节数（无事实正文、无向量值）：库体积、向量占比、
+**向量是否被存了两份**（`fact_embeddings` BLOB + `vec_facts` 索引）、
+以及**多少向量属于退役事实**（召回恒过滤 `status='active'`，退役事实的向量
+仍占着存储，并被 `read_view` 原样拷进常驻副本）。
+
+配套巡检作业见 `runtime/autotask/jobs/memory-footprint-guard.json`——
+它只**报告**，不删库、不重建索引、不改配置。
+
 ## 宿主需要注入哪些业务约定
 
 | 约定 | `MemoryConfig` 字段 | 默认值 | 说明 |

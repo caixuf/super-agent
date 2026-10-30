@@ -1073,7 +1073,9 @@ def warmup_embedder() -> Dict[str, Any]:
 _EMBED_BATCH = 200
 
 #: 嵌入结果缓存：key 是文本内容（不是 fact_id）—— 同一句话在不同事实里也只算一次
-_EMBED_CACHE: Dict[str, List[float]] = {}
+#: 值存 **packed float32 字节**而不是 Python float list：1024 维一条，list 版约 32KB，
+#: packed 版 4KB —— 4000 条从 ~128MB 降到 ~16MB。取值时才解包成 list。
+_EMBED_CACHE: Dict[str, bytes] = {}
 _EMBED_CACHE_LOCK = threading.Lock()
 _EMBED_CACHE_CONFIG = None
 _EMBED_CACHE_BINDING = None
@@ -1342,6 +1344,30 @@ def _same_embedding_binding(left, right):
             and all(a is b for a, b in zip(left[1], right[1])) and left[2:] == right[2:])
 
 
+def _unpack_cached(cached: Sequence[Optional[bytes]]) -> Optional[List[List[float]]]:
+    """把 packed 缓存还原成 float list；任一条损坏即返回 None（调用方按失败处理）。"""
+    out: List[List[float]] = []
+    for blob in cached:
+        if blob is None:
+            return None
+        try:
+            out.append(_unpack_vector(blob))
+        except Exception:  # noqa: BLE001 —— 缓存损坏不该拖垮召回
+            return None
+    return out
+
+
+def _evict_embed_cache_locked() -> None:
+    """超限时**逐条逐出**最旧的条目，而不是整表清空。
+
+    整表清空会让缓存周期性归零：紧接着的一批请求全部 miss，缓存等于没有。
+    逐出只丢最旧的那几条，命中率和内存占用都稳定。调用者持有 _EMBED_CACHE_LOCK。
+    """
+    while len(_EMBED_CACHE) > _EMBED_CACHE_MAX:
+        oldest = next(iter(_EMBED_CACHE))
+        _EMBED_CACHE.pop(oldest, None)
+
+
 def _embed_with_cache(texts: Sequence[str]) -> Optional[List[List[float]]]:
 
     """带缓存的批量向量化：只有缓存未命中的部分才真正请求后端。"""
@@ -1358,7 +1384,7 @@ def _embed_with_cache(texts: Sequence[str]) -> Optional[List[List[float]]]:
         cached = [_EMBED_CACHE.get(t) for t in texts]
     missing = [t for t, v in zip(texts, cached) if v is None]
     if not missing:
-        return list(cached)  # type: ignore[arg-type]
+        return _unpack_cached(cached)  # type: ignore[arg-type]
 
     fresh = _embed_texts(missing)
     if fresh is None or len(fresh) != len(missing):
@@ -1371,14 +1397,13 @@ def _embed_with_cache(texts: Sequence[str]) -> Optional[List[List[float]]]:
                 or not _same_embedding_binding(_EMBED_CACHE_BINDING, binding)
                 or not _same_embedding_binding(_embedding_binding(cfg), binding)):
             return None
-        if len(_EMBED_CACHE) > _EMBED_CACHE_MAX:
-            _EMBED_CACHE.clear()
         for text, vec in zip(missing, fresh):
-            _EMBED_CACHE[text] = vec
+            _EMBED_CACHE[text] = _pack_vector(vec)
+        _evict_embed_cache_locked()
         cached = [_EMBED_CACHE.get(t) for t in texts]
     if any(v is None for v in cached):
         return None
-    return list(cached)  # type: ignore[arg-type]
+    return _unpack_cached(cached)  # type: ignore[arg-type]
 
 
 def _embed_texts(texts: Sequence[str]) -> Optional[List[List[float]]]:

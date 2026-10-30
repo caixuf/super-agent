@@ -213,9 +213,19 @@ class Pool:
                     if row['cancel']:
                         self._terminal(db, row['id'], 'cancelled', {'reason': 'cancelled'})
                         continue
-                    if row['status'] == 'running' and (not row['replay_safe'] or row['tries'] >= row['max_tries']):
-                        self._terminal(db, row['id'], 'failed', {'reason': 'interrupted; replay unavailable'})
-                        continue
+                    if row['status'] == 'running':
+                        token = row['containment_token'] if 'containment_token' in row.keys() else None
+                        safe = row['replay_safe'] and row['tries'] < row['max_tries']
+                        if safe and token:
+                            if containment.tagged(token):
+                                sw = containment.sweep(token, grace=0.1, timeout=0.2)
+                                if sw.get('survivors') or not sw.get('token_scan_empty'):
+                                    safe = False
+                        elif not row['replay_safe'] or row['tries'] >= row['max_tries']:
+                            safe = False
+                        if not safe:
+                            self._terminal(db, row['id'], 'failed', {'reason': 'interrupted; replay unavailable'})
+                            continue
                     deps = [r[0] for r in db.execute('SELECT j.status FROM deps d JOIN jobs j ON j.id=d.dependency WHERE d.job=?', (row['id'],))]
                     if any(s in ('failed', 'cancelled') for s in deps):
                         self._terminal(db, row['id'], 'failed', {'reason': 'dependency failed'})
@@ -229,7 +239,7 @@ class Pool:
                     db.execute("UPDATE jobs SET status='running',attempt=?,heartbeat=?,tries=tries+1,pid=NULL,pid_start=NULL,deadline=NULL,containment_token=? WHERE id=?",
                                (token, time.time(), attempt_token, row['id']))
                     keep = True
-                    return dict(row, attempt=token, containment_token=attempt_token), fd
+                    return dict(row, attempt=token, containment_token=attempt_token, tries=row['tries'] + 1), fd
                 finally:
                     if not keep:
                         os.close(fd)
@@ -284,7 +294,20 @@ class Pool:
             if row['cancel']:
                 self._terminal(db, job, 'cancelled', {'reason': 'cancelled'})
             elif not ok and row['replay_safe'] and row['tries'] < row['max_tries']:
-                db.execute("UPDATE jobs SET status='queued',heartbeat=NULL WHERE id=?", (job,))
+                is_unquiesced = False
+                if isinstance(result, dict):
+                    if result.get('attempt_quiescent') is False:
+                        is_unquiesced = True
+                    elif result.get('error') == 'attempt_not_quiescent':
+                        is_unquiesced = True
+                    elif result.get('attempt_token_scan_empty') is False:
+                        is_unquiesced = True
+                if not is_unquiesced:
+                    db.execute("UPDATE jobs SET status='queued',heartbeat=NULL WHERE id=?", (job,))
+                else:
+                    unquiesced_res = dict(result) if isinstance(result, dict) else {'error': str(result)}
+                    unquiesced_res['reason'] = 'replay_aborted_unquiesced'
+                    self._terminal(db, job, 'failed', unquiesced_res)
             else:
                 self._terminal(db, job, 'completed' if ok else 'failed', result)
             return True
@@ -465,10 +488,13 @@ class Pool:
                         pass
                 evidence = containment.sweep(token) if token else None
                 if evidence is not None:
-                    result['attempt_quiescent'] = evidence['quiescent']
-                    if not evidence['quiescent']:
-                        # A survivor means the attempt outlived its lease; never
-                        # report success for work that may still be running.
+                    has_survivors = bool(evidence.get('survivors'))
+                    token_empty = evidence.get('token_scan_empty', True)
+                    main_exited = (proc.poll() is not None)
+                    attempt_quiescent = main_exited and token_empty and not has_survivors
+                    result['attempt_quiescent'] = attempt_quiescent
+                    result['attempt_token_scan_empty'] = token_empty
+                    if not attempt_quiescent or has_survivors:
                         ok = False
                         result.setdefault('reason', 'attempt did not quiesce')
                 self.finish(job, attempt, ok, result)

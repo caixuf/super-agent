@@ -45,6 +45,14 @@ def plain():
     return InProcess(), _permit
 
 
+class Trusted(InProcess):
+    trusted_containment = True
+
+
+def trusted():
+    return Trusted(), _permit
+
+
 class Silent:
     """A runner that says nothing about containment; the gate must not assume."""
 

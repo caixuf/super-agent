@@ -22,7 +22,7 @@ def QUIESCED(code, stdout, stderr, *, timed_out=False, token="0" * 32):
     """
     return ProcessResult(code, stdout, stderr, timed_out=timed_out, quiescent=True,
                          containment={"token": token, "signalled": [], "survivors": [],
-                                      "quiescent": True})
+                                      "quiescent": True, "proof_scope": "whole_attempt"})
 
 
 class Ready:
@@ -338,7 +338,7 @@ def test_launch_ends_a_descendant_that_holds_the_output_pipes(tmp_path, monkeypa
     monkeypatch.setenv("PIDFILE", str(pidfile))
     result = _launch([str(script)], input="", timeout=0.5)
     assert result.timed_out is True
-    assert result.quiescent is True
+    assert result.quiescent is False
     assert result.containment["survivors"] == []
     assert int(pidfile.read_text()) in result.containment["signalled"]
     with pytest.raises(ProcessLookupError):
@@ -367,7 +367,7 @@ def test_launch_claims_client_scope_when_the_turn_runs_elsewhere(tmp_path, monke
     try:
         assert result.returncode == 0
         assert result.containment_scope == "cli_client"
-        assert result.quiescent is True
+        assert result.quiescent is False
         assert result.containment["survivors"] == []
         os.kill(delegatee, 0)  # still running: the sweep never saw it
     finally:

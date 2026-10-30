@@ -57,6 +57,9 @@ _DEFAULT_RECONCILE_LIMIT = 20
 
 _EDIT_LOCKS = weakref.WeakKeyDictionary()
 _EDIT_LOCKS_GUARD = threading.Lock()
+#: 每个事件循环保留的编辑锁条目上限。锁本身很小，但 key 含 message_id，
+#: 长跑网关会为**每条**消息留一把锁，从不回收 —— 上限是唯一兜底。
+_MAX_EDIT_LOCKS = 512
 
 
 class _EditOutcomeUnknown(Exception):
@@ -69,7 +72,28 @@ def _edit_lock_for(target, message_id):
            str(getattr(target, "chat_id", "") or ""), str(message_id or ""))
     with _EDIT_LOCKS_GUARD:
         per_loop = _EDIT_LOCKS.setdefault(loop, {})
-        return per_loop.setdefault(key, asyncio.Lock())
+        lock = per_loop.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            per_loop[key] = lock
+        _trim_edit_locks_locked(per_loop)
+        return lock
+
+
+def _trim_edit_locks_locked(per_loop):
+    """丢弃最旧的编辑锁，把表压在上限内。
+
+    只丢**没被持有**的锁：正在等锁的协程若被换掉，等价于失去互斥，
+    可能让同一条消息被改两次。调用者持有 _EDIT_LOCKS_GUARD。
+    """
+    if len(per_loop) <= _MAX_EDIT_LOCKS:
+        return
+    for key in list(per_loop):
+        if len(per_loop) <= _MAX_EDIT_LOCKS:
+            break
+        lock = per_loop.get(key)
+        if lock is not None and not lock.locked():
+            per_loop.pop(key, None)
 
 
 # --------------------------------------------------------------------------- #

@@ -1,0 +1,22 @@
+{
+  "id": "memory-footprint-guard",
+  "schedule": "20 4 * * *",
+  "collect": {
+    "kind": "command",
+    "command": "python3 -m agentcore.memory_footprint --database <memory-db> --view-budget-mib <view-mib> --json"
+  },
+  "judge": "只读报告：读 store 体积桶、向量占比、是否重复存放、常驻视图副本是否还在预算内。超预算或向量被存两份时给出结论与建议动作（归档旧事实 / 提高视图预算），**不要**自行删库、重建索引或改配置。",
+  "write": {
+    "kind": "file",
+    "path": "<profile>/state/autotask/memory-footprint.json"
+  },
+  "report": {
+    "ok": "ok ",
+    "fail": "fail "
+  },
+  "retry": {
+    "max": 1,
+    "backoff_seconds": 600
+  },
+  "notify": true
+}

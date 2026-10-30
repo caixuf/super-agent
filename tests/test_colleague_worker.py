@@ -83,13 +83,12 @@ def test_receipt_ignores_a_malformed_attempt_token():
     assert receipt(done)["quiescence_evidence_id"] is None
 
 
-def test_receipt_carries_evidence_for_a_valid_attempt_token():
+def test_valid_attempt_token_alone_does_not_prove_quiescence():
     token = uuid.uuid4().hex
     done = run_worker("colleague_worker_probe:plain", env={containment.ENV: token})
-    assert done.returncode == 0, done.stderr
-    evidence_id = receipt(done)["quiescence_evidence_id"]
-    assert isinstance(evidence_id, str) and len(evidence_id) == 32
-    int(evidence_id, 16)
+    # A token scan alone cannot certify complete attempt containment.
+    assert done.returncode == 1
+    assert receipt(done) == FAILED
 
 
 def test_sweep_stops_a_detached_descendant_that_outlived_the_group():
@@ -102,8 +101,8 @@ def test_sweep_stops_a_detached_descendant_that_outlived_the_group():
     try:
         assert detached.poll() is None
         done = run_worker("colleague_worker_probe:plain", env={containment.ENV: token})
-        assert done.returncode == 0, done.stderr
-        assert receipt(done)["quiescence_evidence_id"]
+        assert done.returncode == 1
+        assert receipt(done) == FAILED
         deadline = time.monotonic() + 20
         while detached.poll() is None and time.monotonic() < deadline:
             time.sleep(0.05)
@@ -112,6 +111,16 @@ def test_sweep_stops_a_detached_descendant_that_outlived_the_group():
         if detached.poll() is None:
             detached.kill()
             detached.wait(timeout=10)
+
+
+def test_worker_succeeds_when_trusted_containment_is_provided():
+    token = uuid.uuid4().hex
+    done = run_worker("colleague_worker_probe:trusted", env={containment.ENV: token})
+    assert done.returncode == 0, done.stderr
+    rec = receipt(done)
+    assert rec["ok"] is True
+    assert rec["quiescence_evidence_id"] is not None
+    assert len(rec["quiescence_evidence_id"]) == 32
 
 
 def test_worker_rejects_a_queue_envelope_it_did_not_define():
@@ -140,3 +149,13 @@ def test_failed_turn_still_sweeps_its_descendants():
         if detached.poll() is None:
             detached.kill()
             detached.wait(timeout=10)
+
+
+def test_worker_succeeds_when_trusted_containment_is_provided():
+    token = uuid.uuid4().hex
+    done = run_worker("colleague_worker_probe:trusted", env={containment.ENV: token})
+    assert done.returncode == 0, done.stderr
+    rec = receipt(done)
+    assert rec["ok"] is True
+    assert rec["quiescence_evidence_id"] is not None
+    assert len(rec["quiescence_evidence_id"]) == 32

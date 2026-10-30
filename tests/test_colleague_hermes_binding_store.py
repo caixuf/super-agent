@@ -11,7 +11,7 @@ from agentcore.colleague_hermes_runner import (
 def QUIESCED(code, stdout, stderr, *, timed_out=False, token="0" * 32):
     return ProcessResult(code, stdout, stderr, timed_out=timed_out, quiescent=True,
                          containment={"token": token, "signalled": [], "survivors": [],
-                                      "quiescent": True})
+                                      "quiescent": True, "proof_scope": "whole_attempt"})
 
 
 class Ready:
