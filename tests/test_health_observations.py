@@ -80,13 +80,19 @@ def test_health_observations_never_copy_untrusted_fields():
     result=conditions(health,identity=IDENTITY,build='different')
     assert result['recall.binding'][0] is False and result['recall.binding'][3] is True
     assert 'DO_NOT_COPY' not in json.dumps(result)
+    health.update(ready=False,state='pending',reason_code='memory_view_embedding_pending')
+    result=conditions(health,identity=IDENTITY,build='build')
+    assert result['recall.availability'][2]['reason_code']=='memory_view_embedding_pending'
+    health['reason_code']='DO_NOT_COPY'
+    assert 'DO_NOT_COPY' not in json.dumps(conditions(health,identity=IDENTITY,build='build'))
 
 
 def test_pending_fault_waits_but_blocked_is_urgent():
-    for state,urgent in [('pending',False),('blocked',True)]:
+    for state,urgent in [('pending',False),('busy',False),('blocked',True)]:
         result=conditions(dict(ready=False,state=state,seq=1),identity=IDENTITY,build='build')
         assert result['recall.availability'][0] is False
         assert result['recall.availability'][3] is urgent
+        assert result['recall.availability'][2]['state'] == state
 
 
 def test_source_queue_pressure_and_missing_kernel_budget_are_detected():

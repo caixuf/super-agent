@@ -17,7 +17,7 @@ lease 与 ack 复用已有 Pool 数据库连接及事务方式，但使用 `ops_
 
 ## 局部验证
 
-- `<peer-home>/.hermes/hermes-agent/.venv/bin/python -m pytest tests/test_ops_alert_outbox.py -q`：**FAIL**，该隔离 Python 3.14 环境没有 pytest 模块。
+- `/home/emily/.hermes/hermes-agent/.venv/bin/python -m pytest tests/test_ops_alert_outbox.py -q`：**FAIL**，该隔离 Python 3.14 环境没有 pytest 模块。
 - 早期版本 `python3 -m pytest tests/test_ops_alert_outbox.py -q` 的 **8 passed** 不作为当前实现验收；root 审查发现发送回执未 fail-closed。
 - 修订版首次 `/dev/shm` 回归为 **22 passed / 1 failed**：失败是并发测试未传新增的回执参数；修正后跑出 23 passed。随后再把相同回执校验加到公开 ack 边界，并新增直接 ack 反例。最终命令 `TMPDIR=/dev/shm PYTHONDONTWRITEBYTECODE=1 python3 -m pytest --basetemp=/dev/shm/agentcore-c-outbox-failclosed-20261026-03 -p no:cacheprovider tests/test_ops_alert_outbox.py -q` 实测 **24 passed in 0.20s**，退出码 0。
 - 新增反例覆盖 `False`、`None`、明确拒绝、错误/缺失 receipt 字段、发送异常、成功发送后 ack 前崩溃；所有未获明确接受回执的路径都保留待发事件。租约反例覆盖零、负数、NaN、正负无穷、布尔和非数字。

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install this repo's generic skills into a Hermes profile (idempotent).
 
-    python3 tools/install_skills.py --profile <profile> [--dry-run] [--only name ...]
+    python3 tools/install_skills.py --profile caixuf [--dry-run] [--only name ...]
 
 Rules (see skills/README.md): ``skills/<name>/SKILL.md`` is installed; ``skills/examples/``
 is a template and never installed. A skill whose directory name already exists but whose

@@ -26,7 +26,7 @@ DONE (new files only; no commit, no production writes, no network).
 
 ## Verification
 ```
-cd <peer-host>/code/agentcore
+cd /home/emily/code/agentcore
 TMPDIR=/dev/shm python3 -m pytest tests/test_learning_retrieval.py -q
 # 43 passed in 0.18s
 TMPDIR=/dev/shm python3 -m pytest tests/test_learning_retrieval.py tests/test_learning_candidates.py -q

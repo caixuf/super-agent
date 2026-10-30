@@ -147,7 +147,7 @@ $ python3 -m pytest tests/test_repo_neutrality.py tests/test_business_neutrality
 ## 7. 复核命令
 
 ```bash
-git -C ~/code/super-agent rev-parse HEAD      # == origin/master
+git -C /home/caixuf/code/super-agent rev-parse HEAD      # == origin/master
 bash install/install.sh --profile caixuf                 # 幂等复核，退出码应为 0
 hermes -p caixuf tools list                              # 插件工具面
 systemctl --user status hermes-gateway-caixuf.service     # 单元状态

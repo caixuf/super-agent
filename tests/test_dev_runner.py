@@ -376,3 +376,67 @@ def test_execute_in_worktree_rejects_unsafe_task_id(tmp_path: Path, task_id: str
     with pytest.raises(ValueError, match="invalid_task_id"):
         ColleagueDevOrchestrator().execute_in_worktree(repo, task_id, "task")
     assert not (tmp_path.parent / "worktree-escape").exists()
+
+
+def test_run_dev_job_with_verification_checks(tmp_path: Path):
+    workdir = tmp_path / "worktree_vc"
+    workdir.mkdir()
+    agent_dir = tmp_path / "agent_dir_vc"
+    out_dir = tmp_path / "output_vc"
+    out_dir.mkdir()
+
+    policy = {"allowed_roots": [str(workdir)]}
+    role_contract = "# Dev Role"
+
+    job_pass = {
+        "job": "dev-job-vc-1",
+        "attempt": "att-1",
+        "payload": {
+            "role": "cases",
+            "goal": "Write code and verify",
+            "verification_checks": [
+                {"check_id": "test_pass", "command": "python3 -c 'exit(0)'"},
+            ],
+        },
+    }
+
+    res_pass = run_dev_job(
+        job=job_pass,
+        policy=policy,
+        role=role_contract,
+        workdir=workdir,
+        agent_dir=agent_dir,
+        output_dir=out_dir,
+        runner_callable=lambda prompt, kwargs: {"ok": True, "final_text": "done"},
+    )
+    assert res_pass["ok"] is True
+    assert "verification_receipt" in res_pass
+    assert res_pass["verification_receipt"]["all_passed"] is True
+
+    # When verification check fails, whole job fails and failure_decision is attached
+    job_fail = {
+        "job": "dev-job-vc-2",
+        "attempt": "att-1",
+        "payload": {
+            "role": "cases",
+            "goal": "Write code and fail verification",
+            "verification_checks": [
+                {"check_id": "test_fail", "command": "python3 -c 'exit(1)'", "critical": True},
+            ],
+        },
+    }
+
+    res_fail = run_dev_job(
+        job=job_fail,
+        policy=policy,
+        role=role_contract,
+        workdir=workdir,
+        agent_dir=agent_dir,
+        output_dir=out_dir,
+        runner_callable=lambda prompt, kwargs: {"ok": True, "final_text": "done"},
+    )
+    assert res_fail["ok"] is False
+    assert "verification_checks_failed" in res_fail["error"]
+    assert "failure_decision" in res_fail
+    assert res_fail["failure_decision"]["action"] in {"stop", "escalate", "replan"}
+

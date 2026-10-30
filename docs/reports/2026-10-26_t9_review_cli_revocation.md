@@ -65,7 +65,7 @@ python -m agentcore.learning.review_cli --root DIR revoke  <id> --reviewer NAME 
 
 ```bash
 # 新增切片
-cd <peer-host>/code/agentcore
+cd /home/emily/code/agentcore
 TMPDIR=/dev/shm python3 -m pytest tests/test_learning_review_cli.py -q
 # 17 passed
 

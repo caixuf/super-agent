@@ -1,7 +1,7 @@
 # T-B 可信 capture 录制器（手册第五节「可信证据」）· 测试报告
 
 日期：2026-10-26
-执行人：Agent（emily 现场，`<peer-host>/code/agentcore`）
+执行人：Agent（emily 现场，`/home/emily/code/agentcore`）
 上游依据：`2026-10-26_core-execution-guide.md` 第五节「可信证据最少字段」与第十二节第 5 步
 结论：**导出侧代码完成并通过 9 组用例（含两次突变验证）**；尚未接进网关运行时，因此**现场仍出不了可信 capture**。
 

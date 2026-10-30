@@ -1,7 +1,7 @@
 # T-A 任务归属持久化（手册 G3）· 测试报告
 
 日期：2026-10-26
-执行人：Agent（emily 现场，`<peer-host>/code/agentcore`）
+执行人：Agent（emily 现场，`/home/emily/code/agentcore`）
 上游依据：`imfl_auto_test/docs/handover/2026-10-26_t1-wiring-field-map.md` 缺口 G3
 结论：**代码完成、离线全验通过、现场库迁移已在真实副本上验证**；生产进程尚未加载（需窗口重启），因此**不构成 T1 完成**。
 
@@ -35,7 +35,7 @@
 ## 三、命令与结果（原样）
 
 ```
-$ cd <peer-host>/code/agentcore
+$ cd /home/emily/code/agentcore
 $ TMPDIR=/dev/shm python3 -m pytest tests/test_pool.py tests/test_durable_dispatch.py -q
 36 passed in 3.95s
 
@@ -48,7 +48,7 @@ $ TMPDIR=/dev/shm python3 -m pytest tests/ -q
 ## 四、生产库迁移验证（在真实 `pool.db` 副本上做，只读源库）
 
 ```
-源：<peer-home>/.local/state/agentcore/analysis-queue/pool.db  →  复制到 /dev/shm 后操作
+源：/home/emily/.local/state/agentcore/analysis-queue/pool.db  →  复制到 /dev/shm 后操作
 before_cols: [..., 'pid', 'pid_start', 'deadline']
 after_cols : [..., 'pid', 'pid_start', 'deadline', 'origin']
 rows before/after: 3 3

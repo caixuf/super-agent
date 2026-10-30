@@ -198,7 +198,10 @@ def _tags_of_many(conn: sqlite3.Connection, fact_ids: Sequence[str]) -> Dict[str
         chunk=ids[offset:offset+400]
         rows=conn.execute('SELECT fact_id,key,value FROM fact_tags WHERE fact_id IN ('+
                           ','.join('?' for _ in chunk)+')',chunk)
-        for row in rows:result[row['fact_id']][row['key']]=row['value']
+        for row in rows:
+            fid, k, v = row[0], row[1], row[2]
+            if fid in result:
+                result[fid][k] = v
     return result
 
 
@@ -706,6 +709,8 @@ def recall_facts(
     # COUNT 出来 0，报 no_match」—— 看起来像没数据，其实是在按 NULL 查。
     user_id = user_id or get_config().default_user
     conn = _connection if _connection is not None else _connect()
+    if conn.row_factory is None:
+        conn.row_factory = sqlite3.Row
     try:
         buckets: List[str] = []
         if ebm:
@@ -892,7 +897,7 @@ def recall_facts(
         if not rows:
             total_any = conn.execute(
                 "SELECT COUNT(*) c FROM working_fact WHERE user_id=? AND status='active'",
-                (user_id,)).fetchone()["c"]
+                (user_id,)).fetchone()[0]
             if total_any == 0:
                 reason = "no_match"
             elif want:
@@ -907,12 +912,17 @@ def recall_facts(
                     "searched_tags": want, "empty_reason": reason}
 
         picked: List[Dict[str, Any]] = []
-        tags_by_id=_tags_of_many(conn,[r['fact_id'] for r in rows])
+        fact_ids = [r[0] if isinstance(r, tuple) else r['fact_id'] for r in rows]
+        tags_by_id = _tags_of_many(conn, fact_ids)
         for r in rows:
-            d = dict(r)
-            d["tags"] = tags_by_id[d['fact_id']]
-            d["apply_match"] = ("legacy_unknown" if (d["workspace_id"] or UNKNOWN_BUCKET) == UNKNOWN_BUCKET
-                                else "exact_ebm" if buckets and d["workspace_id"] == buckets[0]
+            if isinstance(r, tuple):
+                cols = [col[1] for col in conn.execute("PRAGMA table_info(working_fact)").fetchall()]
+                d = dict(zip(cols, r)) if len(cols) == len(r) else {"fact_id": r[0]}
+            else:
+                d = dict(r)
+            d["tags"] = tags_by_id.get(d['fact_id'], {})
+            d["apply_match"] = ("legacy_unknown" if (d.get("workspace_id") or UNKNOWN_BUCKET) == UNKNOWN_BUCKET
+                                else "exact_ebm" if buckets and d.get("workspace_id") == buckets[0]
                                 else "unscoped_ebm")
             picked.append(d)
         # 只有查询指定了代际时才按代际优先；否则 exact_ebm 是本次筛选的产物，

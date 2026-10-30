@@ -97,7 +97,7 @@
 
 ```text
 [测试 1] 研发同事名录提取：8 个官方研发角色完整加载 (architect, cases, reviewer, test, triage, backend, frontend, ops)。
-[测试 2] 工作区自动搜寻：精准定位 ~/code/imfl_auto_test。
+[测试 2] 工作区自动搜寻：精准定位 /home/caixuf/code/imfl_auto_test。
 [测试 3] 需求架构师 (architect)：输入自然语言 Story，成功黑盒拆解并原子落盘 contract_requirements.yaml (ok=True)。
 [测试 4] 用例开发大师 (cases)：根据需求规格，成功逆向并生成领域 DSL 用例代码 (ok=True)。
 [测试 5] 红队挑刺评审员 (reviewer)：针对测试用例执行静态时序与反模式扫描，给出 25.0 分并精确指出缺失退出断言与反向抑制 (ok=True)。

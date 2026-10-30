@@ -1,0 +1,63 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import json
+import tempfile
+
+def atomic_write_json(path: Path, data: dict[str, Any], *, private: bool = False) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False, encoding="utf-8") as tf:
+        json.dump(data, tf, indent=2, sort_keys=True)
+        tf.write("\n")
+        tmp_name = tf.name
+    Path(tmp_name).replace(path)
+
+def ensure_project_store_ignored(directory: Path) -> None:
+    pass
+
+
+CODEGRAPH_SCHEMA_VERSION = "omh_codegraph/v1"
+CODEGRAPH_CONTEXT_SCHEMA_VERSION = "omh_codegraph_context/v1"
+CODEGRAPH_SUMMARY_SCHEMA_VERSION = "omh_codegraph_summary/v1"
+CODEGRAPH_ARTIFACT_RELATIVE_PATH = Path(".omh") / "codegraph" / "codegraph.json"
+# The truth level a codegraph-derived handoff context item carries: a static
+# reading of local source, below anything observed at run time.
+CODEGRAPH_CONTEXT_TRUTH_LEVEL = "static_analysis_hint"
+CLAIM_BOUNDARY = (
+    "Static local analysis is prepared context only. "
+    "Static local analysis is not execution/review/CI/merge evidence. "
+    "It is not review, CI, merge-readiness, merge proof, or observed executor work."
+)
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def resolve_repo_root(repo: str | Path) -> Path:
+    root = Path(repo).expanduser().resolve()
+    if not root.exists():
+        raise ValueError(f"repository path does not exist: {root}")
+    if not root.is_dir():
+        raise ValueError(f"repository path is not a directory: {root}")
+    return root
+
+
+def codegraph_artifact_path(repo_root: str | Path) -> Path:
+    return Path(repo_root).expanduser().resolve() / CODEGRAPH_ARTIFACT_RELATIVE_PATH
+
+
+def write_codegraph_artifact(graph: dict[str, Any]) -> Path:
+    repo_root = str(graph.get("repo_root") or "")
+    if not repo_root:
+        raise ValueError("codegraph artifact is missing repo_root")
+    path = codegraph_artifact_path(repo_root)
+    # Without this the store is untracked in any repository but this one, so
+    # `git add -A` after a codegraph build commits the artifact.
+    ensure_project_store_ignored(path.parent)
+    atomic_write_json(path, graph)
+    return path

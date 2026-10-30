@@ -175,7 +175,8 @@ class ColleagueDevOrchestrator:
             candidates = [
                 Path(os.environ.get("AUTOTEST_PLATFORM_ROOT", "")),
                 Path.home() / "code" / default_pkg,
-                Path.home() / default_pkg,
+                Path("/home/caixuf/code") / default_pkg,
+                Path("/home/emily") / default_pkg,
                 Path.cwd(),
                 Path.cwd().parent / default_pkg,
             ]
@@ -359,3 +360,21 @@ class ColleagueDevOrchestrator:
                 return result
         except Exception as exc:
             raise RuntimeError(f"colleague_worktree_failed: {exc}; preserved at {worktree_dir} (branch {target_branch})") from exc
+
+
+def get_role_routing(
+    role_name: str,
+    executor: str = "hermes",
+    requested_depth: str = "",
+    requested_effort: str = "",
+) -> Dict[str, Any]:
+    """Retrieve the deterministic model route and reasoning tier for a colleague role."""
+    from .model_routing import resolve_model_route
+
+    return resolve_model_route(
+        executor,
+        role=role_name,
+        requested_depth=requested_depth,
+        requested_effort=requested_effort,
+    )
+

@@ -97,6 +97,18 @@ def test_sweep_marks_pidless_silence_stalled_once(ledger):
     assert store.sweep() == []
 
 
+def test_owner_scoped_sweep_never_changes_another_session(ledger):
+    store, clock = ledger
+    store.register('one', kind='durable', owner='profile:one', state='running')
+    store.register('two', kind='durable', owner='profile:two', state='running')
+    clock.advance(61)
+    changed = store.sweep(owner='profile:one')
+    assert [row['task_id'] for row in changed] == ['one']
+    assert store.get('one')['state'] == 'stalled'
+    assert store.get('two')['state'] == 'running'
+    assert [row['task_id'] for row in store.sweep()] == ['two']
+
+
 def test_live_pid_is_not_marked_stalled(ledger):
     store, clock = ledger
     store.register("t1", kind="terminal", state="running", pid=1234, pid_start="boot:1")

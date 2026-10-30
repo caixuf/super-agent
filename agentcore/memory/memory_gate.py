@@ -158,5 +158,25 @@ def validate(fact: Dict[str, Any]) -> Dict[str, Any]:
     if not d["ok"]:
         return {"ok": False, "failed_at": "duplicate", "checks": checks, "reason": d["reason"]}
 
+    # 第四道：客观凭据与推测过滤门禁 (Rationalized Evidence Admission)
+    try:
+        from .memory_admission import evaluate_memory_admission, VERDICT_REFUSE
+        adm = evaluate_memory_admission(
+            fact.get("statement") or "",
+            source_receipt=fact.get("receipt") or fact.get("evidence"),
+            ebm_generation=e.get("bucket") or "",
+        )
+        checks["admission"] = adm
+        if adm.get("verdict") == VERDICT_REFUSE:
+            return {
+                "ok": False,
+                "failed_at": "admission",
+                "checks": checks,
+                "reason": f"未通过证据准入门禁: {adm.get('explanation')} ({adm.get('reason_code')})",
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("准入门禁校验跳过异常: %s", exc)
+
     return {"ok": True, "failed_at": "", "checks": checks, "bucket": e["bucket"],
-            "kind": a["kind"], "reason": "三道门禁全部通过"}
+            "kind": a["kind"], "reason": "全部门禁通过"}
+

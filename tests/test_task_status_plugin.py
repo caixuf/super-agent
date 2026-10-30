@@ -144,6 +144,19 @@ def test_list_classifies_gone_processes_before_reporting(tmp_path):
     assert persisted["detail"] == "process is gone"
 
 
+def test_list_does_not_sweep_other_sessions(tmp_path):
+    ctx = Ctx(tmp_path / 'liveness.db')
+    store = LivenessLedger(ctx.db_path)
+    store.register('mine', kind='terminal', owner='p:s', pid=999999,
+                   pid_start='deadbeef:1', state='running')
+    store.register('other', kind='terminal', owner='p:other', pid=999999,
+                   pid_start='deadbeef:1', state='running')
+    result = json.loads(_handler(ctx)({'action': 'list'}, session_id='s'))
+    assert result['ok'] and [task['task_id'] for task in result['tasks']] == ['mine']
+    assert store.get('mine')['state'] == 'lost'
+    assert store.get('other')['state'] == 'running'
+
+
 def test_list_marks_a_silent_pid_less_row_stalled(tmp_path):
     """A queued row with no pid and an old heartbeat is `stalled`, not silently `running`."""
     ctx = Ctx(tmp_path / "liveness.db")

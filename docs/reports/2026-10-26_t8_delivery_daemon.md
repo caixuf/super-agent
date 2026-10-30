@@ -44,7 +44,7 @@ twice inside its lease window. No release API was added to `AlertOutbox`.
 ## Verification
 ```
 ssh emily
-cd <peer-host>/code/agentcore
+cd /home/emily/code/agentcore
 TMPDIR=/dev/shm python3 -m pytest tests/test_ops_alert_daemon.py -q
 # 32 passed in 0.35s   (three consecutive runs: 0.35s / 0.30s / 0.44s)
 TMPDIR=/dev/shm python3 -m pytest tests/test_ops_alert_outbox.py tests/test_ops_alert_senders.py tests/test_capability_guard.py -q

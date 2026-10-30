@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Re-deploy gate for the super-agent repo: every item must pass on a clean clone.
 
-    git clone https://gitlab-ap-office.immotors.com/lilongfei/imfl_super_agent.git /tmp/sa && cd /tmp/sa
+    git clone https://github.com/caixuf/super-agent.git /tmp/sa && cd /tmp/sa
     python3 tools/redeploy_check.py [--ref origin/master] [--skip-docker]
 
 Checks, in the order a new machine hits them:

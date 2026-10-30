@@ -72,7 +72,7 @@ flowchart TB
 
 ## 当前现场与冲突边界
 
-本指导编写于 2026-10-29；WSL 主开发仓当时是 `~/code/super-agent`，`master` 为 `2b35e5d`，相对本地远端跟踪分支领先 1 个提交。开工前重新核对，避免覆盖其他人正在做的工作。
+本指导编写于 2026-10-29；WSL 主开发仓当时是 `/home/caixuf/code/super-agent`，`master` 为 `2b35e5d`，相对本地远端跟踪分支领先 1 个提交。开工前重新核对，避免覆盖其他人正在做的工作。
 
 现有可复用基础包括 `agentcore/colleague_registry.py`、`colleague_provisioner.py`、`colleague_catalog.py`、`pool.py`、`worker.py`、`session_execution.py`、`colleague_dialogue.py`、`colleague_conversation.py`、`colleague_dialogue_history.py` 及 `plugins/durable_dispatch/`。这些文件中有已实现组件，也有依赖宿主注入的接口：**逐一核对实际接线和测试，不要把模块存在说成已经上线。**
 

@@ -96,9 +96,11 @@ def report(profile: Path, as_json: bool = False) -> dict:
     if as_json:
         print(json.dumps(out, ensure_ascii=False, indent=2))
     else:
-        print(f"memory {out['memory']['bucket']}% chars={mem_chars}/{mem_limit} "
-              f"over85={str(out['memory']['over85']).lower()}")
-        print(f"user   {out['user']['bucket']}% chars={user_chars}/{user_limit}")
+        # 打印行**绝不能带精确字符数**：monitor 对原始字节做哈希，`chars=13658` 每写一次记忆就变，
+        # 门控等于没有（实测 2026-10-26~29 每次 360m 调度都唤醒、都推下游通知）。
+        # 精确值只在 --json 里给脚本用；人读面按桶 + over85 就够判「该不该动手」。
+        print(f"memory {out['memory']['bucket']}% over85={str(out['memory']['over85']).lower()}")
+        print(f"user   {out['user']['bucket']}%")
         print(f"pending {pend_total} 批（可重放 {pend_replay}：destructive 缺 matched_entry 会被拒）")
         print(f"state  {out['state']}")
     return out

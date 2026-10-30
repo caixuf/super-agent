@@ -20,6 +20,7 @@ from pathlib import Path
 import re
 import sys
 import threading
+import time
 import types
 
 #: Bound session variables copied into a job's persisted origin. These name the route
@@ -41,6 +42,22 @@ _DEFAULT_DELIVERY_HEALTH_FAULT_GRACE = 60.0
 _MAX_DELIVERY_HEALTH_FAULT_GRACE = 3600.0
 #: A drained backlog must stay clean this long before the recovery event is enqueued.
 _DELIVERY_HEALTH_RECOVERY_GRACE = 10.0
+_DELIVERY_WARNING_INTERVAL = 60.0
+
+
+class _BacklogWarningLimiter:
+    """Rate-limit noisy observations without affecting delivery or health events."""
+    def __init__(self, interval=_DELIVERY_WARNING_INTERVAL):
+        self.interval = interval
+        self.last_warning = None
+
+    def should_warn(self, summary, now):
+        if not (summary['parked'] or summary['notable']):
+            return False
+        if self.last_warning is None or now - self.last_warning >= self.interval:
+            self.last_warning = now
+            return True
+        return False
 
 
 def _engine_modules(engine_root=None):
@@ -622,7 +639,7 @@ def start_backfill(ctx, service):
 
     def loop():
         last_error = None
-        last_summary = None
+        warning_limiter = _BacklogWarningLimiter()
         while not stop.is_set():
             try:
                 status = service.drain_delivery(transport, not_before=not_before)
@@ -638,12 +655,10 @@ def start_backfill(ctx, service):
                 if report_health:
                     summary = _report_delivery_health(service, status, modules=health_modules,
                                                       fault_grace=fault_grace)
-                    if summary != last_summary:
-                        if summary['parked'] or summary['notable']:
-                            logging.getLogger(__name__).warning(
-                                'completion delivery backlog: parked=%d outcomes=%s status=%s',
-                                summary['parked'], summary['outcomes'] or '-', summary['status'])
-                        last_summary = summary
+                    if warning_limiter.should_warn(summary, time.monotonic()):
+                        logging.getLogger(__name__).warning(
+                            'completion delivery backlog: parked=%d outcomes=%s status=%s',
+                            summary['parked'], summary['outcomes'] or '-', summary['status'])
             if stop.wait(interval):
                 break
 

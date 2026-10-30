@@ -41,7 +41,7 @@ receive `sender=None` unless a host explicitly builds one. No env vars are read;
 ## Verification
 ```
 ssh emily
-cd <peer-host>/code/agentcore
+cd /home/emily/code/agentcore
 TMPDIR=/dev/shm python3 -m pytest tests/test_ops_alert_senders.py -q
 # 50 passed in 3.49s
 TMPDIR=/dev/shm python3 -m pytest tests/test_ops_alert_outbox.py tests/test_capability_guard.py tests/test_completion_delivery.py -q

@@ -19,7 +19,7 @@
 ## 验证
 
 ```bash
-cd <peer-host>/code/agentcore
+cd /home/emily/code/agentcore
 TMPDIR=/dev/shm python3 -m pytest \
   tests/test_memory_engine.py tests/test_memory_evaluation.py tests/test_memory_auto_loop.py \
   -q --basetemp=/dev/shm/t3-memory

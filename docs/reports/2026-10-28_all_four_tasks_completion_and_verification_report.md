@@ -30,18 +30,18 @@
 
 ### 任务 1：任务存活性感知与防假死对账（100% 完成）
 1. **统一任务存活性持久化账本**：
-   - 新增 [`agentcore/liveness.py`](agentcore/liveness.py)，采用 SQLite WAL 模式维护 `task_liveness` 核心状态机（queued, running, stalled, lost, done, failed, cancelled）；
+   - 新增 [`agentcore/liveness.py`](file:///home/caixuf/code/super-agent/agentcore/liveness.py)，采用 SQLite WAL 模式维护 `task_liveness` 核心状态机（queued, running, stalled, lost, done, failed, cancelled）；
    - 提取系统级 `boot_id:starttime` 签名抵御 PID 重用；
    - 实现终态写一次（Terminal Write-Once）原子保护与静默超时判定。
 2. **存活性后台守护巡检**：
-   - 新增 [`agentcore/liveness_daemon.py`](agentcore/liveness_daemon.py)，非阻塞扫表，在心跳衰退时将任务置为 `stalled`，进程失联时置为 `lost`。
+   - 新增 [`agentcore/liveness_daemon.py`](file:///home/caixuf/code/super-agent/agentcore/liveness_daemon.py)，非阻塞扫表，在心跳衰退时将任务置为 `stalled`，进程失联时置为 `lost`。
 3. **宿主插件与调度打通**：
-   - 新增 [`plugins/task_status`](plugins/task_status)，按会话所有者鉴权暴露进度与尾部日志；
-   - 升级 [`plugins/durable_dispatch`](plugins/durable_dispatch/__init__.py)，`submit` 自动登记，`status` 级联输出 `elapsed_s`、`heartbeat_age_s`、`phase`、`progress`、`verdict`，`cancel` 级联终态。
+   - 新增 [`plugins/task_status`](file:///home/caixuf/code/super-agent/plugins/task_status)，按会话所有者鉴权暴露进度与尾部日志；
+   - 升级 [`plugins/durable_dispatch`](file:///home/caixuf/code/super-agent/plugins/durable_dispatch/__init__.py)，`submit` 自动登记，`status` 级联输出 `elapsed_s`、`heartbeat_age_s`、`phase`、`progress`、`verdict`，`cancel` 级联终态。
 
 ### 任务 2：8 大研发同事闭环与自愈修编（100% 完成）
 1. **中立化团队模型与动态晚期绑定**：
-   - 升级 [`agentcore/colleague_dev.py`](agentcore/colleague_dev.py)，抽离 8 大通用研发角色（architect, cases, reviewer, test, triage, backend, frontend, ops）；
+   - 升级 [`agentcore/colleague_dev.py`](file:///home/caixuf/code/super-agent/agentcore/colleague_dev.py)，抽离 8 大通用研发角色（architect, cases, reviewer, test, triage, backend, frontend, ops）；
    - 外部平台适配器改为 `importlib.import_module` 动态发现与按需晚期绑定，修复 `test_import_boundary.py` 与中立性棘轮。
 2. **自愈迭代研发流水线（Self-Healing Loop）**：
    - `ColleagueDevOrchestrator.execute_autonomous_case_dev` 支持审查扣分自动打回修编：红队打分低于 80 分或发现时序反模式时，将评审意见反馈回用例生成环节，自动循环迭代（最大 3 轮），直至得分达到 $\ge 80$ 或达上限；
@@ -49,21 +49,21 @@
 
 ### 任务 3：记忆库长期治理与 T7 降压（100% 完成）
 1. **通用记忆健康审计与压缩引擎**：
-   - 新增 [`agentcore/memory_hygiene.py`](agentcore/memory_hygiene.py)，提供 `MemoryHygieneAuditor`；
+   - 新增 [`agentcore/memory_hygiene.py`](file:///home/caixuf/code/super-agent/agentcore/memory_hygiene.py)，提供 `MemoryHygieneAuditor`；
    - 容量水位监控：以 20,000 字符为上限，70%（14,000 字符）为黄金警戒线，85% 为危急线；
    - 重复事实检测：利用字符级 bigram Jaccard 相似度（阈值 0.85）精确识别近重复条目；
    - 自动过期修剪：自动过滤 `## 临时任务`、`## 待办草稿`、`## 调试记录` 等过期非持久内容，产出压缩节约指标。
 2. **caixuf 生产级长期记忆基线沉淀**：
-   - 现场审查并更新 [`~/.hermes/profiles/caixuf/memories/MEMORY.md`](file://~/.hermes/profiles/caixuf/memories/MEMORY.md)；
+   - 现场审查并更新 [`/home/caixuf/.hermes/profiles/caixuf/memories/MEMORY.md`](file:///home/caixuf/.hermes/profiles/caixuf/memories/MEMORY.md)；
    - 保留代理、模型窗口与 Pi 执行器等关键基础设施事实，增补零 Emoji 规范、单版本 FIFO 调度、Worktree 物理隔离、存活性账本等核心架构纪律；
    - 记忆文件体量稳定在 1,317 字符（仅占 20,000 字符预算的 6.6%，处于极度健康的黄金区间）。
 
 ### 任务 4：交付面体验升级（Card 2.4 与文档直发，100% 完成）
 1. **Markdown 交付租户权限回退保护**：
-   - 升级 [`agentcore/markdown_delivery.py`](agentcore/markdown_delivery.py) 的 `share_with_org` 机制，增加 `allow_unshared_fallback` 容灾选项；
+   - 升级 [`agentcore/markdown_delivery.py`](file:///home/caixuf/code/super-agent/agentcore/markdown_delivery.py) 的 `share_with_org` 机制，增加 `allow_unshared_fallback` 容灾选项；
    - 当企业租户安全策略限制公开发布权限（`link_share_entity != tenant_readable`）时，优雅转为 `warnings` 记录，杜绝任务崩溃，确保已生成的文档链接可靠返回。
 2. **Card 2.4 阶段流式卡片构建器**：
-   - 新增 [`agentcore/card_stream.py`](agentcore/card_stream.py)，支持 4 阶段研发流水线（分析 -> 生成 -> 审查 -> 校验）；
+   - 新增 [`agentcore/card_stream.py`](file:///home/caixuf/code/super-agent/agentcore/card_stream.py)，支持 4 阶段研发流水线（分析 -> 生成 -> 审查 -> 校验）；
    - 遵循 Card 2.4（card_components v2）与 JSON 2.0 规范，强制携带 `config.update_multi: true` 支持原生 PATCH 就地刷新；
    - 严格采用纯文本标识（`[OK]`、`[RUNNING]`、`[WAIT]`、`[FAIL]`、`[SKIP]`），零 Emoji 违规；
    - 提供与 `agentcore.liveness` 的双向状态同步器。

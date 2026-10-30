@@ -41,11 +41,13 @@ def conditions(health, *, identity, build, error=None, resources=None, resource_
     """Whitelist observations. Provider bodies, paths and memory text never pass."""
     answer = {}
     valid = (isinstance(health,dict) and type(health.get('ready')) is bool
-             and health.get('state') in ('ready','pending','blocked','starting','stopped')
+             and health.get('state') in ('ready','pending','busy','blocked','starting','stopped')
              and (health.get('seq') is None or _number(health.get('seq'))))
     state = health['state'] if valid else 'unavailable'
     observation = dict(state=state,request_failed=error is not None or not valid)
     if valid and _number(health.get('seq')): observation['seq'] = health['seq']
+    if valid and health.get('reason_code') in ('memory_view_embedding_pending','memory_view_catchup_budget'):
+        observation['reason_code'] = health['reason_code']
     ready = valid and health['ready'] and state == 'ready'
     answer['recall.availability'] = (ready,dict(ready=True),observation,state=='blocked')
     if valid:

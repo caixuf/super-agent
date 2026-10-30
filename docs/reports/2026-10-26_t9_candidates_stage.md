@@ -60,7 +60,7 @@ AutoApprovalForbidden, ReviewBlocked`。
 ## 验证
 
 ```text
-$ cd <peer-host>/code/agentcore
+$ cd /home/emily/code/agentcore
 $ TMPDIR=/dev/shm python3 -m pytest tests/test_learning_candidates.py -q
 40 passed in 0.23s
 
