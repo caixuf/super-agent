@@ -179,6 +179,11 @@ class MemoryConfig:
     #: 宿主把外网/自建嵌入服务的实现放这里，引擎因此不必 import 任何嵌入 SDK。
     embed_fallbacks: Sequence[Callable[[Sequence[str]], Optional[list]]] = ()
 
+    #: Explicit host attestation that fallback backends produce vectors in
+    #: exactly the same model space as the primary. Dimensions alone do not
+    #: establish compatibility. False degrades to non-vector retrieval.
+    embed_fallbacks_same_model: bool = False
+
     #: 对话补全函数，签名需兼容 chat_completions(messages, timeout=, max_tokens=, temperature=)
     #: 用于事实抽取与冲突裁决这两处需要语义判断的环节。
     llm_fn: Optional[Callable[..., Any]] = None

@@ -1,5 +1,5 @@
 import json
-from urllib.error import URLError
+from urllib.error import URLError, HTTPError
 import pytest
 from agentcore.ccp_config import CcpCredentials
 from agentcore import ccp_analysis_model as adapter
@@ -116,3 +116,32 @@ def test_malformed_response_shapes_are_stable(monkeypatch,bad):
     configure(monkeypatch,bad)
     with pytest.raises(adapter.CcpAnalysisModelError,match="invalid_provider_response"):
         adapter.model([{"role":"user","content":"x"}])
+
+
+@pytest.mark.parametrize("error,category", [
+    (HTTPError("http://secret/path", 429, "secret-body", {}, None), "rate_limited"),
+    (HTTPError("http://secret/path", 401, "secret-body", {}, None), "auth_rejected"),
+    (HTTPError("http://secret/path", 503, "secret-body", {}, None), "provider_5xx"),
+    (HTTPError("http://secret/path", 400, "secret-body", {}, None), "http_other"),
+    (URLError(TimeoutError("secret-body")), "timeout"),
+    (TimeoutError("secret-body"), "timeout"),
+    (URLError("secret-body"), "connection"),
+])
+def test_transport_logs_only_coarse_failure_category(monkeypatch, caplog, error, category):
+    configure(monkeypatch)
+    def fail(request, timeout):
+        raise error
+    monkeypatch.setattr(adapter, "_open_request", fail)
+    with pytest.raises(adapter.CcpAnalysisModelError, match="^ccp_request_failed$"):
+        adapter.model([{"role": "user", "content": "secret-body"}])
+    assert "CCP analysis model failure: " + category in caplog.text
+    assert "secret" not in caplog.text
+
+
+def test_invalid_provider_response_logs_only_safe_category(monkeypatch, caplog):
+    configure(monkeypatch, b"secret-provider-body")
+    with pytest.raises(adapter.CcpAnalysisModelError, match="invalid_provider_response"):
+        adapter.model([{"role": "user", "content": "private prompt"}])
+    assert "CCP analysis model failure: invalid_provider_response" in caplog.text
+    assert "secret-provider-body" not in caplog.text
+    assert "private prompt" not in caplog.text

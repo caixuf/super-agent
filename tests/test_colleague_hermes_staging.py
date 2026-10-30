@@ -8,7 +8,7 @@ from agentcore.colleague_provisioner import InstanceSpec, Provisioner
 from agentcore.colleague_registry import Registry, Actor, Supervisor
 
 
-SOURCE = Path('/home/caixuf/.hermes/hermes-agent')
+SOURCE = Path('<hermes-install>')
 PYTHON = SOURCE / 'venv/bin/python'
 SITES = list((SOURCE / 'venv/lib').glob('python*/site-packages'))
 

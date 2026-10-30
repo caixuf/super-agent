@@ -1277,3 +1277,50 @@ def test_unknown_post_before_message_id_checkpoint_freezes_without_reposting(tmp
     assert second.messages == []
     for callback in second.unload_callbacks:
         callback()
+
+
+def test_edit_lock_table_stays_bounded():
+    """编辑锁表必须有上限。
+
+    key 里带 message_id，长跑网关会为每条消息留一把锁且从不回收 ——
+    这是常驻内存里一处确定的单调增长。
+    """
+    import asyncio
+
+    async def exercise():
+        class _Target:
+            platform = 'p'
+            chat_id = 'c'
+
+        target = _Target()
+        loop = asyncio.get_running_loop()
+        for index in range(plugin._MAX_EDIT_LOCKS + 50):
+            plugin._edit_lock_for(target, 'm%d' % index)
+        with plugin._EDIT_LOCKS_GUARD:
+            per_loop = plugin._EDIT_LOCKS.setdefault(loop, {})
+            assert len(per_loop) <= plugin._MAX_EDIT_LOCKS
+
+    asyncio.run(exercise())
+
+
+def test_a_held_edit_lock_is_never_evicted():
+    """正在被持有的锁不能被回收 —— 换掉它等于失去互斥。"""
+    import asyncio
+
+    async def exercise():
+        class _Target:
+            platform = 'p'
+            chat_id = 'c'
+
+        target = _Target()
+        lock = plugin._edit_lock_for(target, 'held')
+        await lock.acquire()
+        try:
+            with plugin._EDIT_LOCKS_GUARD:
+                per_loop = plugin._EDIT_LOCKS.setdefault(asyncio.get_running_loop(), {})
+                plugin._trim_edit_locks_locked(per_loop)
+                assert per_loop.get(('p', 'c', 'held')) is lock
+        finally:
+            lock.release()
+
+    asyncio.run(exercise())

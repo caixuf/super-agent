@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 _INPUT_KEYS = (
     "max_input_tokens",
@@ -352,6 +353,106 @@ def check_config(catalog: Catalog, config: Dict[str, Any], model: str) -> List[s
     return warnings
 
 
+
+def check_compression_budget(config: Dict[str, Any], budget_tokens: int) -> List[str]:
+    """Compare a user-chosen performance budget with the configured trigger.
+
+    The trigger is not a hard ceiling: one large turn can overshoot it and
+    compression can fail. This check never changes a profile.
+    """
+    if isinstance(budget_tokens, bool) or not isinstance(budget_tokens, int) or budget_tokens <= 0:
+        raise ValueError('budget_tokens must be a positive integer')
+    if _lookup(config, 'compression', 'enabled') is False:
+        return ['compression is disabled; the chosen performance budget is not enforced']
+    threshold = _positive_int(_lookup(config, 'compression', 'threshold_tokens'))
+    if threshold is not None and threshold > budget_tokens:
+        return [f'compression.threshold_tokens={threshold} exceeds the chosen '
+                f'performance budget {budget_tokens}; compression may not start before that budget']
+    return []
+
+
+def estimate_tokens(content: Union[str, Dict[str, Any], Sequence[Dict[str, Any]]]) -> int:
+    """Fast approximation of token count for text or message list."""
+    if isinstance(content, str):
+        cjk = len(re.findall(r"[\u4e00-\u9fff]", content))
+        words = len(re.findall(r"[A-Za-z0-9_]+", content))
+        other = max(0, len(content) - (cjk + words * 4)) // 4
+        return max(1, cjk + words + other)
+    elif isinstance(content, dict):
+        text = str(content.get("content") or "")
+        return 4 + estimate_tokens(text)
+    elif isinstance(content, (list, tuple)):
+        return sum(estimate_tokens(m) for m in content) + 2
+    return 1
+
+
+def compact_context_window(
+    messages: Sequence[Dict[str, Any]],
+    *,
+    max_tokens: int,
+    threshold_tokens: Optional[int] = None,
+    keep_recent_turns: int = 2,
+    reserve_tokens: int = 200,
+) -> List[Dict[str, Any]]:
+    """Structured context sliding compaction when window approaches threshold.
+
+    Preserves head system instructions and tail recent turns, while compacting
+    interim turns into a structured summary to prevent context overflow or attention dilution.
+    """
+    if type(max_tokens) is not int or max_tokens <= 0:
+        raise ValueError("max_tokens must be a positive integer")
+    if threshold_tokens is not None and (type(threshold_tokens) is not int or threshold_tokens <= 0):
+        raise ValueError("threshold_tokens must be a positive integer")
+    if not messages:
+        return []
+    threshold = threshold_tokens if threshold_tokens is not None else int(max_tokens * 0.8)
+    total_tokens = estimate_tokens(messages)
+    if total_tokens <= threshold:
+        return [dict(m) for m in messages]
+
+    head_system: List[Dict[str, Any]] = []
+    dialogue: List[Dict[str, Any]] = []
+    for m in messages:
+        if m.get("role") == "system" and not dialogue:
+            head_system.append(dict(m))
+        else:
+            dialogue.append(dict(m))
+
+    tail_count = max(1, keep_recent_turns * 2)
+    if len(dialogue) <= tail_count:
+        return head_system + dialogue
+
+    middle_turns = dialogue[:-tail_count]
+    tail_turns = dialogue[-tail_count:]
+
+    summary_lines = [
+        f"[Context Sliding Compaction: condensed {len(middle_turns)} historical dialogue turns]"
+    ]
+    for idx, turn in enumerate(middle_turns, 1):
+        role = turn.get("role", "unknown")
+        raw_content = str(turn.get("content") or "").strip()
+        first_line = raw_content.splitlines()[0][:120] if raw_content else ""
+        summary_lines.append(f"- Turn {idx} ({role}): {first_line}")
+
+    summary_message = {
+        "role": "system",
+        "content": "\n".join(summary_lines),
+    }
+
+    compacted = head_system + [summary_message] + tail_turns
+    target_budget = max(100, threshold - reserve_tokens)
+    while len(tail_turns) > 2 and estimate_tokens(compacted) > target_budget:
+        slide_turn = tail_turns.pop(0)
+        role = slide_turn.get("role", "unknown")
+        raw_content = str(slide_turn.get("content") or "").strip()
+        first_line = raw_content.splitlines()[0][:120] if raw_content else ""
+        summary_lines.append(f"- Slid Turn ({role}): {first_line}")
+        summary_message["content"] = "\n".join(summary_lines)
+        compacted = head_system + [summary_message] + tail_turns
+
+    return compacted
+
+
 def _print_report(catalog: Catalog, model: str, warnings: List[str]) -> None:
     window = catalog.effective(model)
     print(f"base_url: {catalog.base_url}")
@@ -373,6 +474,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--model", default="")
     parser.add_argument("--config", default="", help="profile config.yaml used for model/provider defaults")
     parser.add_argument("--timeout", type=float, default=_DEFAULT_TIMEOUT)
+    parser.add_argument("--performance-budget-tokens", type=int, default=None,
+                        help="optional workload budget to compare with compression trigger")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
@@ -394,6 +497,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"probe failed: {error}", file=sys.stderr)
         return 2
     warnings = check_config(catalog, config, model) if config else []
+    if args.performance_budget_tokens is not None:
+        try:
+            warnings.extend(check_compression_budget(config, args.performance_budget_tokens))
+        except ValueError as error:
+            parser.error(str(error))
     if args.json:
         window = catalog.effective(model)
         payload = {

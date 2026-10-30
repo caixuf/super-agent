@@ -390,7 +390,7 @@ class MemoryRuntimeSupervisor:
         evidence = containment.sweep(token)
         self._proc = self._token = None
         return {"profile": self.profile, "returncode": returncode,
-                "quiescent": evidence["quiescent"],
+                "quiescent": False,
                 "quiescence_evidence_id": containment.evidence_id(evidence)}
 
 def configure_memory_from_binding_file(binding_file,profile):

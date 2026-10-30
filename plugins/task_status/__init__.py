@@ -203,6 +203,8 @@ _SCHEMA = {
     "description": (
         "Read the liveness state of a long-running task: state, elapsed seconds, "
         "heartbeat age, phase, progress, pid health and a bounded output tail. "
+        "When liveness_note is present, tell the user its meaning; a visible process "
+        "with a stale heartbeat does not prove continued progress. "
         "Use once when the user asks whether work is still running; never loop or sleep. "
         "Returns unknown_task when no record belongs to this session."
     ),

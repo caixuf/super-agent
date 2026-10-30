@@ -282,3 +282,24 @@ def test_duplicate_injection_is_suppressed(tmp_path):
         assert len([r for r in server.requests if r["path"] == "/decide"]) == 1
     finally:
         server.stop()
+
+
+def test_session_caches_stay_bounded(tmp_path):
+    """会话级缓存必须有上限 —— 长跑网关会为每个会话留一条，永不回收就等于泄漏。"""
+    server = Gateway().start()
+    try:
+        context = _context(tmp_path, gateway_url=server.url)
+        PLUGIN.register(context)
+        grounding = PLUGIN.Grounding(context)
+        for index in range(PLUGIN._MAX_VERDICT_SESSIONS + 40):
+            grounding._verdicts['s%d' % index] = {'digest': 'd', 'source': 'x', 'choice': 'a',
+                                                'confidence': 1.0, 'decisive': True, 'skip_llm': True,
+                                                'model': 'm', 'elapsed_ms': 0.0}
+        grounding._trim_session_keys_locked(grounding._verdicts, PLUGIN._MAX_VERDICT_SESSIONS)
+        assert len(grounding._verdicts) == PLUGIN._MAX_VERDICT_SESSIONS
+        for index in range(PLUGIN._MAX_INJECTED_SESSIONS + 40):
+            grounding._injected['s%d' % index] = {'h'}
+        grounding._trim_session_keys_locked(grounding._injected, PLUGIN._MAX_INJECTED_SESSIONS)
+        assert len(grounding._injected) == PLUGIN._MAX_INJECTED_SESSIONS
+    finally:
+        server.stop()

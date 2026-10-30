@@ -48,14 +48,29 @@ def _attempt_token():
         return None
 
 
-def _attempt_evidence():
-    """Second proof, from the queue's own token, that nothing of this job survives."""
+def _trusted_containment_available(runner):
+    """Check if trusted whole-attempt containment (cgroup, container, or provider) is available."""
+    if os.environ.get("AGENTCORE_CONTAINMENT_UNIT"):
+        return True
+    if os.environ.get("AGENTCORE_CONTAINMENT_CONTAINER"):
+        return True
+    if getattr(runner, "trusted_containment", False):
+        return True
+    return False
+
+
+def _attempt_evidence(runner=None):
+    """Second proof, from the queue's token and trusted boundary, that nothing of this job survives."""
     token = _attempt_token()
     if token is None:
         return None
-    evidence = containment.sweep(token)
-    if not evidence["quiescent"]:
-        raise RuntimeError("attempt_not_quiescent")
+    unit = os.environ.get("AGENTCORE_CONTAINMENT_UNIT") or getattr(runner, "containment_unit", None)
+    container = os.environ.get("AGENTCORE_CONTAINMENT_CONTAINER") or getattr(runner, "containment_container", None)
+    runner_contained = bool(getattr(runner, "trusted_containment", False))
+    evidence = containment.sweep_and_verify(token, systemd_unit=unit, docker_container=container,
+                                            runner_contained=runner_contained)
+    if containment.evidence_id(evidence) is None:
+        raise RuntimeError("attempt_containment_unproven")
     return evidence
 
 
@@ -87,8 +102,13 @@ def main():
         job = json.load(sys.stdin)
         if not isinstance(job, dict) or set(job) != {"job", "attempt", "payload"}:
             raise ValueError("invalid_queue_envelope")
+        # A token scan alone cannot certify whole-attempt containment. If a token
+        # is present, require trusted containment (cgroup, container, or provider)
+        # before execution to prevent side effects before proving quiescence.
+        if _attempt_token() is not None and not _trusted_containment_available(runner):
+            raise RuntimeError("attempt_containment_unavailable")
         result = execute_payload(job["payload"], runner=runner, authorize_assignment=authorize)
-        evidence = _attempt_evidence()
+        evidence = _attempt_evidence(runner)
         print(json.dumps({"ok": True, "result": result,
                           "quiescence_evidence_id": containment.evidence_id(evidence)},
                          ensure_ascii=False))

@@ -77,7 +77,7 @@ FlowCoro Python 绑定执行 Python 回调时仍需 GIL。性能优化应先测�
 
 ## 交接：2026-10-29
 
-当前工作在本机 WSL `/home/caixuf/code/super-agent`，工作树有多项未提交和未跟踪文件，包含并行工作的改动；不要重置或覆盖。没有部署到运行中的 caixuf Gateway，也没有在 Emily 上测试或发送消息平台消息。
+当前工作在本机 WSL `super-agent`，工作树有多项未提交和未跟踪文件，包含并行工作的改动；不要重置或覆盖。没有部署到运行中的 caixuf Gateway，也没有在 Emily 上测试或发送消息平台消息。
 
 - 共享记忆新增宿主绑定原型 `agentcore/colleague_shared_memory.py` 和 `agentcore/colleague_memory_cli.py`。隔离测试使用 Hermes 的 localvec 提供器加载并验证同团队召回、跨团队不命中；实际 runtime worker 的单次运行验证了回合进入独立队列。它还没有安装到 Hermes profile，也没有验证真实 Gateway 模型回合里的自动召回或完整自动写入。
 - 共享记忆映射由宿主管理，新增成员须核对版本及登记库；现有 profile 不能删除或改绑。profile 绑定不是同 UID 任意代码的访问控制，已经启动的退休成员 worker 需要宿主停机或增加运行时校验。

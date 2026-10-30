@@ -70,7 +70,7 @@ recall_probe(fact_id, query, *, memory_store=None, user_id=None, ebm=None,
 ## 验证
 
 ```text
-$ cd /home/emily/code/agentcore
+$ cd agentcore
 $ TMPDIR=/dev/shm python3 -m pytest tests/test_learning_promotion.py -q
 17 passed in 0.18s
 

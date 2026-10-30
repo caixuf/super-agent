@@ -3,7 +3,8 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 .venv/
+tools/assets/mermaid.min.js
+!tools/assets/mermaid.min.js
+identity/manifests/
+identity/overlays/*.overlay.md
 
-# tools/assets/mermaid.min.js 是第三方 vendor 产物，必须随仓存在：
-# install/install.sh 直接复制 tools/ 树，tests/test_install_script.py 断言该文件到位，
-# 仓库内没有下载步骤 —— 剔除会导致安装契约与干净室校验失败。

@@ -1,9 +1,4 @@
-# imfl_super_agent —— 通用智能体本体
-
-> 仓库地址（公司 GitLab）：<https://gitlab-ap-office.immotors.com/lilongfei/imfl_super_agent>
-> 镜像地址（GitHub）：<https://github.com/caixuf/imfl_super_agent>
-> 本仓只放**通用机制**（身份纪律、记忆引擎、工具面、运行时骨架、平台补丁、安装器），
-> 业务内容一律以叠加层形式提供 —— 见下文「一句话定位」。
+# super-agent —— 通用智能体本体
 
 ## 持久任务、研发同事与执行层
 
@@ -241,6 +236,22 @@ for hit in result["results"]:
 - **代际硬隔离**：`ebm` 归一成桶名写入 `workspace_id`，跨代永不互相覆盖。
 
 `docker/engine_smoke.py` 就是这个示例的可运行版本（干净室验证第 ⑦ 步用的就是它）。
+
+## 存储占用体检（只读）
+
+记忆库的**存储与常驻内存**占用由独立命令测量，不靠人猜：
+
+```bash
+python3 -m agentcore.memory_footprint --database <记忆库路径> --view-budget-mib <常驻视图预算>
+```
+
+输出只有条数与字节数（无事实正文、无向量值）：库体积、向量占比、
+**向量是否被存了两份**（`fact_embeddings` BLOB + `vec_facts` 索引）、
+以及**多少向量属于退役事实**（召回恒过滤 `status='active'`，退役事实的向量
+仍占着存储，并被 `read_view` 原样拷进常驻副本）。
+
+配套巡检作业见 `runtime/autotask/jobs/memory-footprint-guard.json`——
+它只**报告**，不删库、不重建索引、不改配置。
 
 ## 宿主需要注入哪些业务约定
 

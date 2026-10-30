@@ -420,3 +420,32 @@ def test_legacy_open_reservation_cannot_be_silently_upgraded_to_exclusive(env):
     with registry._db() as db:
         assert db.execute("SELECT 1 FROM colleague_exclusive_work WHERE profile_id=? AND member_id=?",
                           ("team","reviewer")).fetchone() is None
+
+
+def test_main_bot_leadership_and_anti_eviction_invariants(env):
+    registry, leader, host = env
+
+    # 1. Primary identification
+    assert registry.is_primary_member("leader") is True
+    assert registry.is_primary_member("other_member") is False
+
+    # 2. Leadership assertions
+    registry.assert_primary_leadership(actor=leader)
+
+    role(registry, leader)
+    hire(registry, leader)
+    worker = Actor("team", "reviewer")
+    with pytest.raises(PermissionError, match="primary_leadership_required"):
+        registry.assert_primary_leadership(actor=worker)
+
+    # 3. Anti-eviction invariants: primary member cannot be deactivated
+    with pytest.raises(PermissionError, match="primary_protected"):
+        registry.request_deactivation(actor=leader, member_id="leader", request_id="deact-leader")
+
+    with pytest.raises(PermissionError, match="primary_protected"):
+        registry.finalize_deactivation(supervisor=host, member_id="leader", generation=1, external_idle=True)
+
+    # 4. Anti-eviction invariants: primary member management authority cannot be revoked
+    with pytest.raises(PermissionError, match="primary_protected"):
+        registry.grant_management(actor=leader, member_id="leader", enabled=False, request_id="revoke-lead")
+

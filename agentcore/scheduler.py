@@ -90,7 +90,9 @@ class AgentScheduler:
             self._pool = futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix='agent-tool')
         elif backend == 'flowcoro':
             self._fc = importlib.import_module('flowcoro_py')
-            self._cancel_errors += (self._fc.CancelledError,)
+            fc_cancel = getattr(self._fc, 'CancelledError', None)
+            if fc_cancel is not None:
+                self._cancel_errors += (fc_cancel,)
             self._pool = self._fc.CoroutineThreadPool(threads=workers, pin_to_cores=False)
         else:
             raise ValueError('backend must be stdlib or flowcoro')
@@ -124,7 +126,7 @@ class AgentScheduler:
                 self._cv.wait(remaining)
             if self._closed:
                 raise RuntimeError('scheduler is closed')
-            source = self._fc.CancellationTokenSource() if self._fc else None
+            source = self._fc.CancellationTokenSource() if (self._fc and hasattr(self._fc, 'CancellationTokenSource')) else None
             handle = ToolHandle(name, self, source)
             inject = dict(kwargs)
             # Bind supplied positional arguments first, avoiding duplicate injection.

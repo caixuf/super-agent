@@ -90,7 +90,7 @@ def _committable_files():
     """下一次提交会进版本库的全部文件（相对路径）。git 不可用时退化为遍历工作树。"""
     try:
         out = subprocess.run(
-            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            ["git", "-c", "safe.directory=*", "ls-files", "--cached", "--others", "--exclude-standard"],
             cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):  # git 不在
         out = None

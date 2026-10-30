@@ -561,6 +561,18 @@ class Registry:
         with self._db() as db:
             return self._primary(db)
 
+    def is_primary_member(self, member_id: str) -> bool:
+        """Check whether a given member ID is the protected primary leader bot."""
+        with self._db() as db:
+            return member_id == self._primary(db)
+
+    def assert_primary_leadership(self, *, actor: Actor) -> None:
+        """Assert that the authenticated actor is the primary leader bot; raise PermissionError otherwise."""
+        with self._db() as db:
+            self._reader(db, actor)
+            if actor.member_id != self._primary(db):
+                raise PermissionError("primary_leadership_required")
+
     def work_status(self, *, supervisor, member_id, generation):
         """Summarize registry reservations, not work outside this admission fence."""
         self._host(supervisor)

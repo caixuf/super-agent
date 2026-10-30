@@ -15,9 +15,10 @@ _LINE = re.compile(
 )
 
 
-def summarize(lines, *, since=None):
+def summarize(lines, *, since=None, include_buckets=False):
     """Group completed calls by log-local hour. In-flight calls are not included."""
     hours = defaultdict(list)
+    buckets = defaultdict(list)
     for line in lines:
         match = _LINE.search(line)
         if not match:
@@ -29,18 +30,31 @@ def summarize(lines, *, since=None):
             continue
         if since is not None and instant < since:
             continue
-        hours[hour].append((int(match['input']), float(match['latency'])))
-    return [dict(hour=hour, calls=len(values),
+        input_tokens = int(match['input'])
+        latency = float(match['latency'])
+        hours[hour].append((input_tokens, latency))
+        if include_buckets:
+            bucket = 'under_50k' if input_tokens < 50000 else '50k_to_200k' if input_tokens < 200000 else '200k_or_more'
+            buckets[bucket].append(latency)
+    hourly = [dict(hour=hour, calls=len(values),
                  median_seconds=round(statistics.median(v[1] for v in values), 2),
                  max_seconds=max(v[1] for v in values),
                  max_input_tokens=max(v[0] for v in values))
             for hour, values in sorted(hours.items())]
+    if not include_buckets:
+        return hourly
+    grouped = [dict(input_tokens=bucket, calls=len(values),
+                    median_seconds=round(statistics.median(values), 2),
+                    max_seconds=max(values), calls_over_120_seconds=sum(v >= 120 for v in values))
+               for bucket, values in sorted(buckets.items())]
+    return hourly, grouped
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('log', type=Path)
     parser.add_argument('--tail-mib', type=int, default=8)
+    parser.add_argument('--input-buckets', action='store_true', help='also group completed timings by input size')
     args = parser.parse_args(argv)
     if not 1 <= args.tail_mib <= 128:
         parser.error('--tail-mib must be between 1 and 128')
@@ -51,8 +65,14 @@ def main(argv=None):
         stream.seek(offset)
         if offset:
             stream.readline()  # Discard the partial first line.
-        result = summarize(line.decode('utf-8', 'replace') for line in stream)
-    print(json.dumps({'source': 'tail' if offset else 'full_log', 'hours': result}, ensure_ascii=False))
+        result = summarize((line.decode('utf-8', 'replace') for line in stream),
+                           include_buckets=args.input_buckets)
+    output = {'source': 'tail' if offset else 'full_log'}
+    if args.input_buckets:
+        output['hours'], output['input_buckets'] = result
+    else:
+        output['hours'] = result
+    print(json.dumps(output, ensure_ascii=False))
 
 
 if __name__ == '__main__':

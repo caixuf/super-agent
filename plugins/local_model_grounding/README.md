@@ -32,12 +32,12 @@ plugins:
     local-model-grounding:
       settings:                  # 与既有插件一致：配置放在 settings 下
         enabled: true
-        gateway_url: "http://192.168.137.2:8920"
-        token_file: "<peer-home>/.config/local-model/token"   # 0600，勿写进仓
+        gateway_url: "http://<gateway-host>:8920"
+        token_file: "~/.config/local-model/token"   # 0600，勿写进仓
         docs_roots:
-          - "<peer-home>/imfl_auto_test/docs/handover"
-        index_dir: "<peer-home>/.local/state/local-model-grounding/index"
-        audit_path: "<peer-home>/.local/state/local-model-grounding/audit.jsonl"
+          - "~/<platform-root>/docs/handover"
+        index_dir: "~/.local/state/local-model-grounding/index"
+        audit_path: "~/.local/state/local-model-grounding/audit.jsonl"
         min_confidence: 0.6      # 只能调高，低于 0.6 会被抬回
         top_k: 5
         max_context_chars: 4000

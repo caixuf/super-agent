@@ -25,8 +25,8 @@ test = ["pytest>=7.0", "markdown>=3.4"]
 documents = ["markdown>=3.4", "Pygments>=2.15", "Pillow>=10", "websocket-client>=1.6"]
 
 [project.urls]
-Homepage = "https://gitlab-ap-office.immotors.com/lilongfei/imfl_super_agent"
-Repository = "https://gitlab-ap-office.immotors.com/lilongfei/imfl_super_agent"
+Homepage = "https://github.com/caixuf/super-agent"
+Repository = "https://github.com/caixuf/super-agent"
 
 [tool.setuptools]
 include-package-data = true

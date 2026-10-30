@@ -322,7 +322,7 @@ def test_register_wires_both_hooks():
 
 
 # ── 回执形态识别：宿主可能把「改写前」的参数交给 post 钩子 ────────────────
-# 现场实证：emily 上 27 次转后台、账本一条没落 —— post 钩子拿到的是模型原始参数
+# 现场实证：远端宿主 上 27 次转后台、账本一条没落 —— post 钩子拿到的是模型原始参数
 # （没有 background），于是 old 代码直接 return。回执本身能证明这是后台进程。
 def test_post_hook_registers_from_a_spawn_receipt_without_background_args(monkeypatch):
     fake = _FakeLedger()

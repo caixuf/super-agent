@@ -8,8 +8,9 @@ specifications, and provides bidirectional synchronization with agentcore.livene
 from __future__ import annotations
 
 import json
+import threading
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 DEFAULT_STAGES = [
     ("analysis", "需求规格与因果链拆解"),
@@ -24,6 +25,25 @@ STAGE_STATUS_INDICATORS = {
     "passed": "[OK]",
     "failed": "[FAIL]",
     "skipped": "[SKIP]",
+}
+
+STAGE_STATUS_ALIASES = {
+    "done": "passed",
+    "success": "passed",
+    "passed": "passed",
+    "ok": "passed",
+    "pass": "passed",
+    "failed": "failed",
+    "fail": "failed",
+    "error": "failed",
+    "cancelled": "skipped",
+    "skipped": "skipped",
+    "skip": "skipped",
+    "interrupted": "failed",
+    "waiting": "waiting",
+    "wait": "waiting",
+    "queued": "waiting",
+    "running": "running",
 }
 
 HEADER_TEMPLATES = {
@@ -69,6 +89,20 @@ class CardStreamBuilder:
     def _now(self) -> float:
         return float(self._clock())
 
+    def add_stage(self, stage_key: str, name: Optional[str] = None) -> CardStreamBuilder:
+        """Dynamically add or rename a stage in the card stream."""
+        if stage_key not in self.stages:
+            self.stages[stage_key] = {
+                "key": stage_key,
+                "name": name or stage_key,
+                "status": "waiting",
+                "note": "",
+                "updated_at": self._now(),
+            }
+        elif name:
+            self.stages[stage_key]["name"] = name
+        return self
+
     def advance(
         self,
         stage_key: str,
@@ -76,12 +110,15 @@ class CardStreamBuilder:
         note: str = "",
         state: Optional[str] = None,
         detail: str = "",
+        name: Optional[str] = None,
     ) -> CardStreamBuilder:
-        """Advance a pipeline stage status and update card lifecycle."""
+        """Advance a pipeline stage status and update card lifecycle without failing on unknown stages."""
         if stage_key not in self.stages:
-            raise ValueError(f"unknown_stage: {stage_key}. Expected one of {list(self.stages)}")
-        if status not in STAGE_STATUS_INDICATORS:
-            raise ValueError(f"unknown_status: {status}. Expected one of {list(STAGE_STATUS_INDICATORS)}")
+            self.add_stage(stage_key, name=name or stage_key)
+        norm_status = STAGE_STATUS_ALIASES.get(str(status).lower().strip(), status)
+        if norm_status not in STAGE_STATUS_INDICATORS:
+            norm_status = "running"
+        status = norm_status
 
         now = self._now()
         self.stages[stage_key]["status"] = status
@@ -131,7 +168,7 @@ class CardStreamBuilder:
             self.detail = str(live.get("detail"))
 
         phase = live.get("phase", "")
-        if phase and phase in self.stages:
+        if phase:
             self.advance(phase, status="running", state=self.state)
 
         for art in live.get("artifacts") or []:
@@ -242,4 +279,120 @@ class CardStreamBuilder:
             "msg_type": "interactive",
             "card": card_dict,
         }
+
+
+class CardFrameDebouncer:
+    """Client-side backoff/retry & debounce on card frame updates to prevent frame drops under network jitter."""
+
+    def __init__(
+        self,
+        send_fn: Callable[[Dict[str, Any]], Any],
+        *,
+        min_interval: float = 1.0,
+        max_retries: int = 3,
+        backoff_initial: float = 0.2,
+        backoff_factor: float = 2.0,
+        backoff_max: float = 2.0,
+        clock: Optional[Callable[[], float]] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+    ):
+        self._send_fn = send_fn
+        self.min_interval = max(0.0, float(min_interval))
+        self.max_retries = max(0, int(max_retries))
+        self.backoff_initial = max(0.01, float(backoff_initial))
+        self.backoff_factor = max(1.0, float(backoff_factor))
+        self.backoff_max = max(self.backoff_initial, float(backoff_max))
+        self._clock = clock or time.time
+        self._sleep_fn = sleep_fn or time.sleep
+        self.last_emit_at: float = 0.0
+        self.pending_payload: Optional[Dict[str, Any]] = None
+        self.emit_count: int = 0
+        self.retry_count: int = 0
+        self._lock = threading.Lock()
+
+    def _send_with_retry(self, payload: Dict[str, Any]) -> Any:
+        attempts = 0
+        last_exc: Optional[Exception] = None
+        while attempts <= self.max_retries:
+            try:
+                res = self._send_fn(payload)
+                if isinstance(res, dict) and res.get("ok") is False and res.get("retry_safe") is True:
+                    if attempts < self.max_retries:
+                        self.retry_count += 1
+                        delay = min(self.backoff_max, self.backoff_initial * (self.backoff_factor ** attempts))
+                        attempts += 1
+                        self._sleep_fn(delay)
+                        continue
+                self.emit_count += 1
+                self.last_emit_at = float(self._clock())
+                return res
+            except Exception as exc:
+                last_exc = exc
+                if attempts < self.max_retries:
+                    self.retry_count += 1
+                    delay = min(self.backoff_max, self.backoff_initial * (self.backoff_factor ** attempts))
+                    attempts += 1
+                    self._sleep_fn(delay)
+                else:
+                    raise last_exc
+        return {"ok": False, "error": "max_retries_exceeded"}
+
+    def update(self, payload: Dict[str, Any], *, final: bool = False) -> Any:
+        with self._lock:
+            now = float(self._clock())
+            self.pending_payload = payload
+            if final or (now - self.last_emit_at) >= self.min_interval:
+                self.pending_payload = None
+                return self._send_with_retry(payload)
+            return {"ok": True, "debounced": True}
+
+    def flush(self) -> Any:
+        with self._lock:
+            if self.pending_payload is not None:
+                p = self.pending_payload
+                self.pending_payload = None
+                return self._send_with_retry(p)
+            return None
+
+
+class CardStreamController:
+    """Combines CardStreamBuilder with CardFrameDebouncer for streaming updates."""
+
+    def __init__(
+        self,
+        builder: CardStreamBuilder,
+        send_fn: Callable[[Dict[str, Any]], Any],
+        *,
+        min_interval: float = 1.0,
+        max_retries: int = 3,
+        backoff_initial: float = 0.2,
+        backoff_factor: float = 2.0,
+        backoff_max: float = 2.0,
+        clock: Optional[Callable[[], float]] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+    ):
+        self.builder = builder
+        self.debouncer = CardFrameDebouncer(
+            send_fn=send_fn,
+            min_interval=min_interval,
+            max_retries=max_retries,
+            backoff_initial=backoff_initial,
+            backoff_factor=backoff_factor,
+            backoff_max=backoff_max,
+            clock=clock,
+            sleep_fn=sleep_fn,
+        )
+
+    def advance(self, stage_key: str, status: str = "running", note: str = "", **kwargs: Any) -> Any:
+        self.builder.advance(stage_key, status=status, note=note, **kwargs)
+        return self.debouncer.update(self.builder.render_patch_payload())
+
+    def complete(self, success: bool = True, detail: str = "") -> Any:
+        self.builder.complete(success=success, detail=detail)
+        return self.debouncer.update(self.builder.render_patch_payload(), final=True)
+
+    def sync_from_liveness(self, live: Dict[str, Any]) -> Any:
+        self.builder.sync_from_liveness(live)
+        final = self.builder.state in ("done", "failed", "cancelled")
+        return self.debouncer.update(self.builder.render_patch_payload(), final=final)
 

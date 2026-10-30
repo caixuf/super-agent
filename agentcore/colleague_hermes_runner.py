@@ -675,5 +675,5 @@ def _launch(argv: list[str], *, input: str, timeout: float) -> ProcessResult:
         if evidence is None:
             evidence = containment.sweep(token)
     return ProcessResult(proc.returncode, stdout, stderr, timed_out=timed_out,
-                         quiescent=evidence["quiescent"], containment=evidence,
+                         quiescent=False, containment=evidence,
                          containment_scope="cli_client")

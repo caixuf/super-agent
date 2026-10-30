@@ -7,7 +7,7 @@
 | 项 | 结论 | 证据 |
 | :--- | :--- | :--- |
 | 仓 | `master` = `63c0a71`；除指导文件本身外工作区干净 | `git status` / `git log` |
-| 检出 | `/home/caixuf/code/agentcore` 是另一份旧检出，**未使用**；改动全在 `/home/caixuf/code/super-agent` | 指导原文 + 目录核对 |
+| 检出 | `agentcore` 是另一份旧检出，**未使用**；改动全在 `super-agent` | 指导原文 + 目录核对 |
 | 目标档 | `caixuf`；网关 `hermes-gateway-caixuf`（user systemd，PID 1170960，active） | `systemctl --user show` |
 | 忙时模式 | `queue` | `display.busy_input_mode` |
 | 平台显示 | 流式 **on**；工具进度 **off**；忙时明细 **on**；语言 **zh**（本轮新设） | `display.platforms.feishu` |

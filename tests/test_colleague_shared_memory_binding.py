@@ -54,7 +54,9 @@ def _provider():
         provider_mod.MemoryProvider = object
         provider_mod.RecallStatus = lambda **kw: types.SimpleNamespace(**kw)
         provider_mod.is_trivial_prompt = lambda query: False
-        provider_mod.spawn_context_thread = lambda *a, **kw: None
+        import threading
+        provider_mod.spawn_context_thread = lambda target, *, name, args=(), **kw: threading.Thread(
+            target=target, name=name, args=args, daemon=True)
         sys.modules["agent.memory_provider"] = provider_mod
     root = Path(__file__).resolve().parents[1]
     if "plugins.localvec" in sys.modules:
@@ -67,6 +69,26 @@ def _provider():
         spec.loader.exec_module(module)
     instance = module.LocalVecProvider()
     return instance, module
+
+
+def test_host_manager_receives_unavailable_before_its_timeout(monkeypatch):
+    import threading
+    import pytest
+    manager_module = pytest.importorskip('agent.memory_manager')
+    provider, module = _provider()
+    provider._cmd = ['configured']; provider._timeout = 2
+    monkeypatch.setattr(module, 'MAX_FOREGROUND_WAIT_S', .1)
+    entered = threading.Event(); release = threading.Event(); finished = threading.Event()
+    def slow_recall(query, key):
+        entered.set(); release.wait(3); finished.set(); return True
+    monkeypatch.setattr(provider, '_recall', slow_recall)
+    manager = manager_module.MemoryManager(external_prefetch_timeout=1)
+    try:
+        result = manager._prefetch_provider(provider, 'query', session_id='session-a')
+        assert entered.is_set() and not finished.is_set()
+        assert result == module.RECALL_UNAVAILABLE
+    finally:
+        release.set(); assert finished.wait(3)
 
 
 def test_team_share_session_separation_and_cross_team_isolation(tmp_path,monkeypatch):
@@ -251,8 +273,8 @@ def test_host_supervises_the_memory_runtime_and_stops_it_cleanly(tmp_path):
     finally:
         stopped=supervisor.stop()
     assert stopped["returncode"]==0
-    assert stopped["quiescent"] is True
-    assert stopped["quiescence_evidence_id"]
+    assert stopped["quiescent"] is False
+    assert stopped["quiescence_evidence_id"] is None
     assert supervisor.running() is False
     assert containment.tagged(started["token"])==[]
     assert supervisor.log_path.stat().st_mode&0o077==0

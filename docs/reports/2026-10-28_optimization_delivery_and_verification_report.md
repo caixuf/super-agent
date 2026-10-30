@@ -14,45 +14,45 @@
 ## 二、核心优化模块与实现细节
 
 ### 1. 文档全面对齐代码实现
-- [`README.md`](file:///home/caixuf/code/super-agent/README.md)：
+- [`README.md`](README.md)：
   - 顶层执行层全面更新：记录 `agentcore.pool/worker`、`agentcore.dev_runner`（具备编码测试工具的独立 Git Worktree 隔离运行器）与 `agentcore.colleague_dev`（8 大官方研发同事模型）；
   - 全新架构分层表：补齐研发同事执行层、11 款通用插件清单、通用技能库与自动化运维工具；
   - 完整目录结构树：精准映射 `agentcore/`, `plugins/`, `skills/`, `tools/`, `runtime/`, `patches/`, `install/`, `docker/` 全量文件；
   - 规范治理：全篇清理 Emoji 符号，统一采用专业技术标识。
-- [`identity/COLLEAGUE_MODEL.md`](file:///home/caixuf/code/super-agent/identity/COLLEAGUE_MODEL.md)：
+- [`identity/COLLEAGUE_MODEL.md`](identity/COLLEAGUE_MODEL.md)：
   - 第 1 节：正式将 8 大专业研发岗位、Git Worktree 物理隔离与 `dev_runner` 纳入架构模型；
   - 第 4 节：补充跨进程 `fcntl.flock` 互斥保护机制；
   - 第 6 节：更新落地现状（研发隔离执行与团队插件已实装）。
-- [`docs/DISPATCH_ANALYSIS.md`](file:///home/caixuf/code/super-agent/docs/DISPATCH_ANALYSIS.md)：
+- [`docs/DISPATCH_ANALYSIS.md`](docs/DISPATCH_ANALYSIS.md)：
   - 新增专门章节 `Development colleague runner (dev_runner)`，详细说明命令行入参规范、Worktree 文件锁防并发冲突原理、`read, write, edit, bash` 工具集与 `dev_traceability_v1` 证据协议。
 
 ### 2. 任务存活性账本与调度对账（Liveness & Task Status）
-- [`agentcore/liveness.py`](file:///home/caixuf/code/super-agent/agentcore/liveness.py)：
+- [`agentcore/liveness.py`](agentcore/liveness.py)：
   - 建立统一任务存活性 SQLite 持久化账本（`task_liveness` 表），支持任务生命周期追踪（queued, running, stalled, lost, done, failed, cancelled）；
   - 采用精确进程签名（`boot_id:starttime`）抵御 PID 重用；
   - 提供写一次终态保护机制（Terminal Write-Once）与心跳时间差检测。
-- [`agentcore/liveness_daemon.py`](file:///home/caixuf/code/super-agent/agentcore/liveness_daemon.py)：
+- [`agentcore/liveness_daemon.py`](agentcore/liveness_daemon.py)：
   - 实现非阻塞后台巡检守护进程，自动将失联任务标记为 `stalled`，将进程意外退出任务标记为 `lost`。
-- [`plugins/task_status`](file:///home/caixuf/code/super-agent/plugins/task_status)：
+- [`plugins/task_status`](plugins/task_status)：
   - 注册 `task_status` 工具，支持当前会话所有者按任务 ID 或活动列表查询状态、进度（done/total/percent）、心跳年龄与输出尾部日志。
-- [`plugins/durable_dispatch/__init__.py`](file:///home/caixuf/code/super-agent/plugins/durable_dispatch/__init__.py)：
+- [`plugins/durable_dispatch/__init__.py`](plugins/durable_dispatch/__init__.py)：
   - `submit()` 自动在存活性账本中登记任务（state=queued）；
   - `status()` 自动对齐存活性信息，丰富返回 `elapsed_s`、`heartbeat_age_s`、`phase`、`progress`、`verdict` 与 `stalled` 字段；
   - `cancel()` 自动同步将账本置为 `cancelled` 终态。
 
 ### 3. 代码解耦与依赖边界合规
-- [`agentcore/colleague_dev.py`](file:///home/caixuf/code/super-agent/agentcore/colleague_dev.py)：
+- [`agentcore/colleague_dev.py`](agentcore/colleague_dev.py)：
   - 岗位职责与契约抽象为通用工程团队规范，剔除硬编码私有字面量；
   - 平台工作区检测改为动态路径匹配机制（支持环境变量 `AUTOTEST_PLATFORM_ROOT` 与动态发现），消除静态绑定；
   - 将静态引用改为 `importlib.import_module` 动态晚期绑定，彻底消除依赖泄露。
-- [`agentcore/dev_runner.py`](file:///home/caixuf/code/super-agent/agentcore/dev_runner.py)：
+- [`agentcore/dev_runner.py`](agentcore/dev_runner.py)：
   - 平台目录搜寻改为动态解析 `resolve_platform_repo()`；
   - 外部执行器适配层改为 `importlib` 动态按需加载，彻底修复 `test_import_boundary.py` 边界违规。
-- [`agentcore/colleague_catalog.py`](file:///home/caixuf/code/super-agent/agentcore/colleague_catalog.py)：
+- [`agentcore/colleague_catalog.py`](agentcore/colleague_catalog.py)：
   - 剔除注释与文档中残留的特定领域词汇，保持通用名录抽象。
-- [`tests/test_colleague_evidence.py`](file:///home/caixuf/code/super-agent/tests/test_colleague_evidence.py) 与 [`tests/test_dev_runner.py`](file:///home/caixuf/code/super-agent/tests/test_dev_runner.py)：
+- [`tests/test_colleague_evidence.py`](tests/test_colleague_evidence.py) 与 [`tests/test_dev_runner.py`](tests/test_dev_runner.py)：
   - 测试断言与测试桩改为通用领域入参，消除字面量污染。
-- [`verify.sh`](file:///home/caixuf/code/super-agent/verify.sh)：
+- [`verify.sh`](verify.sh)：
   - 终端回显清理 Emoji，规范采用 `[PASS]` / `[FAIL]` 标识。
 
 ---

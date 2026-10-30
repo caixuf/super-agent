@@ -11,7 +11,7 @@
 ## 运行方式
 
 \`\`\`bash
-cd /home/emily/code/agentcore
+cd agentcore
 python3 -m agentcore.acceptance_evidence < evidence.json
 \`\`\`
 
@@ -74,7 +74,7 @@ python3 -m agentcore.acceptance_evidence < evidence.json
 ## 最近验证
 
 \`\`\`bash
-cd /home/emily/code/agentcore
+cd agentcore
 TMPDIR=/dev/shm python3 -m pytest tests/test_acceptance_evidence.py \
   -q --basetemp=/dev/shm/acceptance-evidence-v2
 \`\`\`

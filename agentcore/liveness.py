@@ -421,8 +421,18 @@ class LivenessLedger:
             verdict = "stalled"
         else:
             verdict = "running"
+        note = None
+        if verdict == "running" and alive is True and heartbeat_age > self.stall_seconds:
+            note = ("进程仍可见，但最后心跳已是 %.0f 秒前；仅凭进程存在不能确认任务仍有进展。"
+                    % heartbeat_age)
+        elif verdict == "stalled":
+            note = ("最后心跳已是 %.0f 秒前，且没有可核验的进程；任务结果尚未确认。"
+                    % heartbeat_age)
+        elif verdict == "lost":
+            note = "无法确认原进程仍在；仅凭进程不可见不能判断任务最终结果。"
         row.update({
             "ok": True,
+            "liveness_note": note,
             "elapsed_s": round(elapsed, 1),
             "heartbeat_age_s": round(heartbeat_age, 1),
             "pid_alive": alive,
@@ -500,6 +510,28 @@ class LivenessLedger:
                 changed.append(out)
         return changed
 
+    def drain(self, timeout: float = 60.0, poll_interval: float = 1.0,
+              owner: Optional[str] = None,
+              sleep_fn: Optional[Callable[[float], None]] = None) -> Dict[str, Any]:
+        """Wait until all non-terminal tasks reach a terminal state, or timeout is reached."""
+        deadline = self._now() + max(0.0, float(timeout))
+        sleeper = sleep_fn or getattr(self, "_sleep_fn", None) or time.sleep
+        while True:
+            active = self.list_tasks(owner=owner, active_only=True)
+            if not active:
+                return {"ok": True, "drained": True, "active_count": 0, "active_tasks": []}
+            if self._now() >= deadline:
+                return {
+                    "ok": False,
+                    "drained": False,
+                    "active_count": len(active),
+                    "active_tasks": [t["task_id"] for t in active],
+                    "timeout": timeout,
+                }
+            sleeper(max(0.05, float(poll_interval)))
+
+    list = list_tasks
+
     def counts(self) -> Dict[str, int]:
         with self.db() as db:
             rows = db.execute(
@@ -519,28 +551,39 @@ __all__ = [
 
 
 def main(argv=None) -> int:
-    """Operator CLI: classify stale rows from evidence and print what changed.
+    """Operator CLI: sweep stale rows or drain active tasks before gateway restart.
 
-    ``python3 -m agentcore.liveness --db <ledger> [--stall-seconds N] [--json]``
-
-    Sweep is the only action on purpose: it writes only rows whose classification
-    changed (live pid stays ``running``, a gone pid becomes ``lost``, no pid plus a
-    stale heartbeat becomes ``stalled``) and never infers a successful exit.
-    Suitable for a periodic systemd timer — a long-lived reader is not required.
+    ``python3 -m agentcore.liveness --db <ledger> [--drain] [--timeout 60] [--stall-seconds N] [--json]``
     """
     import argparse
     import sys
 
     parser = argparse.ArgumentParser(
-        description="Sweep stale task liveness rows (pid evidence; never guesses success).")
+        description="Sweep or drain task liveness rows (pid evidence; never guesses success).")
     parser.add_argument("--db", default=None, help="ledger path (default: per-user state dir)")
     parser.add_argument("--stall-seconds", type=float, default=None,
                         help="silence threshold for a pid-less row (default: ledger default)")
+    parser.add_argument("--drain", action="store_true",
+                        help="drain active tasks until finished or timeout")
+    parser.add_argument("--timeout", type=float, default=60.0,
+                        help="drain timeout in seconds (default: 60)")
     parser.add_argument("--json", action="store_true", help="print the changed rows as JSON")
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     ledger = LivenessLedger(args.db, **({} if args.stall_seconds is None
                                         else {"stall_seconds": args.stall_seconds}))
+    if args.drain:
+        res = ledger.drain(timeout=args.timeout)
+        if args.json:
+            print(json.dumps(res, ensure_ascii=False))
+        else:
+            if res["drained"]:
+                print("drain complete: 0 active tasks in %s" % ledger.path)
+            else:
+                print("drain timed out after %.1fs: %d active task(s): %s"
+                      % (args.timeout, res["active_count"], res["active_tasks"]))
+        return 0 if res["drained"] else 1
+
     changed = ledger.sweep(stall_seconds=args.stall_seconds)
     if args.json:
         print(json.dumps({"db": str(ledger.path), "changed": changed,

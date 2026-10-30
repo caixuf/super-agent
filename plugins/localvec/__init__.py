@@ -40,12 +40,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 from agent.memory_provider import MemoryProvider, RecallStatus, is_trivial_prompt, spawn_context_thread
 
@@ -54,6 +56,9 @@ logger = logging.getLogger(__name__)
 NAME = "localvec"
 GLYPH = "🧠"
 MAX_INFLIGHT_RECALLS = 8
+MAX_FOREGROUND_WAIT_S = 5.0
+MAX_CACHED_RECALLS = 64
+CACHE_TTL_S = 30.0
 RECALL_UNAVAILABLE = '自动记忆召回暂不可用或超时，不能据此认定没有相关记忆。'
 
 
@@ -124,9 +129,13 @@ class LocalVecProvider(MemoryProvider):
         self._cmd: list[str] = []
         self._limit = 6
         self._timeout = 8.0
-        self._cache: dict[str, tuple[str, int]] = {}
+        self._cache: dict[tuple[str, str], tuple[str, int]] = {}
+        self._cache_written_at: dict[tuple[str, str], float] = {}
         self._lock = threading.Lock()
-        self._inflight: dict[str, threading.Event] = {}
+        self._inflight: dict[tuple[str, str], threading.Event] = {}
+        self._generation = 0
+        self._worker_local = threading.local()
+        self._session_id = ""
         self._last: Optional[RecallStatus] = None
 
     # -- 生命周期 ---------------------------------------------------------
@@ -149,88 +158,187 @@ class LocalVecProvider(MemoryProvider):
         self._cmd = _cmd_template(cfg)
         self._limit = int(cfg.get("limit") or 6)
         self._timeout = float(cfg.get("timeout_s") or 8)
-        self._cache = {}
+        self._session_id = session_id if isinstance(session_id, str) else ""
+        with self._lock:
+            self._generation += 1
+            self._last = None
+            self._cache.clear()
+            self._cache_written_at.clear()
+            for event in self._inflight.values():
+                event.recall_result = None
+                event.recall_ok = False
+                event.set()
         if self._cmd:
             logger.info("[localvec] 召回通道就绪（子进程）：%s", " ".join(self._cmd[:3]) + " …")
         else:
             logger.warning("[localvec] 未配置 recall_cmd，自动召回关闭")
+
+    def _prune_cache_locked(self, now: float) -> None:
+        """Expire completed prefetches; callers hold ``_lock``."""
+        for key, written in list(self._cache_written_at.items()):
+            if key not in self._cache or now - written >= CACHE_TTL_S:
+                self._cache.pop(key, None)
+                self._cache_written_at.pop(key, None)
+        while len(self._cache) > MAX_CACHED_RECALLS:
+            oldest = next(iter(self._cache))
+            self._cache.pop(oldest, None)
+            self._cache_written_at.pop(oldest, None)
 
     # -- 召回 -------------------------------------------------------------
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """后台先算好 —— prefetch() 必须快，所以这里只排队、不阻塞。"""
         if not self._cmd or is_trivial_prompt(query):
             return
+        key = (session_id or self._session_id, query)
         with self._lock:
-            if query in self._inflight or query in self._cache:
+            self._prune_cache_locked(time.monotonic())
+            if key in self._inflight or key in self._cache:
                 return
             if len(self._inflight) >= MAX_INFLIGHT_RECALLS:
                 logger.warning('localvec: recall capacity reached')
                 return
-            event = self._inflight[query] = threading.Event()
-        try:
-            th = spawn_context_thread(self._recall_tracked, name="localvec-prefetch", args=(query,event))
-            th.start()
-        except Exception as exc:  # pragma: no cover
-            with self._lock:
-                if self._inflight.get(query) is event:
-                    del self._inflight[query]
-                event.set()
-            logger.debug("[localvec] 后台召回排队失败：%s", exc)
+            event = self._inflight[key] = threading.Event()
+            event.generation = self._generation
+        self._start_recall(query, key, event)
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         """取后台算好的结果；没有就同步算一次（子进程召回是亚秒级，不引入一轮滞后）。"""
         if not self._cmd or is_trivial_prompt(query):
             self._last = None
             return ""
+        key = (session_id or self._session_id, query)
         with self._lock:
-            event = self._inflight.get(query)
+            self._prune_cache_locked(time.monotonic())
+            event = self._inflight.get(key)
             # The producer may have populated the cache but not yet published
             # its result to the event. Wait until publication so one caller
             # cannot consume the entry before the other waiters see it.
-            hit = None if event is not None else self._cache.pop(query, None)
+            hit = None if event is not None else self._cache.pop(key, None)
+            if hit is not None:
+                self._cache_written_at.pop(key, None)
             if hit is None and event is None:
                 if len(self._inflight) >= MAX_INFLIGHT_RECALLS:
                     self._last = None
                     logger.warning('localvec: recall capacity reached')
                     return RECALL_UNAVAILABLE
-                event = self._inflight[query] = threading.Event()
+                event = self._inflight[key] = threading.Event()
+                event.generation = self._generation
                 owner = True
             else:
                 owner = False
         if hit is None:
             if owner:
-                self._recall_tracked(query, event)
-            else:
-                event.wait(self._timeout)
+                self._start_recall(query, key, event)
+            # Leave room for the host's default 8s provider timeout. The child
+            # remains bounded by its own configured subprocess timeout.
+            event.wait(min(self._timeout, MAX_FOREGROUND_WAIT_S))
             with self._lock:
                 # All waiters of the same in-flight request receive its result,
                 # even if another waiter already consumed the cache entry.
                 hit = getattr(event, 'recall_result', None)
                 if hit is not None:
-                    self._cache.pop(query, None)
+                    self._cache.pop(key, None)
+                    self._cache_written_at.pop(key, None)
             if hit is None and (not event.is_set() or not getattr(event, 'recall_ok', False)):
+                fallback = self._fallback_sqlite_recall(query)
+                if fallback:
+                    text, count = fallback[0], fallback[1]
+                    self._last = RecallStatus(provider_label="本地知识库(降级)", count=count, glyph=GLYPH) if text else None
+                    return text
                 self._last = None
                 return RECALL_UNAVAILABLE
-        text, count = hit or ("", 0)
-        self._last = RecallStatus(provider_label="自研记忆库", count=count, glyph=GLYPH) if text else None
+        if hit:
+            text = hit[0]
+            count = hit[1]
+            label = "本地知识库(降级)" if (len(hit) >= 3 and hit[2]) else "自研记忆库"
+        else:
+            text = ""
+            count = 0
+            label = "自研记忆库"
+        self._last = RecallStatus(provider_label=label, count=count, glyph=GLYPH) if text else None
         return text
 
     def recall_status(self) -> Optional[RecallStatus]:
         return self._last
 
-    def _recall_tracked(self, query: str, event: threading.Event) -> None:
-        ok = False
+    def _fallback_sqlite_recall(self, query: str) -> Optional[Tuple[str, int, bool]]:
+        """Dual-track recall fallback: automatic fallback to SQLite FTS5 / curated store if localvec fails."""
         try:
-            ok = self._recall(query) is True
+            import sqlite3
+            from agentcore.memory.config import get_config
+            from agentcore.memory.memory_scale import coarse_filter
+            cfg_db = self._cfg.get("sqlite_db")
+            db_path = str(cfg_db) if cfg_db else str(get_config().db_path)
+            if not os.path.isfile(db_path):
+                return None
+            conn = sqlite3.connect(db_path, timeout=2.0)
+            conn.row_factory = sqlite3.Row
+            try:
+                row_ids = coarse_filter(conn, query, limit=self._limit)
+                rows = []
+                if row_ids:
+                    placeholders = ",".join("?" * len(row_ids))
+                    rows = conn.execute(
+                        f"SELECT fact_id, statement, subject FROM working_fact WHERE rowid IN ({placeholders})",
+                        row_ids
+                    ).fetchall()
+                if not rows:
+                    # Dual-track fallback: check curated store / subject & statement substring
+                    clean_q = re.sub(r"[^\w\u4e00-\u9fff]", "", query)
+                    if clean_q:
+                        like_param = f"%{clean_q}%"
+                        rows = conn.execute(
+                            "SELECT fact_id, statement, subject FROM working_fact "
+                            "WHERE status='active' AND (statement LIKE ? OR subject LIKE ?) "
+                            "ORDER BY created_at DESC LIMIT ?",
+                            (like_param, like_param, self._limit)
+                        ).fetchall()
+                if not rows:
+                    return None
+                formatted_rows = [
+                    {"fact_id": r["fact_id"], "statement": r["statement"], "subject": r["subject"]}
+                    for r in rows
+                ]
+                block, count = format_recall(formatted_rows, limit=self._limit,
+                                             max_chars=int(self._cfg.get('max_chars') or 1800))
+                if block:
+                    return (block, count, True)
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.debug("[localvec] fallback sqlite recall failed: %s", exc)
+        return None
+
+    def _start_recall(self, query: str, key: tuple[str, str], event: threading.Event) -> None:
+        try:
+            th = spawn_context_thread(self._recall_tracked, name="localvec-prefetch", args=(query,key,event))
+            th.start()
+        except Exception as exc:
+            with self._lock:
+                if self._inflight.get(key) is event:
+                    del self._inflight[key]
+                event.recall_ok = False
+                event.set()
+            logger.warning("localvec: recall worker could not start: %s", type(exc).__name__)
+
+    def _recall_tracked(self, query: str, key: tuple[str, str], event: threading.Event) -> None:
+        ok = False
+        self._worker_local.generation = event.generation
+        try:
+            ok = self._recall(query, key) is True
         finally:
             with self._lock:
-                event.recall_result = self._cache.get(query)
+                if event.generation != self._generation:
+                    self._cache.pop(key, None)
+                    self._cache_written_at.pop(key, None)
+                    ok = False
+                event.recall_result = self._cache.get(key)
                 event.recall_ok = ok
-                if self._inflight.get(query) is event:
-                    del self._inflight[query]
+                if self._inflight.get(key) is event:
+                    del self._inflight[key]
                 event.set()
 
-    def _recall(self, query: str) -> bool:
+    def _recall(self, query: str, key: tuple[str, str]) -> bool:
         """子进程召回 + 格式化。任何异常都只记 debug —— 召回失败绝不能影响用户这一轮。"""
         if not self._cmd:
             return False
@@ -239,10 +347,22 @@ class LocalVecProvider(MemoryProvider):
             proc = subprocess.run(argv, capture_output=True, text=True,
                                   timeout=self._timeout, cwd=self._cfg.get("cwd") or None)
         except Exception as exc:
-            logger.debug("[localvec] 召回子进程失败：%s", exc)
+            logger.debug("[localvec] 召回子进程失败：%s，尝试 SQLite FTS5 降级召回", exc)
+            fallback = self._fallback_sqlite_recall(query)
+            if fallback:
+                with self._lock:
+                    self._cache[key] = fallback
+                    self._cache_written_at[key] = time.monotonic()
+                return True
             return False
         if proc.returncode != 0:
-            logger.warning('[localvec] recall subprocess failed: exit_code=%s', proc.returncode)
+            logger.warning('[localvec] recall subprocess failed: exit_code=%s, 尝试 SQLite FTS5 降级召回', proc.returncode)
+            fallback = self._fallback_sqlite_recall(query)
+            if fallback:
+                with self._lock:
+                    self._cache[key] = fallback
+                    self._cache_written_at[key] = time.monotonic()
+                return True
             return False
         try:
             res = json.loads(proc.stdout or "{}")
@@ -260,7 +380,13 @@ class LocalVecProvider(MemoryProvider):
             logger.debug("[localvec] 空召回（%s）", res.get("empty_reason") or "no_match")
             return True
         with self._lock:
-            self._cache[query] = (block, count)
+            generation = getattr(self._worker_local, 'generation', self._generation)
+            if generation != self._generation:
+                return False
+            self._cache.pop(key, None)
+            self._cache[key] = (block, count)
+            self._cache_written_at[key] = time.monotonic()
+            self._prune_cache_locked(time.monotonic())
         logger.info('[localvec] recall ready: count=%s chars=%s', count, len(block))
         return True
 
@@ -270,4 +396,11 @@ class LocalVecProvider(MemoryProvider):
 
     def shutdown(self) -> None:
         with self._lock:
+            self._generation += 1
+            self._last = None
             self._cache.clear()
+            self._cache_written_at.clear()
+            for event in self._inflight.values():
+                event.recall_result = None
+                event.recall_ok = False
+                event.set()

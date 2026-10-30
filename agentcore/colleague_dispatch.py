@@ -7,11 +7,13 @@ the terminal receipt only after checking its owner. Jobs are never replayed.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
 import stat
 from copy import deepcopy
+from typing import Optional
 
 from agentcore.pool import Pool, normalize_origin
 
@@ -36,10 +38,36 @@ def _payload(owner, member_id, generation, request_id, prompt):
             "request_id": request_id, "prompt": prompt}
 
 
+def compute_result_signature(result: dict, key: str) -> str:
+    """Compute HMAC-SHA256 digital signature over trusted result attribution fields."""
+    if not isinstance(result, dict) or not isinstance(key, str) or not key:
+        raise ValueError("invalid_signature_args")
+    body = result.get("text") or result.get("cli_stdout_unparsed") or ""
+    canonical = json.dumps([
+        result.get("request_id"),
+        result.get("requested_by"),
+        result.get("executed_by"),
+        hashlib.sha256(str(body).encode("utf-8")).hexdigest(),
+    ], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hmac.new(key.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def verify_result_signature(result: dict, key: str, signature: Optional[str] = None) -> bool:
+    """Verify constant-time HMAC-SHA256 signature for trusted attribution."""
+    expected_sig = signature or (result.get("signature") if isinstance(result, dict) else None)
+    if not isinstance(expected_sig, str) or not expected_sig:
+        return False
+    try:
+        computed = compute_result_signature(result, key)
+        return hmac.compare_digest(computed, expected_sig)
+    except Exception:
+        return False
+
+
 class ColleagueDispatch:
     """Admission and owner-bound inspection; callers must authenticate first."""
 
-    def __init__(self, pool, *, authorize_assignment, dedicated=False):
+    def __init__(self, pool, *, authorize_assignment, dedicated=False, signing_key: Optional[str] = None):
         if not isinstance(pool, Pool) or not callable(authorize_assignment) or dedicated is not True:
             raise ValueError("dedicated_pool_and_authorizer_required")
         info = pool.root.stat()
@@ -47,6 +75,7 @@ class ColleagueDispatch:
                 or (hasattr(os, "getuid") and info.st_uid != os.getuid())):
             raise ValueError("private_pool_required")
         self.pool, self.authorize_assignment = pool, authorize_assignment
+        self.signing_key = signing_key
 
     def _authorize(self, payload):
         if self.authorize_assignment(deepcopy(payload["owner"]), payload["member_id"],
@@ -84,11 +113,14 @@ class ColleagueDispatch:
             # unparsed CLI transcript is a verified answer or that delivery
             # occurred. Hosts must explicitly verify before claiming success.
             state = "result_unverified"
-        return {"job_id": job_id, "state": state, "queue_state": row["status"],
-                "result": result}
+        out = {"job_id": job_id, "state": state, "queue_state": row["status"],
+               "result": result}
+        if self.signing_key and isinstance(result, dict):
+            out["signature_valid"] = verify_result_signature(result, self.signing_key)
+        return out
 
 
-def execute_payload(payload, *, runner, authorize_assignment):
+def execute_payload(payload, *, runner, authorize_assignment, signing_key: Optional[str] = None):
     """Execute a job in a trusted worker; the payload cannot choose an executable."""
     if not isinstance(payload, dict) or set(payload) != {
         "owner", "member_id", "generation", "request_id", "prompt"
@@ -114,4 +146,7 @@ def execute_payload(payload, *, runner, authorize_assignment):
             or type(result["executed_by"].get("generation")) is not int
             or result["executed_by"].get("generation") != checked["generation"]):
         raise ValueError("colleague_result_identity_mismatch")
+    if signing_key:
+        result["signature"] = compute_result_signature(result, signing_key)
     return result
+

@@ -13,7 +13,7 @@
 
 2. **业务中立性断裂（门禁挂红）**：
    - 本仓最高设计规范要求通用内核完全业务中立（预留 `{{BUSINESS_OVERLAY}}` 插槽，由业务侧提供叠加层）；
-   - 在近期合并的提交中，`agentcore/colleague_dev.py`、`agentcore/colleague_catalog.py` 及相关测试用例直接硬编码了智驾与平台私有字面量，导致仓级业务中立性棘轮门禁 `tests/test_repo_neutrality.py` 与 `tests/test_business_neutrality.py` 持续断言失败。
+   - 在近期合并的提交中，`agentcore/colleague_dev.py`、`agentcore/colleague_catalog.py` 及相关测试用例直接硬编码了<business-domain>与平台私有字面量，导致仓级业务中立性棘轮门禁 `tests/test_repo_neutrality.py` 与 `tests/test_business_neutrality.py` 持续断言失败。
 
 3. **依赖导入边界违规**：
    - `agentcore` 作为通用底层 Python 包，其规范严禁静态依赖宿主或业务平台模块；
@@ -97,7 +97,7 @@
 
 ```text
 [测试 1] 研发同事名录提取：8 个官方研发角色完整加载 (architect, cases, reviewer, test, triage, backend, frontend, ops)。
-[测试 2] 工作区自动搜寻：精准定位 /home/caixuf/code/imfl_auto_test。
+[测试 2] 工作区自动搜寻：精准定位 <platform-root>。
 [测试 3] 需求架构师 (architect)：输入自然语言 Story，成功黑盒拆解并原子落盘 contract_requirements.yaml (ok=True)。
 [测试 4] 用例开发大师 (cases)：根据需求规格，成功逆向并生成领域 DSL 用例代码 (ok=True)。
 [测试 5] 红队挑刺评审员 (reviewer)：针对测试用例执行静态时序与反模式扫描，给出 25.0 分并精确指出缺失退出断言与反向抑制 (ok=True)。

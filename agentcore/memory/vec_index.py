@@ -150,6 +150,52 @@ def upsert(conn: sqlite3.Connection, items: Sequence[Tuple[str, Sequence[float]]
     return written
 
 
+
+def upsert_current(conn: sqlite3.Connection, items: Sequence[Tuple[str, Sequence[float], str, str]],
+                   *, user_id: str, model: str, dim: int, batch: int = 200) -> Dict[str, Any]:
+    """Index rebuilt vectors only while their source fact and embedding still match.
+
+    A separate writer may have committed after the rebuild wrote fact_embeddings.
+    The validation and index update therefore share the same write transaction.
+    This method expects no open transaction and commits at most one batch at a time.
+    """
+    result: Dict[str, Any] = {"available": False, "indexed": 0, "skipped_changed": 0, "failed": 0}
+    if not items:
+        return result
+    if conn.in_transaction:
+        raise ValueError("upsert_current requires no active transaction")
+    if not ensure_table(conn, dim):
+        return result
+    result["available"] = True
+    for start in range(0, len(items), batch):
+        chunk = items[start:start + batch]
+        indexed = skipped = 0
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for fid, vec, subject, statement in chunk:
+                blob = serialize(vec)
+                current = conn.execute(
+                    "SELECT 1 FROM working_fact f JOIN fact_embeddings e ON e.fact_id=f.fact_id "
+                    "WHERE f.fact_id=? AND f.user_id=? AND f.status='active' "
+                    "AND f.subject IS ? AND f.statement IS ? AND e.model=? AND e.vector=?",
+                    (fid, user_id, subject, statement, model, blob)).fetchone()
+                if current is None:
+                    skipped += 1
+                    continue
+                conn.execute("DELETE FROM vec_facts WHERE fact_id=?", (fid,))
+                conn.execute("INSERT INTO vec_facts(fact_id, embedding) VALUES (?, ?)", (fid, blob))
+                indexed += 1
+            conn.commit()
+        except sqlite3.Error as exc:
+            conn.rollback()
+            result["failed"] += len(chunk)
+            logger.warning("重建向量索引批次失败: %s", exc)
+            continue
+        result["indexed"] += indexed
+        result["skipped_changed"] += skipped
+    return result
+
+
 def knn(conn: sqlite3.Connection, query_vec: Sequence[float], *,
         limit: int = 50, dim: int = 1024) -> List[Tuple[str, float]]:
     """KNN 检索，返回 [(fact_id, distance)]。未加载扩展返回空列表。"""

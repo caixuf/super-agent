@@ -81,10 +81,15 @@ def test_worker_executes_queue_and_keeps_request_owner(tmp_path, monkeypatch, ba
     if backend == "flowcoro":
         pytest.importorskip("flowcoro_py")
     root = Path(__file__).resolve().parents[1]
+    marker = tmp_path / "runner-was-executed"
+    monkeypatch.setenv("COLLEAGUE_TEST_MARKER", str(marker))
     (tmp_path / "host_fixture.py").write_text('''
+import os
+from pathlib import Path
 class Runner:
     attempt_containment = "runner_and_descendants"
     def run(self, **kwargs):
+        Path(os.environ["COLLEAGUE_TEST_MARKER"]).write_text("executed")
         return {"execution_state": "fixture", "request_id": kwargs["request_id"],
                 "executed_by": {"member_id": kwargs["member_id"], "generation": kwargs["generation"]},
                 "requested_by": {"profile": kwargs["owner_profile"], "session": kwargs["owner_session"]},
@@ -101,13 +106,12 @@ def bootstrap():
     command = [sys.executable, "-m", "agentcore.colleague_worker", "--bootstrap", "host_fixture:bootstrap"]
     assert Worker(pool, command, workers=1, backend=backend).run(drain=True)["attempts_finished"] == 1
     observed = dispatch.inspect(owner=OWNER, job_id=job)
-    assert observed["state"] == "result_unverified"
-    assert observed["queue_state"] == "completed"
-    assert observed["result"]["result"] == {
-        "execution_state": "fixture", "request_id": "request-1",
-        "executed_by": {"member_id": "alice", "generation": 1},
-        "requested_by": {"profile": "leader", "session": "conversation-a"},
-        "text": "Review the project"}
+    # The self-reported runner contract and empty token scan cannot prove the
+    # whole attempt stopped. Fail closed until a real containment source exists.
+    assert observed["state"] == "failed"
+    assert observed["queue_state"] == "failed"
+    assert observed["result"]["runner_error"] == "colleague_execution_failed_or_unknown"
+    assert not marker.exists(), "uncontained work must be rejected before execution"
     assert pool.origin(job) is None
 
 
@@ -153,7 +157,7 @@ from agentcore.colleague_registry import Registry, Supervisor
 from agentcore.colleague_hermes_runner import HermesColleagueRunner, ProfileBinding, ProcessResult
 def QUIESCED(code, stdout, stderr):
     return ProcessResult(code, stdout, stderr, quiescent=True,
-        containment={"token": "0" * 32, "signalled": [], "survivors": [], "quiescent": True})
+        containment={"token": "0" * 32, "signalled": [], "survivors": [], "quiescent": True, "proof_scope": "whole_attempt"})
 class Ready:
     def status(self, member_id, generation):
         return {"ready": True}
@@ -247,3 +251,68 @@ def bootstrap():
     assert not pidfile.exists(), "the refused runner must not have started a turn"
     assert registry.work_status(supervisor=Supervisor("team"), member_id="alice",
                                 generation=1)["tracked_open"] == 0
+
+
+def test_digital_signing_and_verification_on_colleague_result(tmp_path):
+    from agentcore.colleague_dispatch import compute_result_signature, verify_result_signature
+
+    valid_result = {
+        "request_id": "req-sign-01",
+        "requested_by": {"profile": "leader", "session": "session-1"},
+        "executed_by": {"member_id": "alice", "generation": 1},
+        "text": "Analysis complete with no defect.",
+    }
+    key = "secret-attribution-token-xyz"
+
+    sig = compute_result_signature(valid_result, key)
+    assert isinstance(sig, str) and len(sig) == 64
+    valid_result["signature"] = sig
+
+    assert verify_result_signature(valid_result, key) is True
+    # Tampered signature
+    assert verify_result_signature(valid_result, key, signature="bad" + sig[3:]) is False
+    # Tampered text
+    tampered = dict(valid_result, text="Malicious modification")
+    assert verify_result_signature(tampered, key) is False
+    # Wrong key
+    assert verify_result_signature(valid_result, "other-key") is False
+
+    # Integration with execute_payload
+    class SignedRunner:
+        def run(self, **kwargs):
+            return {
+                "request_id": kwargs["request_id"],
+                "requested_by": {"profile": kwargs["owner_profile"], "session": kwargs["owner_session"]},
+                "executed_by": {"member_id": kwargs["member_id"], "generation": kwargs["generation"]},
+                "text": "Signed response text",
+            }
+
+    req = request(request_id="req-sign-02", prompt="Work to sign")
+    signed_res = execute_payload(req, runner=SignedRunner(), authorize_assignment=permit, signing_key=key)
+    assert "signature" in signed_res
+    assert verify_result_signature(signed_res, key) is True
+
+    # Hermes runner style output with cli_stdout_unparsed
+    hermes_res = {
+        "request_id": "req-sign-03",
+        "requested_by": {"profile": "leader", "session": "session-1"},
+        "executed_by": {"member_id": "alice", "generation": 1},
+        "cli_stdout_unparsed": "Standard unparsed CLI output stream",
+    }
+    hermes_sig = compute_result_signature(hermes_res, key)
+    hermes_res["signature"] = hermes_sig
+    assert verify_result_signature(hermes_res, key) is True
+
+    # ColleagueDispatch.inspect signature enforcement
+    pool = Pool(tmp_path / "sign_pool")
+    dispatch = ColleagueDispatch(pool, authorize_assignment=permit, dedicated=True, signing_key=key)
+    sub = dispatch.submit(**request(request_id="req-sign-04"))
+    job_id = sub["job_id"]
+
+    # Manually finish pool job with unsigned vs signed results
+    row, fd = pool.claim()
+    os.close(fd)
+    pool.finish(job_id, row["attempt"], True, {"unsigned": "receipt"})
+    insp_unsigned = dispatch.inspect(owner=OWNER, job_id=job_id)
+    assert insp_unsigned["signature_valid"] is False
+
