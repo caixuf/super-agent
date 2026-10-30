@@ -24,3 +24,19 @@ def test_since_filters_and_invalid_timestamps_are_ignored():
             '2026-10-30 10:00:00 INFO API call #2: in=7 latency=3s']
     result = summarize(rows, since=datetime(2026, 10, 30, 10))
     assert len(result) == 1 and result[0]['hour'] == '2026-10-30 10'
+
+
+def test_optional_input_buckets_report_only_completed_calls(capsys, tmp_path):
+    log = tmp_path / 'agent.log'
+    log.write_text(
+        '2026-10-30 09:00:01 INFO private-id API call #1: in=49999 latency=2s private-text\n'
+        '2026-10-30 09:00:02 INFO private-id API call #2: in=50000 latency=120s\n'
+        '2026-10-30 10:00:03 INFO private-id API call #3: in=200000 latency=180s\n'
+        '2026-10-30 10:00:04 INFO private-id unfinished call\n', encoding='utf-8')
+    main([str(log), '--input-buckets'])
+    raw = capsys.readouterr().out
+    assert 'private' not in raw
+    buckets = {item['input_tokens']: item for item in json.loads(raw)['input_buckets']}
+    assert buckets['under_50k']['calls'] == 1
+    assert buckets['50k_to_200k']['calls_over_120_seconds'] == 1
+    assert buckets['200k_or_more']['max_seconds'] == 180
