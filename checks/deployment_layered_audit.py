@@ -161,11 +161,12 @@ def audit_profile(manifest_path: Path) -> bool:
     if overlay_file.is_file():
         overlay_content = overlay_file.read_text(encoding="utf-8")
         # 取第一段作为特征识别
-        first_line = [l for l in overlay_content.splitlines() if l.strip() and not l.startswith("#")][0]
-        rc, stdout, _ = run_host_cmd(host, f"head -n 30 {target_soul}")
-        if rc == 0 and first_line in stdout:
+        first_line = [l for l in overlay_content.splitlines() if l.strip() and not l.startswith("#")][0].strip()
+        probe_str = first_line[:30].replace("'", "'\\''")
+        rc, stdout, _ = run_host_cmd(host, f"grep -F '{probe_str}' {target_soul}")
+        if rc == 0:
             log_pass(f"磁盘 SOUL.md 已包含对应的业务叠加层 ({overlay_rel})")
-        elif rc == 0:
+        elif rc == 1:
             log_warn(f"磁盘 SOUL.md 未能精确匹配业务叠加层特征首行 (请核实是否已独立定制)")
         else:
             log_fail(f"无法读取目标 SOUL.md: {target_soul}")

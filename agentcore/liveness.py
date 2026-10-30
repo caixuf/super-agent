@@ -516,8 +516,13 @@ class LivenessLedger:
         """Wait until all non-terminal tasks reach a terminal state, or timeout is reached."""
         deadline = self._now() + max(0.0, float(timeout))
         sleeper = sleep_fn or getattr(self, "_sleep_fn", None) or time.sleep
+        try:
+            self.sweep_stale()
+        except Exception:
+            pass
         while True:
-            active = self.list_tasks(owner=owner, active_only=True)
+            active = [t for t in self.list_tasks(owner=owner, active_only=True)
+                      if t.get("state") in ("queued", "running")]
             if not active:
                 return {"ok": True, "drained": True, "active_count": 0, "active_tasks": []}
             if self._now() >= deadline:
