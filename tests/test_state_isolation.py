@@ -43,12 +43,17 @@ def test_ledger_construction_without_a_path_stays_in_the_sandbox():
     from agentcore.liveness import LivenessLedger, default_db_path
 
     before = default_db_path()
-    existed = before.exists()
+    live = Path.home() / ".local" / "state" / "agentcore" / "liveness.db"
+    # Snapshot the *live* file, not the sandbox one: a machine that never had a live ledger
+    # (CI, a fresh checkout) reported `existed=True` off the sandbox path while `live` was
+    # absent, so the guard below compared two different files and failed on a clean host.
+    live_existed = live.exists()
+    live_stamp = live.stat().st_mtime_ns if live_existed else None
     ledger = LivenessLedger(None)
     ledger.ensure_schema()
     assert Path(ledger.path).resolve() == before.resolve()
-    assert Path(ledger.path).resolve() != (Path.home() / ".local" / "state" / "agentcore"
-                                           / "liveness.db").resolve()
+    assert Path(ledger.path).resolve() != live.resolve()
     # 真账本不该因为这条用例被创建或改动
-    live = Path.home() / ".local" / "state" / "agentcore" / "liveness.db"
-    assert live.exists() == existed or not existed
+    assert live.exists() == live_existed
+    if live_existed:
+        assert live.stat().st_mtime_ns == live_stamp, "用例改写了真实账本"
