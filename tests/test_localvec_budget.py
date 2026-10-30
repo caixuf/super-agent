@@ -185,3 +185,76 @@ def test_recall_cache_is_scoped_by_session(monkeypatch):
     assert provider.prefetch('same', session_id='session-b') == 'for-session-b'
     assert provider.prefetch('same', session_id='session-a') == 'cached-a'
     assert calls == [('session-b', 'same')]
+
+
+def test_expired_background_result_is_not_reused(monkeypatch):
+    import time
+    module = load(monkeypatch)
+    provider = module.LocalVecProvider()
+    provider._cmd = ['configured']
+    provider._timeout = 1
+    key = ('session', 'same query')
+    provider._cache[key] = ('old fact', 1)
+    provider._cache_written_at[key] = time.monotonic() - module.CACHE_TTL_S - 1
+    called = []
+    def recall(query, actual_key):
+        called.append(actual_key)
+        return True
+    monkeypatch.setattr(provider, '_recall', recall)
+    assert provider.prefetch('same query', session_id='session') == ''
+    assert called == [key] and key not in provider._cache
+
+
+def test_background_cache_is_bounded_and_eviction_clears_timestamp(monkeypatch):
+    import json
+    from types import SimpleNamespace
+    module = load(monkeypatch)
+    provider = module.LocalVecProvider()
+    provider._cmd = ['configured']
+    monkeypatch.setattr(module.subprocess, 'run', lambda *args, **kwargs:
+                        SimpleNamespace(returncode=0, stdout=json.dumps({'results': [{'statement': 'fact'}]})))
+    for n in range(module.MAX_CACHED_RECALLS + 5):
+        assert provider._recall('q%d' % n, ('session', 'q%d' % n))
+    assert len(provider._cache) == module.MAX_CACHED_RECALLS
+    assert len(provider._cache_written_at) == module.MAX_CACHED_RECALLS
+    assert ('session', 'q0') not in provider._cache
+    provider.shutdown()
+    assert not provider._cache and not provider._cache_written_at
+
+
+@pytest.mark.parametrize('end_action', ['initialize', 'shutdown'])
+def test_late_prefetch_cannot_repopulate_after_lifecycle_change(monkeypatch, end_action):
+    import json
+    from types import SimpleNamespace
+    module = load(monkeypatch)
+    monkeypatch.setattr(module, '_config_block', lambda: {'recall_cmd': ['configured'], 'timeout_s': 2})
+    entered, release = threading.Event(), threading.Event()
+    threads = []
+    def spawn(target, name, args):
+        t = threading.Thread(target=target, name=name, args=args)
+        threads.append(t)
+        return t
+    def run(*args, **kwargs):
+        entered.set()
+        assert release.wait(2)
+        return SimpleNamespace(returncode=0, stdout=json.dumps({'results': [{'statement': 'old fact'}]}))
+    monkeypatch.setattr(module, 'spawn_context_thread', spawn)
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    provider = module.LocalVecProvider()
+    provider.initialize('session')
+    provider.queue_prefetch('query')
+    assert entered.wait(1)
+    event = provider._inflight[('session', 'query')]
+    try:
+        if end_action == 'initialize':
+            provider.initialize('session')
+        else:
+            provider.shutdown()
+        assert event.is_set() and not event.recall_ok
+    finally:
+        release.set()
+        threads[0].join(3)
+    assert not threads[0].is_alive()
+    assert ('session', 'query') not in provider._cache
+    assert ('session', 'query') not in provider._inflight
+    assert event.recall_result is None and not event.recall_ok

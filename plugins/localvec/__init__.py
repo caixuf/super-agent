@@ -44,6 +44,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -55,6 +56,8 @@ NAME = "localvec"
 GLYPH = "🧠"
 MAX_INFLIGHT_RECALLS = 8
 MAX_FOREGROUND_WAIT_S = 5.0
+MAX_CACHED_RECALLS = 64
+CACHE_TTL_S = 30.0
 RECALL_UNAVAILABLE = '自动记忆召回暂不可用或超时，不能据此认定没有相关记忆。'
 
 
@@ -126,8 +129,11 @@ class LocalVecProvider(MemoryProvider):
         self._limit = 6
         self._timeout = 8.0
         self._cache: dict[tuple[str, str], tuple[str, int]] = {}
+        self._cache_written_at: dict[tuple[str, str], float] = {}
         self._lock = threading.Lock()
         self._inflight: dict[tuple[str, str], threading.Event] = {}
+        self._generation = 0
+        self._worker_local = threading.local()
         self._session_id = ""
         self._last: Optional[RecallStatus] = None
 
@@ -152,11 +158,30 @@ class LocalVecProvider(MemoryProvider):
         self._limit = int(cfg.get("limit") or 6)
         self._timeout = float(cfg.get("timeout_s") or 8)
         self._session_id = session_id if isinstance(session_id, str) else ""
-        self._cache = {}
+        with self._lock:
+            self._generation += 1
+            self._last = None
+            self._cache.clear()
+            self._cache_written_at.clear()
+            for event in self._inflight.values():
+                event.recall_result = None
+                event.recall_ok = False
+                event.set()
         if self._cmd:
             logger.info("[localvec] 召回通道就绪（子进程）：%s", " ".join(self._cmd[:3]) + " …")
         else:
             logger.warning("[localvec] 未配置 recall_cmd，自动召回关闭")
+
+    def _prune_cache_locked(self, now: float) -> None:
+        """Expire completed prefetches; callers hold ``_lock``."""
+        for key, written in list(self._cache_written_at.items()):
+            if key not in self._cache or now - written >= CACHE_TTL_S:
+                self._cache.pop(key, None)
+                self._cache_written_at.pop(key, None)
+        while len(self._cache) > MAX_CACHED_RECALLS:
+            oldest = next(iter(self._cache))
+            self._cache.pop(oldest, None)
+            self._cache_written_at.pop(oldest, None)
 
     # -- 召回 -------------------------------------------------------------
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
@@ -165,12 +190,14 @@ class LocalVecProvider(MemoryProvider):
             return
         key = (session_id or self._session_id, query)
         with self._lock:
+            self._prune_cache_locked(time.monotonic())
             if key in self._inflight or key in self._cache:
                 return
             if len(self._inflight) >= MAX_INFLIGHT_RECALLS:
                 logger.warning('localvec: recall capacity reached')
                 return
             event = self._inflight[key] = threading.Event()
+            event.generation = self._generation
         self._start_recall(query, key, event)
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
@@ -180,17 +207,21 @@ class LocalVecProvider(MemoryProvider):
             return ""
         key = (session_id or self._session_id, query)
         with self._lock:
+            self._prune_cache_locked(time.monotonic())
             event = self._inflight.get(key)
             # The producer may have populated the cache but not yet published
             # its result to the event. Wait until publication so one caller
             # cannot consume the entry before the other waiters see it.
             hit = None if event is not None else self._cache.pop(key, None)
+            if hit is not None:
+                self._cache_written_at.pop(key, None)
             if hit is None and event is None:
                 if len(self._inflight) >= MAX_INFLIGHT_RECALLS:
                     self._last = None
                     logger.warning('localvec: recall capacity reached')
                     return RECALL_UNAVAILABLE
                 event = self._inflight[key] = threading.Event()
+                event.generation = self._generation
                 owner = True
             else:
                 owner = False
@@ -206,6 +237,7 @@ class LocalVecProvider(MemoryProvider):
                 hit = getattr(event, 'recall_result', None)
                 if hit is not None:
                     self._cache.pop(key, None)
+                    self._cache_written_at.pop(key, None)
             if hit is None and (not event.is_set() or not getattr(event, 'recall_ok', False)):
                 self._last = None
                 return RECALL_UNAVAILABLE
@@ -230,10 +262,15 @@ class LocalVecProvider(MemoryProvider):
 
     def _recall_tracked(self, query: str, key: tuple[str, str], event: threading.Event) -> None:
         ok = False
+        self._worker_local.generation = event.generation
         try:
             ok = self._recall(query, key) is True
         finally:
             with self._lock:
+                if event.generation != self._generation:
+                    self._cache.pop(key, None)
+                    self._cache_written_at.pop(key, None)
+                    ok = False
                 event.recall_result = self._cache.get(key)
                 event.recall_ok = ok
                 if self._inflight.get(key) is event:
@@ -270,7 +307,13 @@ class LocalVecProvider(MemoryProvider):
             logger.debug("[localvec] 空召回（%s）", res.get("empty_reason") or "no_match")
             return True
         with self._lock:
+            generation = getattr(self._worker_local, 'generation', self._generation)
+            if generation != self._generation:
+                return False
+            self._cache.pop(key, None)
             self._cache[key] = (block, count)
+            self._cache_written_at[key] = time.monotonic()
+            self._prune_cache_locked(time.monotonic())
         logger.info('[localvec] recall ready: count=%s chars=%s', count, len(block))
         return True
 
@@ -280,4 +323,11 @@ class LocalVecProvider(MemoryProvider):
 
     def shutdown(self) -> None:
         with self._lock:
+            self._generation += 1
+            self._last = None
             self._cache.clear()
+            self._cache_written_at.clear()
+            for event in self._inflight.values():
+                event.recall_result = None
+                event.recall_ok = False
+                event.set()
