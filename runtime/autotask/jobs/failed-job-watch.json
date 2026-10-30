@@ -1,0 +1,22 @@
+{
+  "id": "failed-job-watch",
+  "schedule": "10 9 * * *",
+  "collect": {
+    "kind": "command",
+    "command": "hermes --profile <p> cron list"
+  },
+  "judge": "列出最近 24 小时失败的作业与服务，连续失败 ≥2 次的给出最可能根因与修复动作",
+  "write": {
+    "kind": "file",
+    "path": "<profile>/state/autotask/failed-jobs.json"
+  },
+  "report": {
+    "ok": "ok ",
+    "fail": "fail "
+  },
+  "retry": {
+    "max": 2,
+    "backoff_seconds": 300
+  },
+  "notify": true
+}

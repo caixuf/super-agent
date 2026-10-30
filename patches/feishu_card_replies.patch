@@ -1,0 +1,192 @@
+diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adapter.py
+index 46fbeae062..a019db234d 100644
+--- a/plugins/platforms/feishu/adapter.py
++++ b/plugins/platforms/feishu/adapter.py
+@@ -69,6 +69,9 @@ _LARK_SDK_IMPORTS = (
+         "DeleteMessageRequest", "GetMessageResourceRequest", "P2ImMessageMessageReadV1",
+         "ReplyMessageRequest", "ReplyMessageRequestBody",
+         "UpdateMessageRequest", "UpdateMessageRequestBody",
++        # 卡片消息更新走 PATCH /im/v1/messages/:id（update 不接受 msg_type=interactive，
++        # 实测报 [230001] invalid msg_type）。
++        "PatchMessageRequest", "PatchMessageRequestBody",
+     )),
+     ("lark_oapi.core", ("AccessTokenType", "HttpMethod")),
+     ("lark_oapi.core.const", ("FEISHU_DOMAIN", "LARK_DOMAIN")),
+@@ -322,6 +325,12 @@ class FeishuAdapterSettings:
+     allow_bots: str = "none"  # "none" | "mentions" | "all"
+     require_mention: bool = True
+     allow_all_dm: bool = False  # resolved per-profile so multiplexed adapters honor their own .env
++    # 回复渲染为交互卡片（本地增强）：流式预览原地更新不重排，长任务底部带运行时长。
++    # 默认关；任何卡片发送/更新失败都回落到原来的 text/post 路径。
++    card_replies: bool = False
++    # 审批以纯文字下发（把 /approve 指引写进消息体），不依赖卡片回调。
++    # 卡片回调需要平台应用订阅 card.action.trigger / 配回调地址，没配时按钮点了没反应。
++    exec_approval_text: bool = False
+ 
+ 
+ @dataclass
+@@ -1329,6 +1338,8 @@ class FeishuAdapter(BasePlatformAdapter):
+         self._pending_drain_scheduled = False
+         self._pending_inbound_max_depth = 1000  # cap queue; drop oldest beyond
+         self._chat_locks: collections.OrderedDict[str, asyncio.Lock] = collections.OrderedDict()  # chat_id → lock (per-chat serial processing, LRU-bounded)
++        # 卡片回复：message_id → 首帧时间戳（用于长任务显示运行时长）；LRU 限长防泄漏。
++        self._card_message_ids: collections.OrderedDict[str, float] = collections.OrderedDict()
+         self._chat_info_cache: dict[str, dict[str, Any]] = {}
+         self._message_text_cache: OrderedDict[str, Optional[str]] = OrderedDict()
+         self._app_lock_identity: Optional[str] = None
+@@ -1418,6 +1429,8 @@ class FeishuAdapter(BasePlatformAdapter):
+             default_group_policy=str(extra.get("default_group_policy", "")).strip().lower(),
+             group_rules=group_rules, allow_bots=allow_bots, allow_all_dm=allow_all_dm,
+             require_mention=_to_boolean(extra.get("require_mention", _get_scoped_secret("FEISHU_REQUIRE_MENTION", "true"))),
++            card_replies=_to_boolean(extra.get("card_replies", _get_scoped_secret("FEISHU_CARD_REPLIES", "false"))),
++            exec_approval_text=_to_boolean(extra.get("exec_approval_text", _get_scoped_secret("FEISHU_EXEC_APPROVAL_TEXT", "false"))),
+         )
+ 
+     def _apply_settings(self, settings: FeishuAdapterSettings) -> None:
+@@ -1668,6 +1681,26 @@ class FeishuAdapter(BasePlatformAdapter):
+         prefer_post = bool(_MARKDOWN_HINT_RE.search(formatted))
+         last_response = None
+ 
++        # 卡片回复（本地增强）：仅用于**会被反复编辑的流式预览**。
++        # 判据是网关自己放在 metadata 里的 expect_edits（终稿是 notify）—— 终稿仍走
++        # post/text，因为卡片 markdown 对表格支持弱，正文里的表格在卡片里会退化成源码。
++        if getattr(self, "_card_replies", False) and (metadata or {}).get("expect_edits"):
++            _card_done = bool((metadata or {}).get("notify"))
++            try:
++                sent: Optional[SendResult] = None
++                for chunk in chunks:
++                    sent = await self._send_reply_card(
++                        chat_id=chat_id, content=chunk, reply_to=reply_to,
++                        metadata=metadata, finalize=_card_done,
++                    )
++                    if not sent.success:
++                        logger.warning("[Feishu] Card send failed (%s); falling back to text path", sent.error)
++                        break
++                if sent is not None and sent.success:
++                    return sent
++            except Exception as exc:
++                logger.warning("[Feishu] Card send raised (%s); falling back to text path", exc)
++
+         async def _send_plain(chunk: str) -> Any:
+             return await self._feishu_send_with_retry(
+                 chat_id=chat_id,
+@@ -1703,6 +1736,54 @@ class FeishuAdapter(BasePlatformAdapter):
+             logger.error("[Feishu] Send error: %s", exc, exc_info=True)
+             return SendResult(success=False, error=str(exc))
+ 
++    # --- 卡片回复（本地增强，card_replies 开启时生效）---
++    _CARD_ID_MAX = 500
++
++    def _remember_card_message(self, message_id: str) -> None:
++        """记住本条消息是卡片，之后的 edit_message 才会走卡片更新（LRU 限长）。"""
++        if not message_id:
++            return
++        self._card_message_ids[message_id] = time.time()
++        self._card_message_ids.move_to_end(message_id)
++        while len(self._card_message_ids) > self._CARD_ID_MAX:
++            self._card_message_ids.popitem(last=False)
++
++    def _is_card_message(self, message_id: str) -> bool:
++        return bool(message_id) and message_id in self._card_message_ids
++
++    def _build_reply_card(self, content: str, *, finalize: bool = False,
++                          started_at: Optional[float] = None) -> dict[str, Any]:
++        """宽卡片：头部=机器人名，主体=markdown，运行中额外挂一行运行时长。
++
++        长任务适配：底部提示按首帧时间戳滚动累加，一眼能看出「还在跑、跑了多久」；
++        完成帧摘掉提示并把头部转为绿色。
++        """
++        name = (str(getattr(self, "_bot_name", "") or "Hermes")).strip() or "Hermes"
++        elements: list[dict[str, Any]] = [{"tag": "markdown", "content": content or " "}]
++        if not finalize:
++            elapsed = max(0, int(time.time() - (started_at or time.time())))
++            mins, secs = divmod(elapsed, 60)
++            tip = f"⏳ 运行中 {mins}分{secs:02d}秒" if mins else f"⏳ 运行中 {secs}秒"
++            elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": tip}]})
++        return {
++            "config": {"wide_screen_mode": True},
++            "header": {"title": {"tag": "plain_text", "content": name},
++                       "template": "green" if finalize else "blue"},
++            "elements": elements,
++        }
++
++    async def _send_reply_card(self, *, chat_id: str, content: str, reply_to: Optional[str],
++                               metadata: Optional[dict[str, Any]], finalize: bool) -> SendResult:
++        card = self._build_reply_card(content, finalize=finalize)
++        response = await self._feishu_send_with_retry(
++            chat_id=chat_id, msg_type="interactive", payload=json.dumps(card, ensure_ascii=False),
++            reply_to=reply_to, metadata=metadata,
++        )
++        result = self._finalize_send_result(response, "card send failed")
++        if result.success:
++            self._remember_card_message(result.message_id or "")
++        return result
++
+     async def edit_message(self, chat_id: str, message_id: str, content: str, *, finalize: bool = False) -> SendResult:
+         """Edit a previously sent Feishu text/post message."""
+         if not self._client:
+@@ -1710,6 +1791,25 @@ class FeishuAdapter(BasePlatformAdapter):
+ 
+         content = self.format_message(content)
+ 
++        # 卡片消息：原地更新卡片内容（流式预览不重排；finalize 帧转绿并摘掉运行时长）。
++        if getattr(self, "_card_replies", False) and self._is_card_message(message_id):
++            card = self._build_reply_card(
++                content, finalize=finalize, started_at=self._card_message_ids.get(message_id))
++            body = self._build_patch_message_body(content=json.dumps(card, ensure_ascii=False))
++            request = self._build_patch_message_request(message_id=message_id, request_body=body)
++            try:
++                response = await self._run_blocking(self._client.im.v1.message.patch, request)
++                result = self._finalize_send_result(response, "update failed")
++                if result.success:
++                    result.message_id = message_id
++                    if finalize:
++                        self._card_message_ids.pop(message_id, None)
++                    return result
++                logger.warning("[Feishu] Card update failed (%s); falling back to text edit", result.error)
++            except Exception as exc:
++                logger.warning("[Feishu] Card update raised (%s); falling back to text edit", exc)
++            self._card_message_ids.pop(message_id, None)
++
+         async def _update(msg_type: str, payload: str) -> SendResult:
+             body = self._build_update_message_body(msg_type=msg_type, content=payload)
+             request = self._build_update_message_request(message_id=message_id, request_body=body)
+@@ -1778,6 +1878,23 @@ class FeishuAdapter(BasePlatformAdapter):
+         route to ``resolve_gateway_approval()`` and unblock the waiting agent thread."""
+         if not self._client:
+             return SendResult(success=False, error="Not connected")
++
++        # 文字审批（exec_approval_text）：文本消息 + `/approve` 指引，完全不依赖卡片回调。
++        # 任一环节不可用就回落卡片，不制造新的失败点。
++        if getattr(self, "_exec_approval_text", False):
++            try:
++                from gateway.run import _format_exec_approval_fallback
++                body = _format_exec_approval_fallback(
++                    prompt.command or "", prompt.description or "", self.typed_command_prefix or "/",
++                    allow_permanent="always" in prompt.choices,
++                    allow_session="session" in prompt.choices,
++                    smart_denied=bool(getattr(prompt, "smart_denied", False)),
++                )
++            except Exception as exc:  # noqa: BLE001
++                logger.warning("[Feishu] 文字审批模板不可用，回落卡片: %s", exc)
++            else:
++                return await self.send(prompt.chat_id, body, metadata=prompt.metadata)
++
+         try:
+             approval_id = next(self._approval_counter)
+             actions = [
+@@ -4014,6 +4131,14 @@ class FeishuAdapter(BasePlatformAdapter):
+     def _build_update_message_request(message_id: str, request_body: Any) -> Any:
+         return _sdk_build(UpdateMessageRequest, message_id=message_id, request_body=request_body)
+ 
++    @staticmethod
++    def _build_patch_message_body(*, content: str) -> Any:
++        return _sdk_build(PatchMessageRequestBody, content=content)
++
++    @staticmethod
++    def _build_patch_message_request(message_id: str, request_body: Any) -> Any:
++        return _sdk_build(PatchMessageRequest, message_id=message_id, request_body=request_body)
++
+     @staticmethod
+     def _build_delete_message_request(message_id: str) -> Any:
+         return _sdk_build(DeleteMessageRequest, message_id=message_id)

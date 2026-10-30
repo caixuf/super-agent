@@ -1,0 +1,7 @@
+name: longtask-guard
+version: "1.0.3"
+description: "Rewrite long-running terminal calls into background execution before dispatch, using the pre_tool_call modify directive. Long foreground commands hold the turn hostage (the user gets nothing for minutes, and the turn can hit its step cap before the result is ever sent). Narrow matching only: it converts clear time sinks (test suites, image builds, clones, installs) and ignores read-only wrappers, interpreters with no-exec flags, and already-background calls. Never blocks a call and never raises."
+author: "agentcore"
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call

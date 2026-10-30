@@ -1,0 +1,22 @@
+{
+  "id": "capability-drift-check",
+  "schedule": "30 9 * * *",
+  "collect": {
+    "kind": "command",
+    "command": "hermes --profile <p> plugins list; hermes --profile <p> config get plugins.enabled; hermes --profile <p> config get platform_toolsets"
+  },
+  "judge": "与上次快照逐项比对工具面与插件启用；有变化就列出『变化项 / 之前 / 现在 / 影响』",
+  "write": {
+    "kind": "file",
+    "path": "<profile>/state/autotask/capability-drift.json"
+  },
+  "report": {
+    "ok": "ok ",
+    "fail": "fail "
+  },
+  "retry": {
+    "max": 2,
+    "backoff_seconds": 300
+  },
+  "notify": true
+}

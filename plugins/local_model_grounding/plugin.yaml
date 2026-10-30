@@ -1,0 +1,6 @@
+name: local-model-grounding
+version: "0.1.0"
+description: "Ground an expert assistant's turns with two local models that never generate text: decider-4b classifies the most recent failure into environment/data/dependency/assertion/timing/not-implemented/other with a calibrated confidence, and bge-m3 recalls dated precedents from docs/handover. High-confidence environment/data/dependency verdicts are injected as a deterministic instruction to stop editing assertions; low-confidence verdicts inject nothing and are recorded for audit only. Every local call is written to an append-only JSONL audit trail. Never raises, never blocks the runtime, and returns no context when the gateway is unreachable."
+author: "caixuf"
+provides_hooks:
+  - pre_llm_call

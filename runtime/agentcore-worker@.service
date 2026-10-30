@@ -1,0 +1,26 @@
+[Unit]
+Description=Durable agent worker %i
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/code/agentcore
+Environment=PYTHONUNBUFFERED=1
+# Two knobs, both deployment choices (the floor values live in BASELINE.md):
+#   AGENTCORE_WORKERS  1 while one queue is enough; raise only when queues are independent.
+#   AGENTCORE_BACKEND  `stdlib` needs no optional dependency; `flowcoro` becomes available
+#                      when the host installs flowcoro_py (an explicit choice, never a fallback).
+Environment=AGENTCORE_WORKERS=1
+Environment=AGENTCORE_BACKEND=stdlib
+EnvironmentFile=-%h/.config/agent-pool/worker.env
+UMask=0077
+# Set trusted runner argv in this administrator-owned file before enabling.
+ExecStart=/usr/bin/python3 -m agentcore.pool --root %h/.local/state/agent-pool worker --runner-config %h/.config/agent-pool/runner.json --workers ${AGENTCORE_WORKERS} --backend ${AGENTCORE_BACKEND}
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=15
+Nice=10
+
+[Install]
+WantedBy=default.target
