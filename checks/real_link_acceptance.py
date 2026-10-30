@@ -21,8 +21,14 @@ import uuid
 from agentcore.pool import Pool
 
 
+#: The profile this acceptance drives, read from the environment so the check carries no
+#: personal profile name: a hardcoded one is exactly the "clone it and it still won't run
+#: for you" shape the repo-level neutrality ratchet is about.
+PROFILE = os.environ.get("HERMES_ACCEPTANCE_PROFILE", "default")
+
+
 def test_plain_turn() -> dict:
-    cmd = ["hermes", "-p", "caixuf", "chat", "-Q", "-q", "请回复 ACCEPTANCE_OK"]
+    cmd = ["hermes", "-p", PROFILE, "chat", "-Q", "-q", "请回复 ACCEPTANCE_OK"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         output = proc.stdout.strip()
@@ -80,8 +86,10 @@ def test_restart_recovery(pool_dir: Path) -> dict:
 
 def test_origin_attribution(pool_dir: Path) -> dict:
     pool = Pool(pool_dir)
-    origin_a = {"profile": "caixuf", "session": "session-user-alpha", "route": "agent:caixuf:dm:user-a"}
-    origin_b = {"profile": "caixuf", "session": "session-user-beta", "route": "agent:caixuf:dm:user-b"}
+    origin_a = {"profile": PROFILE, "session": "session-user-alpha",
+                "route": "agent:%s:dm:user-a" % PROFILE}
+    origin_b = {"profile": PROFILE, "session": "session-user-beta",
+                "route": "agent:%s:dm:user-b" % PROFILE}
 
     job_a = pool.submit("job-user-a", {"msg": "hello from alpha"}, origin=origin_a)
     job_b = pool.submit("job-user-b", {"msg": "hello from beta"}, origin=origin_b)
