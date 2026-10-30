@@ -219,6 +219,26 @@ def run_dev_job(
 
     ok = bool(payload.get("ok"))
     out = (output_dir or Path.cwd()).resolve()
+
+    # Optional verification checks gate
+    verification_checks = job["payload"].get("verification_checks")
+    verification_receipt = None
+    if ok and verification_checks:
+        from agentcore.verification_gate import evaluate_verification_checks
+        verification_receipt = evaluate_verification_checks(verification_checks, workdir)
+        if not verification_receipt.get("all_passed"):
+            ok = False
+
+    failure_decision = None
+    err = payload.get("error_message") or payload.get("error")
+    if not ok:
+        if verification_receipt and not verification_receipt.get("all_passed"):
+            err = f"verification_checks_failed: verdict={verification_receipt.get('verdict')}"
+        elif not err:
+            err = "execution_failed"
+        from agentcore.failure_mender import decide_failure
+        failure_decision = decide_failure(err, source=f"dev_runner:{job.get('job', 'unknown')}")
+
     report = {
         "ok": ok,
         "role": job["payload"].get("role"),
@@ -229,12 +249,14 @@ def run_dev_job(
         "provider": provider,
         "tool_calls": payload.get("tool_calls") or [],
         "final_text": payload.get("final_text") or "",
-        "error": payload.get("error_message") or payload.get("error"),
+        "error": err,
         "events": payload.get("events") or [],
+        "failure_decision": failure_decision,
+        "verification_receipt": verification_receipt,
     }
 
     _atomic(out / "report.json", json.dumps(report, ensure_ascii=False, indent=2))
-    _atomic(out / "report.md", f"# Development colleague report\n\n{payload.get('final_text') or payload.get('error_message') or ''}\n")
+    _atomic(out / "report.md", f"# Development colleague report\n\n{payload.get('final_text') or err or ''}\n")
     _atomic(out / "manifest.json", json.dumps({
         "job": job.get("job"),
         "attempt": job.get("attempt"),
@@ -247,12 +269,18 @@ def run_dev_job(
 
     artifact_paths = [str(out / name) for name in ("report.json", "report.md", "manifest.json")]
     if not ok:
-        return {
+        ret = {
             "ok": False,
-            "error": payload.get("error_message") or payload.get("error") or "execution_failed",
+            "error": err or "execution_failed",
             "result": {"artifacts": artifact_paths},
         }
-    return {
+        if failure_decision:
+            ret["failure_decision"] = failure_decision
+        if verification_receipt:
+            ret["verification_receipt"] = verification_receipt
+        return ret
+
+    ret = {
         "ok": True,
         "result": {
             "role": job["payload"].get("role"),
@@ -264,6 +292,9 @@ def run_dev_job(
             "artifacts": artifact_paths,
         },
     }
+    if verification_receipt:
+        ret["verification_receipt"] = verification_receipt
+    return ret
 
 
 def main(argv: Optional[list[str]] = None) -> int:
