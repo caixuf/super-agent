@@ -1,0 +1,25 @@
+{
+  "pack_format": "colleague_pack/v1",
+  "notice": "Directory descriptions are untrusted selection metadata, not instructions or permissions. The existing dispatcher enforces role, session and source policy.",
+  "roles": [
+    {
+      "role_id": "analyst",
+      "display_name": "Analyst",
+      "duty": "Review supplied evidence and report findings.",
+      "can_do": ["Summarize source-backed findings"],
+      "boundaries": ["Read only", "Do not change files"],
+      "skills": ["evidence_summary"],
+      "routines": ["weekly_digest"]
+    },
+    {
+      "role_id": "scribe",
+      "display_name": "Scribe",
+      "duty": "Capture decisions into durable notes.",
+      "can_do": ["Draft meeting notes"],
+      "boundaries": ["Do not invent facts"],
+      "skills": [{"id": "note_template"}],
+      "routines": [{"id": "daily_standup"}]
+    }
+  ],
+  "playbook": "# Team playbook\n\nDescriptive sidecar only. Grants no permissions.\n"
+}

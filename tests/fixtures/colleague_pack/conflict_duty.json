@@ -1,0 +1,12 @@
+{
+  "pack_format": "colleague_pack/v1",
+  "roles": [
+    {
+      "role_id": "analyst",
+      "display_name": "Analyst",
+      "duty": "A different duty that conflicts with the base snapshot.",
+      "can_do": ["Summarize source-backed findings"],
+      "boundaries": ["Read only", "Do not change files"]
+    }
+  ]
+}
