@@ -269,16 +269,7 @@ class Pool:
                         self._terminal(db, row['id'], 'cancelled', {'reason': 'cancelled'})
                         continue
                     if row['status'] == 'running':
-                        token = row['containment_token'] if 'containment_token' in row.keys() else None
-                        safe = row['replay_safe'] and row['tries'] < row['max_tries']
-                        if safe and token:
-                            if containment.tagged(token):
-                                sw = containment.sweep(token, grace=0.1, timeout=0.2)
-                                if sw.get('survivors') or not sw.get('token_scan_empty'):
-                                    safe = False
-                        elif not row['replay_safe'] or row['tries'] >= row['max_tries']:
-                            safe = False
-                        if not safe:
+                        if not self._replay_allowed(row):
                             self._terminal(db, row['id'], 'failed', {'reason': 'interrupted; replay unavailable'})
                             continue
                     deps = [r[0] for r in db.execute('SELECT j.status FROM deps d JOIN jobs j ON j.id=d.dependency WHERE d.job=?', (row['id'],))]
@@ -332,6 +323,28 @@ class Pool:
             pass
 
 
+    def _replay_allowed(self, row):
+        """Whether an expired running job may be re-queued (claim / Prefer-D2 shared)."""
+        if isinstance(row, dict):
+            token = row.get("containment_token")
+            replay_safe = bool(row.get("replay_safe"))
+            tries = int(row.get("tries") or 0)
+            max_tries = int(row.get("max_tries") or 0)
+        else:
+            token = row["containment_token"] if "containment_token" in row.keys() else None
+            replay_safe = bool(row["replay_safe"])
+            tries = int(row["tries"] or 0)
+            max_tries = int(row["max_tries"] or 0)
+        safe = replay_safe and tries < max_tries
+        if safe and token:
+            if containment.tagged(token):
+                sw = containment.sweep(token, grace=0.1, timeout=0.2)
+                if sw.get("survivors") or not sw.get("token_scan_empty"):
+                    safe = False
+        elif not replay_safe or tries >= max_tries:
+            safe = False
+        return safe
+
     def enforce_windows(self, now=None, *, start_window_s=None, cancel_window_s=None):
         """Prefer-D2: fail-closed STARTING + force-terminal CANCELING (pool = ledger authority).
 
@@ -378,20 +391,34 @@ class Pool:
                         kill_rows.append(row)
                     continue
                 # STARTING fail-closed: running + pid NULL past window.
+                # Lock held (claimer alive, never registered pid) -> starting_timeout.
+                # Lock free (worker dead): preserve interrupted when replay unavailable;
+                # otherwise still fail-closed starting_timeout (do not silently replay).
                 if row.get("status") == "running" and row.get("pid") is None:
                     clock = row.get("heartbeat")
                     if clock is None:
                         clock = row.get("created") or at
                     if at - float(clock) > start_w:
-                        self._terminal(
-                            db, job_id, "failed",
-                            {
-                                "reason": "starting_timeout",
-                                "event": "claim_without_pid",
-                            },
-                        )
+                        lock_fd = self._lock(job_id)
+                        if lock_fd is None:
+                            reason = "starting_timeout"
+                            event = "claim_without_pid"
+                        else:
+                            try:
+                                if not self._replay_allowed(row):
+                                    reason = "interrupted; replay unavailable"
+                                    event = None
+                                else:
+                                    reason = "starting_timeout"
+                                    event = "claim_without_pid"
+                            finally:
+                                os.close(lock_fd)
+                        payload = {"reason": reason}
+                        if event:
+                            payload["event"] = event
+                        self._terminal(db, job_id, "failed", payload)
                         forced.append({"id": job_id, "status": "failed",
-                                       "reason": "starting_timeout"})
+                                       "reason": reason})
                         continue
         # Best-effort kills outside the write transaction for soft-cancel within window.
         for row in kill_rows:
