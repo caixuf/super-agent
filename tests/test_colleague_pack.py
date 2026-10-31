@@ -24,6 +24,7 @@ from agentcore.colleague_pack import (
     import_additive,
     load_pack_file,
     parse_pack,
+    set_yaml_loader,
     redact_pack,
     validate_pack,
 )
@@ -71,12 +72,16 @@ def test_b1_rejects_bad_role_id_and_missing_fields():
 
 
 def test_b1_yaml_frontmatter_md_optional():
-    pytest.importorskip("yaml")
-    pack = validate_pack(FIXTURES / "playbook.md")
-    assert pack["roles"][0]["role_id"] == "scout"
-    assert pack["playbook"] and "grants no permissions" in pack["playbook"].lower()
-    assert pack["roles"][0]["skills"][0] == {"id": "open_source_scan", "enabled": False}
-    assert pack["roles"][0]["routines"][0] == {"id": "morning_sweep", "paused": True}
+    yaml = pytest.importorskip("yaml")
+    set_yaml_loader(yaml.safe_load)
+    try:
+        pack = validate_pack(FIXTURES / "playbook.md")
+        assert pack["roles"][0]["role_id"] == "scout"
+        assert pack["playbook"] and "grants no permissions" in pack["playbook"].lower()
+        assert pack["roles"][0]["skills"][0] == {"id": "open_source_scan", "enabled": False}
+        assert pack["roles"][0]["routines"][0] == {"id": "morning_sweep", "paused": True}
+    finally:
+        set_yaml_loader(None)
 
 
 def test_b2_secret_keys_and_values_rejected():
