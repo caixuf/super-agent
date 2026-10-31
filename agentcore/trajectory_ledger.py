@@ -237,6 +237,7 @@ class TrajectoryLedger:
                 "avg_latency_ms": round(avg_lat, 2),
                 "failed_turns": fail_cnt,
                 "total_retries": agg["total_retries"] or 0,
+                "anomaly_rate": round(fail_cnt / total_turns, 4),
                 "status": "HEALTHY" if fail_cnt == 0 else "DEGRADED",
             }
 

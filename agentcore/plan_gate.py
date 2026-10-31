@@ -103,7 +103,7 @@ COMPLEXITY_PATTERNS = [
 
 def assess_task_complexity(prompt: str) -> ComplexityAssessment:
     """评估输入任务的系统复杂度，判定是否必须强制输出执行蓝图 (Plan-First)"""
-    if not prompt or not prompt.strip():
+    if not isinstance(prompt, str) or not prompt.strip():
         return ComplexityAssessment(is_complex=False, score=0, reasons=[], plan_first_required=False)
 
     score = 0

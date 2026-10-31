@@ -440,8 +440,13 @@ class EntityStore:
 
     def recall(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
         """基于 FTS5 与精准实体关键词召回强相关事实与规则。"""
-        if not query or not query.strip():
+        if not isinstance(query, str) or not query.strip():
             return []
+
+        try:
+            limit = max(1, min(int(limit), 50))
+        except (ValueError, TypeError):
+            limit = 5
 
         clean_query = query.strip()
         tokens = self._extract_search_tokens(clean_query)
@@ -527,6 +532,8 @@ class EntityStore:
             return results
 
     def _extract_search_tokens(self, text: str) -> List[str]:
+        if not isinstance(text, str) or not text.strip():
+            return []
         tokens = set()
         words = re.findall(r'[a-zA-Z0-9_\-\.:]+', text)
         for w in words:

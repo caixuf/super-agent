@@ -103,5 +103,6 @@ def test_trajectory_system_health(tmp_path):
     health = ledger.get_system_health()
     assert health["total_turns"] == 2
     assert health["overall_pass_rate"] == 1.0
+    assert health["anomaly_rate"] == 0.0
     assert health["avg_latency_ms"] == 100.0
     assert health["status"] == "HEALTHY"

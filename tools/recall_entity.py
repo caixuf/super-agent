@@ -23,16 +23,75 @@ if str(REPO_ROOT) not in sys.path:
 from agentcore.memory.entity_store import EntityStore
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Recall relevant entity rules for prompt prefetch.")
-    parser.add_argument("query", nargs="?", default="", help="User prompt query")
-    parser.add_argument("--query", dest="named_query", default="", help="Query alias")
-    parser.add_argument("--limit", type=int, default=5, help="Max number of items to recall")
-    parser.add_argument("--db", default=None, help="Path to SQLite entity rules database")
+def parse_arguments(argv: list[str]) -> tuple[str, int, Optional[str]]:
+    query_parts: list[str] = []
+    limit = 5
+    db_path: Optional[str] = None
+    named_query: Optional[str] = None
 
-    args = parser.parse_args()
-    q = (args.query or args.named_query or "").strip()
-    limit = max(1, min(args.limit, 20))
+    i = 0
+    after_double_dash = False
+    while i < len(argv):
+        arg = argv[i]
+        if after_double_dash:
+            query_parts.append(arg)
+            i += 1
+            continue
+
+        if arg == "--":
+            after_double_dash = True
+            i += 1
+            continue
+
+        if arg in ("--limit", "-limit") and i + 1 < len(argv):
+            try:
+                limit = int(argv[i + 1])
+            except ValueError:
+                limit = 5
+            i += 2
+            continue
+        elif arg.startswith("--limit="):
+            try:
+                limit = int(arg.split("=", 1)[1])
+            except ValueError:
+                limit = 5
+            i += 1
+            continue
+
+        if arg in ("--db", "-db") and i + 1 < len(argv):
+            db_path = argv[i + 1]
+            i += 2
+            continue
+        elif arg.startswith("--db="):
+            db_path = arg.split("=", 1)[1]
+            i += 1
+            continue
+
+        if arg in ("--query", "-query") and i + 1 < len(argv):
+            named_query = argv[i + 1]
+            i += 2
+            continue
+        elif arg.startswith("--query="):
+            named_query = arg.split("=", 1)[1]
+            i += 1
+            continue
+
+        query_parts.append(arg)
+        i += 1
+
+    q = (named_query if named_query is not None else " ".join(query_parts)).strip()
+    limit = max(1, min(limit, 20))
+    return q, limit, db_path
+
+
+def main() -> int:
+    raw_args = sys.argv[1:]
+    if len(raw_args) == 1 and raw_args[0] in ("-h", "--help"):
+        print("Usage: recall_entity.py [query] [--limit N] [--db PATH]")
+        print("Recall relevant entity rules for prompt prefetch.")
+        return 0
+
+    q, limit, db_path = parse_arguments(raw_args)
 
     if not q:
         json.dump({"ok": True, "results": [], "empty_reason": "empty_query"}, sys.stdout, ensure_ascii=False)
@@ -41,7 +100,7 @@ def main() -> int:
 
     t0 = time.monotonic()
     try:
-        store = EntityStore(db_path=args.db)
+        store = EntityStore(db_path=db_path)
         results = store.recall(q, limit=limit)
         elapsed_ms = (time.monotonic() - t0) * 1000.0
 

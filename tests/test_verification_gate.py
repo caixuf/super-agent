@@ -129,6 +129,26 @@ def test_evaluate_verification_checks_critical_halts_remaining(tmp_path: Path):
     assert receipt["results"][1]["reason"] == "skipped_due_to_prior_critical_failure"
 
 
+def test_evaluate_verification_checks_non_critical_failure(tmp_path: Path):
+    checks = [
+        {"check_id": "c1", "command": "exit_1", "expected_exit_code": 0, "critical": False},
+        {"check_id": "c2", "command": "echo success", "expected_exit_code": 0, "critical": True},
+    ]
+
+    def mock_executor(argv, timeout_s, workdir):
+        if argv[0] == "exit_1":
+            return {"exit_code": 1, "stdout": "", "stderr": "warn", "timed_out": False, "duration_s": 0.01}
+        return {"exit_code": 0, "stdout": "ok", "stderr": "", "timed_out": False, "duration_s": 0.01}
+
+    receipt = evaluate_verification_checks(checks, tmp_path, executor=mock_executor)
+
+    assert receipt["all_passed"] is False
+    assert receipt["critical_failed"] is False
+    assert receipt["verdict"] == "rejected"
+    assert receipt["results"][0]["status"] == "failed"
+    assert receipt["results"][1]["status"] == "passed"
+
+
 def test_evaluate_verification_checks_reproduction_expected_nonzero(tmp_path: Path):
     checks = [
         {"check_id": "repro_bug", "command": "run_reproduction", "expected_exit_code": 1, "critical": True},
@@ -141,6 +161,41 @@ def test_evaluate_verification_checks_reproduction_expected_nonzero(tmp_path: Pa
     assert receipt["all_passed"] is True
     assert receipt["verdict"] == "approved"
     assert receipt["results"][0]["status"] == "passed"
+
+
+def test_evaluate_verification_checks_timeout(tmp_path: Path):
+    checks = [{"check_id": "c_slow", "command": "sleep 100", "timeout_s": 1.0}]
+
+    def mock_executor(argv, timeout_s, workdir):
+        return {"exit_code": 124, "stdout": "", "stderr": "timed out", "timed_out": True, "duration_s": 1.0}
+
+    receipt = evaluate_verification_checks(checks, tmp_path, executor=mock_executor)
+    assert receipt["verdict"] == "timed_out"
+    assert receipt["results"][0]["status"] == "timed_out"
+
+
+def test_evaluate_verification_checks_limits(tmp_path: Path):
+    too_many = [{"check_id": f"c_{i}", "command": "echo 1"} for i in range(MAX_VERIFICATION_CHECKS + 1)]
+    with pytest.raises(ValueError, match="exceeds limit"):
+        evaluate_verification_checks(too_many, tmp_path)
+
+    non_existent = tmp_path / "does_not_exist"
+    with pytest.raises(ValueError, match="does not exist"):
+        evaluate_verification_checks([], non_existent)
+
+
+def test_normalize_verification_check_with_env():
+    raw = {
+        "check_id": "c_env",
+        "command": "PYTHONPATH=. FOO=bar python3 -c 'exit(0)'",
+        "env": {"EXTRA": "1"},
+    }
+    check = normalize_verification_check(raw)
+    assert check.command == ("python3", "-c", "exit(0)")
+    env_dict = dict(check.env)
+    assert env_dict["PYTHONPATH"] == "."
+    assert env_dict["FOO"] == "bar"
+    assert env_dict["EXTRA"] == "1"
 
 
 def test_default_process_executor_real_process(tmp_path: Path):
@@ -162,6 +217,24 @@ def test_default_process_executor_real_process(tmp_path: Path):
     )
     assert res2["timed_out"] is True
     assert res2["exit_code"] == 124
+
+    res3 = default_process_executor(
+        argv=["python3", "-c", "print('A' * 2_000_000)"],
+        timeout_s=5.0,
+        workdir=tmp_path,
+    )
+    assert "[TRUNCATED:" in res3["stdout"]
+    assert len(res3["stdout"]) < 1_500_000
+
+
+def test_evaluate_verification_checks_real_end_to_end(tmp_path: Path):
+    checks = [
+        {"check_id": "c_env_real", "command": "TEST_VAR=passed python3 -c \"import os; assert os.environ['TEST_VAR'] == 'passed'\""},
+    ]
+    receipt = evaluate_verification_checks(checks, tmp_path)
+    assert receipt["all_passed"] is True
+    assert receipt["verdict"] == "approved"
+    assert receipt["results"][0]["status"] == "passed"
 
 
 # --- 进阶证据门禁与自愈测试 ---
@@ -286,3 +359,47 @@ def test_self_correction_loop_exceeds_max_attempts():
     assert attempts_seen == [1, 2, 3]
     assert "EXCEEDED_MAX_RETRY_LIMIT_3" in result.terminated_reason
     assert not result.final_report.ok
+
+
+def test_verify_code_execution_insufficient_passed_tests():
+    gate = VerificationGate()
+    rep = gate.verify_code_execution(
+        task_id="code-insufficient",
+        command="pytest tests/fast.py",
+        exit_code=0,
+        stdout_tail="2 passed in 0.05s",
+        min_passed_tests=5,
+    )
+    assert rep.ok is False
+    assert any("通过用例数不足" in f for f in rep.failed_assertions)
+    with pytest.raises(VerificationGateError):
+        gate.assert_evidence(rep)
+
+
+def test_verify_log_evidence_invalid_regex():
+    gate = VerificationGate()
+    rep = gate.verify_log_evidence(
+        task_id="log-invalid-re",
+        log_path="/var/log/app.log",
+        pattern=r"[unclosed character set",
+        log_content="sample log",
+    )
+    assert rep.ok is False
+    assert any("无效的正则表达式模式" in f for f in rep.failed_assertions)
+
+
+def test_self_correction_loop_handles_verify_exception():
+    loop = SelfCorrectionLoop(max_attempts=2)
+
+    def execute_fn(attempt: int, repair_ctx: RepairContext | None):
+        return {"attempt": attempt}
+
+    def verify_fn(res):
+        raise RuntimeError("verification service crashed")
+
+    result = loop.run("exc-01", execute_fn, verify_fn)
+    assert result.success is False
+    assert result.total_attempts == 2
+    assert "EXCEEDED_MAX_RETRY_LIMIT_2" in result.terminated_reason
+    assert any("verification service crashed" in f for f in result.final_report.failed_assertions)
+

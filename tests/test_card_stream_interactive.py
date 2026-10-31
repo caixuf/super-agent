@@ -122,3 +122,31 @@ def test_table_fidelity_and_zero_emoji():
     card_json_str = json.dumps(card, ensure_ascii=False)
     for ch in card_json_str:
         assert ord(ch) < 0x1F300 or ord(ch) > 0x1FAD6
+
+
+def test_table_cell_pipe_escaping_and_nested_code_fence():
+    wb = CardStreamBuilder.create_workbench(task_id="wb-task-004")
+    # Table cell with pipes and newlines
+    wb.add_table(
+        headers=["命令", "说明"],
+        rows=[
+            ["cat /var/log/dmesg | grep 3090", "检查是否有掉卡\n第二行说明"],
+        ],
+    )
+    # Diff panel with nested triple backticks
+    nested_content = "```python\nprint('hello')\n```"
+    wb.add_diff_panel("代码片段", nested_content)
+
+    card = wb.render_card()
+    md_elements = [el["text"]["content"] for el in card["elements"] if el.get("text", {}).get("tag") == "lark_md"]
+
+    table_md = [m for m in md_elements if "cat /var/log/dmesg" in m][0]
+    # Verify pipe inside cell is escaped
+    assert r"cat /var/log/dmesg \| grep 3090" in table_md
+    # Verify newline inside cell is converted to space
+    assert "检查是否有掉卡 第二行说明" in table_md
+
+    diff_md = [m for m in md_elements if "代码片段" in m][0]
+    # Verify outer fence uses 4 backticks so nested 3 backticks don't break markdown
+    assert "````diff" in diff_md
+

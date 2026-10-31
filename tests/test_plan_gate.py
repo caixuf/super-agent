@@ -20,6 +20,11 @@ def test_assess_task_complexity_simple():
     assert not assessment.plan_first_required
     assert assessment.score < 3
 
+    # Non-string safe handling
+    assert not assess_task_complexity(None).is_complex  # type: ignore
+    assert not assess_task_complexity({"query": "test"}).is_complex  # type: ignore
+    assert not assess_task_complexity(123).is_complex  # type: ignore
+
 
 def test_assess_task_complexity_complex_cases():
     assessment1 = assess_task_complexity("升级重构当前记忆系统，并在灌灌工控机上进行验证")

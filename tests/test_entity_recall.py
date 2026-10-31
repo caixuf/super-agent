@@ -124,3 +124,40 @@ def test_tools_recall_entity_empty_query():
     assert data["ok"] is True
     assert data["results"] == []
     assert data["empty_reason"] == "empty_query"
+
+
+def test_tools_recall_entity_dash_and_help_queries(tmp_path):
+    repo_root = Path(__file__).resolve().parents[1]
+    cli_path = repo_root / "tools" / "recall_entity.py"
+    db_file = tmp_path / "test_entities.db"
+    _ = EntityStore(db_path=db_file)
+
+    # 1. Dash-prefixed query (e.g. "--status")
+    proc1 = subprocess.run(
+        [sys.executable, str(cli_path), "--status", "--limit", "2", "--db", str(db_file)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert proc1.returncode == 0
+    data1 = json.loads(proc1.stdout)
+    assert data1["ok"] is True
+    assert isinstance(data1["results"], list)
+
+    # 2. Flag query (e.g. "-h" with limit)
+    proc2 = subprocess.run(
+        [sys.executable, str(cli_path), "-h", "--limit", "2", "--db", str(db_file)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert proc2.returncode == 0
+    data2 = json.loads(proc2.stdout)
+    assert data2["ok"] is True
+
+    # 3. Store handles non-string query gracefully
+    store = EntityStore(db_path=db_file)
+    assert store.recall(None) == []  # type: ignore
+    assert store.recall(12345) == []  # type: ignore
+    assert store.recall({"foo": "bar"}) == []  # type: ignore
+

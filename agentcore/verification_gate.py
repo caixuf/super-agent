@@ -468,6 +468,8 @@ class VerificationGate:
             failed_assertions.append(f"测试套件出现 {failed_count} 项失败")
         elif exit_code == 0 and passed_count >= min_passed_tests:
             passed_assertions.append(f"测试套件全部通过 ({passed_count} 项 passed)")
+        elif exit_code == 0 and passed_count < min_passed_tests:
+            failed_assertions.append(f"通过用例数不足: 实际 {passed_count} 项, 期望至少 {min_passed_tests} 项")
 
         is_ok = len(failed_assertions) == 0 and exit_code == 0
         err_msg = "; ".join(failed_assertions) if not is_ok else ""
@@ -555,17 +557,24 @@ class VerificationGate:
         matched_snippet = ""
         matched_line_no = None
 
-        lines = log_content.splitlines()
-        for i, line in enumerate(lines, start=1):
-            if re.search(pattern, line):
-                matched_snippet = line.strip()
-                matched_line_no = i
-                break
+        lines = log_content.splitlines() if isinstance(log_content, str) else []
+        try:
+            compiled_pattern = re.compile(pattern)
+        except re.error as exc:
+            compiled_pattern = None
+            failed_assertions.append(f"无效的正则表达式模式: `{pattern}` ({exc})")
 
-        if matched_snippet:
-            passed_assertions.append(f"日志 `{log_path}` 第 {matched_line_no} 行命中特征: `{matched_snippet[:80]}`")
-        else:
-            failed_assertions.append(f"日志 `{log_path}` 未找到预期特征: `{pattern}`")
+        if compiled_pattern is not None:
+            for i, line in enumerate(lines, start=1):
+                if compiled_pattern.search(line):
+                    matched_snippet = line.strip()
+                    matched_line_no = i
+                    break
+
+            if matched_snippet:
+                passed_assertions.append(f"日志 `{log_path}` 第 {matched_line_no} 行命中特征: `{matched_snippet[:80]}`")
+            else:
+                failed_assertions.append(f"日志 `{log_path}` 未找到预期特征: `{pattern}`")
 
         is_ok = len(failed_assertions) == 0
         err_msg = "; ".join(failed_assertions) if not is_ok else ""
@@ -649,7 +658,28 @@ class SelfCorrectionLoop:
                     error_summary=str(exec_err),
                 )
             else:
-                report = verify_fn(action_result)
+                try:
+                    report = verify_fn(action_result)
+                    if not isinstance(report, VerificationReport):
+                        report = VerificationReport(
+                            task_id=task_id,
+                            task_type="verification_adapter",
+                            ok=bool(report),
+                            passed_assertions=["验证返回 True"] if report else [],
+                            failed_assertions=["验证返回 False 或未满足"] if not report else [],
+                            evidences=[],
+                            error_summary="" if report else "校验未通过",
+                        )
+                except Exception as verify_err:
+                    report = VerificationReport(
+                        task_id=task_id,
+                        task_type="verification_exception",
+                        ok=False,
+                        passed_assertions=[],
+                        failed_assertions=[f"验证过程发生异常: {verify_err}"],
+                        evidences=[],
+                        error_summary=str(verify_err),
+                    )
 
             duration = time.time() - t0
             last_report = report

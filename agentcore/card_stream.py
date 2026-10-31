@@ -217,11 +217,17 @@ class CardStreamBuilder:
         lines: List[str] = []
         if title:
             lines.append(f"**{title}**\n")
-        lines.append("| " + " | ".join(str(h) for h in headers) + " |")
+
+        def _escape_cell(c: Any) -> str:
+            return str(c).replace("\r\n", " ").replace("\n", " ").replace("|", "\\|").strip()
+
+        safe_headers = [_escape_cell(h) for h in headers]
+        lines.append("| " + " | ".join(safe_headers) + " |")
         lines.append("| " + " | ".join(["---"] * col_count) + " |")
         for row in rows:
             padded = list(row) + [""] * (col_count - len(row))
-            lines.append("| " + " | ".join(str(c) for c in padded[:col_count]) + " |")
+            safe_row = [_escape_cell(c) for c in padded[:col_count]]
+            lines.append("| " + " | ".join(safe_row) + " |")
         self.tables.append("\n".join(lines))
         return self
 
@@ -305,7 +311,8 @@ class CardStreamBuilder:
             p_content = panel.get("content", "")
             open_attr = " open" if panel.get("expanded") else ""
             if p_type in ("diff", "code", "log", "bash", "python"):
-                fold_md = f"<details{open_attr}><summary>{p_title}</summary>\n\n```{p_type}\n{p_content}\n```\n</details>"
+                fence = "````" if "```" in p_content else "```"
+                fold_md = f"<details{open_attr}><summary>{p_title}</summary>\n\n{fence}{p_type}\n{p_content}\n{fence}\n</details>"
             else:
                 fold_md = f"<details{open_attr}><summary>{p_title}</summary>\n\n{p_content}\n</details>"
             elements.append({
