@@ -93,15 +93,20 @@ class LivenessDaemon:
     def run_once(self) -> List[Dict[str, Any]]:
         """Sweep once, emit one event per transition, return what was emitted.
 
-        Prefer-D2: when a pool is bound, enforce STARTING/CANCELING hard windows first
-        so pid-null running and soft-cancel fences cannot fake healthy Running forever.
+        Prefer-D2/D6: when a pool is bound, prefer ``reconcile_watchdog`` (includes
+        Prefer-D2 ``enforce_windows`` + finish-callback-loss reconcile). Fall back to
+        ``enforce_windows`` alone on older pools. Pool remains ledger authority.
         """
-        if self.pool is not None and hasattr(self.pool, "enforce_windows"):
+        if self.pool is not None:
             try:
-                self.pool.enforce_windows(now=self._clock())
-            except Exception:  # noqa: BLE001 — window sweep must not stop the daemon
+                if hasattr(self.pool, "reconcile_watchdog"):
+                    self.pool.reconcile_watchdog(now=self._clock())
+                elif hasattr(self.pool, "enforce_windows"):
+                    self.pool.enforce_windows(now=self._clock())
+            except Exception:  # noqa: BLE001 — window/watchdog sweep must not stop the daemon
                 self.errors += 1
-                logger.warning("prefer-d2 pool.enforce_windows failed", exc_info=True)
+                logger.warning("prefer-d6 pool.reconcile_watchdog/enforce_windows failed",
+                               exc_info=True)
         emitted: List[Dict[str, Any]] = []
         for row in self.ledger.sweep(now=self._clock()):
             event = self._event(row)
