@@ -3,6 +3,6 @@
     "name": "skill-distill-candidate",
     "schedule": "20 4 * * *",
     "prompt": "从昨天到今天已结束的任务里提炼技能候选，按 skills/skill-distillation 的门槛与结构执行：1) 只挑同时满足『会重复 / 有可执行判据 / 非业务』的条目；2) 每条写成候选：标题一句话、触发时机、核心判据、3-6 个步骤、至少一条真实反模式（带代价）、一条可执行验收；3) 业务名、内部地址、凭据一律换成占位符，写完自查一遍；4) 最多 3 条，宁缺毋滥；没有合格的就只回一行『candidates none』。把候选写到 <profile>/skills/candidates/<日期>.md，不要直接放进 skills/，不要改任何现有技能或配置。",
-    "notify": true
+    "notify": false
   }
 ]

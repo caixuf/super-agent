@@ -2,7 +2,7 @@
   {
     "name": "capability-drift-check",
     "schedule": "30 9 * * *",
-    "prompt": "对比能力基线与现场：1) 读 <profile>/config.yaml 的 plugins.enabled、platform_toolsets；2) 用 CLI 列出当前工具面与已启用插件；3) 与上次巡检结果（保存在 <profile>/state/capability-drift.json）逐项比对。有差异就输出『变化项 / 之前的取值 / 现在取值 / 影响』，并把本次快照写回该文件；无差异只回一行『drift none』。只读，不要修改配置。",
+    "prompt": "对比能力基线与现场：1) 读 <profile>/config.yaml 的 plugins.enabled、platform_toolsets；2) 用 CLI 列出当前工具面与已启用插件；3) 与上次巡检结果（保存在 <profile>/state/capability-drift.json）逐项比对。有差异就输出『变化项 / 之前的取值 / 现在取值 / 影响』，并把本次快照写回该文件；若无差异首行严格输出 [SILENT]（不要带任何多余字符）以抑制向用户推送噪音。只读，不要修改配置。",
     "notify": true
   }
 ]
