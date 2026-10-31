@@ -19,7 +19,7 @@ Fake Feishu / fake clock only — **no live Feishu delivery invented**.
 | Prefer-D4 stalled | `8d6f832` #9 | stalled/lost → actionable same-card |
 | Prefer-D6 watchdog | `1f50232` #11 | reconcile + attempt fencing (SQLite) |
 | Prefer-D5 CardView | `2a5598f` #12 | A+B round-trip gap-fill (main tip) |
-| Prefer-D7 wrap (this) | *(land tip)* | smoke + WRAP STATUS |
+| Prefer-D7 wrap (this) | `34e7e5d` #13 | smoke + WRAP STATUS |
 
 SHAs re-confirmed from `git log origin/main` at branch time (2026-10-31 Asia/Shanghai).
 
