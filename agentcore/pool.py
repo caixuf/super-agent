@@ -27,6 +27,14 @@ ORIGIN_FIELDS = ('profile', 'session', 'route', 'channel', 'chat', 'thread', 'tu
 ORIGIN_REQUIRED = ('profile', 'session')
 
 
+# Prefer-D2 — Dagster-style hard windows on SQLite pool (config; local defaults).
+# STARTING: claim stamped running with pid NULL until run_claimed Popen.
+# CANCELING: soft cancel() sets cancel=1 while status may still be running.
+START_WINDOW_S = 30.0   # fail-closed claim-without-PID (suggest 15–60s)
+CANCEL_WINDOW_S = 60.0  # soft-cancel fence then force terminal (suggest 30–120s)
+PAUSE_QUIESCE_S = 30.0  # optional: escalate if pause left status=running (deliver-or-reason)
+
+
 def normalize_origin(origin):
     """Serialize addressable task ownership, refusing partial or unknown fields.
 
@@ -53,6 +61,49 @@ def normalize_origin(origin):
     if missing:
         raise ValueError('origin requires ' + ', '.join(missing))
     return json.dumps(normalized, sort_keys=True)
+
+
+def display_stage(row):
+    """Prefer-D2 CardView/status stage — never healthy Running for pid-null or cancel=1.
+
+    Returns one of: queued, starting, running, canceling, paused, waiting_user,
+    awaiting_plan_approval, completed, failed, cancelled, or the raw status.
+    ``paused`` is the CardView label when pool status is waiting_user after pause.
+    """
+    if row is None:
+        return "unknown"
+    if hasattr(row, "keys") and not isinstance(row, dict):
+        row = dict(row)
+    status = str(row.get("status") or "")
+    if status in ("completed", "failed", "cancelled"):
+        return status
+    if status == "waiting_user":
+        # pause() aliases to waiting_user; CardView shows paused/waiting_user.
+        return "paused"
+    if status == "awaiting_plan_approval":
+        return status
+    if status == "running":
+        cancel = row.get("cancel") or 0
+        try:
+            cancel = int(cancel)
+        except (TypeError, ValueError):
+            cancel = 1 if cancel else 0
+        if cancel:
+            return "canceling"
+        pid = row.get("pid")
+        if pid is None:
+            return "starting"
+        return "running"
+    if status == "queued":
+        cancel = row.get("cancel") or 0
+        try:
+            cancel = int(cancel)
+        except (TypeError, ValueError):
+            cancel = 1 if cancel else 0
+        if cancel:
+            return "canceling"
+        return "queued"
+    return status or "unknown"
 
 
 class Pool:
@@ -84,7 +135,8 @@ class Pool:
             db.execute('BEGIN IMMEDIATE')
             columns = {r[1] for r in db.execute('PRAGMA table_info(jobs)')}
             for name, kind in [('pid', 'INTEGER'), ('pid_start', 'TEXT'), ('deadline', 'REAL'),
-                               ('origin', 'TEXT'), ('containment_token', 'TEXT')]:
+                               ('origin', 'TEXT'), ('containment_token', 'TEXT'),
+                               ('cancel_requested_at', 'REAL')]:
                 if name not in columns:
                     db.execute('ALTER TABLE jobs ADD COLUMN ' + name + ' ' + kind)
             outbox_columns = {r[1] for r in db.execute('PRAGMA table_info(outbox)')}
@@ -196,6 +248,9 @@ class Pool:
         db.execute('INSERT OR IGNORE INTO outbox(job,receipt) VALUES(?,?)', (job, receipt))
 
     def claim(self, lease=60):
+        # Prefer-D2: clear STARTING/CANCELING hard windows before selecting work.
+        # Pool remains ledger authority; liveness tick may also call enforce_windows.
+        self.enforce_windows()
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             rows = db.execute("SELECT * FROM jobs WHERE status IN ('queued','running') ORDER BY created").fetchall()
@@ -276,6 +331,76 @@ class Pool:
         except (ProcessLookupError, PermissionError):
             pass
 
+
+    def enforce_windows(self, now=None, *, start_window_s=None, cancel_window_s=None):
+        """Prefer-D2: fail-closed STARTING + force-terminal CANCELING (pool = ledger authority).
+
+        STARTING: status=running AND pid IS NULL past START_WINDOW_S (clock = claim heartbeat)
+          → terminal failed reason=starting_timeout / claim_without_pid.
+        CANCELING: cancel=1 while still non-terminal past CANCEL_WINDOW_S
+          → force terminal cancelled reason=cancel_timeout + killpg/containment best-effort.
+        Soft cancel within the window: kill/sweep best-effort; finish/claim still terminal
+        cancelled when they observe the flag. Does not invent a second scheduler.
+        """
+        at = time.time() if now is None else float(now)
+        start_w = float(START_WINDOW_S if start_window_s is None else start_window_s)
+        cancel_w = float(CANCEL_WINDOW_S if cancel_window_s is None else cancel_window_s)
+        if start_w <= 0 or cancel_w <= 0:
+            raise ValueError("window durations must be positive")
+        forced = []
+        kill_rows = []
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT * FROM jobs WHERE status IN ('queued','running')"
+            ).fetchall()
+            for row in rows:
+                row = dict(row)
+                job_id = row["id"]
+                # CANCELING hard timeout (queued or running with cancel flag).
+                if row.get("cancel"):
+                    stamp = row.get("cancel_requested_at")
+                    if stamp is None:
+                        # Legacy soft-cancel without stamp: use heartbeat/created as floor.
+                        stamp = row.get("heartbeat") or row.get("created") or at
+                    age = at - float(stamp)
+                    if age > cancel_w:
+                        self._stop_expired_runner(row)
+                        self._terminal(
+                            db, job_id, "cancelled",
+                            {"reason": "cancel_timeout", "event": "canceling_hard_window"},
+                        )
+                        forced.append({"id": job_id, "status": "cancelled",
+                                       "reason": "cancel_timeout"})
+                        continue
+                    # Within window: still attempt kill/sweep (soft cancel happy path assist).
+                    if row.get("status") == "running":
+                        kill_rows.append(row)
+                    continue
+                # STARTING fail-closed: running + pid NULL past window.
+                if row.get("status") == "running" and row.get("pid") is None:
+                    clock = row.get("heartbeat")
+                    if clock is None:
+                        clock = row.get("created") or at
+                    if at - float(clock) > start_w:
+                        self._terminal(
+                            db, job_id, "failed",
+                            {
+                                "reason": "starting_timeout",
+                                "event": "claim_without_pid",
+                            },
+                        )
+                        forced.append({"id": job_id, "status": "failed",
+                                       "reason": "starting_timeout"})
+                        continue
+        # Best-effort kills outside the write transaction for soft-cancel within window.
+        for row in kill_rows:
+            try:
+                self._stop_expired_runner(row)
+            except Exception:
+                pass
+        return forced
+
     def heartbeat(self, job, attempt):
         with self.db() as db:
             updated = db.execute("UPDATE jobs SET heartbeat=? WHERE id=? AND attempt=? AND status='running' AND cancel=0", (time.time(), job, attempt))
@@ -313,8 +438,20 @@ class Pool:
             return True
 
     def cancel(self, job):
+        """Soft-cancel: set cancel=1 and stamp CANCELING clock (Prefer-D2).
+
+        Does not force terminal — runner / claim / enforce_windows observe the flag.
+        ``cancel_requested_at`` is set once (COALESCE) so repeated cancel calls do not
+        refresh the CANCEL_WINDOW_S deadline. Prefer-D1 ``finalize_cancel`` remains the
+        immediate barge-in path.
+        """
         with self.db() as db:
-            db.execute("UPDATE jobs SET cancel=1 WHERE id=? AND status IN ('queued','running')", (job,))
+            db.execute(
+                "UPDATE jobs SET cancel=1, "
+                "cancel_requested_at=COALESCE(cancel_requested_at, ?) "
+                "WHERE id=? AND status IN ('queued','running')",
+                (time.time(), job),
+            )
 
     def pause(self, job, *, reason="paused"):
         """Prefer-D1 thin alias: park as waiting_user (no named suspend / second state DB)."""
@@ -334,7 +471,11 @@ class Pool:
                 return False
             if row["status"] in ("completed", "failed", "cancelled"):
                 return False
-            db.execute("UPDATE jobs SET cancel=1 WHERE id=?", (job,))
+            db.execute(
+                "UPDATE jobs SET cancel=1, "
+                "cancel_requested_at=COALESCE(cancel_requested_at, ?) WHERE id=?",
+                (time.time(), job),
+            )
             self._terminal(db, job, "cancelled", {"reason": "cancelled"})
             return True
 
@@ -419,8 +560,16 @@ class Pool:
 
     def status(self, job):
         with self.db() as db:
-            row = db.execute('SELECT id,status,attempt,tries,cancel,result,heartbeat,created,deadline FROM jobs WHERE id=?', (job,)).fetchone()
-            return dict(row) if row else None
+            row = db.execute(
+                "SELECT id,status,attempt,tries,cancel,result,heartbeat,created,deadline,"
+                "pid,pid_start,cancel_requested_at FROM jobs WHERE id=?",
+                (job,),
+            ).fetchone()
+            if row is None:
+                return None
+            out = dict(row)
+            out["stage"] = display_stage(out)
+            return out
 
     def receipts(self):
         with self.db() as db:

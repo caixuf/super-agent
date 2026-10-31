@@ -153,10 +153,16 @@ def compose_title(*, display_name: str = "", task_title: str = "",
 
 
 def _note(state: CardState, elapsed: int, *, heartbeat_age_s: Optional[float] = None,
-          waiting_role: str = "") -> str:
-    """A quiet card still advances its elapsed time, so silence stays informative."""
-    if state is CardState.WAITING_USER:
+          waiting_role: str = "", phase: str = "") -> str:
+    """A quiet card still advances its elapsed time, so silence stays informative.
+
+    Prefer-D2: phases starting / canceling / paused must not read as healthy Running.
+    """
+    phase_l = (phase or "").strip().lower()
+    if state is CardState.WAITING_USER or phase_l in ("paused", "waiting_user"):
         who = ("（%s）" % waiting_role) if waiting_role else ""
+        if phase_l == "paused":
+            return "已暂停%s · 已用 %d 秒" % (who, elapsed)
         return "等待用户确认%s · 已用 %d 秒" % (who, elapsed)
     if state is CardState.AWAITING_PLAN_APPROVAL:
         who = ("（%s）" % waiting_role) if waiting_role else ""
@@ -164,7 +170,13 @@ def _note(state: CardState, elapsed: int, *, heartbeat_age_s: Optional[float] = 
     if state.terminal:
         return "已用 %d 秒" % elapsed
     minutes, seconds = divmod(elapsed, 60)
-    base = "运行中 %d分%02d秒" % (minutes, seconds) if minutes else "运行中 %d秒" % seconds
+    clock = "%d分%02d秒" % (minutes, seconds) if minutes else "%d秒" % seconds
+    if phase_l == "starting":
+        base = "启动中 %s" % clock
+    elif phase_l == "canceling":
+        base = "取消中 %s" % clock
+    else:
+        base = "运行中 %s" % clock
     if heartbeat_age_s is not None:
         age = max(0, int(heartbeat_age_s))
         base = "%s · 心跳 %d秒前" % (base, age)
@@ -193,7 +205,7 @@ def view_for(handle: CardHandle, frame: CardFrame, *, elapsed: int,
         host=frame.host,
         artifacts=tuple(frame.artifacts),
         note=_note(frame.state, elapsed, heartbeat_age_s=frame.heartbeat_age_s,
-                   waiting_role=waiting_role),
+                   waiting_role=waiting_role, phase=frame.phase),
         actions=_ACTIONS.get(frame.state, ("details",)),
         final=frame.final,
         role_id=role_id,
@@ -334,6 +346,34 @@ class CardEmitter:
         """Prefer-D1 Tab: same-card hint that a follow-up is queued (still RUNNING)."""
         note = detail or ("queued follow-up x%d" % max(1, int(count or 1)))
         return self.update(phase="queued_follow_up", detail=note)
+
+
+    def mark_starting(self, *, detail: str = "") -> Optional[CardView]:
+        """Prefer-D2: claim-without-PID window — stage starting, never healthy Running."""
+        return self.update(phase="starting", detail=detail or "starting")
+
+    def mark_canceling(self, *, detail: str = "") -> Optional[CardView]:
+        """Prefer-D2: soft-cancel fence — stage canceling until terminal or timeout."""
+        return self.update(phase="canceling", detail=detail or "canceling")
+
+    def apply_pool_stage(self, stage: str, *, detail: str = "") -> Optional[CardView]:
+        """Map pool.display_stage onto CardView (starting/canceling/paused/terminal)."""
+        s = (stage or "").strip().lower()
+        if s == "starting":
+            return self.mark_starting(detail=detail)
+        if s == "canceling":
+            return self.mark_canceling(detail=detail)
+        if s in ("paused", "waiting_user"):
+            return self.pause(detail=detail or "paused", phase="paused")
+        if s == "failed":
+            return self.fail(detail=detail or "failed")
+        if s == "cancelled":
+            return self.cancel(detail=detail or "cancelled")
+        if s in ("completed", "done"):
+            return self.finish(phase=detail or "done")
+        if s == "running":
+            return self.update(phase="running", detail=detail)
+        return self.update(phase=s or "queued", detail=detail)
 
     def notify_terminal_or_wait(self, state: CardState, *, detail: str = "",
                                 phase: str = "") -> Optional[CardView]:

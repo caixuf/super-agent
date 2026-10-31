@@ -48,7 +48,8 @@ class LivenessDaemon:
     def __init__(self, ledger: LivenessLedger, sink: Callable[[Dict[str, Any]], Any], *,
                  interval: float = DEFAULT_INTERVAL_SECONDS,
                  clock: Optional[Callable[[], float]] = None,
-                 sleep: Optional[Callable[[float], Any]] = None):
+                 sleep: Optional[Callable[[float], Any]] = None,
+                 pool: Any = None):
         if not callable(sink):
             raise ValueError("sink must be callable")
         try:
@@ -63,6 +64,9 @@ class LivenessDaemon:
         self._clock = clock or time.time
         self._sleep = sleep
         self.errors = 0
+        # Prefer-D2: optional pool reference — tick sweeps STARTING/CANCELING windows.
+        # Pool remains ledger authority; daemon never becomes a second scheduler.
+        self.pool = pool
 
     def _event(self, row: Dict[str, Any]) -> Dict[str, Any]:
         now = float(self._clock())
@@ -87,7 +91,17 @@ class LivenessDaemon:
         }
 
     def run_once(self) -> List[Dict[str, Any]]:
-        """Sweep once, emit one event per transition, return what was emitted."""
+        """Sweep once, emit one event per transition, return what was emitted.
+
+        Prefer-D2: when a pool is bound, enforce STARTING/CANCELING hard windows first
+        so pid-null running and soft-cancel fences cannot fake healthy Running forever.
+        """
+        if self.pool is not None and hasattr(self.pool, "enforce_windows"):
+            try:
+                self.pool.enforce_windows(now=self._clock())
+            except Exception:  # noqa: BLE001 — window sweep must not stop the daemon
+                self.errors += 1
+                logger.warning("prefer-d2 pool.enforce_windows failed", exc_info=True)
         emitted: List[Dict[str, Any]] = []
         for row in self.ledger.sweep(now=self._clock()):
             event = self._event(row)
