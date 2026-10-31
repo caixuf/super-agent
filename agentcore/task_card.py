@@ -94,6 +94,11 @@ class CardFrame:
     hitl_kind: str = ""  # "waiting_user" | "plan" | ""
     hitl_summary: str = ""
     hitl_request_id: str = ""
+    # Prefer-D5 thin additive for D-stream (optional; blank-ok).
+    queued_follow_up_count: int = 0
+    liveness_verdict: str = ""  # running|stalled|lost|quiet
+    pool_window: str = ""  # starting|canceling|""
+    ack_miss: bool = False
 
     def render(self) -> dict:
         """Platform-agnostic view; adapters map this onto their own card schema."""
@@ -127,6 +132,14 @@ class CardFrame:
             payload["hitl_summary"] = self.hitl_summary
         if self.hitl_request_id:
             payload["hitl_request_id"] = self.hitl_request_id
+        if self.queued_follow_up_count:
+            payload["queued_follow_up_count"] = int(self.queued_follow_up_count)
+        if self.liveness_verdict:
+            payload["liveness_verdict"] = self.liveness_verdict
+        if self.pool_window:
+            payload["pool_window"] = self.pool_window
+        if self.ack_miss:
+            payload["ack_miss"] = True
         return payload
 
 
@@ -218,7 +231,9 @@ class CardWriter:
              role_id: str = "", display_name: str = "", task_title: str = "",
              heartbeat_age_s: Optional[float] = None, attempt_id: str = "",
              from_bot: str = "", source_thread: str = "", hitl_kind: str = "",
-             hitl_summary: str = "", hitl_request_id: str = "") -> Optional[CardFrame]:
+             hitl_summary: str = "", hitl_request_id: str = "",
+             queued_follow_up_count: int = 0, liveness_verdict: str = "",
+             pool_window: str = "", ack_miss: bool = False) -> Optional[CardFrame]:
         """Build the next frame for this card and commit it.
 
         Returns the committed frame, or ``None`` if the card is already terminal.
@@ -245,6 +260,10 @@ class CardWriter:
             hitl_kind=hitl_kind,
             hitl_summary=hitl_summary or detail,
             hitl_request_id=hitl_request_id,
+            queued_follow_up_count=int(queued_follow_up_count or 0),
+            liveness_verdict=(liveness_verdict or "").strip(),
+            pool_window=(pool_window or "").strip(),
+            ack_miss=bool(ack_miss),
         )
         return self.commit(frame)
 

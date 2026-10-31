@@ -64,6 +64,10 @@ class CardView:
     verdict: str = ""
     # Prefer-D3/D5: durable queued follow-up count (0 when unknown).
     queued_follow_up_count: int = 0
+    # Prefer-D5 thin additive B (optional; blank-ok).
+    liveness_verdict: str = ""  # running|stalled|lost|quiet
+    pool_window: str = ""  # starting|canceling|""
+    ack_miss: bool = False
 
     def render(self) -> dict:
         payload = {
@@ -102,6 +106,13 @@ class CardView:
             payload["verdict"] = self.verdict
         if self.queued_follow_up_count:
             payload["queued_follow_up_count"] = int(self.queued_follow_up_count)
+        live = (self.liveness_verdict or self.verdict or "").strip()
+        if live:
+            payload["liveness_verdict"] = live
+        if self.pool_window:
+            payload["pool_window"] = self.pool_window
+        if self.ack_miss:
+            payload["ack_miss"] = True
         return payload
 
 
@@ -211,6 +222,37 @@ def _note(state: CardState, elapsed: int, *, heartbeat_age_s: Optional[float] = 
     return base
 
 
+def _derive_pool_window(frame: CardFrame) -> str:
+    """Prefer-D5/D2: starting|canceling window; blank otherwise."""
+    explicit = (getattr(frame, "pool_window", "") or "").strip().lower()
+    if explicit in ("starting", "canceling"):
+        return explicit
+    phase_l = (frame.phase or "").strip().lower()
+    if phase_l in ("starting", "canceling"):
+        return phase_l
+    return ""
+
+
+def _derive_liveness_verdict(frame: CardFrame) -> str:
+    """Prefer-D5/D4: running|stalled|lost|quiet when known; blank-ok."""
+    explicit = (getattr(frame, "liveness_verdict", "") or "").strip().lower()
+    if explicit in ("running", "stalled", "lost", "quiet"):
+        return explicit
+    phase_l = (frame.phase or "").strip().lower()
+    if phase_l in ("stalled", "lost"):
+        return phase_l
+    if phase_l in ("running", "quiet"):
+        return phase_l
+    return ""
+
+
+def _derive_ack_miss(frame: CardFrame) -> bool:
+    """Prefer-D5/D3: ack SLO miss badge flag."""
+    if bool(getattr(frame, "ack_miss", False)):
+        return True
+    return (frame.phase or "").strip().lower() == "ack_miss"
+
+
 def view_for(handle: CardHandle, frame: CardFrame, *, elapsed: int,
              title: str = "任务") -> CardView:
     display_name = frame.display_name or handle.display_name
@@ -250,7 +292,11 @@ def view_for(handle: CardHandle, frame: CardFrame, *, elapsed: int,
         verdict=((frame.phase or "").strip().lower()
                  if (frame.phase or "").strip().lower() in ("stalled", "lost")
                  else ""),
-    )
+        queued_follow_up_count=int(getattr(frame, "queued_follow_up_count", 0) or 0),
+        liveness_verdict=_derive_liveness_verdict(frame),
+        pool_window=_derive_pool_window(frame),
+        ack_miss=_derive_ack_miss(frame),
+)
 
 
 class CardEmitter:
@@ -322,10 +368,18 @@ class CardEmitter:
     def update(self, *, phase: str = "", detail: str = "", host: str = "",
                artifacts: Sequence[str] = (),
                heartbeat_age_s: Optional[float] = None,
-               attempt_id: str = "") -> Optional[CardView]:
+               attempt_id: str = "",
+               queued_follow_up_count: int = 0,
+               liveness_verdict: str = "",
+               pool_window: str = "",
+               ack_miss: bool = False) -> Optional[CardView]:
         return self._publish(self._writer.emit(
             CardState.RUNNING, phase=phase, detail=detail, host=host, artifacts=artifacts,
             heartbeat_age_s=heartbeat_age_s, attempt_id=attempt_id,
+            queued_follow_up_count=queued_follow_up_count,
+            liveness_verdict=liveness_verdict,
+            pool_window=pool_window,
+            ack_miss=ack_miss,
             **self._identity_kwargs()))
 
     def wait_user(self, *, detail: str = "", phase: str = "waiting_user",
@@ -394,7 +448,10 @@ class CardEmitter:
                 durable_count = None
         n = durable_count if durable_count is not None else max(1, int(count or 1))
         note = detail or ("queued follow-up x%d" % n)
-        view = self.update(phase="queued_follow_up", detail=note)
+        view = self.update(
+            phase="queued_follow_up", detail=note,
+            queued_follow_up_count=n,
+        )
         return view
 
     def durable_queued_follow_up_count(self, task_id: str = "") -> int:
@@ -411,11 +468,13 @@ class CardEmitter:
 
     def mark_starting(self, *, detail: str = "") -> Optional[CardView]:
         """Prefer-D2: claim-without-PID window — stage starting, never healthy Running."""
-        return self.update(phase="starting", detail=detail or "starting")
+        return self.update(phase="starting", detail=detail or "starting",
+                           pool_window="starting")
 
     def mark_canceling(self, *, detail: str = "") -> Optional[CardView]:
         """Prefer-D2: soft-cancel fence — stage canceling until terminal or timeout."""
-        return self.update(phase="canceling", detail=detail or "canceling")
+        return self.update(phase="canceling", detail=detail or "canceling",
+                           pool_window="canceling")
 
     def mark_stalled(self, *, detail: str = "", heartbeat_age_s: Optional[float] = None,
                      verdict: str = "stalled") -> Optional[CardView]:
@@ -425,6 +484,7 @@ class CardEmitter:
             phase=phase,
             detail=detail or phase,
             heartbeat_age_s=heartbeat_age_s,
+            liveness_verdict=phase,
         )
 
     def mark_lost(self, *, detail: str = "",

@@ -346,6 +346,25 @@ def colleague_card_payload(view) -> dict:
             lines.append("心跳：%d秒前" % max(0, int(float(age))))
         except (TypeError, ValueError):
             pass
+    attempt_id = rendered.get("attempt_id") or ""
+    if attempt_id:
+        lines.append("attempt：%s" % attempt_id)
+    # Prefer-D5: optional B fields (blank omitted).
+    queued = rendered.get("queued_follow_up_count")
+    try:
+        queued_n = int(queued) if queued not in (None, "") else 0
+    except (TypeError, ValueError):
+        queued_n = 0
+    if queued_n:
+        lines.append("排队跟进：%d" % queued_n)
+    live = (rendered.get("liveness_verdict") or rendered.get("verdict") or "").strip()
+    if live:
+        lines.append("活性：%s" % live)
+    pool_window = (rendered.get("pool_window") or "").strip()
+    if pool_window:
+        lines.append("窗口：%s" % pool_window)
+    if rendered.get("ack_miss"):
+        lines.append("ack_miss：是")
     if note:
         lines.append(note)
     waiting = rendered.get("waiting_role")
@@ -467,6 +486,32 @@ def colleague_card_payload(view) -> dict:
         if ops_buttons:
             elements.append({"tag": "action", "actions": ops_buttons})
         header_color = "orange" if phase_l == "stalled" else "red"
+    # Prefer-D5/D1: pause/status/cancel still on card when actions say so
+    # (running / starting / canceling — not HITL, not stalled-ops which already painted).
+    if (
+        not is_hitl
+        and not is_stalled_ops
+        and state not in ("done", "failed", "cancelled")
+    ):
+        from agentcore.stalled_card_bridge import ops_callback_value
+        d1_label = {
+            "cancel": ("取消", "danger"),
+            "pause": ("暂停", "default"),
+            "status": ("查看进度", "default"),
+        }
+        tid = str(rendered.get("task_id") or "")
+        d1_buttons = []
+        for token in ("cancel", "pause", "status"):
+            if token in actions:
+                label, btype = d1_label[token]
+                d1_buttons.append({
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": label},
+                    "type": btype,
+                    "value": ops_callback_value(task_id=tid or "pending", action=token),
+                })
+        if d1_buttons:
+            elements.append({"tag": "action", "actions": d1_buttons})
     return {
         "schema": "2.0",
         "config": {"wide_screen_mode": True, "update_multi": True},
