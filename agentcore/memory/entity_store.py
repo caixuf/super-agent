@@ -51,9 +51,14 @@ def _find_default_memory_file() -> Optional[Path]:
     env_mem = os.getenv("SUPER_AGENT_MEMORY_FILE")
     if env_mem and os.path.isfile(env_mem):
         return Path(env_mem).resolve()
-    p = Path.home() / ".hermes" / "profiles" / "caixuf" / "memories" / "MEMORY.md"
-    if p.is_file():
-        return p
+    candidates = [
+        Path.home() / ".hermes" / "profiles" / "caixuf" / "memories" / "MEMORY.md",
+        Path("/mnt/nvme_ntfs/agents/hermes/profiles/imfl/memories/MEMORY.md"),
+        Path.home() / ".hermes" / "profiles" / "imfl" / "memories" / "MEMORY.md",
+    ]
+    for p in candidates:
+        if p.is_file():
+            return p
     return None
 
 
