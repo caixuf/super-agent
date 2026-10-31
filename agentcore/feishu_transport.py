@@ -626,10 +626,40 @@ class CardNotifyBridge:
 
     Does not open a model turn. Callers pass a CardEmitter (or compatible) and a
     target CardState; the bridge only patches the existing card / completion path.
+
+    Prefer-C2: optional ``pool`` + ``transport`` kick ``kick_deliver_once`` after the
+    same-card terminal frame so the outbox receipt also drains (at-least-once honest).
+    Gateway injection is never the default path here.
     """
 
-    def __init__(self, emitter):
+    def __init__(self, emitter, *, pool=None, transport=None):
         self.emitter = emitter
+        self.pool = pool
+        self.transport = transport
 
     def notify(self, state, *, detail: str = "", phase: str = "") -> object:
-        return self.emitter.notify_terminal_or_wait(state, detail=detail, phase=phase)
+        view = self.emitter.notify_terminal_or_wait(state, detail=detail, phase=phase)
+        return view
+
+    def notify_terminal(self, state, *, detail: str = "", phase: str = "",
+                        kick_delivery: bool = True) -> dict:
+        """Same-card terminal frame + optional completion_delivery kick (no LLM).
+
+        Returns ``{"card": view_or_None, "delivery": outcome_or_None}``. When no pool
+        or transport is bound, delivery is omitted (inspect_pending remains the dry-run).
+        """
+        view = self.notify(state, detail=detail, phase=phase)
+        delivery = None
+        if kick_delivery and self.pool is not None:
+            from agentcore.completion_delivery import notify_on_terminal
+            delivery = notify_on_terminal(self.pool, self.transport, status=state)
+        handle = getattr(self.emitter, "handle", None)
+        card_id = getattr(handle, "card_id", "") if handle is not None else ""
+        message_id = getattr(handle, "message_id", "") if handle is not None else ""
+        return {
+            "card": view,
+            "delivery": delivery,
+            "card_id": card_id,
+            "message_id": message_id,
+            "same_card": bool(message_id),
+        }

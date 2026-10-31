@@ -3,6 +3,10 @@
 The sender returns a real platform message ID. A crash/timeout after starting a
 send leaves an unknown operation; it is never automatically sent a second time.
 Successful text and files are reused when a later part fails or queue ACK is lost.
+
+Prefer-C2: sync twin of ``completion_delivery`` for Feishu plaintext. Hosts kick
+``kick_deliver_once`` / ``notify_on_terminal`` on durable terminal; envelope
+``type=agent-turn-complete`` is rendered by the host ``render`` callable.
 """
 import hashlib
 from contextlib import contextmanager

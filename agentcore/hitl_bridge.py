@@ -244,6 +244,27 @@ class HitlBridge:
                 "denied": bool(ok), "reason": normalized}
 
 
+def notify_approval_requested(emitter, *, detail: str = "", kind: str = "waiting_user",
+                              bridge=None, job: str = "") -> object:
+    """Prefer-C2 optional shared helper: approval-requested notify via CardEmitter.
+
+    Does **not** reopen Approve/Deny UX — reuses existing wait_user / await_plan frames
+    (and HitlBridge.emit_via when a bridge+job are supplied). No new model turn.
+    """
+    if bridge is not None and job:
+        return bridge.emit_via(emitter, kind=("plan" if kind == "plan" else "waiting_user"),
+                               detail=detail, job=job)
+    from agentcore.task_card import CardState
+    state = (CardState.AWAITING_PLAN_APPROVAL if kind == "plan"
+             else CardState.WAITING_USER)
+    if hasattr(emitter, "notify_terminal_or_wait"):
+        return emitter.notify_terminal_or_wait(state, detail=detail)
+    notify = getattr(emitter, "notify", None)
+    if callable(notify):
+        return notify(state, detail=detail)
+    raise TypeError("emitter_missing_notify")
+
+
 def hitl_text_fallback_instructions(*, task_id: str = "") -> str:
     """Honest text-fallback copy when interactive Approve/Deny cannot render."""
     tip = "回复 APPROVE 批准，或 DENY: <原因> 拒绝（原因必填，≤240字）"
