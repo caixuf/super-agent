@@ -8,6 +8,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -19,6 +20,8 @@ import time
 import uuid
 
 from agentcore import colleague_containment as containment
+
+logger = logging.getLogger(__name__)
 
 
 ORIGIN_FIELDS = ('profile', 'session', 'route', 'channel', 'chat', 'thread', 'turn')
@@ -242,10 +245,29 @@ class Pool:
             os.close(fd)
             return None
 
-    def _terminal(self, db, job, status, result):
+    def _terminal(self, db, job, status, result, *, attempt=None):
+        """Conditional terminal (Prefer-D6): only non-terminal rows may flip.
+
+        Optional ``attempt`` fences the update so a stale/superseded attempt cannot
+        clobber a live claimer. Outbox uses INSERT OR IGNORE so the first receipt wins.
+        Returns True when the jobs row was updated.
+        """
         receipt = json.dumps({'job': job, 'status': status, 'result': result})
-        db.execute('UPDATE jobs SET status=?,result=?,heartbeat=NULL WHERE id=?', (status, json.dumps(result), job))
-        db.execute('INSERT OR IGNORE INTO outbox(job,receipt) VALUES(?,?)', (job, receipt))
+        if attempt is None:
+            updated = db.execute(
+                "UPDATE jobs SET status=?,result=?,heartbeat=NULL "
+                "WHERE id=? AND status NOT IN ('completed','failed','cancelled')",
+                (status, json.dumps(result), job),
+            )
+        else:
+            updated = db.execute(
+                "UPDATE jobs SET status=?,result=?,heartbeat=NULL "
+                "WHERE id=? AND attempt=? AND status NOT IN ('completed','failed','cancelled')",
+                (status, json.dumps(result), job, attempt),
+            )
+        if updated.rowcount == 1:
+            db.execute('INSERT OR IGNORE INTO outbox(job,receipt) VALUES(?,?)', (job, receipt))
+        return updated.rowcount == 1
 
     def claim(self, lease=60):
         # Prefer-D2: clear STARTING/CANCELING hard windows before selecting work.
@@ -427,6 +449,161 @@ class Pool:
             except Exception:
                 pass
         return forced
+
+
+    def _runner_identity_gone(self, row):
+        """True when a registered PID identity is gone (exited / recycled).
+
+        Prefer-D6 dead evidence — not mere heartbeat silence. pid NULL is Prefer-D2
+        STARTING territory; silence alone must not invent terminal here.
+        """
+        if isinstance(row, dict):
+            pid = row.get('pid')
+            pid_start = row.get('pid_start')
+        else:
+            pid = row['pid']
+            pid_start = row['pid_start']
+        if not pid or not pid_start:
+            return False
+        current = self._process_start(pid)
+        return current is None or current != pid_start
+
+    def reconcile_watchdog(self, now=None, *, lease=60):
+        """Prefer-D6: OpenHands-style watchdog reconcile on the SQLite pool ledger.
+
+        One clear sweeper: runs Prefer-D2 ``enforce_windows`` first, then closes
+        finish-callback-loss into conditional terminal OR replay-safe requeue when
+        evidence says the runner is dead (PID identity gone + job lock free + past
+        lease). Never marks completed/failed from stall silence alone (align D4).
+        Watchdog passes the same attempt fence as finish/heartbeat — never force-
+        terminals with a guessed/null attempt that could clobber a live claimer.
+        Also observes expired outbox leases (reclaimable; logs delivered-missing-ack).
+        Pool remains the sole ledger authority — no Temporal / second scheduler.
+        """
+        if lease <= 0:
+            raise ValueError('lease must be positive')
+        at = time.time() if now is None else float(now)
+        forced = list(self.enforce_windows(now=at))
+        actions = []
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute(
+                "SELECT * FROM jobs WHERE status='running'"
+            ).fetchall()
+            for raw in rows:
+                row = dict(raw)
+                job_id = row['id']
+                attempt = row.get('attempt')
+                if not attempt:
+                    continue
+                hb = row.get('heartbeat')
+                if hb is None or (at - float(hb)) <= float(lease):
+                    continue
+                if not self._runner_identity_gone(row):
+                    continue
+                token = row.get('containment_token')
+                if token:
+                    try:
+                        sw = containment.sweep(token, grace=0.05, timeout=0.15)
+                        if sw.get('survivors') or not sw.get('token_scan_empty', True):
+                            continue
+                    except Exception:
+                        continue
+                lock_fd = self._lock(job_id)
+                if lock_fd is None:
+                    continue
+                try:
+                    fresh = db.execute(
+                        "SELECT * FROM jobs WHERE id=? AND attempt=? AND status='running'",
+                        (job_id, attempt),
+                    ).fetchone()
+                    if fresh is None:
+                        continue
+                    fresh = dict(fresh)
+                    if fresh.get('cancel'):
+                        ok = self._terminal(
+                            db, job_id, 'cancelled',
+                            {'reason': 'cancelled', 'event': 'watchdog_finish_callback_lost'},
+                            attempt=attempt,
+                        )
+                        if ok:
+                            actions.append({
+                                'id': job_id, 'status': 'cancelled',
+                                'reason': 'cancelled',
+                                'event': 'watchdog_finish_callback_lost',
+                            })
+                        continue
+                    if self._replay_allowed(fresh):
+                        updated = db.execute(
+                            "UPDATE jobs SET status='queued',heartbeat=NULL,attempt=NULL,"
+                            "pid=NULL,pid_start=NULL,deadline=NULL,containment_token=NULL "
+                            "WHERE id=? AND attempt=? AND status='running'",
+                            (job_id, attempt),
+                        )
+                        if updated.rowcount == 1:
+                            actions.append({
+                                'id': job_id, 'status': 'queued',
+                                'reason': 'finish_callback_lost_requeue',
+                                'event': 'watchdog_finish_callback_lost',
+                            })
+                        continue
+                    ok = self._terminal(
+                        db, job_id, 'failed',
+                        {
+                            'reason': 'finish_callback_lost',
+                            'event': 'watchdog_finish_callback_lost',
+                        },
+                        attempt=attempt,
+                    )
+                    if ok:
+                        actions.append({
+                            'id': job_id, 'status': 'failed',
+                            'reason': 'finish_callback_lost',
+                            'event': 'watchdog_finish_callback_lost',
+                        })
+                finally:
+                    os.close(lock_fd)
+
+        outbox_obs = self.observe_outbox_reclaims(now=at)
+        return {
+            'windows': forced,
+            'actions': actions,
+            'outbox': outbox_obs,
+        }
+
+    def observe_outbox_reclaims(self, now=None):
+        """Prefer-D6 thin: observe expired outbox leases (at-least-once; no exactly-once).
+
+        Wrong/stale lease_token still cannot ack (claim_receipt fencing unchanged).
+        Returns counts; logs when a reclaimable row has delivered set but missing ack
+        (crash after transport success before ack → redelivery OK).
+        """
+        at = time.time() if now is None else float(now)
+        with self.db() as db:
+            rows = db.execute(
+                "SELECT job, lease_token, lease_until, delivered, acknowledged "
+                "FROM outbox WHERE acknowledged=0"
+            ).fetchall()
+        reclaimable = 0
+        delivered_missing_ack = 0
+        for row in rows:
+            row = dict(row)
+            until = row.get('lease_until')
+            if until is None:
+                continue
+            if float(until) >= at:
+                continue
+            reclaimable += 1
+            if row.get('lease_token') and row.get('delivered') is not None:
+                delivered_missing_ack += 1
+                logger.info(
+                    'prefer-d6 outbox reclaim after delivered missing ack job=%s',
+                    row.get('job'),
+                )
+        return {
+            'reclaimable': reclaimable,
+            'delivered_missing_ack': delivered_missing_ack,
+        }
 
     def heartbeat(self, job, attempt):
         with self.db() as db:
