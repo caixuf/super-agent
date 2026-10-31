@@ -160,5 +160,20 @@ def terminal_delivery_sink(pool, transport=None):
     return _sink
 
 
+
+#: Prefer-D4 — liveness stalled/lost → same-card ops (no auto-done).
+
+
+def stalled_card_sink(bridge):
+    """Build a liveness sink that kicks Prefer-D4 on stalled/lost transitions.
+
+    Thin Prefer-D4 wire: one actionable same-card attempt per transition (bridge
+    owns cooldown). Non-stall events return None. Does not open a model turn or
+    mark done/failed from silence alone.
+    """
+    from agentcore.stalled_card_bridge import stalled_card_sink as _impl
+    return _impl(bridge)
+
+
 __all__ = ["LivenessDaemon", "JsonlSink", "DEFAULT_INTERVAL_SECONDS",
-           "terminal_delivery_sink"]
+           "terminal_delivery_sink", "stalled_card_sink"]

@@ -27,8 +27,10 @@ class CardView:
     """Structured content for one card. Adapters map this onto their own card schema.
 
     ``actions`` are platform-neutral tokens (``cancel`` / ``details`` / ``logs`` /
-    ``report`` / ``rerun`` / ``approve`` / ``deny`` / ``approve_plan``); the adapter
-    decides how to render them. Prefer-C1 HITL uses ``approve`` / ``deny``.
+    ``report`` / ``rerun`` / ``approve`` / ``deny`` / ``approve_plan`` /
+    ``pause`` / ``status`` / ``resume_observe``); the adapter decides how to
+    render them. Prefer-C1 HITL uses ``approve`` / ``deny``. Prefer-D4 stalled/lost
+    ops use ``cancel`` / ``pause`` / ``status`` / ``resume_observe`` (not Approve/Deny).
 
     Identity fields are optional: when present, ``title`` should already include
     ``display_name + task_title`` so a platform that only paints ``title`` still shows
@@ -55,6 +57,8 @@ class CardView:
     hitl_kind: str = ""
     hitl_summary: str = ""
     hitl_request_id: str = ""
+    # Prefer-D4 stalled/lost verdict (blank when not a stall ops card).
+    verdict: str = ""
 
     def render(self) -> dict:
         payload = {
@@ -89,6 +93,8 @@ class CardView:
             payload["hitl_summary"] = self.hitl_summary
         if self.hitl_request_id:
             payload["hitl_request_id"] = self.hitl_request_id
+        if self.verdict:
+            payload["verdict"] = self.verdict
         return payload
 
 
@@ -102,6 +108,17 @@ _ACTIONS = {
     CardState.FAILED: ("details", "logs", "rerun"),
     CardState.CANCELLED: ("details", "rerun"),
 }
+
+#: Prefer-D4 ops actions on a stalled/lost same-card (not C1 Approve/Deny).
+_STALLED_ACTIONS = ("cancel", "pause", "status", "resume_observe", "details")
+
+
+def _actions_for(frame: CardFrame) -> Tuple[str, ...]:
+    """Pick button tokens: stalled/lost phases get ops actions while non-terminal."""
+    phase = (frame.phase or "").strip().lower()
+    if phase in ("stalled", "lost") and not frame.state.terminal:
+        return _STALLED_ACTIONS
+    return _ACTIONS.get(frame.state, ("details",))
 
 
 def resolve_display_name(role_id: str, *, catalog: Optional[dict] = None) -> str:
@@ -175,6 +192,10 @@ def _note(state: CardState, elapsed: int, *, heartbeat_age_s: Optional[float] = 
         base = "启动中 %s" % clock
     elif phase_l == "canceling":
         base = "取消中 %s" % clock
+    elif phase_l == "stalled":
+        base = "已停滞 %s" % clock
+    elif phase_l == "lost":
+        base = "进程丢失 %s" % clock
     else:
         base = "运行中 %s" % clock
     if heartbeat_age_s is not None:
@@ -206,7 +227,7 @@ def view_for(handle: CardHandle, frame: CardFrame, *, elapsed: int,
         artifacts=tuple(frame.artifacts),
         note=_note(frame.state, elapsed, heartbeat_age_s=frame.heartbeat_age_s,
                    waiting_role=waiting_role, phase=frame.phase),
-        actions=_ACTIONS.get(frame.state, ("details",)),
+        actions=_actions_for(frame),
         final=frame.final,
         role_id=role_id,
         display_name=display_name,
@@ -219,6 +240,9 @@ def view_for(handle: CardHandle, frame: CardFrame, *, elapsed: int,
         hitl_kind=hitl_kind,
         hitl_summary=frame.hitl_summary or frame.detail,
         hitl_request_id=frame.hitl_request_id,
+        verdict=((frame.phase or "").strip().lower()
+                 if (frame.phase or "").strip().lower() in ("stalled", "lost")
+                 else ""),
     )
 
 
@@ -356,6 +380,23 @@ class CardEmitter:
         """Prefer-D2: soft-cancel fence — stage canceling until terminal or timeout."""
         return self.update(phase="canceling", detail=detail or "canceling")
 
+    def mark_stalled(self, *, detail: str = "", heartbeat_age_s: Optional[float] = None,
+                     verdict: str = "stalled") -> Optional[CardView]:
+        """Prefer-D4: same-card stalled/lost ops frame (RUNNING + phase; not HITL)."""
+        phase = "lost" if str(verdict or "").strip().lower() == "lost" else "stalled"
+        return self.update(
+            phase=phase,
+            detail=detail or phase,
+            heartbeat_age_s=heartbeat_age_s,
+        )
+
+    def mark_lost(self, *, detail: str = "",
+                  heartbeat_age_s: Optional[float] = None) -> Optional[CardView]:
+        """Prefer-D4: process-gone observation — actionable same-card, not auto-failed."""
+        return self.mark_stalled(
+            detail=detail or "lost", heartbeat_age_s=heartbeat_age_s, verdict="lost",
+        )
+
     def apply_pool_stage(self, stage: str, *, detail: str = "") -> Optional[CardView]:
         """Map pool.display_stage onto CardView (starting/canceling/paused/terminal)."""
         s = (stage or "").strip().lower()
@@ -373,6 +414,10 @@ class CardEmitter:
             return self.finish(phase=detail or "done")
         if s == "running":
             return self.update(phase="running", detail=detail)
+        if s == "stalled":
+            return self.mark_stalled(detail=detail or "stalled")
+        if s == "lost":
+            return self.mark_lost(detail=detail or "lost")
         return self.update(phase=s or "queued", detail=detail)
 
     def notify_terminal_or_wait(self, state: CardState, *, detail: str = "",
