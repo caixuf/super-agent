@@ -59,6 +59,12 @@ def register_pack_tools(ctx) -> None:
     if not _pack_enabled(ctx):
         return
     PackError, dump_pack_json, export_redacted, import_additive, load_pack_file = _pack_engine(ctx)
+    try:
+        import yaml as _yaml  # host/plugin optional; never inside agentcore
+        from agentcore.colleague_pack import set_yaml_loader as _set_yaml_loader
+        _set_yaml_loader(_yaml.safe_load)
+    except Exception:
+        pass
 
     def _session_ok(session_id) -> bool:
         return isinstance(session_id, str) and bool(session_id.strip()) and len(session_id) <= 512

@@ -50,6 +50,9 @@ _ABS_HOST_PATH_RE = re.compile(r"(?i)\A(?:/[A-Za-z]|[A-Za-z]:[\\/]|\\\\)")
 
 Source = Union[str, bytes, Path, Mapping[str, Any]]
 
+# Host/tests may inject yaml.safe_load; agentcore never imports PyYAML.
+_YAML_SAFE_LOAD: Optional[Any] = None
+
 
 class PackError(ValueError):
     """Honest pack parse / validate / import failure (never silent)."""
@@ -95,6 +98,19 @@ def _parse_text(text: str, *, hint: str) -> dict[str, Any]:
     raise PackError("unsupported_pack_serialization")
 
 
+def set_yaml_loader(loader: Optional[Any]) -> None:
+    """Inject or clear a callable ``loader(text) -> mapping`` for MD frontmatter.
+
+    Prefer-B JSON packs need no loader. MD frontmatter packs work only when the
+    host/tests inject a YAML safe loader from outside agentcore.
+    agentcore itself never imports PyYAML — the import-boundary gate forbids it.
+    """
+    global _YAML_SAFE_LOAD
+    if loader is not None and not callable(loader):
+        raise PackError("yaml_loader_must_be_callable")
+    _YAML_SAFE_LOAD = loader
+
+
 def _parse_frontmatter_md(text: str) -> dict[str, Any]:
     if not text.startswith("---"):
         raise PackError("frontmatter_expected")
@@ -104,12 +120,11 @@ def _parse_frontmatter_md(text: str) -> dict[str, Any]:
         raise PackError("frontmatter_unclosed")
     fm_text = rest[:end].strip("\n")
     body = rest[end + 4:].lstrip("\n")
+    loader = _YAML_SAFE_LOAD
+    if loader is None:
+        raise PackError("yaml_unavailable_use_json_pack")
     try:
-        import yaml  # optional; test extra. Runtime prefers JSON.
-    except ImportError as exc:
-        raise PackError("yaml_unavailable_use_json_pack") from exc
-    try:
-        meta = yaml.safe_load(fm_text)
+        meta = loader(fm_text)
     except Exception as exc:  # noqa: BLE001 — surface as PackError
         raise PackError(f"invalid_pack_yaml:{exc}") from exc
     if not isinstance(meta, dict):
@@ -489,6 +504,7 @@ __all__ = [
     "PACK_FORMAT",
     "PACK_NOTICE",
     "PackError",
+    "set_yaml_loader",
     "parse_pack",
     "redact_pack",
     "validate_pack",
