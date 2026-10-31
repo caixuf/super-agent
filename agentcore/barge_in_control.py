@@ -23,10 +23,14 @@ Prefer-C2 notify internals stay untouched — this module only reuses them.
 """
 from __future__ import annotations
 
+import logging
 import re
+import time
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TYPE_CHECKING
 
 from agentcore.task_progress import (
     FollowUpQueue,
@@ -34,6 +38,15 @@ from agentcore.task_progress import (
     poll_progress_from_ledger,
 )
 from agentcore.task_card import CardState
+
+if TYPE_CHECKING:
+    from agentcore.follow_up_store import FollowUpStore
+
+_LOG = logging.getLogger(__name__)
+
+#: Prefer-D3 dual SLO budgets (host classify->ack dict; Feishu attempt outer).
+CONTROL_FAST_BUDGET_MS = 2000.0
+FEISHU_ATTEMPT_BUDGET_MS = 5000.0
 
 
 class ControlVerb(str, Enum):
@@ -84,7 +97,12 @@ class ControlDecision:
 
 @dataclass
 class ControlAck:
-    """Fast ack payload for Feishu text / same-card note."""
+    """Fast ack payload for Feishu text / same-card note.
+
+    Prefer-D1 keeps second_exec=false / durable_dispatch_submit=false.
+    Prefer-D3 adds SLO fields (ack_id, ack_emitted_at, ack_latency_ms,
+    slo_class, slo_met). Miss still acks; never opens LLM.
+    """
 
     ok: bool
     verb: str
@@ -93,9 +111,15 @@ class ControlAck:
     second_exec: bool = False
     durable_dispatch_submit: bool = False
     detail: dict = field(default_factory=dict)
+    # Prefer-D3 additive SLO (optional until _emit_ack fills them).
+    ack_id: Optional[str] = None
+    ack_emitted_at: Optional[str] = None
+    ack_latency_ms: Optional[float] = None
+    slo_class: str = "control_fast"
+    slo_met: Optional[bool] = None
 
     def as_dict(self) -> dict:
-        return {
+        out = {
             "ok": self.ok,
             "verb": self.verb,
             "task_id": self.task_id,
@@ -104,6 +128,17 @@ class ControlAck:
             "durable_dispatch_submit": self.durable_dispatch_submit,
             "detail": dict(self.detail),
         }
+        if self.ack_id is not None:
+            out["ack_id"] = self.ack_id
+        if self.ack_emitted_at is not None:
+            out["ack_emitted_at"] = self.ack_emitted_at
+        if self.ack_latency_ms is not None:
+            out["ack_latency_ms"] = self.ack_latency_ms
+        if self.slo_class:
+            out["slo_class"] = self.slo_class
+        if self.slo_met is not None:
+            out["slo_met"] = self.slo_met
+        return out
 
 
 def classify_control(
@@ -184,12 +219,14 @@ def classify_control(
 class FollowUpInbox:
     """Tab follow-up inbox bound to task-id + owner (optional origin).
 
-    Persists nothing new in pool schema — wraps FollowUpQueue so durable_dispatch /
-    host control can enqueue without calling submit (no second long exec).
+    Prefer-D3: optional durable FollowUpStore is the ledger authority.
+    Process-local FollowUpQueue stays a cache; after restart the ledger wins.
+    Enqueue is crash-safe BEFORE ok-ack when a store is bound.
     """
 
-    def __init__(self):
+    def __init__(self, store: Optional["FollowUpStore"] = None):
         self._by_task: dict[str, FollowUpQueue] = {}
+        self.store = store
 
     def _queue(self, task_id: str) -> FollowUpQueue:
         key = str(task_id or "")
@@ -205,9 +242,18 @@ class FollowUpInbox:
         owner: str = "",
         origin: Optional[dict] = None,
         kind: str = "follow_up",
+        id: Optional[str] = None,  # noqa: A002 — schema field
+        ack_id: Optional[str] = None,
     ) -> dict:
         if not isinstance(task_id, str) or not task_id.strip():
             raise ValueError("task_id_required")
+        durable_item = None
+        if self.store is not None:
+            # Crash-safe durable insert FIRST (Prefer-D3 D3-5).
+            durable_item = self.store.enqueue(
+                task_id, text, id=id, kind=kind, owner=owner,
+                origin=origin, ack_id=ack_id,
+            )
         q = self._queue(task_id)
         result = q.enqueue(text, kind=kind, task_id=task_id)
         result["owner"] = str(owner or "")
@@ -217,19 +263,36 @@ class FollowUpInbox:
                 for k in ("profile", "session", "route", "channel", "chat", "thread", "turn")
                 if isinstance(origin, dict) and k in origin
             }
+        if durable_item is not None:
+            result["id"] = durable_item["id"]
+            result["item"] = durable_item
+            result["state"] = durable_item["state"]
+            result["created_at"] = durable_item["created_at"]
+            result["durable"] = True
+            result["queued"] = self.store.queued_count(task_id)
+        else:
+            result["durable"] = False
         result["second_exec"] = False
         result["durable_dispatch_submit"] = False
         return result
 
     def peek(self, task_id: str) -> list:
+        if self.store is not None:
+            return self.store.peek(task_id)
         return self._queue(task_id).peek()
 
     def drain(self, task_id: str, *, current_phase: str = "", allow_preempt: bool = False) -> list:
+        if self.store is not None:
+            return self.store.drain(
+                task_id, current_phase=current_phase, allow_preempt=allow_preempt,
+            )
         return self._queue(task_id).drain(
             current_phase=current_phase, allow_preempt=allow_preempt,
         )
 
     def queued_count(self, task_id: str) -> int:
+        if self.store is not None:
+            return self.store.queued_count(task_id)
         return len(self._queue(task_id))
 
 
@@ -251,17 +314,35 @@ class BargeInController:
         emitter=None,
         notify_bridge=None,
         inbox: Optional[FollowUpInbox] = None,
+        follow_up_store: Optional["FollowUpStore"] = None,
         ack_sink: Optional[Callable[[ControlAck], Any]] = None,
         clock: Optional[Callable[[], float]] = None,
+        mono_clock: Optional[Callable[[], float]] = None,
     ):
         self.pool = pool
         self.ledger = ledger
         self.emitter = emitter
         self.notify_bridge = notify_bridge
-        self.inbox = inbox if inbox is not None else FollowUpInbox()
+        store = follow_up_store
+        if store is None and pool is not None and hasattr(pool, "root"):
+            try:
+                from agentcore.follow_up_store import FollowUpStore as _FUS
+                store = _FUS(pool.root)
+            except Exception:  # noqa: BLE001 — thin: fall back to cache-only
+                store = None
+        if inbox is not None:
+            self.inbox = inbox
+            if store is not None and getattr(self.inbox, "store", None) is None:
+                self.inbox.store = store
+        else:
+            self.inbox = FollowUpInbox(store=store)
+        self.follow_up_store = store
         self.ack_sink = ack_sink
         self._clock = clock or (lambda: 0.0)
+        # Prefer-D3: monotonic host clock for classify->ack latency (fakeable).
+        self._mono = mono_clock or time.monotonic
         self._llm_calls = 0  # Prefer-D1: must stay 0 on control short-path
+        self._handle_t0: Optional[float] = None
 
     def spawn_llm(self, *a, **k):  # never called by Prefer-D1 path
         self._llm_calls += 1
@@ -278,6 +359,7 @@ class BargeInController:
         origin: Optional[dict] = None,
         current_phase: str = "",
     ) -> dict:
+        self._handle_t0 = self._mono()
         decision = classify_control(text, action=action, urgency_hint=urgency_hint)
         if decision.verb is ControlVerb.STATUS:
             return self.status(task_id, owner=owner)
@@ -357,19 +439,28 @@ class BargeInController:
         origin: Optional[dict] = None,
         current_phase: str = "",
     ) -> dict:
-        """D1-2: Tab queue — do not preempt irreversible; no second long exec."""
+        """D1-2 + Prefer-D3: durable Tab enqueue BEFORE ok-ack; no second long exec."""
         phase = str(current_phase or "").strip().lower()
         preempt_blocked = phase in IRREVERSIBLE_PHASES
+        # Durable ledger write happens inside inbox.enqueue when store is bound.
         queued = self.inbox.enqueue(
             task_id, text, owner=owner, origin=origin, kind="follow_up",
         )
+        count = int(queued.get("queued") or self.inbox.queued_count(task_id) or 1)
         if preempt_blocked:
             hint = "已排队后续补充（当前不可打断：%s）" % phase
         else:
-            hint = "已排队后续补充（Tab）· 共 %d 条" % queued.get("queued", 1)
+            hint = "已排队后续补充（Tab）· 共 %d 条" % count
         if self.emitter is not None and hasattr(self.emitter, "mark_queued_follow_up"):
             try:
-                self.emitter.mark_queued_follow_up(detail=hint, count=queued.get("queued", 1))
+                self.emitter.mark_queued_follow_up(
+                    detail=hint, count=count, task_id=task_id,
+                )
+            except TypeError:
+                try:
+                    self.emitter.mark_queued_follow_up(detail=hint, count=count)
+                except Exception:
+                    pass
             except Exception:
                 pass
         elif self.emitter is not None and hasattr(self.emitter, "update"):
@@ -385,6 +476,7 @@ class BargeInController:
                 "preempt_blocked": preempt_blocked,
                 "current_phase": phase,
                 "running_continues": True,
+                "durable": bool(queued.get("durable")),
             },
         )
         return self._emit_ack(ack)
@@ -574,6 +666,53 @@ class BargeInController:
         return self._emit_ack(ack)
 
     def _emit_ack(self, ack: ControlAck) -> dict:
+        """Prefer-D3: stamp SLO fields on every ControlAck (still ack on miss)."""
+        if not ack.ack_id:
+            ack.ack_id = uuid.uuid4().hex
+        if not ack.ack_emitted_at:
+            ack.ack_emitted_at = (
+                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            )
+        t0 = self._handle_t0
+        if ack.ack_latency_ms is None and t0 is not None:
+            try:
+                ack.ack_latency_ms = max(0.0, (self._mono() - t0) * 1000.0)
+            except Exception:  # noqa: BLE001
+                ack.ack_latency_ms = None
+        if not ack.slo_class:
+            ack.slo_class = "control_fast"
+        if ack.slo_met is None and ack.ack_latency_ms is not None:
+            budget = (
+                CONTROL_FAST_BUDGET_MS
+                if ack.slo_class == "control_fast"
+                else FEISHU_ATTEMPT_BUDGET_MS
+            )
+            ack.slo_met = bool(ack.ack_latency_ms <= budget)
+            if not ack.slo_met:
+                _LOG.warning(
+                    "prefer_d3_ack_slo_miss verb=%s task=%s latency_ms=%s budget_ms=%s",
+                    ack.verb, ack.task_id, ack.ack_latency_ms, budget,
+                )
+                if self.emitter is not None and hasattr(self.emitter, "update"):
+                    try:
+                        self.emitter.update(
+                            phase="ack_miss",
+                            detail="ack SLO miss %.0fms" % (ack.ack_latency_ms or 0),
+                        )
+                    except Exception:
+                        pass
+        # Bind ack_id onto the durable item when present (ok-ack linkage).
+        queued = (ack.detail or {}).get("queued") if isinstance(ack.detail, dict) else None
+        if (
+            isinstance(queued, dict)
+            and queued.get("id")
+            and self.inbox is not None
+            and getattr(self.inbox, "store", None) is not None
+        ):
+            try:
+                self.inbox.store.bind_ack(queued["id"], ack.ack_id)
+            except Exception:
+                pass
         if self.ack_sink is not None:
             try:
                 self.ack_sink(ack)
