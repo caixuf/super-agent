@@ -316,6 +316,57 @@ class Pool:
         with self.db() as db:
             db.execute("UPDATE jobs SET cancel=1 WHERE id=? AND status IN ('queued','running')", (job,))
 
+
+    def wait_for_user(self, job, *, reason="waiting_user"):
+        """Park job as waiting_user so claim skips it (HITL frees worker slot).
+
+        claim() only selects status IN (queued, running), so waiting_user is
+        never claimable. Wake with resume_from_user().
+        """
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()
+            if row is None:
+                return False
+            if row["status"] in ("completed", "failed", "cancelled"):
+                return False
+            db.execute(
+                "UPDATE jobs SET status=?, heartbeat=NULL WHERE id=?",
+                ("waiting_user", job),
+            )
+            return True
+
+    def await_plan_approval(self, job):
+        """Mark job awaiting_plan_approval (non-claimable; frees worker slot)."""
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()
+            if row is None:
+                return False
+            if row["status"] in ("completed", "failed", "cancelled"):
+                return False
+            db.execute(
+                "UPDATE jobs SET status=?, heartbeat=NULL WHERE id=?",
+                ("awaiting_plan_approval", job),
+            )
+            return True
+
+    def resume_from_user(self, job):
+        """Return waiting_user / awaiting_plan_approval job to queued for re-claim."""
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()
+            if row is None:
+                return False
+            if row["status"] not in ("waiting_user", "awaiting_plan_approval"):
+                return False
+            db.execute(
+                "UPDATE jobs SET status='queued', attempt=NULL, heartbeat=NULL, "
+                "pid=NULL, pid_start=NULL, deadline=NULL WHERE id=?",
+                (job,),
+            )
+            return True
+
     def status(self, job):
         with self.db() as db:
             row = db.execute('SELECT id,status,attempt,tries,cancel,result,heartbeat,created,deadline FROM jobs WHERE id=?', (job,)).fetchone()
