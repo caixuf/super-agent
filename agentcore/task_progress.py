@@ -48,7 +48,7 @@ def verdict(row: Optional[Dict[str, Any]]) -> str:
         return state
     if state in _STUCK:
         return state
-    if state in ("queued", "running"):
+    if state in ("queued", "running", "waiting_user", "awaiting_plan_approval"):
         return state
     return "unknown"
 
@@ -66,6 +66,10 @@ def card_state(row: Optional[Dict[str, Any]]) -> CardState:
         return _TERMINAL_STATES[word]
     if word in _STUCK:
         return CardState.FAILED
+    if word == "waiting_user":
+        return CardState.WAITING_USER
+    if word == "awaiting_plan_approval":
+        return CardState.AWAITING_PLAN_APPROVAL
     if word == "running":
         return CardState.RUNNING
     return CardState.QUEUED
@@ -108,6 +112,11 @@ def snapshot(row: Optional[Dict[str, Any]], *, now: float) -> Dict[str, Any]:
         "artifacts": tuple(str(a) for a in (artifacts or ()))[:6],
         "host": str(data.get("host") or ""),
         "terminal": card_state(data) in (CardState.DONE, CardState.FAILED, CardState.CANCELLED),
+        "role_id": str(data.get("role_id") or "").strip()[:64],
+        "display_name": str(data.get("display_name") or "").strip()[:80],
+        "task_title": str(data.get("task_title") or data.get("label") or "").strip()[:120],
+        "heartbeat_age_s": data.get("heartbeat_age_s"),
+        "attempt_id": str(data.get("attempt_id") or "").strip()[:64],
     }
 
 
@@ -158,6 +167,8 @@ def _clock_text(seconds: int) -> str:
 _STATE_WORD = {
     CardState.QUEUED: "已接收",
     CardState.RUNNING: "进行中",
+    CardState.WAITING_USER: "等待用户",
+    CardState.AWAITING_PLAN_APPROVAL: "等待计划审批",
     CardState.DONE: "已完成",
     CardState.FAILED: "未完成",
     CardState.CANCELLED: "已取消",
@@ -167,9 +178,23 @@ _STATE_WORD = {
 def render(snap: Dict[str, Any], *, title: str = "") -> str:
     """One editable entry's text. Every line comes from a field, none from imagination."""
     lines = []
-    head = title.strip() or snap.get("label") or snap.get("task_id") or "任务"
+    display_name = str(snap.get("display_name") or "").strip()
+    task_title = str(snap.get("task_title") or snap.get("label") or "").strip()
+    if display_name and task_title:
+        composed = "%s · %s" % (display_name, task_title)
+    else:
+        composed = display_name or task_title
+    head = title.strip() or composed or snap.get("label") or snap.get("task_id") or "任务"
     lines.append("**%s**" % head[:90])
+    if display_name and display_name not in head:
+        lines.append("岗位：%s" % display_name[:80])
     lines.append("状态：%s%s" % (_STATE_WORD[card_state(snap)], _state_suffix(snap)))
+    age = snap.get("heartbeat_age_s")
+    if age is not None and not snap.get("terminal"):
+        try:
+            lines.append("心跳：%d秒前" % max(0, int(float(age))))
+        except (TypeError, ValueError):
+            pass
     if snap.get("phase"):
         lines.append("当前：%s" % snap["phase"])
     if snap.get("percent") is not None:
@@ -282,3 +307,69 @@ def render_many(snaps, *, title: str = "任务") -> str:
         lines.append("· …另有 %d 个" % (len(items) - 6))
     lines.append("已用（最长）：%s" % _clock_text(int(head["elapsed"])))
     return "\n".join(lines)[:MAX_TEXT]
+
+# --------------------------------------------------------------------------- #
+# Mid-run interrupt queue (Codex section 6-3) — queue follow-ups; never preempt irreversible
+# --------------------------------------------------------------------------- #
+
+IRREVERSIBLE_PHASES = frozenset({
+    "commit", "push", "deploy", "send", "payment", "delete", "destructive",
+})
+
+
+class FollowUpQueue:
+    """Queue mid-run user follow-ups on the main-dialog control path.
+
+    Drain only when the current phase is not irreversible. Never starts a second
+    long execution by itself — the host control path decides how to apply items.
+    """
+
+    def __init__(self):
+        self._items = []
+
+    def enqueue(self, text, *, kind="follow_up", task_id=""):
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("follow_up_text_required")
+        item = {"kind": kind, "text": text.strip()[:2000], "task_id": str(task_id or "")}
+        self._items.append(item)
+        return {"ok": True, "queued": len(self._items), "item": item}
+
+    def __len__(self):
+        return len(self._items)
+
+    def peek(self):
+        return list(self._items)
+
+    def drain(self, *, current_phase="", allow_preempt=False):
+        phase = str(current_phase or "").strip().lower()
+        if not allow_preempt and phase in IRREVERSIBLE_PHASES:
+            return []
+        items, self._items = self._items, []
+        return items
+
+
+def poll_progress_from_ledger(ledger, task_id, *, owner=None, now=None):
+    """User progress ask -> read liveness ledger only; never start a second long job."""
+    if ledger is None or not hasattr(ledger, "inspect"):
+        return {"ok": False, "error": "ledger_unavailable", "task_id": task_id}
+    kwargs = {}
+    if owner is not None:
+        kwargs["require_owner"] = owner
+    if now is not None:
+        kwargs["now"] = now
+    row = ledger.inspect(task_id, **kwargs)
+    if not row.get("ok"):
+        return row
+    started = float(row.get("started_at") or 0)
+    at = float(now if now is not None else started + float(row.get("elapsed_s") or 0))
+    snap = snapshot(row, now=at)
+    if "heartbeat_age_s" in row:
+        snap["heartbeat_age_s"] = row["heartbeat_age_s"]
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "snap": snap,
+        "verdict": row.get("verdict"),
+        "source": "liveness_ledger",
+        "second_exec": False,
+    }

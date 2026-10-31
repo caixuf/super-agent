@@ -295,3 +295,241 @@ def from_env(journal, env=None, opener=None):
         return None
     return FeishuTransport(app_id=app_id, app_secret=app_secret, journal=journal,
                            opener=opener)
+
+
+# --------------------------------------------------------------------------- #
+# Card Kit adapter — one writer ↔ one card_id (colleague visibility knife C)
+# --------------------------------------------------------------------------- #
+
+#: Card Kit entities remain patchable for this many days; past that, resume must
+#: deliver-or-reason instead of silently orphaning a second card.
+CARD_KIT_UPDATE_WINDOW_DAYS = 14
+
+
+def colleague_card_payload(view) -> dict:
+    """Map a platform-neutral CardView onto an interactive card body.
+
+    Title carries display_name + task_title (already composed by card_emit). No
+    invented percent/ETA. Identity row is plain text from the view fields only.
+    """
+    rendered = view.render() if hasattr(view, "render") else dict(view)
+    title = str(rendered.get("title") or "任务")[:120]
+    state = str(rendered.get("state") or "")
+    phase = str(rendered.get("phase") or "")
+    note = str(rendered.get("note") or "")
+    role = str(rendered.get("display_name") or rendered.get("role_id") or "")
+    task_title = str(rendered.get("task_title") or "")
+    age = rendered.get("heartbeat_age_s")
+    lines = []
+    if role or task_title:
+        lines.append("岗位：%s" % (role or "—"))
+    if task_title:
+        lines.append("任务：%s" % task_title)
+    lines.append("状态：%s" % (state or "—"))
+    if phase:
+        lines.append("阶段：%s" % phase)
+    if age is not None:
+        try:
+            lines.append("心跳：%d秒前" % max(0, int(float(age))))
+        except (TypeError, ValueError):
+            pass
+    if note:
+        lines.append(note)
+    waiting = rendered.get("waiting_role")
+    if waiting and state in ("waiting_user", "awaiting_plan_approval"):
+        lines.append("待确认岗位：%s" % waiting)
+    arts = rendered.get("artifacts") or []
+    if arts:
+        lines.append("产物：" + "、".join(str(a) for a in list(arts)[:6]))
+    body = "\n".join(lines)
+    header_color = {
+        "queued": "grey",
+        "running": "blue",
+        "waiting_user": "orange",
+        "awaiting_plan_approval": "orange",
+        "done": "green",
+        "failed": "red",
+        "cancelled": "grey",
+    }.get(state, "blue")
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True, "update_multi": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": header_color,
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": body[:3500]},
+            }
+        ],
+    }
+
+
+class FeishuCardKitAdapter:
+    """One CardWriter-facing transport: create Card 2.0 once, then patch in place.
+
+    Contract for :class:`agentcore.card_emit.CardEmitter`:
+    ``emit(handle, view, *, final)``.
+
+    * Create → persist ``card_id`` on the handle (caller should ``store.set_card_id``).
+    * Update → Card Kit ``batch_update`` / message PATCH with monotonic sequence.
+    * uuid = ``{task_id}:{sequence}`` (matches CardWriter) for platform idempotency.
+    * Fail → fall back to existing plaintext ``send_plaintext`` path.
+    * Restart resume: if handle has ``card_id`` + ``message_id``, patch that card;
+      if the platform rejects as expired (14d window), return an honest reason dict
+      instead of opening a second card silently.
+    """
+
+    def __init__(self, transport: FeishuTransport, *, store=None, clock=None):
+        if not isinstance(transport, FeishuTransport):
+            raise ValueError("feishu_transport_required")
+        self.transport = transport
+        self.store = store
+        self._clock = clock or time.time
+        self._last_uuid: dict = {}
+
+    def _persist_card_id(self, handle, card_id: str) -> None:
+        handle.card_id = card_id
+        if self.store is not None and hasattr(self.store, "set_card_id"):
+            try:
+                self.store.set_card_id(handle.task_id, card_id)
+            except Exception:
+                if hasattr(self.store, "save"):
+                    self.store.save(handle)
+
+    def _origin_for(self, handle):
+        # Minimal addressable origin: chat is required by FeishuTransport._target.
+        return {"profile": "card", "session": handle.task_id, "chat": handle.chat_id}
+
+    def _create(self, handle, view) -> dict:
+        card = colleague_card_payload(view)
+        # Card Kit create (entity), then send as interactive message referencing it.
+        # When Card Kit is unavailable, fall back to sending the interactive body
+        # directly as an IM message (still one message_id for later PATCH).
+        card_id = ""
+        try:
+            data = self.transport._call(
+                "POST", "/cardkit/v1/cards",
+                body={"type": "card_json", "data": json.dumps(card, ensure_ascii=False)},
+            )
+            card_id = data.get("card_id") or data.get("card", {}).get("card_id") or ""
+        except FeishuError:
+            card_id = ""
+        body = {
+            "receive_id": handle.chat_id,
+            "msg_type": "interactive",
+            "content": json.dumps(card, ensure_ascii=False),
+            "uuid": ("%s:%d" % (handle.task_id, max(1, handle.sequence)))[:50],
+        }
+        try:
+            data = self.transport._call(
+                "POST", "/im/v1/messages",
+                params={"receive_id_type": "chat_id"},
+                body=body,
+            )
+        except FeishuError as err:
+            return self._text_fallback(handle, view, reason=str(err))
+        message_id = data.get("message_id")
+        if not isinstance(message_id, str) or not message_id.strip():
+            return self._text_fallback(handle, view, reason="feishu_message_id_missing")
+        handle.message_id = message_id
+        if card_id:
+            self._persist_card_id(handle, card_id)
+        if self.store is not None and hasattr(self.store, "save"):
+            self.store.save(handle)
+        return {"ok": True, "message_id": message_id, "card_id": handle.card_id,
+                "created": True}
+
+    def _patch(self, handle, view, *, final: bool) -> dict:
+        card = colleague_card_payload(view)
+        uuid = ("%s:%d" % (handle.task_id, handle.sequence))[:50]
+        if self._last_uuid.get(handle.task_id) == uuid:
+            return {"ok": True, "deduped": True, "uuid": uuid}
+        # Prefer Card Kit batch_update when card_id is known.
+        if handle.card_id:
+            try:
+                self.transport._call(
+                    "POST",
+                    "/cardkit/v1/cards/%s/batch_update" % handle.card_id,
+                    body={
+                        "uuid": uuid,
+                        "sequence": int(handle.sequence),
+                        # Full card replace with monotonic sequence + uuid idempotency.
+                        "card": card,
+                        "sequence": int(handle.sequence),
+                        "update_multi": True,
+                    },
+                )
+                self._last_uuid[handle.task_id] = uuid
+                return {"ok": True, "patched": True, "via": "cardkit", "uuid": uuid,
+                        "card_id": handle.card_id, "final": final}
+            except FeishuError as err:
+                reason = str(err)
+                if "230020" in reason or "expired" in reason.lower():
+                    return {"ok": False, "expired": True,
+                            "reason": "card_update_window_expired_%sd" % CARD_KIT_UPDATE_WINDOW_DAYS,
+                            "card_id": handle.card_id}
+                # Fall through to message PATCH / text.
+        # Message content PATCH (in-place edit of the interactive message).
+        if handle.message_id:
+            try:
+                self.transport._call(
+                    "PATCH",
+                    "/im/v1/messages/" + handle.message_id,
+                    body={
+                        "msg_type": "interactive",
+                        "content": json.dumps(card, ensure_ascii=False),
+                    },
+                )
+                self._last_uuid[handle.task_id] = uuid
+                return {"ok": True, "patched": True, "via": "message_patch",
+                        "uuid": uuid, "message_id": handle.message_id, "final": final}
+            except FeishuError as err:
+                reason = str(err)
+                if "230020" in reason or "expired" in reason.lower():
+                    return {"ok": False, "expired": True,
+                            "reason": "card_update_window_expired_%sd" % CARD_KIT_UPDATE_WINDOW_DAYS,
+                            "message_id": handle.message_id}
+                return self._text_fallback(handle, view, reason=reason)
+        return self._text_fallback(handle, view, reason="no_message_or_card_id")
+
+    def _text_fallback(self, handle, view, *, reason: str) -> dict:
+        """Existing plaintext path — never invent a second card writer."""
+        rendered = view.render() if hasattr(view, "render") else dict(view)
+        text = "%s\n%s" % (rendered.get("title") or "任务", rendered.get("note") or "")
+        try:
+            receipt = self.transport.send_plaintext(
+                origin=self._origin_for(handle),
+                delivery_key=("%s:fallback:%d" % (handle.task_id, handle.sequence))[:50],
+                payload={"text": text[:8000]},
+            )
+        except (FeishuError, ValueError) as err:
+            return {"ok": False, "fallback": True, "error": str(err), "reason": reason}
+        if not handle.message_id:
+            handle.message_id = receipt.get("receipt_id") or handle.message_id
+            if self.store is not None and hasattr(self.store, "save"):
+                self.store.save(handle)
+        return {"ok": True, "fallback": True, "message_id": receipt.get("receipt_id"),
+                "reason": reason}
+
+    def emit(self, handle, view, *, final: bool = False) -> dict:
+        """CardEmitter transport entrypoint — create once, then same-card patch."""
+        if not handle.message_id:
+            return self._create(handle, view)
+        return self._patch(handle, view, final=final)
+
+
+class CardNotifyBridge:
+    """Turn-complete / approval-requested notify on the *same* card (Codex §6-1).
+
+    Does not open a model turn. Callers pass a CardEmitter (or compatible) and a
+    target CardState; the bridge only patches the existing card / completion path.
+    """
+
+    def __init__(self, emitter):
+        self.emitter = emitter
+
+    def notify(self, state, *, detail: str = "", phase: str = "") -> object:
+        return self.emitter.notify_terminal_or_wait(state, detail=detail, phase=phase)
