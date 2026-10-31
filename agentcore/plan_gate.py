@@ -37,6 +37,7 @@ class TaskPlan:
     contingency_plan: str
     created_at: float = field(default_factory=time.time)
     status: str = "draft"  # draft, approved, executing, completed, failed
+    model_tier: str = "pro"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -57,6 +58,7 @@ class TaskPlan:
             "contingency_plan": self.contingency_plan,
             "created_at": self.created_at,
             "status": self.status,
+            "model_tier": self.model_tier,
         }
 
     @classmethod
@@ -80,6 +82,7 @@ class TaskPlan:
             contingency_plan=data.get("contingency_plan", ""),
             created_at=data.get("created_at", time.time()),
             status=data.get("status", "draft"),
+            model_tier=data.get("model_tier", "pro"),
         )
 
 
@@ -187,14 +190,53 @@ def render_plan_markdown(plan: Union[TaskPlan, Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def resolve_plan_route(
+    *,
+    task_id: str = "",
+    role: str = "planning",
+    task_pro_calls: int = 0,
+    max_pro_calls: int = 2,
+    executor_profile: str = "super-agent",
+) -> Dict[str, Any]:
+    """Resolve model route for PlanGate planning.
+
+    Guaranteed to request 'pro' within budget, falling back to 'main'
+    if the budget quota is exhausted.
+    """
+    from .model_routing import resolve_model_route
+
+    return resolve_model_route(
+        executor_profile=executor_profile,
+        role=role,
+        requested_model="pro",
+        task_pro_calls=task_pro_calls,
+        max_pro_calls=max_pro_calls,
+    )
+
+
 class PlanGate:
     """规划先行控制门，集成计划生成、校验与流转控制。"""
 
-    def __init__(self) -> None:
+    def __init__(self, max_pro_calls: int = 2) -> None:
         self._plans: Dict[str, TaskPlan] = {}
+        self._pro_calls: Dict[str, int] = {}
+        self._max_pro_calls = max_pro_calls
 
     def assess(self, prompt: str) -> ComplexityAssessment:
         return assess_task_complexity(prompt)
+
+    def get_plan_route(self, task_id: str, *, role: str = "planning") -> Dict[str, Any]:
+        """获取任务规划所需的模型路由，严格执行预算硬限与降级策略。"""
+        used = self._pro_calls.get(task_id, 0)
+        route = resolve_plan_route(
+            task_id=task_id,
+            role=role,
+            task_pro_calls=used,
+            max_pro_calls=self._max_pro_calls,
+        )
+        if route.get("selected_model") == "pro":
+            self._pro_calls[task_id] = used + 1
+        return route
 
     def register_plan(self, plan: Union[TaskPlan, Dict[str, Any]]) -> TaskPlan:
         task_plan = plan if isinstance(plan, TaskPlan) else TaskPlan.from_dict(plan)

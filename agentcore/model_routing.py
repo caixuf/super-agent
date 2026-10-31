@@ -11,6 +11,41 @@ from typing import Any, Dict, Final, Iterable, List, Mapping, Optional, Sequence
 
 CODING_MODEL_ROUTE_SCHEMA_VERSION: Final[str] = "coding_model_route/v2"
 
+# 3-Tier Model Architecture Constants
+TIER_PRO: Final[str] = "pro"
+TIER_MAIN: Final[str] = "main"
+TIER_FLASH: Final[str] = "flash"
+MODEL_TIERS: Final[Tuple[str, ...]] = (TIER_PRO, TIER_MAIN, TIER_FLASH)
+
+# Strict whitelist for expensive 'pro' model tier (planning & deep diagnosis only)
+PRO_ALLOWED_ROLES: Final[frozenset[str]] = frozenset({
+    "architect",
+    "brain",
+    "planning",
+    "plan_gate",
+    "plan_generator",
+    "deep_diagnosis",
+})
+
+# Roles strictly forbidden from accessing 'pro' tier (forced to flash to prevent overdraft)
+EXECUTION_ROLES: Final[frozenset[str]] = frozenset({
+    "dev_runner",
+    "pi_executor",
+    "implementation",
+    "test",
+    "cases",
+    "ops",
+    "docs",
+    "worker",
+    "runner",
+    "tool_loop",
+    "executor",
+    "compression",
+    "background_review",
+})
+
+DEFAULT_MAX_PRO_CALLS_PER_TASK: Final[int] = 2
+
 # Canonical weakest-to-strongest reasoning effort ladder
 REASONING_EFFORT_LADDER: Final[Tuple[str, ...]] = (
     "off",
@@ -29,9 +64,14 @@ MODEL_ROLES: Final[Tuple[str, ...]] = (
     "triage",
     "research",
     "brain",
+    "planning",
+    "plan_gate",
+    "deep_diagnosis",
     "implementation",
     "design_visual",
     "docs",
+    "dev_runner",
+    "ops",
 )
 
 # Explicit reasoning depth dials
@@ -68,6 +108,9 @@ MODEL_ROUTE_PROVENANCES: Final[Tuple[str, ...]] = (
 ROLE_PROFILE_DEFAULTS: Final[Dict[str, Dict[str, str]]] = {
     "architect": {"depth": "ultrabrain", "effort": "high", "tier": "ultrabrain"},
     "brain": {"depth": "ultrabrain", "effort": "high", "tier": "ultrabrain"},
+    "planning": {"depth": "ultrabrain", "effort": "high", "tier": "ultrabrain"},
+    "plan_gate": {"depth": "ultrabrain", "effort": "high", "tier": "ultrabrain"},
+    "deep_diagnosis": {"depth": "ultrabrain", "effort": "high", "tier": "ultrabrain"},
     "reviewer": {"depth": "deep", "effort": "high", "tier": "deep"},
     "triage": {"depth": "deep", "effort": "high", "tier": "deep"},
     "cases": {"depth": "standard", "effort": "medium", "tier": "standard"},
@@ -75,11 +118,66 @@ ROLE_PROFILE_DEFAULTS: Final[Dict[str, Dict[str, str]]] = {
     "research": {"depth": "standard", "effort": "medium", "tier": "standard"},
     "docs": {"depth": "standard", "effort": "low", "tier": "quick"},
     "test": {"depth": "shallow", "effort": "low", "tier": "quick"},
+    "dev_runner": {"depth": "shallow", "effort": "low", "tier": "quick"},
     "ops": {"depth": "shallow", "effort": "off", "tier": "quick"},
 }
 
 # Standard executor candidate chains
 BUILTIN_ROLE_CHAINS: Final[Dict[str, Dict[str, Tuple[Dict[str, str], ...]]]] = {
+    "super-agent": {
+        "architect": (
+            {"model": "pro", "effort": "high"},
+            {"model": "main", "effort": "high"},
+        ),
+        "brain": (
+            {"model": "pro", "effort": "high"},
+            {"model": "main", "effort": "high"},
+        ),
+        "planning": (
+            {"model": "pro", "effort": "high"},
+            {"model": "main", "effort": "high"},
+        ),
+        "plan_gate": (
+            {"model": "pro", "effort": "high"},
+            {"model": "main", "effort": "high"},
+        ),
+        "deep_diagnosis": (
+            {"model": "pro", "effort": "high"},
+            {"model": "main", "effort": "high"},
+        ),
+        "reviewer": (
+            {"model": "main", "effort": "high"},
+            {"model": "flash", "effort": "medium"},
+        ),
+        "triage": (
+            {"model": "main", "effort": "high"},
+            {"model": "flash", "effort": "medium"},
+        ),
+        "cases": (
+            {"model": "flash", "effort": "medium"},
+            {"model": "main", "effort": "low"},
+        ),
+        "implementation": (
+            {"model": "flash", "effort": "medium"},
+            {"model": "main", "effort": "low"},
+        ),
+        "research": (
+            {"model": "main", "effort": "medium"},
+            {"model": "flash", "effort": "low"},
+        ),
+        "test": (
+            {"model": "flash", "effort": "low"},
+        ),
+        "ops": (
+            {"model": "flash", "effort": "off"},
+        ),
+        "docs": (
+            {"model": "flash", "effort": "low"},
+        ),
+        "dev_runner": (
+            {"model": "flash", "effort": "medium"},
+        ),
+    },
     "hermes": {
         "architect": (
             {"model": "o3-mini", "effort": "high"},
@@ -171,6 +269,7 @@ BUILTIN_ROLE_CHAINS: Final[Dict[str, Dict[str, Tuple[Dict[str, str], ...]]]] = {
 }
 
 EXECUTOR_DEFAULTS: Final[Dict[str, Dict[str, str]]] = {
+    "super-agent": {"model": "main", "effort": "medium"},
     "hermes": {"model": "gpt-4o", "effort": "medium"},
     "claude-code": {"model": "claude-3-5-sonnet", "effort": "medium"},
     "generic": {"model": "deepseek-chat", "effort": "medium"},
@@ -207,6 +306,73 @@ def normalize_effort(effort: str) -> str:
     return "medium"
 
 
+def enforce_model_tier_budget(
+    model: str,
+    *,
+    role: str = "",
+    task_pro_calls: int = 0,
+    max_pro_calls: int = DEFAULT_MAX_PRO_CALLS_PER_TASK,
+) -> Tuple[str, Optional[Dict[str, str]]]:
+    """Intercept and guard calls to the expensive 'pro' model tier.
+
+    Financial circuit breaker rules:
+    1. Execution roles (dev_runner, test, cases, implementation, etc.) are strictly
+       prohibited from using 'pro' and are forced to downgrade to 'flash'.
+    2. Non-whitelisted roles requesting 'pro' are downgraded to 'main'.
+    3. Tasks exceeding the maximum allowed 'pro' quota (default: 2) are downgraded to 'main'.
+    """
+    clean_model = (model or "").strip()
+    if clean_model.lower() != TIER_PRO:
+        return clean_model, None
+
+    clean_role = (role or "").strip().lower()
+
+    # Rule 1: Execution roles strictly cannot use pro -> forced downgrade to flash
+    if clean_role in EXECUTION_ROLES:
+        return TIER_FLASH, {
+            "stage": "budget_guard",
+            "outcome": "intercepted_and_downgraded",
+            "reason": (
+                f"[BUDGET_GUARD] Execution role '{clean_role}' is strictly prohibited "
+                f"from using expensive tier '{TIER_PRO}'. Forced downgrade to '{TIER_FLASH}' "
+                "to prevent financial overdraft."
+            ),
+        }
+
+    # Rule 2: Unapproved / general roles cannot use pro -> downgrade to main
+    if clean_role not in PRO_ALLOWED_ROLES:
+        return TIER_MAIN, {
+            "stage": "budget_guard",
+            "outcome": "intercepted_and_downgraded",
+            "reason": (
+                f"[BUDGET_GUARD] Role '{clean_role or 'unspecified'}' is not whitelisted "
+                f"for '{TIER_PRO}' tier (allowed: {', '.join(sorted(PRO_ALLOWED_ROLES))}). "
+                f"Downgraded to '{TIER_MAIN}' to prevent financial overdraft."
+            ),
+        }
+
+    # Rule 3: Task quota exceeded -> downgrade to main
+    if task_pro_calls >= max_pro_calls:
+        return TIER_MAIN, {
+            "stage": "budget_guard",
+            "outcome": "quota_exceeded_downgraded",
+            "reason": (
+                f"[BUDGET_GUARD] Task exceeded maximum allowed '{TIER_PRO}' calls "
+                f"({task_pro_calls} >= {max_pro_calls}). Downgraded to '{TIER_MAIN}' "
+                "to prevent runaway billing."
+            ),
+        }
+
+    return TIER_PRO, {
+        "stage": "budget_guard",
+        "outcome": "approved",
+        "reason": (
+            f"[BUDGET_GUARD] Role '{clean_role}' approved for '{TIER_PRO}' tier "
+            f"({task_pro_calls + 1}/{max_pro_calls} calls used)."
+        ),
+    }
+
+
 def resolve_model_route(
     executor_profile: str,
     *,
@@ -215,17 +381,19 @@ def resolve_model_route(
     role: str = "",
     requested_depth: str = "",
     requested_scale: str = "",
+    task_pro_calls: int = 0,
+    max_pro_calls: int = DEFAULT_MAX_PRO_CALLS_PER_TASK,
     chains: Optional[Mapping[str, Mapping[str, Sequence[Mapping[str, str]]]]] = None,
     available_models: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
-    """Pure-function deterministic model and reasoning effort resolution.
+    """Pure-function deterministic model and reasoning effort resolution with budget guardrails.
 
     Precedence:
-    1. requested_model (explicit pass-through unless non_generative)
-    2. requested_depth / requested_role chain head
+    1. requested_model (explicit request subject to budget guardrail and non_generative filter)
+    2. requested_depth / requested_role candidate chain
     3. executor default fallback
     """
-    profile = (executor_profile or "hermes").strip().lower()
+    profile = (executor_profile or "super-agent").strip().lower()
     if profile not in BUILTIN_ROLE_CHAINS and profile not in EXECUTOR_DEFAULTS:
         profile = "generic"
 
@@ -259,18 +427,36 @@ def resolve_model_route(
                 "attempted": attempted,
             }
 
-        effective_effort = clean_effort or "medium"
+        # Budget Guardrail Check for explicit model request
+        guarded_model, guard_record = enforce_model_tier_budget(
+            req_model,
+            role=clean_role,
+            task_pro_calls=task_pro_calls,
+            max_pro_calls=max_pro_calls,
+        )
+        if guard_record:
+            attempted.append(guard_record)
+        req_model = guarded_model
+
+        effective_effort = clean_effort or (
+            "high" if req_model == TIER_PRO else ("medium" if req_model == TIER_MAIN else "low")
+        )
         attempted.append({
             "stage": "request_model",
             "outcome": "applied",
-            "reason": f"User explicitly requested `{req_model}`",
+            "reason": f"Applied model `{req_model}`",
         })
+        selected_tier = (
+            "ultrabrain"
+            if req_model == TIER_PRO or effective_effort == "high"
+            else ("deep" if req_model == TIER_MAIN or effective_effort == "medium" else "quick")
+        )
         return {
             "schema_version": CODING_MODEL_ROUTE_SCHEMA_VERSION,
             "status": "routed",
             "selected_model": req_model,
             "selected_reasoning_effort": effective_effort,
-            "selected_tier": "ultrabrain" if effective_effort == "high" else ("deep" if effective_effort == "medium" else "quick"),
+            "selected_tier": selected_tier,
             "role": clean_role,
             "depth": clean_depth,
             "scale": clean_scale,
@@ -303,30 +489,41 @@ def resolve_model_route(
             "reason": f"No candidate chain for role `{clean_role}` on profile `{profile}`",
         })
 
-    # Filter candidate chain against available_models if provided
+    # Filter candidate chain against available_models and budget guardrail
     selected_candidate: Optional[Mapping[str, str]] = None
     for cand in role_chain:
         cand_model = cand.get("model", "")
-        if available_set is None or cand_model.lower() in available_set:
-            selected_candidate = cand
+        guarded_cand, guard_rec = enforce_model_tier_budget(
+            cand_model,
+            role=clean_role,
+            task_pro_calls=task_pro_calls,
+            max_pro_calls=max_pro_calls,
+        )
+        if guard_rec:
+            attempted.append(guard_rec)
+
+        if available_set is None or guarded_cand.lower() in available_set:
+            selected_candidate = dict(cand)
+            selected_candidate["model"] = guarded_cand
             break
 
     if selected_candidate:
+        cand_model = selected_candidate.get("model", "")
         eff = clean_effort or selected_candidate.get("effort", "medium")
-        if effective_depth == "ultrabrain":
+        if cand_model == TIER_PRO or effective_depth == "ultrabrain":
             eff = "high"
             tier = "ultrabrain"
-        elif effective_depth == "deep" and eff in ("off", "low"):
-            eff = "medium"
+        elif cand_model == TIER_MAIN or (effective_depth == "deep" and eff in ("off", "low")):
+            eff = "medium" if eff in ("off", "low") else eff
             tier = "deep"
-        elif effective_depth == "shallow":
-            eff = "low"
+        elif cand_model == TIER_FLASH or effective_depth == "shallow":
+            eff = "low" if eff in ("high", "medium") else eff
             tier = "quick"
 
         return {
             "schema_version": CODING_MODEL_ROUTE_SCHEMA_VERSION,
             "status": "routed",
-            "selected_model": selected_candidate.get("model", ""),
+            "selected_model": cand_model,
             "selected_reasoning_effort": eff,
             "selected_tier": tier,
             "role": clean_role,
@@ -338,6 +535,16 @@ def resolve_model_route(
 
     # Step 3: Executor default fallback
     default_entry = EXECUTOR_DEFAULTS.get(profile, EXECUTOR_DEFAULTS["generic"])
+    default_model = default_entry.get("model", "")
+    guarded_default, guard_rec = enforce_model_tier_budget(
+        default_model,
+        role=clean_role,
+        task_pro_calls=task_pro_calls,
+        max_pro_calls=max_pro_calls,
+    )
+    if guard_rec:
+        attempted.append(guard_rec)
+
     attempted.append({
         "stage": "executor_default",
         "outcome": "applied",
@@ -345,17 +552,20 @@ def resolve_model_route(
     })
 
     eff = clean_effort or default_entry.get("effort", "medium")
-    if effective_depth == "ultrabrain":
+    if guarded_default == TIER_PRO or effective_depth == "ultrabrain":
         eff = "high"
         tier = "ultrabrain"
-    elif effective_depth == "shallow":
+    elif guarded_default == TIER_MAIN:
+        eff = eff or "medium"
+        tier = "deep"
+    elif guarded_default == TIER_FLASH or effective_depth == "shallow":
         eff = "low"
         tier = "quick"
 
     return {
         "schema_version": CODING_MODEL_ROUTE_SCHEMA_VERSION,
         "status": "routed",
-        "selected_model": default_entry.get("model", ""),
+        "selected_model": guarded_default,
         "selected_reasoning_effort": eff,
         "selected_tier": tier,
         "role": clean_role,

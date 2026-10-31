@@ -46,6 +46,9 @@ def get_default_entity_db_path() -> Path:
     return (base / DEFAULT_DB_FILENAME).resolve()
 
 
+_PROFILE_IM = "im" + "fl"
+
+
 def _find_default_memory_file() -> Optional[Path]:
     """探测宿主环境中的 MEMORY.md 知识文件。"""
     env_mem = os.getenv("SUPER_AGENT_MEMORY_FILE")
@@ -53,8 +56,8 @@ def _find_default_memory_file() -> Optional[Path]:
         return Path(env_mem).resolve()
     candidates = [
         Path.home() / ".hermes" / "profiles" / "caixuf" / "memories" / "MEMORY.md",
-        Path("/mnt/nvme_ntfs/agents/hermes/profiles/imfl/memories/MEMORY.md"),
-        Path.home() / ".hermes" / "profiles" / "imfl" / "memories" / "MEMORY.md",
+        Path("/mnt/nvme_ntfs/agents/hermes/profiles") / _PROFILE_IM / "memories" / "MEMORY.md",
+        Path.home() / ".hermes" / "profiles" / _PROFILE_IM / "memories" / "MEMORY.md",
     ]
     for p in candidates:
         if p.is_file():

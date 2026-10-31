@@ -145,6 +145,16 @@ def run_dev_job(
 ) -> dict[str, Any]:
     """Execute a development task for a colleague role in an isolated worktree."""
     goal = _goal(job)
+    # Financial Overdraft Guard: dev_runner is strictly for execution and tool calling.
+    # Pro model tier is forbidden to prevent bankruptcy from heavy execution loops.
+    clean_model = (model or "").strip()
+    if clean_model.lower() == "pro":
+        sys.stderr.write(
+            "[BUDGET_GUARD] dev_runner received forbidden model tier 'pro'. "
+            "Forced downgrade to 'flash' to prevent financial overdraft.\n"
+        )
+        model = "flash"
+
     memory = ""
     if memory_file:
         try:
@@ -311,6 +321,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--sandbox", action="store_true")
     parser.add_argument("--output-dir", default="")
     args, _unknown = parser.parse_known_args(argv)
+
+    # Financial Overdraft Guard: dev_runner CLI intercept
+    if args.model and args.model.strip().lower() == "pro":
+        sys.stderr.write(
+            "[BUDGET_GUARD] dev_runner CLI requested forbidden 'pro' model tier. "
+            "Forced downgrade to 'flash' to prevent financial overdraft.\n"
+        )
+        args.model = "flash"
 
     try:
         job = _load_job(sys.stdin)
