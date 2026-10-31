@@ -88,10 +88,12 @@ def test_dry_run_plans_plugins_and_both_patch_scripts(tmp_path):
     assert "plugins/longtask_guard/" in out  # 源路径出现在计划里
     # 启用记录也进计划，但 dry-run 一个文件都不建。
     assert "plugins.enabled" in out
-    # 两个补丁脚本都必须出现在计划里，且都是先 --check。
+    # 补丁脚本都必须出现在计划里，且都是先 --check。
     assert "apply_feishu_card_replies.py --check" in out
     assert "patch_card_finalize.py --check" in out
     assert "patch_card_finalize.py --apply" in out
+    assert "patch_card_markdown_native.py --check" in out
+    assert "patch_card_markdown_native.py --apply" in out
 
     # dry-run 只打印，不建目录、不写文件。
     assert not home.exists()

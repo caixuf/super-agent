@@ -70,12 +70,26 @@ BUILD_PROBE_V11 = "else build_card_elements(content))\n        if not finalize:"
 #: The streaming tip is a 1.0 ``note``; 2.4 rejects it (200861) and the whole card falls
 #: back to plain text. Rewritten in both tree shapes.
 NOTE_OLD = '''            elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": tip}]})'''
-NOTE_NEW = '''            if card_components_v2():
+NOTE_MALFORMED = '''            if card_components_v2():
+                # 'note' is a 1.0 tag; 2.4 rejects it (200861) and falls back to plain text.
+                elements.append({"tag": "div", "text": {"tag": "plain_text", "content": tip}})
+            else:
+                if _card_v2_enabled() or card_components_v2():
+                # 'note' is a 1.0 tag; 2.0/2.4 reject it (200861) and fall back to plain text.
+                elements.append({"tag": "div", "text": {"tag": "plain_text", "content": tip}})
+            else:
+                elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": tip}]})'''
+NOTE_V1 = '''            if card_components_v2():
                 # 'note' is a 1.0 tag; 2.4 rejects it (200861) and falls back to plain text.
                 elements.append({"tag": "div", "text": {"tag": "plain_text", "content": tip}})
             else:
                 elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": tip}]})'''
-NOTE_PROBE = "if card_components_v2():\n                # 'note' is a 1.0 tag"
+NOTE_NEW = '''            if _card_v2_enabled() or card_components_v2():
+                # 'note' is a 1.0 tag; 2.0/2.4 reject it (200861) and fall back to plain text.
+                elements.append({"tag": "div", "text": {"tag": "plain_text", "content": tip}})
+            else:
+                elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": tip}]})'''
+NOTE_PROBE = "if _card_v2_enabled() or card_components_v2():\n                # 'note' is a 1.0 tag"
 
 RETURN_OLD = '''        return {
             "config": {"wide_screen_mode": True},
@@ -87,11 +101,25 @@ RETURN_OLD_V11 = '''        header = {"title": {"tag": "plain_text", "content": 
                   "template": "green" if finalize else "blue"}
         return {"schema": "2.0", "config": {"wide_screen_mode": True, "update_multi": True},
                 "header": header, "body": {"elements": elements}}'''
-RETURN_NEW = '''        header = {"title": {"tag": "plain_text", "content": name},
+RETURN_V1 = '''        header = {"title": {"tag": "plain_text", "content": name},
                   "template": "green" if finalize else "blue"}
         if card_components_v2():
             # 2.4 rejects the 1.0 markdown/note tags; plain_text and table are accepted.
             card: dict[str, Any] = {"schema": "2.0", "config": {"update_multi": True},
+                                    "header": header, "body": {"elements": elements}}
+        elif _card_v2_enabled():
+            # update_multi stays true on every frame: the PATCH API requires a shared card
+            # before AND after each update, and the streaming frames are exactly those updates.
+            card = {"schema": "2.0", "config": {"wide_screen_mode": True, "update_multi": True},
+                    "header": header, "body": {"elements": elements}}
+        else:
+            return {"config": {"wide_screen_mode": True}, "header": header, "elements": elements}
+        return card'''
+RETURN_NEW = '''        header = {"title": {"tag": "plain_text", "content": name},
+                  "template": "green" if finalize else "blue"}
+        if card_components_v2():
+            # 2.4 rejects the 1.0 markdown/note tags; plain_text and table are accepted.
+            card: dict[str, Any] = {"schema": "2.0", "config": {"wide_screen_mode": True, "update_multi": True},
                                     "header": header, "body": {"elements": elements}}
         elif _card_v2_enabled():
             # update_multi stays true on every frame: the PATCH API requires a shared card
@@ -138,9 +166,12 @@ EDITS = [
     # both shapes end in the same builder; the shared probe covers either tree
     ("build", BUILD_OLD, BUILD_NEW, BUILD_PROBE),
     ("build-v11", BUILD_OLD_V11, _strip_24(BUILD_NEW), BUILD_PROBE),
+    ("tip-malformed", NOTE_MALFORMED, NOTE_NEW, NOTE_PROBE),
+    ("tip-v1", NOTE_V1, NOTE_NEW, NOTE_PROBE),
     ("tip", NOTE_OLD, NOTE_NEW, NOTE_PROBE),
     # both shapes end in the same 2.0 payload; one probe covers either tree
     # A tree without the streaming tip (synthetic or a host variant) still returns the 1.0 card.
+    ("return-v1", RETURN_V1, RETURN_NEW, RETURN_PROBE),
     ("return-no-tip", RETURN_OLD, RETURN_NEW, RETURN_PROBE),
     ("return-v11", RETURN_OLD_V11, _strip_24(RETURN_NEW_V11), RETURN_PROBE),
 ]
@@ -172,6 +203,8 @@ def _missing(text):
             continue
         if name.startswith("helpers") and _helper_gone(text):
             continue                     # any helper shape is done once the 2.4 branch exists
+        if (name.endswith("-v1") or name.endswith("-v11") or name.endswith("-malformed")) and text.count(old) == 0:
+            continue
         missing.append((old, probe))
     return missing
 

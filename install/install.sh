@@ -579,15 +579,18 @@ fi
 
 # ---------------------------------------------------------------------------- #
 if [ "$DO_PATCH" = "1" ]; then
-  step "⑩ 消息平台适配补丁（卡片流式 + 审批纯文字 + 卡片终态/同卡）"
+  step "⑩ 消息平台适配补丁（卡片流式 + 审批纯文字 + 卡片终态/同卡 + 原生表格/Card2.0）"
   APPLY="$REPO_ROOT/patches/apply_feishu_card_replies.py"
   FINALIZE="$REPO_ROOT/patches/patch_card_finalize.py"
+  NATIVE="$REPO_ROOT/patches/patch_card_markdown_native.py"
   if [ "$DRY_RUN" = "1" ]; then
     log "    [plan] HERMES_AGENT_DIR=$HERMES_AGENT_DIR python3 $APPLY --check"
     log "    [plan] HERMES_AGENT_DIR=$HERMES_AGENT_DIR python3 $APPLY --apply"
     log "    [plan] HERMES_PROFILE_DIR=$TARGET_HOME python3 $APPLY --config"
     log "    [plan] python3 $FINALIZE --check --agent-dir $HERMES_AGENT_DIR"
     log "    [plan] python3 $FINALIZE --apply --agent-dir $HERMES_AGENT_DIR   （仅当 --check 不在位）"
+    log "    [plan] python3 $NATIVE --check --agent-dir $HERMES_AGENT_DIR"
+    log "    [plan] python3 $NATIVE --apply --agent-dir $HERMES_AGENT_DIR   （仅当 --check 不在位）"
   elif [ ! -d "$HERMES_AGENT_DIR" ]; then
     warn "Hermes 安装树不存在（$HERMES_AGENT_DIR），跳过补丁。装好 Hermes 后重跑本步。"
   else
@@ -604,6 +607,13 @@ if [ "$DO_PATCH" = "1" ]; then
       ok "卡片终态/同卡补丁已重放（**需重启网关**才生效）"
     else
       fail "卡片终态/同卡补丁重放失败（上游锚点可能已漂移，退出码 2）；人工核对后重跑"
+    fi
+    if python3 "$NATIVE" --check --agent-dir "$HERMES_AGENT_DIR"; then
+      skip "卡片原生表格补丁已整块在位"
+    elif python3 "$NATIVE" --apply --agent-dir "$HERMES_AGENT_DIR"; then
+      ok "卡片原生表格补丁已重放（**需重启网关**才生效）"
+    else
+      fail "卡片原生表格补丁重放失败（上游锚点可能已漂移，退出码 2）；人工核对后重跑"
     fi
   fi
 else

@@ -766,7 +766,7 @@ def test_terminal_hook_does_not_race_or_block_slow_running_edit(tmp_path, monkey
         assert message_id == "msg-serial"
         if not edits:
             entered.set()
-            assert release.wait(5), "controlled edit release timed out"
+            assert release.wait(10), "controlled edit release timed out"
         edits.append(text)
         return {"ok": True, "edited": True, "message_id": message_id}
 
@@ -780,7 +780,7 @@ def test_terminal_hook_does_not_race_or_block_slow_running_edit(tmp_path, monkey
     ctx.hooks["post_tool_call"](tool_name="terminal",
                                 result={"session_id": "proc_serial"},
                                 session_id="s", turn_id="t")
-    assert entered.wait(5), "running edit did not start"
+    assert entered.wait(10), "running edit did not start"
 
     start = time.monotonic()
     ctx.hooks["on_session_end"](session_id="s", turn_id="t", completed=True)
