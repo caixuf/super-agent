@@ -45,6 +45,25 @@ class Transport(Protocol):
                 idempotency_key: str) -> "DeliveryReceipt | dict[str, Any] | None": ...
 
 
+#: Codex agent-turn-complete subset — map, do not vendor Rust notify.py.
+AGENT_TURN_COMPLETE = "agent-turn-complete"
+
+#: Origin keys mirrored onto the completion envelope when persisted (never guessed).
+ORIGIN_ENVELOPE_KEYS = ("session", "chat", "thread", "turn", "route", "channel")
+
+
+def origin_envelope_fields(origin: Any) -> dict[str, str]:
+    """Copy addressable origin fields for the notify payload; blank-ok, never invent."""
+    out: dict[str, str] = {}
+    if not isinstance(origin, dict):
+        return out
+    for key in ORIGIN_ENVELOPE_KEYS:
+        value = origin.get(key)
+        if isinstance(value, str) and value.strip() and len(value.strip()) <= 512:
+            out[key] = value.strip()
+    return out
+
+
 @dataclass(frozen=True)
 class CompletionMessage:
     task_id: str
@@ -55,18 +74,50 @@ class CompletionMessage:
     colleague_role: str | None = None
     colleague_name: str | None = None
     colleague_label: str | None = None
+    # Prefer-C2 turn-complete envelope (Codex subset map).
+    notify_type: str = AGENT_TURN_COMPLETE
+    session: str | None = None
+    chat: str | None = None
+    thread: str | None = None
+    turn_id: str | None = None
+    route: str | None = None
+    channel: str | None = None
+    role_id: str | None = None
+    display_name: str | None = None
 
     def render(self) -> dict[str, Any]:
-        result = {'task_id': self.task_id, 'status': self.status,
-                  'summary': self.summary, 'truncated': self.truncated}
+        result = {
+            "type": self.notify_type or AGENT_TURN_COMPLETE,
+            "task_id": self.task_id,
+            "status": self.status,
+            "summary": self.summary,
+            "truncated": self.truncated,
+        }
         if self.artifacts:
-            result['artifacts'] = list(self.artifacts)
+            result["artifacts"] = list(self.artifacts)
         if self.colleague_role:
-            result['colleague_role'] = self.colleague_role
+            result["colleague_role"] = self.colleague_role
         if self.colleague_name:
-            result['colleague_name'] = self.colleague_name
+            result["colleague_name"] = self.colleague_name
         if self.colleague_label:
-            result['colleague_label'] = self.colleague_label
+            result["colleague_label"] = self.colleague_label
+        if self.session:
+            result["session"] = self.session
+        if self.chat:
+            result["chat"] = self.chat
+        if self.thread:
+            result["thread"] = self.thread
+            result["thread_id"] = self.thread  # Codex-shaped alias
+        if self.turn_id:
+            result["turn_id"] = self.turn_id
+        if self.route:
+            result["route"] = self.route
+        if self.channel:
+            result["channel"] = self.channel
+        if self.role_id:
+            result["role_id"] = self.role_id
+        if self.display_name:
+            result["display_name"] = self.display_name
         return result
 
 
@@ -93,8 +144,15 @@ def _summary(result: Any, *, limit: int = MAX_SUMMARY_CHARS) -> tuple[str, bool]
 def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS,
                   colleague_role: str | None = None,
                   colleague_name: str | None = None,
-                  colleague_label: str | None = None) -> CompletionMessage:
-    """Turn a queue receipt into the platform-neutral message a transport renders."""
+                  colleague_label: str | None = None,
+                  origin: Any = None,
+                  role_id: str | None = None,
+                  display_name: str | None = None) -> CompletionMessage:
+    """Turn a queue receipt into the platform-neutral message a transport renders.
+
+    Prefer-C2: envelope is Codex ``agent-turn-complete`` subset. Origin fields ride
+    only when the caller passes the *persisted* jobs.origin — never an ambient chat.
+    """
     if not isinstance(receipt, dict) or not isinstance(receipt.get('job'), str):
         raise ValueError('receipt must name its job')
     if colleague_role is not None and (not isinstance(colleague_role, str)
@@ -106,6 +164,11 @@ def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS,
     if colleague_label is not None and (not isinstance(colleague_label, str)
                                         or not 1 <= len(colleague_label) <= 80):
         raise ValueError('invalid colleague label')
+    if role_id is not None and (not isinstance(role_id, str) or not 1 <= len(role_id) <= 64):
+        raise ValueError('invalid role_id')
+    if display_name is not None and (not isinstance(display_name, str)
+                                     or not 1 <= len(display_name) <= 80):
+        raise ValueError('invalid display_name')
     status = str(receipt.get('status') or 'unknown')
     result = receipt.get('result')
     # Worker protocol envelopes persist intact in the queue. Unwrap only an
@@ -117,20 +180,28 @@ def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS,
     if not isinstance(artifacts, list) or len(artifacts) > 8 or any(
             not isinstance(p, str) or not p or len(p) > 4096 for p in artifacts):
         raise ValueError('invalid completion artifacts')
-    return CompletionMessage(task_id=receipt['job'], status=status, summary=summary,
-                             truncated=truncated, artifacts=tuple(artifacts),
-                             colleague_role=colleague_role, colleague_name=colleague_name,
-                             colleague_label=colleague_label)
+    fields = origin_envelope_fields(origin)
+    return CompletionMessage(
+        task_id=receipt['job'], status=status, summary=summary,
+        truncated=truncated, artifacts=tuple(artifacts),
+        colleague_role=colleague_role, colleague_name=colleague_name,
+        colleague_label=colleague_label,
+        session=fields.get('session'), chat=fields.get('chat'),
+        thread=fields.get('thread'), turn_id=fields.get('turn'),
+        route=fields.get('route'), channel=fields.get('channel'),
+        role_id=role_id or colleague_role,
+        display_name=display_name or colleague_name,
+    )
 
 
-def _colleague_identity(pool: Pool, job: str) -> tuple[str | None, str | None]:
+def _colleague_identity(pool: Pool, job: str) -> tuple[str | None, str | None, str | None]:
     """Host-persisted colleague binding for a completion; never parsed from model text."""
     try:
         with pool.db() as db:
             row = db.execute('SELECT payload FROM jobs WHERE id=?', (job,)).fetchone()
         payload = json.loads(row['payload']) if row and row['payload'] else {}
     except (TypeError, ValueError, KeyError):
-        return None, None
+        return None, None, None
     role = payload.get('_colleague_role')
     name = payload.get('_colleague_name')
     label = payload.get('_colleague_label')
@@ -169,9 +240,11 @@ def deliver_once(pool: Pool, transport: Optional[Transport], *, lease: float = 6
                 'reason': 'task has no persisted origin; refusing to guess a conversation'}
     try:
         role, name, label = _colleague_identity(pool, job)
-        message = build_message(claim['receipt'], limit=limit,
-                                colleague_role=role, colleague_name=name,
-                                colleague_label=label).render()
+        message = build_message(
+            claim['receipt'], limit=limit,
+            colleague_role=role, colleague_name=name, colleague_label=label,
+            origin=address,
+        ).render()
     except (ValueError, TypeError):
         return {'status': 'invalid_receipt', 'task_id': job}
     try:
@@ -248,6 +321,45 @@ def inspect_pending(pool: Pool, *, limit: int = 20,
                      'status': message.status, 'summary': message.summary,
                      'truncated': message.truncated})
     return rows
+
+
+
+#: Terminal statuses that fire Prefer-C2 side-channel notify (pool outbox / host signal).
+TERMINAL_NOTIFY_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def is_terminal_status(status: Any) -> bool:
+    """Whether a pool / card status warrants a turn-complete notify."""
+    if status is None:
+        return False
+    text = str(getattr(status, "value", status) or "").strip().lower()
+    # CardState uses done; pool outbox uses completed — both terminal.
+    if text == "done":
+        text = "completed"
+    return text in TERMINAL_NOTIFY_STATUSES
+
+
+def kick_deliver_once(pool: Pool, transport: Optional[Transport], **kwargs) -> dict[str, Any]:
+    """Prefer-C2 host-tick entry: ONE side-channel deliver attempt — never an LLM turn.
+
+    Callers (worker finish hook, liveness terminal sink, host tick) invoke this after a
+    durable terminal lands in the outbox. Idempotency remains ``job``; at-least-once
+    honest. When ``transport`` is None the drain stays inspectable via
+    :func:`inspect_pending` and returns ``unavailable`` — do not fake delivered.
+    """
+    return deliver_once(pool, transport, **kwargs)
+
+
+def notify_on_terminal(pool: Pool, transport: Optional[Transport], *,
+                       status: Any = None, **kwargs) -> dict[str, Any]:
+    """Fire at most one notify when *status* is terminal (or status omitted = drain once).
+
+    Explicit host turn-complete signal: pass ``status`` from the finish hook. Omitting
+    status drains one pending receipt (host poll / tick). Never spawns a model turn.
+    """
+    if status is not None and not is_terminal_status(status):
+        return {"status": "skipped", "reason": "non_terminal", "given": str(status)}
+    return kick_deliver_once(pool, transport, **kwargs)
 
 
 def main(argv=None) -> int:

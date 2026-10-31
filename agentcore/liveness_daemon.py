@@ -122,4 +122,29 @@ class LivenessDaemon:
         return {"iterations": iterations, "errors": self.errors}
 
 
-__all__ = ["LivenessDaemon", "JsonlSink", "DEFAULT_INTERVAL_SECONDS"]
+#: Prefer-C2 — liveness terminal states that may kick completion_delivery (no LLM).
+_TERMINAL_LIVENESS = frozenset({"done", "failed", "cancelled", "completed"})
+
+
+def terminal_delivery_sink(pool, transport=None):
+    """Build a liveness sink that kicks ``notify_on_terminal`` on terminal transitions.
+
+    Thin Prefer-C2 wire: one side-channel deliver attempt per terminal event. Failures
+    stay observable via the returned status; never fakes delivered when transport is
+    missing. Does not open a model turn or a second scheduler.
+    """
+    from agentcore.completion_delivery import notify_on_terminal
+
+    def _sink(event):
+        if not isinstance(event, dict):
+            return None
+        state = event.get("state")
+        if str(state or "").lower() not in _TERMINAL_LIVENESS:
+            return None
+        return notify_on_terminal(pool, transport, status=state)
+
+    return _sink
+
+
+__all__ = ["LivenessDaemon", "JsonlSink", "DEFAULT_INTERVAL_SECONDS",
+           "terminal_delivery_sink"]
