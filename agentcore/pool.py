@@ -316,6 +316,28 @@ class Pool:
         with self.db() as db:
             db.execute("UPDATE jobs SET cancel=1 WHERE id=? AND status IN ('queued','running')", (job,))
 
+    def pause(self, job, *, reason="paused"):
+        """Prefer-D1 thin alias: park as waiting_user (no named suspend / second state DB)."""
+        return self.wait_for_user(job, reason=reason or "paused")
+
+    def finalize_cancel(self, job):
+        """Prefer-D1: cancel flag + terminal cancelled + outbox receipt (fast C2 path).
+
+        Existing :meth:`cancel` only sets the flag for queued/running (durable_dispatch
+        semantics unchanged). This helper terminals any non-terminal row so barge-in
+        cancel is observable immediately and Prefer-C2 can drain <=1 notify.
+        """
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()
+            if row is None:
+                return False
+            if row["status"] in ("completed", "failed", "cancelled"):
+                return False
+            db.execute("UPDATE jobs SET cancel=1 WHERE id=?", (job,))
+            self._terminal(db, job, "cancelled", {"reason": "cancelled"})
+            return True
+
 
     def wait_for_user(self, job, *, reason="waiting_user"):
         """Park job as waiting_user so claim skips it (HITL frees worker slot).
