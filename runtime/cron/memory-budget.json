@@ -3,6 +3,6 @@
     "name": "memory-budget-guard",
     "schedule": "0 * * * *",
     "prompt": "检查 <profile> 的记忆文件：读 memories/MEMORY.md 与 USER.md 的字符数，超过各自上限的 90% 时按『同类合并、保留判据、删除过程』压缩，写入前备份到 memories/*.bak-<时间戳>，并在回答里给出压缩前后字符数与删掉的条目摘要。未超限就只回一行『budget ok <当前值>/<上限>』。不要改任何代码或配置。",
-    "notify": true
+    "notify": false
   }
 ]

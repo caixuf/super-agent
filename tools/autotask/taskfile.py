@@ -93,6 +93,11 @@ def render(task):
         % (task["report"]["ok"], task["report"]["fail"]),
         "不要修改代码、配置或重启服务；判断不了就写 %s不确定。" % task["report"]["fail"],
     ]
+    if task.get("notify"):
+        lines.append(
+            "【静默抑制】若判定为 %s且无需人工处理（第二行为 `-`），首行严格输出 [SILENT] 以抑制向用户推送无异常噪音。"
+            % task["report"]["ok"]
+        )
     if retry:
         lines.append("失败最多重试 %d 次，间隔 ≥%d 秒；超过后只告警，不再重试。"
                      % (retry["max"], retry.get("backoff_seconds", 60)))
