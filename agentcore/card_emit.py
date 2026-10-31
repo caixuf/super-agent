@@ -27,7 +27,8 @@ class CardView:
     """Structured content for one card. Adapters map this onto their own card schema.
 
     ``actions`` are platform-neutral tokens (``cancel`` / ``details`` / ``logs`` /
-    ``report`` / ``rerun`` / ``approve_plan``); the adapter decides how to render them.
+    ``report`` / ``rerun`` / ``approve`` / ``deny`` / ``approve_plan``); the adapter
+    decides how to render them. Prefer-C1 HITL uses ``approve`` / ``deny``.
 
     Identity fields are optional: when present, ``title`` should already include
     ``display_name + task_title`` so a platform that only paints ``title`` still shows
@@ -48,6 +49,12 @@ class CardView:
     heartbeat_age_s: Optional[float] = None
     attempt_id: str = ""
     waiting_role: str = ""
+    # Prefer-C1 HITL source labels + summary (blank-ok; host-bound only).
+    from_bot: str = ""
+    source_thread: str = ""
+    hitl_kind: str = ""
+    hitl_summary: str = ""
+    hitl_request_id: str = ""
 
     def render(self) -> dict:
         payload = {
@@ -72,6 +79,16 @@ class CardView:
             payload["attempt_id"] = self.attempt_id
         if self.waiting_role:
             payload["waiting_role"] = self.waiting_role
+        if self.from_bot:
+            payload["from_bot"] = self.from_bot
+        if self.source_thread:
+            payload["source_thread"] = self.source_thread
+        if self.hitl_kind:
+            payload["hitl_kind"] = self.hitl_kind
+        if self.hitl_summary:
+            payload["hitl_summary"] = self.hitl_summary
+        if self.hitl_request_id:
+            payload["hitl_request_id"] = self.hitl_request_id
         return payload
 
 
@@ -79,8 +96,8 @@ class CardView:
 _ACTIONS = {
     CardState.QUEUED: ("cancel", "details"),
     CardState.RUNNING: ("cancel", "details", "logs"),
-    CardState.WAITING_USER: ("details", "logs"),
-    CardState.AWAITING_PLAN_APPROVAL: ("approve_plan", "cancel", "details"),
+    CardState.WAITING_USER: ("approve", "deny", "details", "logs"),
+    CardState.AWAITING_PLAN_APPROVAL: ("approve", "deny", "details"),
     CardState.DONE: ("details", "report", "rerun"),
     CardState.FAILED: ("details", "logs", "rerun"),
     CardState.CANCELLED: ("details", "rerun"),
@@ -164,6 +181,11 @@ def view_for(handle: CardHandle, frame: CardFrame, *, elapsed: int,
     waiting_role = ""
     if frame.state in (CardState.WAITING_USER, CardState.AWAITING_PLAN_APPROVAL):
         waiting_role = display_name or role_id
+    hitl_kind = frame.hitl_kind
+    if not hitl_kind and frame.state is CardState.AWAITING_PLAN_APPROVAL:
+        hitl_kind = "plan"
+    elif not hitl_kind and frame.state is CardState.WAITING_USER:
+        hitl_kind = "waiting_user"
     return CardView(
         title=composed,
         state=frame.state.value,
@@ -180,6 +202,11 @@ def view_for(handle: CardHandle, frame: CardFrame, *, elapsed: int,
         heartbeat_age_s=frame.heartbeat_age_s,
         attempt_id=frame.attempt_id,
         waiting_role=waiting_role,
+        from_bot=frame.from_bot,
+        source_thread=frame.source_thread,
+        hitl_kind=hitl_kind,
+        hitl_summary=frame.hitl_summary or frame.detail,
+        hitl_request_id=frame.hitl_request_id,
     )
 
 
@@ -255,15 +282,30 @@ class CardEmitter:
             heartbeat_age_s=heartbeat_age_s, attempt_id=attempt_id,
             **self._identity_kwargs()))
 
-    def wait_user(self, *, detail: str = "", phase: str = "waiting_user") -> Optional[CardView]:
+    def wait_user(self, *, detail: str = "", phase: str = "waiting_user",
+                  from_bot: str = "", source_thread: str = "",
+                  hitl_kind: str = "waiting_user", hitl_summary: str = "",
+                  hitl_request_id: str = "") -> Optional[CardView]:
         """Enter HITL without finishing the card (Codex notify / plan gate)."""
         return self._publish(self._writer.emit(
-            CardState.WAITING_USER, phase=phase, detail=detail, **self._identity_kwargs()))
+            CardState.WAITING_USER, phase=phase, detail=detail,
+            from_bot=from_bot, source_thread=source_thread,
+            hitl_kind=hitl_kind or "waiting_user",
+            hitl_summary=hitl_summary or detail,
+            hitl_request_id=hitl_request_id,
+            **self._identity_kwargs()))
 
-    def await_plan(self, *, detail: str = "", phase: str = "awaiting_plan_approval") -> Optional[CardView]:
+    def await_plan(self, *, detail: str = "", phase: str = "awaiting_plan_approval",
+                   from_bot: str = "", source_thread: str = "",
+                   hitl_kind: str = "plan", hitl_summary: str = "",
+                   hitl_request_id: str = "") -> Optional[CardView]:
         """Plan-before-run gate: card shows awaiting_plan_approval (frees worker slot)."""
         return self._publish(self._writer.emit(
             CardState.AWAITING_PLAN_APPROVAL, phase=phase, detail=detail,
+            from_bot=from_bot, source_thread=source_thread,
+            hitl_kind=hitl_kind or "plan",
+            hitl_summary=hitl_summary or detail,
+            hitl_request_id=hitl_request_id,
             **self._identity_kwargs()))
 
     def finish(self, *, phase: str = "", host: str = "",
