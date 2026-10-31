@@ -42,6 +42,7 @@ class ControlVerb(str, Enum):
     PAUSE = "pause"
     CANCEL = "cancel"
     URGENT_INJECT = "urgent_inject"
+    RESUME_OBSERVE = "resume_observe"  # Prefer-D4: clear stall note, not fake done
     UNKNOWN = "unknown"
 
 
@@ -56,6 +57,10 @@ _SLASH_PAUSE = frozenset({"pause", "/pause", "暂停"})
 _SLASH_CANCEL = frozenset({"cancel", "/cancel", "取消"})
 _SLASH_FOLLOW = frozenset({"follow_up", "/follow_up", "followup", "/followup", "补充"})
 _SLASH_URGENT = frozenset({"urgent", "/urgent", "紧急", "紧急注入", "enter"})
+_SLASH_RESUME_OBSERVE = frozenset({
+    "resume_observe", "/resume_observe", "resume-observe", "/resume-observe",
+    "恢复观察", "observe", "/observe",
+})
 
 # Thin free-text Chinese / English hints (optional; slash wins).
 _RE_STATUS = re.compile(
@@ -130,6 +135,11 @@ def classify_control(
         if candidates & _SLASH_URGENT or low in {"urgent", "enter"}:
             return ControlDecision(
                 ControlVerb.URGENT_INJECT, Urgency.ENTER, raw or tok, source,
+            )
+        if candidates & _SLASH_RESUME_OBSERVE or low in {
+                "resume_observe", "resume-observe", "observe"}:
+            return ControlDecision(
+                ControlVerb.RESUME_OBSERVE, Urgency.TAB, raw or tok, source,
             )
         return None
 
@@ -280,6 +290,8 @@ class BargeInController:
                 task_id, text=decision.text, owner=owner, origin=origin,
                 current_phase=current_phase,
             )
+        if decision.verb is ControlVerb.RESUME_OBSERVE:
+            return self.resume_observe(task_id, detail=decision.text or "resume_observe")
         if decision.verb is ControlVerb.FOLLOW_UP:
             return self.queue_follow_up(
                 task_id, decision.text or text,
@@ -505,6 +517,45 @@ class BargeInController:
                 "resume": "pool.resume_from_user",
                 "replan": "await_plan_approval or queued follow-up",
                 "current_phase": current_phase,
+            },
+        )
+        return self._emit_ack(ack)
+
+    def resume_observe(self, task_id: str, *, detail: str = "resume_observe") -> dict:
+        """Prefer-D4: clear stall note / force beat observe — NEVER fake done/failed."""
+        beat_row = None
+        if self.ledger is not None and hasattr(self.ledger, "beat"):
+            try:
+                beat_row = self.ledger.beat(
+                    task_id, phase="observing", detail=detail or "resume_observe",
+                )
+            except Exception as exc:  # noqa: BLE001
+                ack = ControlAck(
+                    ok=False, verb="resume_observe", task_id=task_id,
+                    message="恢复观察失败：%s" % type(exc).__name__,
+                    second_exec=False, durable_dispatch_submit=False,
+                    detail={"error": type(exc).__name__, "auto_done": False},
+                )
+                return self._emit_ack(ack)
+        view = None
+        if self.emitter is not None and hasattr(self.emitter, "update"):
+            try:
+                view = self.emitter.update(
+                    phase="observing",
+                    detail=detail or "已恢复观察（未标记完成）",
+                )
+            except Exception:
+                pass
+        ok = beat_row is not None or view is not None
+        ack = ControlAck(
+            ok=ok, verb="resume_observe", task_id=task_id,
+            message="已恢复观察（未标记完成/失败）" if ok else "恢复观察未生效",
+            second_exec=False, durable_dispatch_submit=False,
+            detail={
+                "beat": beat_row,
+                "card_phase": getattr(view, "phase", None),
+                "auto_done": False,
+                "auto_failed": False,
             },
         )
         return self._emit_ack(ack)

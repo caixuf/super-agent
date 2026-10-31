@@ -427,6 +427,46 @@ def colleague_card_payload(view) -> dict:
                 },
             })
             elements.append({"tag": "action", "actions": button_actions})
+    # Prefer-D4: stalled/lost ops buttons (not HITL Approve/Deny).
+    phase_l = phase.strip().lower()
+    verdict = str(rendered.get("verdict") or "")
+    is_stalled_ops = (
+        phase_l in ("stalled", "lost") or verdict in ("stalled", "lost")
+    ) and state not in (
+        "done", "failed", "cancelled",
+        "waiting_user", "awaiting_plan_approval",
+    )
+    if is_stalled_ops:
+        from agentcore.stalled_card_bridge import (
+            ops_callback_value,
+            stalled_text_fallback_instructions,
+        )
+        lines.append(stalled_text_fallback_instructions(
+            task_id=str(rendered.get("task_id") or "")))
+        body = chr(10).join(lines)
+        elements[0] = {
+            "tag": "div",
+            "text": {"tag": "plain_text", "content": body[:3500]},
+        }
+        tid = str(rendered.get("task_id") or "")
+        ops_buttons = []
+        label_for = {
+            "cancel": ("取消", "danger"),
+            "pause": ("暂停/等待", "default"),
+            "status": ("查看进度", "default"),
+            "resume_observe": ("恢复观察", "primary"),
+        }
+        for token in ("cancel", "pause", "status", "resume_observe"):
+            label, btype = label_for[token]
+            ops_buttons.append({
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": label},
+                "type": btype,
+                "value": ops_callback_value(task_id=tid or "pending", action=token),
+            })
+        if ops_buttons:
+            elements.append({"tag": "action", "actions": ops_buttons})
+        header_color = "orange" if phase_l == "stalled" else "red"
     return {
         "schema": "2.0",
         "config": {"wide_screen_mode": True, "update_multi": True},
