@@ -16,10 +16,13 @@ role is waiting using the same source (Codex §6-4).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Callable, Optional, Sequence, Tuple
 
 from .card_store import CardStore
 from .task_card import CardFrame, CardHandle, CardState
+
+if TYPE_CHECKING:
+    from .follow_up_store import FollowUpStore
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,8 @@ class CardView:
     hitl_request_id: str = ""
     # Prefer-D4 stalled/lost verdict (blank when not a stall ops card).
     verdict: str = ""
+    # Prefer-D3/D5: durable queued follow-up count (0 when unknown).
+    queued_follow_up_count: int = 0
 
     def render(self) -> dict:
         payload = {
@@ -95,6 +100,8 @@ class CardView:
             payload["hitl_request_id"] = self.hitl_request_id
         if self.verdict:
             payload["verdict"] = self.verdict
+        if self.queued_follow_up_count:
+            payload["queued_follow_up_count"] = int(self.queued_follow_up_count)
         return payload
 
 
@@ -255,12 +262,15 @@ class CardEmitter:
     """
 
     def __init__(self, store: CardStore, task_id: str, transport, *,
-                 title: str = "任务", clock: Optional[Callable[[], float]] = None):
+                 title: str = "任务", clock: Optional[Callable[[], float]] = None,
+                 follow_up_store: Optional["FollowUpStore"] = None):
         self._store = store
         self._transport = transport
         self._title = title
         self._clock = clock or (lambda: 0.0)
         self._writer = store.writer(task_id)
+        self._follow_up_store = follow_up_store
+        self._task_id = task_id
         # Seed task_title from constructor when the handle has none yet.
         if title and title != "任务" and not self._writer.handle.task_title:
             self._writer.handle.task_title = title
@@ -366,10 +376,37 @@ class CardEmitter:
         return self.wait_user(detail=detail or "已暂停", phase=phase or "paused",
                               hitl_kind="waiting_user", hitl_summary=detail or "paused")
 
-    def mark_queued_follow_up(self, *, detail: str = "", count: int = 1) -> Optional[CardView]:
-        """Prefer-D1 Tab: same-card hint that a follow-up is queued (still RUNNING)."""
-        note = detail or ("queued follow-up x%d" % max(1, int(count or 1)))
-        return self.update(phase="queued_follow_up", detail=note)
+    def mark_queued_follow_up(
+        self,
+        *,
+        detail: str = "",
+        count: int = 1,
+        task_id: str = "",
+    ) -> Optional[CardView]:
+        """Prefer-D1/D3 Tab: same-card hint; count from durable peek when store bound."""
+        tid = (task_id or getattr(self, "_task_id", "") or "").strip()
+        durable_count = None
+        store = getattr(self, "_follow_up_store", None)
+        if store is not None and tid:
+            try:
+                durable_count = int(store.queued_count(tid))
+            except Exception:  # noqa: BLE001
+                durable_count = None
+        n = durable_count if durable_count is not None else max(1, int(count or 1))
+        note = detail or ("queued follow-up x%d" % n)
+        view = self.update(phase="queued_follow_up", detail=note)
+        return view
+
+    def durable_queued_follow_up_count(self, task_id: str = "") -> int:
+        """Prefer-D3: peek durable inbox count for this card's task."""
+        tid = (task_id or getattr(self, "_task_id", "") or "").strip()
+        store = getattr(self, "_follow_up_store", None)
+        if store is None or not tid:
+            return 0
+        try:
+            return int(store.queued_count(tid))
+        except Exception:  # noqa: BLE001
+            return 0
 
 
     def mark_starting(self, *, detail: str = "") -> Optional[CardView]:
