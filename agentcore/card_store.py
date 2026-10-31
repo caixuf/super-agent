@@ -13,6 +13,9 @@ writers on slow storage benefit from a local lock).
 Schema extensions (colleague visibility / Card Kit):
 * ``card`` — optional platform Card Kit entity id
 * ``role_id`` / ``display_name`` / ``task_title`` — frozen identity for restart resume
+* Prefer-D5 optional B (queued_follow_up_count / liveness_verdict / pool_window /
+  ack_miss) rides on CardFrame emit payloads — not duplicated here; restart must
+  keep identity A above (blank-ok B is reconstructed from live phase when set).
 
 No third-party imports: the package import-boundary gate forbids them.
 """
