@@ -19,6 +19,13 @@ DEFAULT_STAGES = [
     ("verify", "静态 AST 与门禁验证"),
 ]
 
+WORKBENCH_STAGES = [
+    ("analysis", "现场分析"),
+    ("plan", "规划推演"),
+    ("execution", "执行落盘"),
+    ("verification", "机器验证"),
+]
+
 STAGE_STATUS_INDICATORS = {
     "waiting": "[WAIT]",
     "running": "[RUNNING]",
@@ -74,6 +81,8 @@ class CardStreamBuilder:
         self.detail = ""
         self.metrics: Dict[str, Any] = {}
         self.artifacts: List[str] = []
+        self.collapsible_panels: List[Dict[str, Any]] = []
+        self.tables: List[str] = []
 
         raw_stages = stages or DEFAULT_STAGES
         self.stages: Dict[str, Dict[str, Any]] = {}
@@ -85,6 +94,16 @@ class CardStreamBuilder:
                 "note": "",
                 "updated_at": self.created_at,
             }
+
+    @classmethod
+    def create_workbench(
+        cls,
+        task_id: str,
+        title: str = "自主研发工作台",
+        clock: Optional[Any] = None,
+    ) -> CardStreamBuilder:
+        """Create a CardStreamBuilder pre-configured with the standard 4-stage workbench pipeline."""
+        return cls(task_id=task_id, title=title, stages=WORKBENCH_STAGES, clock=clock)
 
     def _now(self) -> float:
         return float(self._clock())
@@ -153,6 +172,57 @@ class CardStreamBuilder:
 
     def set_metric(self, key: str, value: Any) -> CardStreamBuilder:
         self.metrics[key] = value
+        return self
+
+    def add_collapsible_panel(
+        self,
+        title: str,
+        content: str,
+        expanded: bool = False,
+        panel_type: str = "log",
+    ) -> CardStreamBuilder:
+        """Add a collapsible/foldable block for long logs, diffs, or debug traces."""
+        self.collapsible_panels.append({
+            "title": title,
+            "content": content,
+            "expanded": expanded,
+            "panel_type": panel_type,
+        })
+        return self
+
+    def add_diff_panel(
+        self,
+        title: str,
+        diff_text: str,
+        expanded: bool = False,
+    ) -> CardStreamBuilder:
+        """Helper to fold a code diff block."""
+        return self.add_collapsible_panel(
+            title=title,
+            content=diff_text,
+            expanded=expanded,
+            panel_type="diff",
+        )
+
+    def add_table(
+        self,
+        headers: List[str],
+        rows: List[List[str]],
+        title: Optional[str] = None,
+    ) -> CardStreamBuilder:
+        """Add a high-fidelity Markdown table to the card."""
+        if not headers or not rows:
+            return self
+        col_count = len(headers)
+        lines: List[str] = []
+        if title:
+            lines.append(f"**{title}**\n")
+        lines.append("| " + " | ".join(str(h) for h in headers) + " |")
+        lines.append("| " + " | ".join(["---"] * col_count) + " |")
+        for row in rows:
+            padded = list(row) + [""] * (col_count - len(row))
+            lines.append("| " + " | ".join(str(c) for c in padded[:col_count]) + " |")
+        self.tables.append("\n".join(lines))
         return self
 
     def sync_from_liveness(self, live: Dict[str, Any]) -> CardStreamBuilder:
@@ -226,6 +296,32 @@ class CardStreamBuilder:
                 "text": {
                     "tag": "plain_text",
                     "content": art_text,
+                },
+            })
+
+        for panel in self.collapsible_panels:
+            p_type = panel.get("panel_type", "log")
+            p_title = panel.get("title", "详细日志")
+            p_content = panel.get("content", "")
+            open_attr = " open" if panel.get("expanded") else ""
+            if p_type in ("diff", "code", "log", "bash", "python"):
+                fold_md = f"<details{open_attr}><summary>{p_title}</summary>\n\n```{p_type}\n{p_content}\n```\n</details>"
+            else:
+                fold_md = f"<details{open_attr}><summary>{p_title}</summary>\n\n{p_content}\n</details>"
+            elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": fold_md,
+                },
+            })
+
+        for tbl in self.tables:
+            elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": tbl,
                 },
             })
 

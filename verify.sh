@@ -72,6 +72,15 @@ else
   fail "单元测试未全过（完整输出：/tmp/verify_unit.log）"
 fi
 
+# ── ②.1 防退化靶场：Golden Evals 真实踩坑用例硬门禁
+section "②.1 防退化靶场（$PY -m pytest tests/evals -q）"
+if "$PY" -m pytest tests/evals -q >/tmp/verify_golden.log 2>&1; then
+  pass "$(tail -n 1 /tmp/verify_golden.log | tr -d '\n')"
+else
+  tail -n 20 /tmp/verify_golden.log | sed 's/^/    /'
+  fail "防退化靶场用例失败（完整输出：/tmp/verify_golden.log）"
+fi
+
 # ── ③ 安装器 dry-run：一个文件都不许建
 section "③ 安装器 dry-run（零副作用）"
 if [ -f install/install.sh ]; then
