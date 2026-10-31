@@ -150,12 +150,55 @@ def _strip_24(value: str) -> str:
     """Drop the 2.4 branch lines from generated code (keeps the v1.1 shape when absent)."""
     return "".join(line for line in value.splitlines(True) if "card_components_v2" not in line)
 
-#: (name, old, new, probe). One entry per step; a step is done when its probe is present and
-#: its own target shape no longer matches. Two trees exist in the wild: pristine (markdown
-#: block per card) and v1.1 (native tables, 2.0 payload) — chain-safe shapes.
-EDITS = [
+
+#: --- 0.22.x tree shape -------------------------------------------------------------
+#: 0.22 deleted ``_markdown_needs_post`` from the adapter, so every anchor above misses and
+#: ``--apply`` refuses to write. Measured on 0.22.2 (2026-10-31): each anchor below hits
+#: exactly once in a stock 0.22.2 adapter. The helper block itself is unchanged — only the
+#: five places that carry it move.
+ANCHOR_022 = '_POST_CONTENT_INVALID_RE = re.compile(r"content format of the post type is incorrect", re.IGNORECASE)\n'
+
+SEND_OLD_022 = '        if getattr(self, "_card_replies", False) and (metadata or {}).get("expect_edits"):\n'
+SEND_NEW_022 = ('        if (getattr(self, "_card_replies", False) and (metadata or {}).get("expect_edits")\n'
+                '                and not any(not card_renders_markdown(chunk) for chunk in chunks)):\n')
+
+#: 0.22 keeps its finalize/turn_final logic inside the branch, so only the gate line changes.
+EDIT_OLD_022 = ('        if getattr(self, "_card_replies", False) and self._is_card_message(message_id):\n'
+                '            card = self._build_reply_card(\n')
+EDIT_NEW_022 = ('        if (getattr(self, "_card_replies", False) and self._is_card_message(message_id)\n'
+                '                and card_renders_markdown(content)):\n'
+                '            card = self._build_reply_card(\n')
+#: 0.22's gate is an ``and`` clause on the if-line, not a nested ``if not`` — its own probe.
+EDIT_PROBE_022 = "and card_renders_markdown(content)):"
+
+#: No trailing newline on purpose: the replacement must not consume the line break before
+#: ``if not finalize:`` — doing so glues the two lines together (caught by the 0.22 test).
+BUILD_OLD_022 = '        elements: list[dict[str, Any]] = [{"tag": "markdown", "content": content or " "}]'
+
+RETURN_OLD_022 = '''        return {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": name},
+                       "template": "green" if finalize else "blue"},
+            "elements": elements,
+        }
+'''
+
+#: (name, old, new, probe) per tree shape. A host carries exactly ONE shape, so a shape's
+#: steps are only judged against a tree of that shape — otherwise --check reports the other
+#: shapes' anchors as missing on a perfectly good tree (which is what 0.22 hit).
+PRISTINE_STEPS = [
     ("helpers", ANCHOR_AFTER, ANCHOR_AFTER + HELPERS, "_CARD24_ENV = \"HERMES_FEISHU_CARD_24\""),
-    # Upgrade a tree patched by the first version of this script (helpers, no 2.4 branch).
+    ("send-gate", SEND_OLD, SEND_NEW, SEND_PROBE),
+    ("edit-gate", EDIT_OLD, EDIT_NEW, EDIT_PROBE),
+    # both shapes end in the same builder; the shared probe covers either tree
+    ("build", BUILD_OLD, BUILD_NEW, BUILD_PROBE),
+    ("tip", NOTE_OLD, NOTE_NEW, NOTE_PROBE),
+    # A tree without the streaming tip (synthetic or a host variant) still returns the 1.0 card.
+    ("return-no-tip", RETURN_OLD, RETURN_NEW, RETURN_PROBE),
+]
+
+#: v1.1: helper block already present (2.0 tables, no 2.4 branch) -> upgrade in place.
+V11_STEPS = [
     # v1.1 helper block (ends at card_renders_markdown) -> full block with the 2.4 branch
     ("helpers-24", V11_HELPERS_FULL, HELPERS, "def card_components_v2() -> bool:"),
     ("helpers-24-tail", V11_HELPERS_TAIL, HELPERS, "def card_components_v2() -> bool:"),
@@ -163,7 +206,6 @@ EDITS = [
     ("block", V2_ENV_ONLY, HELPERS, "def card_components_v2() -> bool:"),
     ("send-gate", SEND_OLD, SEND_NEW, SEND_PROBE),
     ("edit-gate", EDIT_OLD, EDIT_NEW, EDIT_PROBE),
-    # both shapes end in the same builder; the shared probe covers either tree
     ("build", BUILD_OLD, BUILD_NEW, BUILD_PROBE),
     ("build-v11", BUILD_OLD_V11, _strip_24(BUILD_NEW), BUILD_PROBE),
     ("tip-malformed", NOTE_MALFORMED, NOTE_NEW, NOTE_PROBE),
@@ -175,6 +217,35 @@ EDITS = [
     ("return-no-tip", RETURN_OLD, RETURN_NEW, RETURN_PROBE),
     ("return-v11", RETURN_OLD_V11, _strip_24(RETURN_NEW_V11), RETURN_PROBE),
 ]
+
+#: 0.22.x: helpers hang off the module-level regex block; the card gates are one-liners.
+STEPS_022 = [
+    ("helpers-022", ANCHOR_022, ANCHOR_022 + HELPERS, "_CARD24_ENV = \"HERMES_FEISHU_CARD_24\""),
+    ("tip-022", NOTE_OLD, NOTE_NEW, NOTE_PROBE),
+    ("send-gate-022", SEND_OLD_022, SEND_NEW_022, SEND_PROBE),
+    ("edit-gate-022", EDIT_OLD_022, EDIT_NEW_022, EDIT_PROBE_022),
+    ("build-022", BUILD_OLD_022, BUILD_NEW.rstrip("\n"), BUILD_PROBE),
+    ("return-022", RETURN_OLD_022, RETURN_NEW, RETURN_PROBE),
+]
+
+#: Union, for callers that only ask "is any known shape fully patched?".
+EDITS = PRISTINE_STEPS + V11_STEPS + STEPS_022
+
+
+def shape_of(text: str) -> str:
+    """Which adapter shape is this file? Decided by anchors unique to one shape."""
+    if "def _markdown_needs_post" in text:
+        return "pristine"
+    if ANCHOR_022 in text:
+        return "022"
+    if "_CARD_V2_ENV" in text or "build_card_elements" in text:
+        return "v11"
+    return "unknown"
+
+
+def steps_for(text: str):
+    return {"pristine": PRISTINE_STEPS, "v11": V11_STEPS,
+            "022": STEPS_022, "unknown": []}[shape_of(text)]
 
 
 def _agent_dir(explicit):
@@ -188,17 +259,17 @@ def _helper_gone(text: str) -> bool:
 
 
 def _missing(text):
-    """Not in place = probe absent, or the unchanged anchor still present.
+    """Not in place = a probe for THIS tree's shape is absent.
 
-    When the probe is present the edit's *new* text is in the file, so the old anchor can
-    only survive where the new text already contains it (chained anchors such as
-    ``ANCHOR_AFTER + helpers``) — that is not a miss.
+    Only the shape's own steps are judged: pristine/v1.1/0.22 anchors do not coexist in one
+    adapter, so checking the union would report the other shapes as missing on a good tree.
+    An already-patched tree reports its probes as present for whichever shape it became.
     """
-    # An edit that already has its text in place is done, even when its old anchor is still
-    # there (chained anchors) — except for the no-op "v1.1" markers, whose job is only to be
-    # superseded once the real edit applied.
+    steps = steps_for(text)
+    if not steps:
+        return []
     missing = []
-    for name, old, _new, probe in EDITS:
+    for name, old, _new, probe in steps:
         if probe in text:
             continue
         if name.startswith("helpers") and _helper_gone(text):
@@ -222,12 +293,16 @@ def main() -> int:
         print("[FAIL] 找不到 %s" % path)
         return 2
     text = path.read_text(encoding="utf-8")
+    steps = steps_for(text)
+    if not steps:
+        print("[FAIL] 认不出这棵树的形态（既无 0.22 锚点，也无 _markdown_needs_post / 旧辅助块）")
+        return 2
     missing = _missing(text)
     if args.check:
         if not missing:
-            print("[PASS] 卡片原生表格补丁：在位（%d 处）" % len(EDITS))
+            print("[PASS] 卡片原生表格补丁：在位（形态 %s，%d 步全中）" % (shape_of(text), len(steps)))
             return 0
-        print("[FAIL] 卡片原生表格补丁：不在位（缺 %d 处）" % len(missing))
+        print("[FAIL] 卡片原生表格补丁：不在位（形态 %s，缺 %d 处）" % (shape_of(text), len(missing)))
         for _old, probe in missing:
             print("  - 缺 %r" % probe[:70])
         return 1
@@ -242,7 +317,7 @@ def main() -> int:
             return False
         return text.count(old) > 0
 
-    for index, (name, old, new, probe) in enumerate(EDITS):
+    for index, (name, old, new, probe) in enumerate(steps):
         if not _needs(name, old, new, probe):
             continue                     # done, or this tree never had that shape
         count = text.count(old)
