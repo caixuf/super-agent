@@ -13,12 +13,15 @@ from .config import (
     logger_name,
     reset_config,
 )
+from . import progressive
+from . import monthly_log
 from .memory_store import (
     drop_fact,
     flush_background,
     list_tags,
     normalize_ebm,
     recall_facts,
+    get_facts_by_ids,
     reindex_embeddings,
     supersede,
     write_fact,
@@ -34,6 +37,9 @@ __all__ = [
     # 写入 / 召回
     "write_fact",
     "recall_facts",
+    "get_facts_by_ids",
+    "progressive",
+    "monthly_log",
     "flush_background",
     "drop_fact",
     "supersede",

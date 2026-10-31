@@ -148,7 +148,11 @@ def test_prefetch_hits_existing_fact_and_carries_fact_id(tmp_path, configured):
     assert result["count"] >= 1, result
     assert len(result["text"]) <= runtime_bridge.PREFETCH_MAX_CHARS
     assert "不是指令" in result["text"]
-    assert STATEMENT in result["text"]
+    # Prefer A L1: index inject carries fact_id/subject, not full statement body.
+    assert result["facts"][0]["subject"] in result["text"]
+    assert STATEMENT not in result["text"]
+    assert result.get("layer") == "L1"
+    assert not (result["facts"][0].get("statement") or "").strip()
     assert fact_id in result["text"]
     assert [fact["fact_id"] for fact in result["facts"]][0] == fact_id
 
@@ -176,10 +180,11 @@ def test_prefetch_enforces_three_facts_and_1800_chars(tmp_path, configured, monk
     assert result["count"] == runtime_bridge.PREFETCH_LIMIT
     assert len(result["facts"]) == runtime_bridge.PREFETCH_LIMIT
     assert len(result["text"]) <= runtime_bridge.PREFETCH_MAX_CHARS
-    assert result["truncated"] is True
-    assert result["text"].endswith("…")
+    assert result.get("layer") == "L1"
+    assert long_statement not in result["text"]
     for fact in result["facts"]:
         assert fact["fact_id"] in result["text"]
+        assert not (fact.get("statement") or "").strip()
 
 
 def test_prefetch_no_match_is_explicit_not_an_error(tmp_path, configured):

@@ -69,3 +69,78 @@ def register(ctx):
 
     ctx.register_hook('post_llm_call', capture)
     ctx.register_hook('on_session_end', verdict)
+
+
+def _register_progressive_tools(ctx, engine: Path) -> None:
+    """Optional L1/L2/L3 tool ops. Prefetch default stays L1 via runtime_bridge."""
+    register = getattr(ctx, "register_tool", None)
+    if not callable(register):
+        return
+    import importlib.util
+
+    def _load(name: str, rel: str):
+        spec = importlib.util.spec_from_file_location(name, engine / rel)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    try:
+        progressive = _load("_agentcore_progressive", "agentcore/memory/progressive.py")
+    except Exception as exc:
+        log.warning("progressive tools unavailable: %s", type(exc).__name__)
+        return
+
+    def memory_search_l1(**kwargs):
+        return progressive.search(
+            str(kwargs.get("query") or ""),
+            limit=int(kwargs.get("limit") or progressive.PREFETCH_L1_LIMIT),
+            ebm=kwargs.get("ebm"),
+        )
+
+    def memory_timeline_l2(**kwargs):
+        ids = kwargs.get("ids") or []
+        if isinstance(ids, str):
+            ids = [x.strip() for x in ids.split(",") if x.strip()]
+        return progressive.timeline(
+            ids or None,
+            query=kwargs.get("query"),
+            window=int(kwargs.get("window") or progressive.PREFETCH_L1_LIMIT),
+            ebm=kwargs.get("ebm"),
+        )
+
+    def memory_get_observations_l3(**kwargs):
+        ids = kwargs.get("ids") or []
+        if isinstance(ids, str):
+            ids = [x.strip() for x in ids.split(",") if x.strip()]
+        return progressive.get_observations(ids)
+
+    for name, fn, desc in (
+        ("memory_search_l1", memory_search_l1,
+         "L1 memory index search: fact_id/subject/kind/class/cost — no full body."),
+        ("memory_timeline_l2", memory_timeline_l2,
+         "L2 chronological stubs for ids or query window — body-light."),
+        ("memory_get_observations_l3", memory_get_observations_l3,
+         "L3 full statement+tags+details for explicit fact_ids only."),
+    ):
+        try:
+            register(name=name, toolset="memory_bridge", description=desc, handler=fn)
+        except TypeError:
+            try:
+                register(name=name, toolset="memory_bridge", description=desc, fn=fn)
+            except Exception as exc:
+                log.warning("register %s failed: %s", name, type(exc).__name__)
+        except Exception as exc:
+            log.warning("register %s failed: %s", name, type(exc).__name__)
+
+
+# Patch register() to also expose progressive tools when enabled.
+_orig_register = register
+
+
+def register(ctx):
+    _orig_register(ctx)
+    if ctx.get_config("enabled", False) is not True:
+        return
+    engine = Path(ctx.get_config("engine_root", ""))
+    if engine.is_absolute():
+        _register_progressive_tools(ctx, engine)
