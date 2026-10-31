@@ -280,6 +280,13 @@ def write_fact(
     except ImportError:
         from .memory_kind import classify_kind
     tag_map.setdefault("kind", classify_kind(stmt, subject, ebm))
+    try:
+        from .memory_kind import classify_observation_class, TAG_OBSERVATION_CLASS
+    except ImportError:
+        from .memory_kind import classify_observation_class, TAG_OBSERVATION_CLASS
+    _obs = classify_observation_class(stmt, subject, tag_map)
+    if _obs:
+        tag_map.setdefault(TAG_OBSERVATION_CLASS, _obs)
     # 作用域与代际正交：代际回答「哪一代车」，scope 回答「什么性质的知识」。
     # 外部书籍/文档必须标 reference，否则会和平台经验混在同一个召回池里互相稀释。
     try:
@@ -394,6 +401,15 @@ def write_fact(
         # 这里保证「进程正常退出前，已提交的写入都把向量落盘」。
         _submit_background(_bg_embed, fid, subject or "", stmt)
 
+        # Prefer A: needle -> monthly markdown append (no Feishu / model turn).
+        try:
+            from . import monthly_log as _monthly_log
+            _monthly_log.maybe_append_from_write(
+                out, statement=stmt, subject=subject, tags=tag_map)
+        except Exception as exc:  # noqa: BLE001 -- log must never break write
+            logging.getLogger(logger_name("store")).debug(
+                "monthly_log hook skipped: %s", exc)
+
         return out
     finally:
         conn.close()
@@ -427,6 +443,57 @@ _GENERIC_TERMS = frozenset("""
 这个 那个 一下 一些 可以 应该 需要 没有 就是 还是 但是 因为 所以
 谢谢 你好 请问 帮我 看看 知道 觉得 认为 其实 真的 非常 比较
 """.split())
+
+
+def get_facts_by_ids(
+    fact_ids: Sequence[str],
+    *,
+    user_id: Optional[str] = None,
+    include_inactive: bool = False,
+) -> Dict[str, Any]:
+    """Thin helper: load full working_fact rows (+ tags) for explicit ids.
+
+    Used by progressive L2/L3. Does not invent ranking — order follows *fact_ids*.
+    Unknown ids are reported honestly in ``missing_ids``; no silent fabrication.
+    """
+    ids: List[str] = []
+    seen = set()
+    for raw in fact_ids or []:
+        fid = str(raw or "").strip()
+        if not fid or fid in seen:
+            continue
+        seen.add(fid)
+        ids.append(fid)
+    if not ids:
+        return {"ok": True, "results": [], "missing_ids": [], "total": 0}
+
+    user_id = user_id or get_config().default_user
+    conn = _connect()
+    try:
+        marks = ",".join("?" * len(ids))
+        where = ["fact_id IN (" + marks + ")", "user_id = ?"]
+        params: List[Any] = list(ids) + [user_id]
+        if not include_inactive:
+            where.append("status = 'active'")
+        rows = conn.execute(
+            "SELECT * FROM working_fact WHERE " + " AND ".join(where),
+            params,
+        ).fetchall()
+        by_id = {r["fact_id"]: dict(r) for r in rows}
+        tags_by = _tags_of_many(conn, list(by_id.keys()))
+        results: List[Dict[str, Any]] = []
+        missing: List[str] = []
+        for fid in ids:
+            row = by_id.get(fid)
+            if row is None:
+                missing.append(fid)
+                continue
+            row = dict(row)
+            row["tags"] = tags_by.get(fid, {})
+            results.append(row)
+        return {"ok": True, "results": results, "missing_ids": missing, "total": len(results)}
+    finally:
+        conn.close()
 
 
 def _confidence_weights(fact_ids: Sequence[Optional[str]]) -> Dict[str, float]:

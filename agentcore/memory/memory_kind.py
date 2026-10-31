@@ -77,3 +77,74 @@ def describe(kind: str) -> Dict[str, Any]:
         KIND_PERSONAL: {"ebm_required": False, "hint": "人物/偏好：不要求代际，要求可归属"},
         KIND_CONTEXT: {"ebm_required": False, "hint": "项目背景：不要求代际，要求可执行"},
     }.get(kind, {"ebm_required": True, "hint": "未知类别按技术处理"}),
+
+# ---------------------------------------------------------------------------
+# observation_class（针类）—— 与 kind 正交，禁止把 kind 折叠进 observation_class
+# ---------------------------------------------------------------------------
+# kind 回答「怎么验证」（technical/personal/context）。
+# observation_class 回答「这条观测对人工扫月报有多尖锐」：
+#   decision / bugfix / security_alert / sensitive → needle → 月日志一行
+# 其它类或不标 → 不写月日志。标签键固定为 observation_class。
+
+OBS_DECISION = "decision"
+OBS_BUGFIX = "bugfix"
+OBS_SECURITY_ALERT = "security_alert"
+OBS_SENSITIVE = "sensitive"
+
+NEEDLE_CLASSES = frozenset({
+    OBS_DECISION,
+    OBS_BUGFIX,
+    OBS_SECURITY_ALERT,
+    OBS_SENSITIVE,
+})
+
+TAG_OBSERVATION_CLASS = "observation_class"
+
+_DECISION_HINTS = (
+    r"(决定|定了|已定|拍板|采用|改用|改成|换成|确定用|已经确定|已确定|结论是)",
+    r"(以后|下次|后续)(都|要|不要|必须|记得)",
+    r"(不要|禁止|必须|一律|绝不能)",
+)
+_BUGFIX_HINTS = (
+    r"(踩过|踩坑|踩了|教训是|之前遇到|曾经因为|根因是|bug\s*fix|修复了|修好了)",
+    r"(回归失败|断言失败|复现|hotfix)",
+)
+_SECURITY_HINTS = (
+    r"(安全|泄露|泄漏|凭证|密钥|token|secret|权限提升|越权|注入攻击|CVE)",
+    r"(security[_\s-]?alert|credential|exfiltrat)",
+)
+_SENSITIVE_HINTS = (
+    r"(身份证|护照|银行卡|密码|口令|私钥|隐私|敏感|手机号|住址)",
+    r"(sensitive|PII|个人敏感)",
+)
+
+
+def is_needle(observation_class):
+    """observation_class 是否属于针类（决定是否写月日志）。"""
+    return str(observation_class or "").strip().lower() in NEEDLE_CLASSES
+
+
+def classify_observation_class(statement, subject="", tags=None):
+    """推断 observation_class；已有 tag 优先；判不出返回 None（非针类）。
+
+    不改写 kind。显式 tag 非法值视为未标注（返回 None），避免脏标签进月报。
+    """
+    raw = ""
+    if isinstance(tags, dict):
+        raw = str(tags.get(TAG_OBSERVATION_CLASS) or tags.get("observation_class") or "").strip()
+    if raw:
+        low = raw.lower()
+        return low if low in NEEDLE_CLASSES else None
+
+    blob = ("%s %s" % (subject or "", statement or "")).strip()
+    if not blob:
+        return None
+    if any(re.search(p, blob, re.IGNORECASE) for p in _SECURITY_HINTS):
+        return OBS_SECURITY_ALERT
+    if any(re.search(p, blob, re.IGNORECASE) for p in _SENSITIVE_HINTS):
+        return OBS_SENSITIVE
+    if any(re.search(p, blob, re.IGNORECASE) for p in _BUGFIX_HINTS):
+        return OBS_BUGFIX
+    if any(re.search(p, blob, re.IGNORECASE) for p in _DECISION_HINTS):
+        return OBS_DECISION
+    return None

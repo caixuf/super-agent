@@ -315,6 +315,15 @@ def parse_facts(raw: str) -> List[Dict[str, Any]]:
         cleaned_tags = {str(k): str(v) for k, v in tags.items() if v not in (None, "")}
         if kind:
             cleaned_tags["kind"] = kind
+        try:
+            from .memory_kind import TAG_OBSERVATION_CLASS, classify_observation_class
+        except ImportError:
+            from .memory_kind import TAG_OBSERVATION_CLASS, classify_observation_class
+        obs = str(f.get("observation_class") or cleaned_tags.get(TAG_OBSERVATION_CLASS) or "").strip()
+        if not obs:
+            obs = classify_observation_class(stmt, str(f.get("subject") or ""), cleaned_tags) or ""
+        if obs:
+            cleaned_tags[TAG_OBSERVATION_CLASS] = obs
         out.append({
             "subject": str(f.get("subject") or "").strip()[:40],
             "statement": stmt,
@@ -398,6 +407,12 @@ def run(user_message: str, assistant_reply: str = "", context: str = "",
             results.append(r)
             if r.get("written"):
                 written += 1
+                try:
+                    from . import monthly_log as _monthly_log
+                    _monthly_log.maybe_append_from_write(
+                        r, statement=f["statement"], subject=f["subject"], tags=f.get("tags"))
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("monthly_log trigger hook skipped: %s", exc)
         except Exception as exc:
             results.append({"ok": False, "error": str(exc)})
             logger.warning("事实写入失败: %s", exc)
