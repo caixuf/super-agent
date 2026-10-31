@@ -5,6 +5,8 @@ is quiet, and overwriting a finished card with a late frame.
 """
 from __future__ import annotations
 
+import pytest
+
 from agentcore.task_card import CardState
 from agentcore.task_progress import (
     card_state, changed, render, should_emit, snapshot, terminal, verdict,
@@ -102,3 +104,68 @@ def test_foreground_and_background_terminal_aggregation():
     bg_failed = snapshot({"task_id": "proc_z", "state": "failed", "started_at": 1}, now=10)
     failed = aggregate_with_foreground([bg_failed], fg)
     assert failed["terminal"] and failed["verdict"] == "failed"
+
+
+# --------------------------------------------------------------------------- #
+# Reader-facing words: the card must not print the ledger's own vocabulary
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("verdict,word", [
+    ("queued", "已接收"),
+    ("running", "进行中"),
+    ("done", "已完成"),
+    ("failed", "未完成"),
+    ("cancelled", "已取消"),
+    # These two are what a killed background process actually becomes. They were
+    # missing from the map, so the card printed `lost` / `stalled` in English.
+    ("stalled", "无响应"),
+    ("lost", "进程已不在"),
+])
+def test_every_ledger_verdict_has_a_reader_facing_word(verdict, word):
+    from agentcore.task_progress import verdict_word
+
+    assert verdict_word(verdict) == word
+
+
+def test_render_many_never_shows_a_raw_verdict():
+    from agentcore.task_progress import render_many
+
+    def snap(word):
+        return {"task_id": "proc_" + word, "label": "跑测试套（pytest）", "verdict": word,
+                "state": word, "phase": "", "percent": None, "elapsed": 30,
+                "detail": "", "artifacts": (), "terminal": word != "running"}
+
+    text = render_many([snap("lost"), snap("stalled")], title="任务")
+    assert "lost" not in text and "stalled" not in text
+    assert "进程已不在" in text and "无响应" in text
+
+
+def test_an_unknown_verdict_is_shown_as_is_rather_than_dropped():
+    """A word this table has not met yet must still reach the reader."""
+    from agentcore.task_progress import verdict_word
+
+    assert verdict_word("some_future_state") == "some_future_state"
+    assert verdict_word(None) == ""
+
+
+def test_the_plugin_copy_of_the_word_table_matches_the_engine():
+    """The plugin keeps its own copy; a drift here is a wrong word on a card.
+
+    The engine package is a plain module, so a plugin hot-reload re-executes the
+    plugin file while ``agentcore`` stays whatever the gateway imported at boot.
+    The plugin therefore cannot call the engine's helper and carries the table
+    itself -- which makes "the two agree" a real invariant, not a style point.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    from agentcore.task_progress import VERDICT_WORD
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "task_progress_plugin_under_test", root / "plugins" / "task_progress" / "__init__.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert dict(module._VERDICT_WORD) == dict(VERDICT_WORD)

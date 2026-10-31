@@ -282,30 +282,89 @@ def aggregate(snaps) -> Dict[str, Any]:
 #: Ledger phases that carry no information for a reader.
 _QUIET_PHASES = frozenset({"", "started", "queued", "running"})
 
+_HEAD_ICON = {
+    CardState.QUEUED: "⏳",
+    CardState.RUNNING: "🔵",
+    CardState.WAITING_USER: "⏳",
+    CardState.AWAITING_PLAN_APPROVAL: "⏳",
+    CardState.DONE: "🟢",
+    CardState.FAILED: "🔴",
+    CardState.CANCELLED: "⚪",
+}
+
+_VERDICT_ICON = {
+    "queued": "⏳",
+    "running": "🔵",
+    "done": "🟢",
+    "failed": "🔴",
+    "cancelled": "⚪",
+    "stalled": "🟡",
+    "lost": "🔴",
+    "waiting_user": "⏳",
+    "awaiting_plan_approval": "⏳",
+}
+
+
+def format_verdict_pill(verdict: Optional[str]) -> str:
+    """Format a verdict into a clean status pill with an icon."""
+    word = verdict_word(verdict)
+    icon = _VERDICT_ICON.get(str(verdict or ""), "▫️")
+    return f"{icon} `{word}`" if word else ""
+
+
+#: One word per ledger verdict, for every line a reader sees. The ledger's
+#: vocabulary is code (running / lost / stalled); a card that prints it verbatim
+#: leaks English internals into a Chinese sentence, and `lost`/`stalled` -- the
+#: two states a killed background process actually lands in -- were missing
+#: entirely before this table existed.
+VERDICT_WORD = {
+    "queued": "已接收",
+    "running": "进行中",
+    "done": "已完成",
+    "failed": "未完成",
+    "cancelled": "已取消",
+    "stalled": "无响应",
+    "lost": "进程已不在",
+    "waiting_user": "等待用户",
+    "awaiting_plan_approval": "等待计划审批",
+}
+
+
+def verdict_word(verdict: Optional[str]) -> str:
+    """The reader-facing word for a ledger verdict; unknown values stay as-is."""
+    return VERDICT_WORD.get(str(verdict or ""), str(verdict or ""))
+
 
 def render_many(snaps, *, title: str = "任务") -> str:
-    """One entry over several tasks: a header, one line per task, and the longest elapsed."""
+    """One entry over several tasks: a rich header, structured bullet items, and elapsed time."""
     items = [s for s in (snaps or ()) if isinstance(s, dict)]
     if not items:
-        return "**%s**\n状态：已接收\n（暂无新进展，收到进度会更新这一条）" % title
+        return "**%s**\n状态：⏳ **已接收**\n（暂无新进展，收到进度会更新这一条）" % title
     head = aggregate(items)
     heading = ("任务" if head["tasks"] == 1
                else "任务（本轮 %d 个后台任务）" % head["tasks"])
-    lines = ["**%s**" % heading]
-    lines.append("状态：%s" % _STATE_WORD[card_state({"state": head["verdict"]})])
+    state = card_state({"state": head["verdict"]})
+    state_icon = _HEAD_ICON.get(state, "▫️")
+    state_str = _STATE_WORD[state]
+    elapsed_str = _clock_text(int(head["elapsed"]))
+
+    lines = [
+        "**%s**" % heading,
+        f"状态：{state_icon} **{state_str}** ｜ 已用（最长）：`{elapsed_str}`",
+        "",
+    ]
     for snap in items[:6]:
-        bits = [snap.get("label") or snap.get("task_id") or "任务"]
-        word = {"running": "进行中", "queued": "已接收", "done": "已完成",
-                "failed": "未完成", "cancelled": "已取消"}.get(snap.get("verdict"), snap.get("verdict"))
-        bits.append(word)
+        label = str(snap.get("label") or snap.get("task_id") or "任务").strip()
+        pill = format_verdict_pill(snap.get("verdict"))
+        extra_bits = []
         if snap.get("phase") and snap["phase"] not in _QUIET_PHASES:
-            bits.append(snap["phase"])
+            extra_bits.append(str(snap["phase"]))
         if snap.get("percent") is not None:
-            bits.append("%.0f%%" % snap["percent"])
-        lines.append("· " + " · ".join(str(b) for b in bits if b))
+            extra_bits.append("%.0f%%" % snap["percent"])
+        extra_str = f" ({' · '.join(extra_bits)})" if extra_bits else ""
+        lines.append(f"• **{label}** ｜ {pill}{extra_str}")
     if len(items) > 6:
-        lines.append("· …另有 %d 个" % (len(items) - 6))
-    lines.append("已用（最长）：%s" % _clock_text(int(head["elapsed"])))
+        lines.append("• …另有 %d 个" % (len(items) - 6))
     return "\n".join(lines)[:MAX_TEXT]
 
 # --------------------------------------------------------------------------- #

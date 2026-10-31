@@ -61,6 +61,30 @@ _EDIT_LOCKS_GUARD = threading.Lock()
 #: 长跑网关会为**每条**消息留一把锁，从不回收 —— 上限是唯一兜底。
 _MAX_EDIT_LOCKS = 512
 
+#: Reader-facing word for a ledger verdict.
+#:
+#: Kept here rather than imported from ``agentcore.task_progress`` on purpose:
+#: the engine package is a plain module, so a plugin hot-reload re-executes this
+#: file while ``agentcore`` stays the copy the gateway imported at boot. Calling
+#: a helper that only exists in the *new* engine code would raise AttributeError
+#: in the running gateway until it restarts. Two small tables beat a live crash;
+#: ``tests/test_task_progress.py`` keeps them identical.
+_VERDICT_WORD = {
+    "queued": "已接收",
+    "running": "进行中",
+    "done": "已完成",
+    "failed": "未完成",
+    "cancelled": "已取消",
+    "stalled": "无响应",
+    "lost": "进程已不在",
+    "waiting_user": "等待用户",
+    "awaiting_plan_approval": "等待计划审批",
+}
+
+
+def _verdict_word(verdict: Any) -> str:
+    return _VERDICT_WORD.get(str(verdict or ""), str(verdict or ""))
+
 
 class _EditOutcomeUnknown(Exception):
     pass
@@ -1093,9 +1117,7 @@ def register(ctx) -> None:
                                    reverse=True)[:20]
         for task_id, (turn, frozen) in recent_foreground:
             snap = progress.foreground_snapshot(turn, now=time.time())
-            word = {"queued": "已接收", "running": "进行中", "done": "已完成",
-                    "failed": "未完成", "cancelled": "已中断", "unknown": "状态待确认"}.get(
-                        snap["verdict"], snap["verdict"])
+            word = _verdict_word(snap["verdict"])
             minutes, seconds = divmod(int(snap["elapsed"]), 60)
             elapsed = "%d分%02d秒" % (minutes, seconds) if minutes else "%d秒" % seconds
             lines.append("· `%s` 前台回合 · %s · 已用 %s%s%s" % (
@@ -1103,7 +1125,7 @@ def register(ctx) -> None:
                 " · 进度消息更新待确认" if frozen else ""))
         for row in rows:
             snap = progress.snapshot(row, now=time.time())
-            word = {"queued": "已接收", "running": "进行中"}.get(snap["verdict"], snap["verdict"])
+            word = _verdict_word(snap["verdict"])
             minutes, seconds = divmod(int(snap["elapsed"]), 60)
             elapsed = "%d分%02d秒" % (minutes, seconds) if minutes else "%d秒" % seconds
             lines.append("· `%s` %s · 已用 %s%s" % (snap["task_id"], word, elapsed,
