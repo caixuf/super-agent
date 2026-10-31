@@ -487,6 +487,18 @@ class DispatchService:
                 'cancellation_requested': bool(after['cancel']), 'status': after['status']}
 
 
+
+def enqueue_tab_follow_up(task_id, text, *, owner="", origin=None, inbox=None):
+    """Prefer-D1 Tab: bind follow-up to task-id + origin without durable_submit.
+
+    Does not open a second long exec. Host control / barge-in path calls this
+    (or BargeInController.queue_follow_up) instead of submit().
+    """
+    from agentcore.barge_in_control import DEFAULT_INBOX, bind_follow_up_to_task
+    target = inbox if inbox is not None else DEFAULT_INBOX
+    return bind_follow_up_to_task(target, task_id, text, owner=owner, origin=origin)
+
+
 class DispatchRouter:
     """One public entry point, administrator-owned queues and per-role policies."""
     def __init__(self,services):

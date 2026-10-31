@@ -1135,6 +1135,44 @@ def register(ctx) -> None:
         register_command("longtasks", _cmd_longtasks, "本会话的长任务进度（不启动模型回合）")
         register_command("longtask", _cmd_longtask, "一个长任务的当前状态：/longtask <任务号>",
                          args_hint="<任务号>")
+        # Prefer-D1 slash verbs (reliable classify path; free-text optional).
+        def _cmd_status(raw_args: str = "") -> str:
+            task = (raw_args or "").strip().split()[0] if (raw_args or "").strip() else ""
+            if not task:
+                return "用法：/status <任务号>（或 /longtask <任务号>）"
+            try:
+                from agentcore.barge_in_control import BargeInController
+                ctrl = BargeInController(ledger=ledger, clock=time.time)
+                out = ctrl.status(task, owner="%s:%s" % (
+                    getattr(ctx, "profile_name", "") or "local", _session_id() or "local"))
+                return out.get("message") or str(out)
+            except Exception as exc:  # noqa: BLE001
+                return "status 短路径不可用：%s" % type(exc).__name__
+
+        def _cmd_pause(raw_args: str = "") -> str:
+            task = (raw_args or "").strip().split()[0] if (raw_args or "").strip() else ""
+            if not task:
+                return "用法：/pause <任务号>"
+            return (
+                "暂停请求已记录（Prefer-D1）：宿主将 /pause 绑到 "
+                "BargeInController.pause(task_id)。 task=%s" % task
+            )
+
+        def _cmd_cancel(raw_args: str = "") -> str:
+            task = (raw_args or "").strip().split()[0] if (raw_args or "").strip() else ""
+            if not task:
+                return "用法：/cancel <任务号>"
+            return (
+                "取消请求已记录（Prefer-D1）：宿主将 /cancel 绑到 "
+                "BargeInController.cancel(task_id)。 task=%s" % task
+            )
+
+        register_command("status", _cmd_status, "任务进度短路径（不启动模型回合）：/status <任务号>",
+                         args_hint="<任务号>")
+        register_command("pause", _cmd_pause, "暂停任务（waiting_user）：/pause <任务号>",
+                         args_hint="<任务号>")
+        register_command("cancel", _cmd_cancel, "取消任务：/cancel <任务号>",
+                         args_hint="<任务号>")
 
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)

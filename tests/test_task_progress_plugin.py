@@ -604,7 +604,7 @@ def test_slash_commands_answer_from_the_ledger_without_a_model_turn(tmp_path, mo
 
     ctx = CommandCtx(tmp_path, _settings(tmp_path))
     plugin.register(ctx)
-    assert set(ctx.commands) == {"longtasks", "longtask"}
+    assert set(ctx.commands) == {"longtasks", "longtask", "status", "pause", "cancel"}
 
     ledger = LivenessLedger(ctx.settings["liveness_db"])
     ledger.register("proc_zzz", kind="terminal", owner="p:sess-1", label="pytest tests",

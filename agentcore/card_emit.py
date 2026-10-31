@@ -95,7 +95,7 @@ class CardView:
 #: Which buttons a card offers, by state. Tokens, not labels.
 _ACTIONS = {
     CardState.QUEUED: ("cancel", "details"),
-    CardState.RUNNING: ("cancel", "details", "logs"),
+    CardState.RUNNING: ("cancel", "pause", "status", "details", "logs"),
     CardState.WAITING_USER: ("approve", "deny", "details", "logs"),
     CardState.AWAITING_PLAN_APPROVAL: ("approve", "deny", "details"),
     CardState.DONE: ("details", "report", "rerun"),
@@ -324,6 +324,16 @@ class CardEmitter:
     def cancel(self, *, detail: str = "") -> Optional[CardView]:
         return self._publish(self._writer.emit(
             CardState.CANCELLED, detail=detail, final=True, **self._identity_kwargs()))
+
+    def pause(self, *, detail: str = "", phase: str = "paused") -> Optional[CardView]:
+        """Prefer-D1: soft-pause card (waiting_user + phase paused). Not a C1 UX rework."""
+        return self.wait_user(detail=detail or "已暂停", phase=phase or "paused",
+                              hitl_kind="waiting_user", hitl_summary=detail or "paused")
+
+    def mark_queued_follow_up(self, *, detail: str = "", count: int = 1) -> Optional[CardView]:
+        """Prefer-D1 Tab: same-card hint that a follow-up is queued (still RUNNING)."""
+        note = detail or ("queued follow-up x%d" % max(1, int(count or 1)))
+        return self.update(phase="queued_follow_up", detail=note)
 
     def notify_terminal_or_wait(self, state: CardState, *, detail: str = "",
                                 phase: str = "") -> Optional[CardView]:
