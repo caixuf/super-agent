@@ -150,14 +150,19 @@ def _on_post_tool_call(tool_name: str = "", args: Any = None, result: Any = None
             return None
         profile = getattr(_CTX, "profile_name", "") or "local"
         owner = "%s:%s" % (profile, session_id or "local")
-        label = str(payload.get("command") or args.get("command") or "")[:200]
+        command = str(payload.get("command") or args.get("command") or "")
+        # The card shows `label`; a truncated shell line there reads as noise.
+        # Keep the readable name in `label` and the command itself in `detail`,
+        # where the single-task view can still show it for debugging.
+        label = readable_label(command)
         pid = payload.get("pid")
         try:
             pid = int(pid) if pid is not None else None
         except (TypeError, ValueError):
             pid = None
         ledger.register(process_id, kind="terminal", owner=owner, label=label,
-                        pid=pid, host="local", phase="started", state="running")
+                        pid=pid, host="local", phase="started", state="running",
+                        detail=command.strip()[:120])
         # A background start receipt carries exit_code=0 even while the child is
         # still running. Only a completion-shaped status may close the row.
         status = payload.get("status")
@@ -343,6 +348,35 @@ def _match_segment(segment: str, _depth: int = 0) -> Optional[str]:
         if exe == pat or tokens[0].endswith("/" + pat):
             return f"{label}（{pat}）"
     return None
+
+
+#: Shell builtins and noise words that name no work when they open a segment.
+_SHELL_NOISE = frozenset({"cd", "echo", "export", "set", "true", "time", "env", "nohup"})
+
+
+def readable_label(command: str) -> str:
+    """A short human name for a shell command, for the progress card.
+
+    The card is read by a person waiting on the task; a truncated shell line
+    tells them nothing. Reuse the long-task classifier's vocabulary
+    ("跑测试套（pytest）") and otherwise fall back to the program name plus its
+    leading arguments. Pure, so the naming can be pinned by a test.
+    """
+    text = (command or "").strip()
+    if not text:
+        return ""
+    segments = _shell_segments(text)
+    for segment in segments:
+        hit = _match_segment(segment)
+        if hit:
+            return hit
+    for segment in segments:
+        parts = segment.split()
+        if not parts or parts[0].rsplit("/", 1)[-1] in _SHELL_NOISE:
+            continue
+        args = [t for t in parts[1:] if not t.startswith("-")][:2]
+        return " ".join([parts[0].rsplit("/", 1)[-1], *args])[:60]
+    return text.rsplit("/", 1)[-1][:60]
 
 
 def classify(args: dict[str, Any]) -> Optional[str]:

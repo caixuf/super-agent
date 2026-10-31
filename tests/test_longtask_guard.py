@@ -299,7 +299,10 @@ def test_post_hook_writes_a_real_ledger_row(monkeypatch, tmp_path):
     row = store.get("proc_1", require_owner="p:s1")
     assert row is not None
     assert row["state"] == "running"
-    assert row["label"] == "pytest tests"
+    # `label` is what the progress card shows, so it is a readable name -- not
+    # the shell line. The command itself is kept in `detail` for debugging.
+    assert row["label"] == "跑测试套（pytest）"
+    assert row["detail"] == "pytest tests"
 
 
 def test_register_wires_both_hooks():
@@ -404,3 +407,31 @@ def test_silent_background_still_reaches_the_ledger(monkeypatch):
                 "pid": 42, "exit_code": 0, "error": None, "notify_on_complete": False},
         session_id="session-one")
     assert len(fake.register_calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Progress-card naming: a shell line is not a label
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("command,expected", [
+    # A wrapped, piped, redirected command still resolves to the work it does.
+    ('cd /srv/app && /usr/bin/python3 -m pytest bridge/tests -q 2>&1 | tail -5',
+     "跑测试套（pytest）"),
+    ("docker build -t img .", "建镜像（docker build）"),
+    # Not a known long task: fall back to the program name plus its arguments.
+    ("npm run build", "npm run build"),
+    ("git status", "git status"),
+    # A leading `cd` names no work on its own; the next segment decides.
+    ("cd /srv/app && make release", "make release"),
+    # Flags are dropped, positional arguments are kept: they name the target.
+    ("ls -la /tmp", "ls /tmp"),
+])
+def test_readable_label_names_the_work_not_the_shell_line(command, expected):
+    assert guard.readable_label(command) == expected
+
+
+def test_readable_label_is_bounded_and_never_empty_for_empty_input():
+    assert guard.readable_label("") == ""
+    assert guard.readable_label("   ") == ""
+    long_cmd = "cd /x && " + "runner " + " ".join("a%d" % i for i in range(40))
+    assert 0 < len(guard.readable_label(long_cmd)) <= 60
