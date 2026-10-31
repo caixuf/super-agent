@@ -367,6 +367,34 @@ class Pool:
             )
             return True
 
+    def deny_from_user(self, job, *, reason, policy="cancelled"):
+        """Deny HITL with a required reason; no silent resume (Prefer-C1).
+
+        Job must be waiting_user / awaiting_plan_approval. ``policy`` is
+        ``cancelled`` (default) or ``failed``. Reason is trimmed to <=240 chars.
+        """
+        if reason is None:
+            raise ValueError("deny_reason_required")
+        text_reason = str(reason).strip()
+        if not text_reason:
+            raise ValueError("deny_reason_required")
+        text_reason = text_reason[:240]
+        if policy not in ("cancelled", "failed"):
+            raise ValueError("deny_policy_invalid")
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()
+            if row is None:
+                return False
+            if row["status"] not in ("waiting_user", "awaiting_plan_approval"):
+                return False
+            self._terminal(db, job, policy, {
+                "reason": text_reason,
+                "hitl": "denied",
+                "event": "hitl_denied",
+            })
+            return True
+
     def status(self, job):
         with self.db() as db:
             row = db.execute('SELECT id,status,attempt,tries,cancel,result,heartbeat,created,deadline FROM jobs WHERE id=?', (job,)).fetchone()

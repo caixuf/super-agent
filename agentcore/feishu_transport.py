@@ -311,7 +311,17 @@ def colleague_card_payload(view) -> dict:
 
     Title carries display_name + task_title (already composed by card_emit). No
     invented percent/ETA. Identity row is plain text from the view fields only.
+
+    Prefer-C1: HITL states render Approve / Deny buttons when ``actions`` include
+    them, plus an honest source-label row (from_bot / source_thread / role). When
+    the platform cannot host interactive controls, callers still get the same
+    body text with text-fallback instructions (deliver-or-reason).
     """
+    from agentcore.hitl_bridge import (
+        callback_value,
+        hitl_text_fallback_instructions,
+    )
+
     rendered = view.render() if hasattr(view, "render") else dict(view)
     title = str(rendered.get("title") or "任务")[:120]
     state = str(rendered.get("state") or "")
@@ -328,6 +338,9 @@ def colleague_card_payload(view) -> dict:
     lines.append("状态：%s" % (state or "—"))
     if phase:
         lines.append("阶段：%s" % phase)
+    summary = rendered.get("hitl_summary") or rendered.get("detail") or ""
+    if summary and state in ("waiting_user", "awaiting_plan_approval"):
+        lines.append("摘要：%s" % str(summary)[:500])
     if age is not None:
         try:
             lines.append("心跳：%d秒前" % max(0, int(float(age))))
@@ -338,9 +351,30 @@ def colleague_card_payload(view) -> dict:
     waiting = rendered.get("waiting_role")
     if waiting and state in ("waiting_user", "awaiting_plan_approval"):
         lines.append("待确认岗位：%s" % waiting)
+    from_bot = rendered.get("from_bot") or ""
+    source_thread = rendered.get("source_thread") or ""
+    role_id = rendered.get("role_id") or ""
+    if state in ("waiting_user", "awaiting_plan_approval"):
+        src_bits = []
+        if from_bot:
+            src_bits.append("from_bot=%s" % from_bot)
+        if source_thread:
+            src_bits.append("source_thread=%s" % source_thread)
+        if role_id or role:
+            src_bits.append("role=%s" % (role or role_id))
+        if src_bits:
+            lines.append("来源：" + " · ".join(src_bits))
+        else:
+            lines.append("来源：（未绑定）")
     arts = rendered.get("artifacts") or []
     if arts:
         lines.append("产物：" + "、".join(str(a) for a in list(arts)[:6]))
+    actions = list(rendered.get("actions") or [])
+    hitl_kind = str(rendered.get("hitl_kind") or "")
+    request_id = str(rendered.get("hitl_request_id") or "")
+    is_hitl = state in ("waiting_user", "awaiting_plan_approval")
+    if is_hitl and ("approve" in actions or "deny" in actions or "approve_plan" in actions):
+        lines.append(hitl_text_fallback_instructions())
     body = "\n".join(lines)
     header_color = {
         "queued": "grey",
@@ -351,6 +385,48 @@ def colleague_card_payload(view) -> dict:
         "failed": "red",
         "cancelled": "grey",
     }.get(state, "blue")
+    elements = [
+        {
+            "tag": "div",
+            "text": {"tag": "plain_text", "content": body[:3500]},
+        }
+    ]
+    if is_hitl:
+        button_actions = []
+        tid = str(rendered.get("task_id") or "")
+        if "approve" in actions or "approve_plan" in actions:
+            button_actions.append({
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "批准"},
+                "type": "primary",
+                "value": callback_value(
+                    task_id=tid or request_id or "pending",
+                    action="approve",
+                    hitl_kind=hitl_kind,
+                    request_id=request_id,
+                ),
+            })
+        if "deny" in actions:
+            button_actions.append({
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "拒绝"},
+                "type": "danger",
+                "value": callback_value(
+                    task_id=tid or request_id or "pending",
+                    action="deny",
+                    hitl_kind=hitl_kind,
+                    request_id=request_id,
+                ),
+            })
+        if button_actions:
+            elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "plain_text",
+                    "content": "拒绝时请在回调/回复中附原因（必填，≤240字）",
+                },
+            })
+            elements.append({"tag": "action", "actions": button_actions})
     return {
         "schema": "2.0",
         "config": {"wide_screen_mode": True, "update_multi": True},
@@ -358,13 +434,23 @@ def colleague_card_payload(view) -> dict:
             "title": {"tag": "plain_text", "content": title},
             "template": header_color,
         },
-        "elements": [
-            {
-                "tag": "div",
-                "text": {"tag": "plain_text", "content": body[:3500]},
-            }
-        ],
+        "elements": elements,
     }
+
+
+
+class _ViewProxy:
+    """Thin proxy so colleague_card_payload sees task_id without mutating CardView."""
+
+    def __init__(self, base, rendered: dict):
+        self._base = base
+        self._rendered = rendered
+
+    def render(self):
+        return dict(self._rendered)
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
 
 
 class FeishuCardKitAdapter:
@@ -499,6 +585,13 @@ class FeishuCardKitAdapter:
         """Existing plaintext path — never invent a second card writer."""
         rendered = view.render() if hasattr(view, "render") else dict(view)
         text = "%s\n%s" % (rendered.get("title") or "任务", rendered.get("note") or "")
+        state = str(rendered.get("state") or "")
+        if state in ("waiting_user", "awaiting_plan_approval"):
+            from agentcore.hitl_bridge import hitl_text_fallback_instructions
+            extra = hitl_text_fallback_instructions(task_id=handle.task_id)
+            summary = rendered.get("hitl_summary") or ""
+            text = (text + "\n" + str(summary) + "\n" + extra).strip()
+
         try:
             receipt = self.transport.send_plaintext(
                 origin=self._origin_for(handle),
@@ -516,6 +609,13 @@ class FeishuCardKitAdapter:
 
     def emit(self, handle, view, *, final: bool = False) -> dict:
         """CardEmitter transport entrypoint — create once, then same-card patch."""
+        try:
+            rendered = view.render() if hasattr(view, "render") else dict(view)
+            if "task_id" not in rendered or not rendered.get("task_id"):
+                rendered["task_id"] = handle.task_id
+                view = _ViewProxy(view, rendered)
+        except Exception:
+            pass
         if not handle.message_id:
             return self._create(handle, view)
         return self._patch(handle, view, final=final)

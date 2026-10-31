@@ -88,6 +88,12 @@ class CardFrame:
     task_title: str = ""
     heartbeat_age_s: Optional[float] = None
     attempt_id: str = ""
+    # Prefer-C1 HITL source labels (optional; host/origin/ontology — never model-forged).
+    from_bot: str = ""
+    source_thread: str = ""
+    hitl_kind: str = ""  # "waiting_user" | "plan" | ""
+    hitl_summary: str = ""
+    hitl_request_id: str = ""
 
     def render(self) -> dict:
         """Platform-agnostic view; adapters map this onto their own card schema."""
@@ -111,6 +117,16 @@ class CardFrame:
             payload["heartbeat_age_s"] = self.heartbeat_age_s
         if self.attempt_id:
             payload["attempt_id"] = self.attempt_id
+        if self.from_bot:
+            payload["from_bot"] = self.from_bot
+        if self.source_thread:
+            payload["source_thread"] = self.source_thread
+        if self.hitl_kind:
+            payload["hitl_kind"] = self.hitl_kind
+        if self.hitl_summary:
+            payload["hitl_summary"] = self.hitl_summary
+        if self.hitl_request_id:
+            payload["hitl_request_id"] = self.hitl_request_id
         return payload
 
 
@@ -200,7 +216,9 @@ class CardWriter:
     def emit(self, state: CardState, *, phase: str = "", detail: str = "", host: str = "",
              artifacts: Sequence[str] = (), final: bool = False,
              role_id: str = "", display_name: str = "", task_title: str = "",
-             heartbeat_age_s: Optional[float] = None, attempt_id: str = "") -> Optional[CardFrame]:
+             heartbeat_age_s: Optional[float] = None, attempt_id: str = "",
+             from_bot: str = "", source_thread: str = "", hitl_kind: str = "",
+             hitl_summary: str = "", hitl_request_id: str = "") -> Optional[CardFrame]:
         """Build the next frame for this card and commit it.
 
         Returns the committed frame, or ``None`` if the card is already terminal.
@@ -222,6 +240,11 @@ class CardWriter:
             task_title=task_title or self.handle.task_title,
             heartbeat_age_s=heartbeat_age_s,
             attempt_id=attempt_id,
+            from_bot=from_bot,
+            source_thread=source_thread,
+            hitl_kind=hitl_kind,
+            hitl_summary=hitl_summary or detail,
+            hitl_request_id=hitl_request_id,
         )
         return self.commit(frame)
 

@@ -45,6 +45,21 @@ _EXTRA_COLUMNS = (
     ("task_title", "TEXT NOT NULL DEFAULT ''"),
 )
 
+_HITL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS hitl_pending (
+  task TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  from_bot TEXT NOT NULL DEFAULT '',
+  source_thread TEXT NOT NULL DEFAULT '',
+  created REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending',
+  event TEXT NOT NULL DEFAULT ''
+);
+"""
+
+
 
 class PersistentCardWriter(CardWriter):
     """A :class:`CardWriter` that persists the handle after every accepted frame.
@@ -81,6 +96,7 @@ class CardStore:
             for name, kind in _EXTRA_COLUMNS:
                 if name not in columns:
                     db.execute("ALTER TABLE cards ADD COLUMN %s %s" % (name, kind))
+            db.executescript(_HITL_SCHEMA)
 
     @contextlib.contextmanager
     def db(self):
@@ -187,3 +203,49 @@ class CardStore:
     def forget(self, task_id: str) -> None:
         with self.db() as db:
             db.execute("DELETE FROM cards WHERE task = ?", (task_id,))
+
+    def park_hitl(self, task_id: str, *, request_id: str, kind: str,
+                  summary: str = "", from_bot: str = "", source_thread: str = "",
+                  created: Optional[float] = None) -> None:
+        """Park pending HITL correlation for Approve/Deny callback (Prefer-C1)."""
+        stamp = time.time() if created is None else float(created)
+        with self.db() as db:
+            db.execute(
+                "INSERT INTO hitl_pending (task, request_id, kind, summary, from_bot, "
+                "source_thread, created, status, event) VALUES (?, ?, ?, ?, ?, ?, ?, "
+                "'pending', '') "
+                "ON CONFLICT(task) DO UPDATE SET "
+                "request_id=excluded.request_id, kind=excluded.kind, "
+                "summary=excluded.summary, from_bot=excluded.from_bot, "
+                "source_thread=excluded.source_thread, created=excluded.created, "
+                "status='pending', event=''",
+                (task_id, request_id, kind, summary or "", from_bot or "",
+                 source_thread or "", stamp),
+            )
+
+    def load_hitl(self, task_id: str) -> Optional[dict]:
+        with self.db() as db:
+            row = db.execute(
+                "SELECT * FROM hitl_pending WHERE task = ?", (task_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return {k: row[k] for k in row.keys()}
+
+    def resolve_hitl(self, task_id: str, *, status: str, event: Optional[dict] = None,
+                     request_id: Optional[str] = None) -> None:
+        """Mark pending HITL approved/denied and persist the durable event JSON."""
+        import json as _json
+        payload = _json.dumps(event or {}, ensure_ascii=False)
+        with self.db() as db:
+            if request_id:
+                db.execute(
+                    "UPDATE hitl_pending SET status=?, event=? WHERE task=? AND "
+                    "(request_id=? OR request_id='')",
+                    (status, payload, task_id, request_id),
+                )
+            else:
+                db.execute(
+                    "UPDATE hitl_pending SET status=?, event=? WHERE task=?",
+                    (status, payload, task_id),
+                )
