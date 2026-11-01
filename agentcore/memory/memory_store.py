@@ -240,6 +240,7 @@ def write_fact(
     resolve_conflict: bool = False,
     initial_status: str = 'active',
     dedupe_by_statement: bool = False,
+    schedule_background_index: bool = True,
 ) -> Dict[str, Any]:
     """确定性写入一条经验。同 (workspace_id, subject, statement) 视为同一条，幂等跳过。
 
@@ -258,6 +259,32 @@ def write_fact(
         raise ValueError('candidate publishers require source-scoped identity')
     if not stmt:
         return {"ok": False, "error": "statement 为空"}
+
+    # A deterministic candidate ID is the replay/identity boundary. Check it
+    # before activation, background indexing or monthly reporting so a later
+    # model call can never hijack or duplicate an existing owned fact.
+    cfg = get_config()
+    user_id = user_id or cfg.default_user
+    agent_id = agent_id or cfg.default_agent
+    source = source or "manual"
+    bucket = normalize_ebm(ebm)
+    if initial_status == "candidate" and fact_id:
+        conn = _connect()
+        try:
+            known = conn.execute(
+                "SELECT fact_id,user_id,agent_id,workspace_id,subject,statement,source,status"
+                " FROM working_fact WHERE fact_id=?", (fact_id,)).fetchone()
+        finally:
+            conn.close()
+        if known is not None:
+            expected = dict(user_id=user_id, agent_id=agent_id, workspace_id=bucket,
+                            subject=subject, statement=stmt, source=source)
+            if any(known[key] != value for key, value in expected.items()):
+                raise ValueError("candidate_fact_identity_conflict")
+            return {"ok": True, "written": False,
+                    "reason": "duplicate" if known["status"] == "active" else "candidate_exists",
+                    "fact_id": fact_id, "workspace_id": bucket,
+                    "status": known["status"]}
 
     # 身份默认值在调用时取，不用函数签名默认值：
     # 签名默认值在模块导入时就固化了，宿主后来 configure() 注入的配置不生效。
@@ -399,16 +426,21 @@ def write_fact(
         # daemon 线程会在进程退出时被直接杀掉，向量就静默丢了 —— 常驻服务里
         # 看不出来，但脚本、CLI、一次性任务里每次写都丢索引，召回恒为 0。
         # 这里保证「进程正常退出前，已提交的写入都把向量落盘」。
-        _submit_background(_bg_embed, fid, subject or "", stmt)
+        # Candidate rows use the synchronous admission index path instead: an
+        # event must never become done while an index write is merely queued.
+        if schedule_background_index:
+            _submit_background(_bg_embed, fid, subject or "", stmt)
 
-        # Prefer A: needle -> monthly markdown append (no Feishu / model turn).
-        try:
-            from . import monthly_log as _monthly_log
-            _monthly_log.maybe_append_from_write(
-                out, statement=stmt, subject=subject, tags=tag_map)
-        except Exception as exc:  # noqa: BLE001 -- log must never break write
-            logging.getLogger(logger_name("store")).debug(
-                "monthly_log hook skipped: %s", exc)
+        # Candidate rows are isolated until activation. Their metadata may be
+        # model-derived, so they must not reach the durable monthly report yet.
+        if initial_status == "active":
+            try:
+                from . import monthly_log as _monthly_log
+                _monthly_log.maybe_append_from_write(
+                    out, statement=stmt, subject=subject, tags=tag_map)
+            except Exception as exc:  # noqa: BLE001 -- log must never break write
+                logging.getLogger(logger_name("store")).debug(
+                    "monthly_log hook skipped: %s", exc)
 
         return out
     finally:
@@ -449,6 +481,8 @@ def get_facts_by_ids(
     fact_ids: Sequence[str],
     *,
     user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    profile: Optional[str] = None,
     include_inactive: bool = False,
 ) -> Dict[str, Any]:
     """Thin helper: load full working_fact rows (+ tags) for explicit ids.
@@ -473,6 +507,14 @@ def get_facts_by_ids(
         marks = ",".join("?" * len(ids))
         where = ["fact_id IN (" + marks + ")", "user_id = ?"]
         params: List[Any] = list(ids) + [user_id]
+        if agent_id is not None:
+            where.append("agent_id = ?")
+            params.append(str(agent_id))
+        if profile is not None:
+            where.append("EXISTS (SELECT 1 FROM fact_tags pr WHERE"
+                         " pr.fact_id=working_fact.fact_id AND pr.key='profile'"
+                         " AND pr.value=?)")
+            params.append(str(profile))
         if not include_inactive:
             where.append("status = 'active'")
         rows = conn.execute(
@@ -546,6 +588,8 @@ def _knn_rowids(conn: sqlite3.Connection, query: str, *,
                 kinds: Optional[Sequence[str]] = None,
                 scopes: Optional[Sequence[str]] = None,
                 user_id: Optional[str] = None,
+                agent_id: Optional[str] = None,
+                profile: Optional[str] = None,
                 limit: int = 200) -> Optional[List[int]]:
     """用 sqlite-vec 做语义粗筛，返回 rowid 列表。不可用时返回 None（调用方回退）。
 
@@ -602,6 +646,7 @@ def _knn_rowids(conn: sqlite3.Connection, query: str, *,
     values = ",".join("(?)" for _ in fids)
     where = ["f.fact_id = candidate.fact_id", "f.status = 'active'", "f.user_id = ?"]
     params: List[Any] = [*fids, user_id]
+    _append_strict_identity(where, params, agent_id=agent_id, profile=profile)
     if buckets:
         where.append("f.workspace_id IN (%s)" % ",".join("?" * len(buckets)))
         params.extend(buckets)
@@ -718,6 +763,299 @@ def _recall_floor(kinds: Optional[Sequence[str]]) -> str:
     return str(min(vals))
 
 
+def _append_strict_identity(where: List[str], params: List[Any], *,
+                            agent_id: Optional[str], profile: Optional[str]) -> None:
+    if agent_id is not None:
+        where.append("f.agent_id = ?")
+        params.append(str(agent_id))
+    if profile is not None:
+        where.append(
+            "EXISTS (SELECT 1 FROM fact_tags pr WHERE pr.fact_id=f.fact_id"
+            " AND pr.key='profile' AND pr.value=?)")
+        params.append(str(profile))
+
+
+def find_active_fact_strict(*, statement: str, user_id: str, agent_id: str,
+                            profile: str, ebm: Optional[str] = None,
+                            exclude_fact_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Find a semantic duplicate only inside one user/agent/profile boundary."""
+    stmt = (statement or "").strip()
+    if not stmt or not all(isinstance(v, str) and v for v in (user_id, agent_id, profile)):
+        raise ValueError("strict_fact_identity_required")
+    bucket = normalize_ebm(ebm)
+    conn = _connect()
+    try:
+        where = ["f.user_id=?", "f.agent_id=?", "f.workspace_id=?",
+                 "f.statement=?", "f.status='active'"]
+        params: List[Any] = [user_id, agent_id, bucket, stmt]
+        _append_strict_identity(where, params, agent_id=None, profile=profile)
+        if exclude_fact_id:
+            where.append("f.fact_id<>?")
+            params.append(exclude_fact_id)
+        row = conn.execute(
+            "SELECT f.* FROM working_fact f WHERE " + " AND ".join(where)
+            + " ORDER BY f.created_at DESC LIMIT 1", params).fetchone()
+        return dict(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+AUTONOMY_CONFLICT_SCAN_BUDGET = 256
+AUTONOMY_CONFLICT_JUDGE_BUDGET = 16
+AUTONOMY_CONFLICT_TIME_BUDGET_SECONDS = 10.0
+
+
+def autonomy_conflict_budget_status(*, user_id: str, agent_id: str,
+                                     profile: str,
+                                     ebm: Optional[str] = None) -> Dict[str, Any]:
+    """Check the all-active identity window before writing a candidate."""
+    bucket = normalize_ebm(ebm)
+    conn = _connect()
+    try:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM working_fact f WHERE f.user_id=? AND f.agent_id=?"
+            " AND f.status='active'"
+            " AND EXISTS (SELECT 1 FROM fact_tags pr WHERE pr.fact_id=f.fact_id"
+            " AND pr.key='profile' AND pr.value=?)",
+            [user_id, agent_id, profile]).fetchone()[0]
+        if count > AUTONOMY_CONFLICT_SCAN_BUDGET:
+            return {"ok": False, "reason": "conflict_budget_exceeded",
+                    "active_count": int(count)}
+        return {"ok": True, "active_count": int(count)}
+    finally:
+        conn.close()
+
+
+def _autonomy_conflict_candidates(conn: sqlite3.Connection, *, statement: str,
+                                  bucket: str, user_id: str, agent_id: str,
+                                  profile: str) -> Dict[str, Any]:
+    """Collect a bounded, identity-scoped candidate window conservatively.
+
+    New and old preferences can share a topic word while having very low
+    character Jaccard. We therefore scan a bounded all-active window (not only
+    the latest eight) and pass only records with a meaningful token overlap to
+    the existing conflict judge. An exhausted scan budget is unresolved, never
+    "no conflict".
+    """
+    buckets = [bucket] if bucket == UNKNOWN_BUCKET else [bucket, UNKNOWN_BUCKET]
+    marks = ",".join("?" for _ in buckets)
+    where = ["user_id=?", "agent_id=?", "status='active'",
+             "workspace_id IN (" + marks + ")"]
+    params: List[Any] = [user_id, agent_id, *buckets]
+    profile_clause = (" AND EXISTS (SELECT 1 FROM fact_tags pr"
+                      " WHERE pr.fact_id=working_fact.fact_id"
+                      " AND pr.key='profile' AND pr.value=?)")
+    count = conn.execute(
+        "SELECT COUNT(*) FROM working_fact WHERE " + " AND ".join(where)
+        + profile_clause, [*params, profile]).fetchone()[0]
+    if count > AUTONOMY_CONFLICT_SCAN_BUDGET:
+        return {"ok": False, "reason": "conflict_budget_exceeded",
+                "candidates": [], "active_count": int(count)}
+    rows = conn.execute(
+        "SELECT fact_id,workspace_id,subject,statement FROM working_fact"
+        " WHERE " + " AND ".join(where) + profile_clause
+        + " ORDER BY created_at DESC", [*params, profile]).fetchall()
+    new_terms = {t for t in _query_terms(statement) if not _is_noise_term(t)}
+    candidates = []
+    for row in rows:
+        old_terms = {t for t in _query_terms(row["statement"])
+                     if not _is_noise_term(t)}
+        if new_terms and old_terms and new_terms & old_terms:
+            candidates.append(dict(row))
+    return {"ok": True, "candidates": candidates, "active_count": int(count)}
+
+
+def activate_candidate_fact(*, fact_id: str, user_id: str, agent_id: str,
+                            profile: str, statement: str, subject: str,
+                            source: str, ebm: Optional[str] = None,
+                            verify_recall: bool = True) -> Dict[str, Any]:
+    """Atomically activate a durable candidate after index/conflict checks.
+
+    The candidate row is invisible to recall until this function commits it as
+    active. Conflict review happens before taking the write lock; the final
+    transaction rechecks the candidate, duplicate owner, and supersede targets.
+    On any unresolved verdict the candidate remains isolated.
+    """
+    stmt = (statement or "").strip()
+    if not stmt or not all(isinstance(v, str) and v for v in
+                           (fact_id, user_id, agent_id, profile, source)):
+        return {"ok": False, "written": False, "reason": "strict_fact_identity_required"}
+    bucket = normalize_ebm(ebm)
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT fact_id,user_id,agent_id,workspace_id,subject,statement,source,status"
+            " FROM working_fact WHERE fact_id=?", (fact_id,)).fetchone()
+        if row is None:
+            return {"ok": False, "written": False, "reason": "candidate_missing"}
+        if (row["user_id"] != user_id or row["agent_id"] != agent_id
+                or row["workspace_id"] != bucket or row["subject"] != subject
+                or row["statement"] != stmt or row["source"] != source):
+            return {"ok": False, "written": False, "reason": "candidate_identity_conflict"}
+        profile_tag = conn.execute(
+            "SELECT value FROM fact_tags WHERE fact_id=? AND key='profile'",
+            (fact_id,)).fetchone()
+        if profile_tag is None or profile_tag["value"] != profile:
+            return {"ok": False, "written": False, "reason": "profile_provenance_missing"}
+        if row["status"] == "active":
+            return {"ok": True, "written": False, "reason": "duplicate",
+                    "fact_id": fact_id, "workspace_id": bucket, "status": "active"}
+        if row["status"] != "candidate":
+            return {"ok": False, "written": False, "reason": "candidate_not_isolated"}
+
+        duplicate = find_active_fact_strict(
+            statement=stmt, user_id=user_id, agent_id=agent_id, profile=profile,
+            ebm=ebm, exclude_fact_id=fact_id)
+        if duplicate is not None:
+            return {"ok": True, "written": False, "reason": "duplicate",
+                    "fact_id": duplicate["fact_id"],
+                    "fact_subject": duplicate.get("subject") or "",
+                    "fact_statement": duplicate.get("statement") or "",
+                    "workspace_id": bucket, "status": "active"}
+        # If a previous attempt indexed this candidate and committed activation
+        # just before the caller crashed, the same deterministic fact_id is
+        # already active. Treat that exact owned row as a verified replay, not
+        # as a new write.
+        own_active = conn.execute(
+            "SELECT f.fact_id FROM working_fact f WHERE f.fact_id=? AND f.status='active'"
+            " AND f.user_id=? AND f.agent_id=? AND f.workspace_id=?"
+            " AND f.subject=? AND f.statement=? AND f.source=?"
+            " AND EXISTS (SELECT 1 FROM fact_tags pr WHERE pr.fact_id=f.fact_id"
+            " AND pr.key='profile' AND pr.value=?)",
+            (fact_id, user_id, agent_id, bucket, subject, stmt, source, profile)).fetchone()
+        if own_active is not None:
+            return {"ok": True, "written": False, "reason": "duplicate",
+                    "fact_id": fact_id, "workspace_id": bucket, "status": "active"}
+
+        from . import memory_conflict
+        snapshot_buckets = ([bucket] if bucket == UNKNOWN_BUCKET
+                            else [bucket, UNKNOWN_BUCKET])
+        snapshot_marks = ",".join("?" for _ in snapshot_buckets)
+        snapshot_sql = (
+            "SELECT fact_id FROM working_fact f WHERE f.user_id=? AND f.agent_id=?"
+            " AND f.status='active' AND f.workspace_id IN (" + snapshot_marks + ")"
+            " AND EXISTS (SELECT 1 FROM fact_tags pr WHERE pr.fact_id=f.fact_id"
+            " AND pr.key='profile' AND pr.value=?) ORDER BY fact_id")
+        snapshot_params = [user_id, agent_id, *snapshot_buckets, profile]
+        snapshot = tuple(r[0] for r in conn.execute(
+            snapshot_sql, snapshot_params).fetchall())
+        candidate_window = _autonomy_conflict_candidates(
+            conn, statement=stmt, bucket=bucket, user_id=user_id,
+            agent_id=agent_id, profile=profile)
+        if candidate_window.get("ok") is not True:
+            return {"ok": False, "written": False, "retryable": True,
+                    "reason": candidate_window.get("reason") or "conflict_unresolved",
+                    "workspace_id": bucket, "status": "candidate",
+                    "fact_id": fact_id}
+        candidates = candidate_window.get("candidates") or []
+        verdict = memory_conflict.resolve(
+            {"statement": stmt, "subject": subject, "workspace_id": bucket},
+            candidates, conservative=True,
+            max_candidates=AUTONOMY_CONFLICT_JUDGE_BUDGET,
+            time_budget_seconds=AUTONOMY_CONFLICT_TIME_BUDGET_SECONDS)
+        relation = verdict.get("relation")
+        if verdict.get("action") != "write":
+            if relation == "duplicate":
+                duplicate_id = str(verdict.get("duplicate_of") or "")
+                old = next((row for row in candidates
+                            if row.get("fact_id") == duplicate_id), None)
+                if old is not None:
+                    return {"ok": True, "written": False, "reason": "duplicate",
+                            "fact_id": duplicate_id,
+                            "fact_subject": old.get("subject") or "",
+                            "fact_statement": old.get("statement") or "",
+                            "workspace_id": bucket, "status": "active"}
+            reason = str(verdict.get("reason") or "conflict_unresolved")
+            return {"ok": False, "written": False, "retryable": True,
+                    "reason": reason, "conflict": verdict, "workspace_id": bucket,
+                    "status": "candidate", "fact_id": fact_id}
+
+        superseded: List[str] = []
+        conn.execute("BEGIN IMMEDIATE")
+        current_snapshot = tuple(r[0] for r in conn.execute(
+            snapshot_sql, snapshot_params).fetchall())
+        if current_snapshot != snapshot:
+            conn.rollback()
+            return {"ok": False, "written": False, "retryable": True,
+                    "reason": "conflict_snapshot_changed", "workspace_id": bucket,
+                    "status": "candidate", "fact_id": fact_id}
+        current = conn.execute(
+            "SELECT status,user_id,agent_id,workspace_id,subject,statement,source"
+            " FROM working_fact WHERE fact_id=?", (fact_id,)).fetchone()
+        if (current is None or current["status"] != "candidate" or current["user_id"] != user_id
+                or current["agent_id"] != agent_id or current["workspace_id"] != bucket
+                or current["subject"] != subject or current["statement"] != stmt
+                or current["source"] != source):
+            conn.rollback()
+            return {"ok": False, "written": False, "reason": "candidate_changed"}
+        # Recheck the duplicate under the write lock; this is the linearization
+        # point that prevents two replay workers from activating twin facts.
+        dup = conn.execute(
+            "SELECT f.fact_id FROM working_fact f WHERE f.user_id=? AND f.agent_id=?"
+            " AND f.workspace_id=? AND f.statement=? AND f.status='active'"
+            " AND f.fact_id<>? AND EXISTS (SELECT 1 FROM fact_tags pr"
+            " WHERE pr.fact_id=f.fact_id AND pr.key='profile' AND pr.value=?) LIMIT 1",
+            (user_id, agent_id, bucket, stmt, fact_id, profile)).fetchone()
+        if dup is not None:
+            conn.rollback()
+            return {"ok": True, "written": False, "reason": "duplicate",
+                    "fact_id": dup["fact_id"], "workspace_id": bucket,
+                    "status": "active"}
+        conn.execute(
+            "UPDATE working_fact SET status='active' WHERE fact_id=? AND status='candidate'",
+            (fact_id,))
+        for old_id in verdict.get("superseded") or []:
+            cur = conn.execute(
+                "UPDATE working_fact SET status='superseded',fact_chain_summary=?"
+                " WHERE fact_id=? AND status='active' AND user_id=? AND agent_id=?"
+                " AND EXISTS (SELECT 1 FROM fact_tags pr WHERE pr.fact_id=working_fact.fact_id"
+                " AND pr.key='profile' AND pr.value=?)",
+                ("superseded_by:%s %s" % (fact_id, verdict.get("reason") or ""),
+                 old_id, user_id, agent_id, profile))
+            if cur.rowcount:
+                superseded.append(old_id)
+        if verify_recall:
+            # Verify through the real recall path while the activation and any
+            # supersede updates are still uncommitted. A failure rolls the
+            # whole transaction back: the candidate stays isolated and the old
+            # fact remains active.
+            try:
+                recalled = recall_facts(
+                    subject or stmt[:120], user_id=user_id, agent_id=agent_id,
+                    profile=profile, ebm=ebm or None, limit=20, _connection=conn)
+            except Exception:
+                recalled = {"ok": False}
+            hit_ids = [str(row.get("fact_id") or "")
+                       for row in (recalled.get("results") or [])
+                       if isinstance(row, dict)]
+            if recalled.get("ok") is not True or fact_id not in hit_ids:
+                conn.rollback()
+                return {"ok": False, "written": False, "retryable": True,
+                        "reason": "recall_verification_failed",
+                        "workspace_id": bucket, "status": "candidate",
+                        "fact_id": fact_id}
+        conn.commit()
+        out = {"ok": True, "written": True, "fact_id": fact_id,
+               "workspace_id": bucket, "conflict": verdict,
+               "superseded": superseded, "status": "active"}
+        try:
+            from . import monthly_log as _monthly_log
+            _monthly_log.maybe_append_from_write(
+                out, statement=stmt, subject=subject, tags=_tags_of(conn, fact_id))
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(logger_name("store")).debug(
+                "monthly_log hook skipped: %s", exc)
+        return out
+    except Exception:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
 def _conflict_candidates(conn: sqlite3.Connection, statement: str,
                          bucket: str, user_id: str, limit: int = 8) -> List[Dict[str, Any]]:
     """挑出可能要和新事实比对的旧事实。
@@ -770,6 +1108,9 @@ def recall_facts(
     tags: Optional[Dict[str, Any]] = None,
     include_unknown: bool = True,
     user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    profile: Optional[str] = None,
+    shared_legacy: bool = False,
     limit: int = 5,
     kinds: Optional[Sequence[str]] = None,
     scopes: Optional[Sequence[str]] = None,
@@ -799,6 +1140,20 @@ def recall_facts(
                 buckets.append(UNKNOWN_BUCKET)
         where: List[str] = ["f.user_id = ?", "f.status = 'active'"]
         params: List[Any] = [user_id]
+        if shared_legacy:
+            # Trusted team CLI path: legacy manually shared facts remain team
+            # visible, while automatic completed-turn facts stay private to the
+            # exact agent/profile that produced them.
+            where.append(
+                "(NOT EXISTS (SELECT 1 FROM fact_tags trust"
+                " WHERE trust.fact_id=f.fact_id AND trust.key='source_trust'"
+                " AND trust.value='completed_user_turn')"
+                " OR (f.agent_id=? AND EXISTS (SELECT 1 FROM fact_tags own"
+                " WHERE own.fact_id=f.fact_id AND own.key='profile'"
+                " AND own.value=?)))")
+            params.extend([str(agent_id), str(profile)])
+        else:
+            _append_strict_identity(where, params, agent_id=agent_id, profile=profile)
         if buckets:
             where.append("f.workspace_id IN (%s)" % ",".join("?" * len(buckets)))
             params.extend(buckets)
@@ -943,7 +1298,10 @@ def recall_facts(
             # 「李龙飞是谁」永远匹配不上「李龙飞自称菜虚虚飞...」，而语义检索可以。
             # 这也是做规模化最关键的一步：数据越多，字面匹配越不可靠。
             rid_list = _knn_rowids(conn, query, buckets=buckets or None,
-                                   kinds=want_kinds or None, scopes=scopes, user_id=user_id)
+                                   kinds=want_kinds or None, scopes=scopes,
+                                   user_id=user_id,
+                                   agent_id=None if shared_legacy else agent_id,
+                                   profile=None if shared_legacy else profile)
             if rid_list is None:
                 try:
                     from .memory_scale import COARSE_CANDIDATES, coarse_filter
@@ -1278,6 +1636,73 @@ def _persist_fact_embedding(fact_id: str, text: str, vec: Sequence[float], model
     except Exception as exc:  # noqa: BLE001
         conn.rollback()
         logging.getLogger(logger_name("store")).warning("持久化向量失败: %s", exc)
+    finally:
+        conn.close()
+
+
+def ensure_fact_index(fact_id: str, *, user_id: str, agent_id: str,
+                      subject: str, statement: str,
+                      expected_statuses: Sequence[str] = ("active", "candidate")) -> Dict[str, Any]:
+    """Synchronously persist and verify one fact's durable embedding/index.
+
+    The normal write path deliberately warms embeddings in the background, but
+    an automated queue event may only be acknowledged after its index is
+    durable. This helper reuses the canonical embedding and vec tables; it does
+    not create another index or database.
+    """
+    expected_user = str(user_id or "").strip()
+    expected_agent = str(agent_id or "").strip()
+    fact = str(fact_id or "").strip()
+    if not fact or not expected_user or not expected_agent:
+        return {"ok": False, "reason": "identity_required"}
+    full_text = ((subject or "") + " " + (statement or "")).strip()
+    if not full_text:
+        return {"ok": False, "reason": "fact_text_required"}
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT user_id,agent_id,subject,statement,status FROM working_fact"
+            " WHERE fact_id=?", (fact,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return {"ok": False, "reason": "fact_missing"}
+    if (row["user_id"] != expected_user or row["agent_id"] != expected_agent
+            or row["status"] not in tuple(expected_statuses)):
+        return {"ok": False, "reason": "fact_identity_mismatch"}
+    if ((row["subject"] or "") != (subject or "")
+            or (row["statement"] or "") != (statement or "")):
+        return {"ok": False, "reason": "fact_content_mismatch"}
+    vectors = _embed_with_cache([full_text])
+    if not vectors or len(vectors) != 1 or not _valid_embedding(vectors[0]):
+        return {"ok": False, "reason": "embedding_unavailable", "retryable": True}
+    try:
+        from . import vec_index
+        index_available = vec_index.find_extension() is not None
+    except Exception:  # noqa: BLE001
+        index_available = False
+    _persist_fact_embedding(fact, full_text, vectors[0], expected_user_id=expected_user)
+    conn = _connect()
+    try:
+        embedding = conn.execute(
+            "SELECT model,dim,text_hash FROM fact_embeddings WHERE fact_id=?",
+            (fact,)).fetchone()
+        expected_hash = _text_hash(full_text)
+        if (embedding is None or embedding["model"] != DEFAULT_EMBED_MODEL
+                or int(embedding["dim"]) != len(vectors[0])
+                or embedding["text_hash"] != expected_hash):
+            return {"ok": False, "reason": "embedding_not_persisted", "retryable": True}
+        indexed = False
+        if index_available:
+            try:
+                indexed = conn.execute(
+                    "SELECT 1 FROM vec_facts WHERE fact_id=?", (fact,)).fetchone() is not None
+            except sqlite3.Error:
+                indexed = False
+            if not indexed:
+                return {"ok": False, "reason": "vector_index_incomplete", "retryable": True}
+        return {"ok": True, "fact_id": fact, "embedded": True,
+                "indexed": indexed, "index_available": index_available}
     finally:
         conn.close()
 

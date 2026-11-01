@@ -57,8 +57,8 @@ DECISION_PATTERNS = (
 # 注意「吧」不能单独当反问词："定了改 5% 了吧" 是确认，不是提问。
 # 只有明确疑问词或真正的问号结尾才拦。
 NEGATIVE_PATTERNS = (
-    r"[?？]\s*$",
-    r"^(为什么|怎么|如何|是否|能不能|可不可以|有没有)",
+    r"(?:^|[。！!\n])\s*(?:为什么|怎么|如何|是否|能不能|可不可以|有没有)",
+    r"(?:^|[。！!\n])[^。！!\n]{0,120}[?？]\s*(?:$|[。！!\n])",
     r"^(你好|谢谢|收到|好的|OK|ok)\s*[!！。]?$",
     r"(吗|呢)\s*[?？]?$",
 )
@@ -74,16 +74,29 @@ def should_consider(user_message: str, assistant_reply: str = "") -> Dict[str, A
     if len(q) < MIN_QUERY_CHARS:
         return {"consider": False, "reason": "query_too_short", "matched": []}
 
-    for pat in NEGATIVE_PATTERNS:
-        if re.search(pat, q):
-            return {"consider": False, "reason": "question_or_chitchat", "matched": []}
-
+    negative = any(re.search(pat, q) for pat in NEGATIVE_PATTERNS)
     matched: List[str] = []
     for pat in DECISION_PATTERNS:
         for m in re.finditer(pat, q + " " + a):
             matched.append(m.group(0))
     if not matched:
-        return {"consider": False, "reason": "no_decision_signal", "matched": []}
+        return {"consider": False,
+                "reason": "question_or_chitchat" if negative else "no_decision_signal",
+                "matched": []}
+    # A pure question/chitchat must not reach extraction. Mixed turns do: the
+    # candidate review checks the quoted sentence, so "是否改用英文？以后默认
+    # 中文回复。" can preserve the independent decision while rejecting the
+    # question. Additive cue patterns ("以后") do not prove confirmation.
+    pure_negative = (
+        re.search(r"(吗|呢)\s*[?？]?\s*$", q)
+        or re.search(r"^(你好|谢谢|收到|好的|OK|ok)\s*[!！。]?$", q, re.IGNORECASE)
+        or (bool(negative) and not bool(re.search(
+            r"(决定|定了|已定|拍板|采用|改用|改成|换成|确定用|已确认|"
+            r"我喜欢|我习惯|我偏好|我不喜欢|我讨厌|"
+            r"(?:以后|默认|每次|所有).{0,16}(?:回答|回复|文档|沟通))", q)))
+    )
+    if pure_negative:
+        return {"consider": False, "reason": "question_or_chitchat", "matched": []}
     return {"consider": True, "reason": "decision_signal", "matched": matched[:5]}
 
 
@@ -242,6 +255,7 @@ def extract_facts(user_message: str, assistant_reply: str = "",
             # Automatic writes preserve the user's actual words. A model's
             # paraphrase can add an order, threshold or certainty never confirmed.
             for fact, original in zip(facts, data['facts']):
+                fact['user_quote'] = original['user_quote'].strip()
                 fact['statement'] = original['user_quote'].strip()
         return facts
     return parse_facts(raw)
