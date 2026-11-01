@@ -1157,16 +1157,76 @@ def register(ctx) -> None:
         register_command("longtasks", _cmd_longtasks, "本会话的长任务进度（不启动模型回合）")
         register_command("longtask", _cmd_longtask, "一个长任务的当前状态：/longtask <任务号>",
                          args_hint="<任务号>")
+
+        #: Preferred verb, then two stable plugin namespaces.  The host rejects a
+        #: plugin command whose name is already a built-in, so every candidate is
+        #: checked with the host's own resolver before registration.  The choices
+        #: are ordered (not generated): the effective command is stable across
+        #: plugin reloads and host versions that do not add the same verbs.
+        _VERB_CANDIDATES = {
+            "status": ("status", "taskstatus", "task-progress-status"),
+            "pause": ("pause", "taskpause", "task-progress-pause"),
+            "cancel": ("cancel", "taskcancel", "task-progress-cancel"),
+        }
+        installed = {}
+
+        def _host_owns(name: str) -> Optional[bool]:
+            """Return the host's answer, or ``None`` when it cannot be inspected.
+
+            ``PluginContext.register_command`` rejects built-ins by calling this
+            same resolver.  A missing or broken resolver is not evidence that a
+            plain verb is free: the host may still reject it internally.  Keep
+            the unknown state separate so registration can choose a namespaced
+            fallback instead of advertising a command that may not exist.
+            """
+            try:
+                from hermes_cli.commands import resolve_command  # host module
+            except Exception:  # noqa: BLE001 - host module is optional here
+                return None
+            try:
+                return resolve_command(name) is not None
+            except Exception:  # noqa: BLE001 - resolver outage must not break load
+                return None
+
+        def _register_verb(primary, handler, description, args_hint=None):
+            """Register the first host-free candidate and return its exact name.
+
+            If all candidates are built-ins, do not register a colliding command:
+            the host would silently skip it and its usage text would be a lie.
+            """
+            candidates = _VERB_CANDIDATES[primary]
+            plain_owned = _host_owns(candidates[0])
+            # Unknown host state is deliberately treated as unsafe for the plain
+            # verb.  The second candidate is the stable task-prefixed namespace;
+            # third-party collisions there are outside this plugin's remit.
+            start = 1 if plain_owned is not False else 0
+            for name in candidates[start:]:
+                if name != candidates[0] and _host_owns(name) is True:
+                    continue
+                kwargs = {"args_hint": args_hint} if args_hint else {}
+                register_command(name, handler, description.replace("<verb>", name), **kwargs)
+                installed[primary] = name
+                return name
+            logger.warning("task-progress: every alias for %s conflicts with a host command",
+                           primary)
+            return None
+
+        def _verb(primary: str) -> str:
+            return installed.get(primary, primary)
+
         # Prefer-D1 slash verbs (reliable classify path; free-text optional).
         def _cmd_status(raw_args: str = "") -> str:
             task = (raw_args or "").strip().split()[0] if (raw_args or "").strip() else ""
             if not task:
-                return "用法：/status <任务号>（或 /longtask <任务号>）"
+                return "用法：/%s <任务号>（或 /longtask <任务号>）" % _verb("status")
+            session = _session_id()
+            if not session:
+                return "无法确认当前会话，暂时不能查询任务进度。"
             try:
                 from agentcore.barge_in_control import BargeInController
                 ctrl = BargeInController(ledger=ledger, clock=time.time)
                 out = ctrl.status(task, owner="%s:%s" % (
-                    getattr(ctx, "profile_name", "") or "local", _session_id() or "local"))
+                    getattr(ctx, "profile_name", "") or "local", session))
                 return out.get("message") or str(out)
             except Exception as exc:  # noqa: BLE001
                 return "status 短路径不可用：%s" % type(exc).__name__
@@ -1174,27 +1234,24 @@ def register(ctx) -> None:
         def _cmd_pause(raw_args: str = "") -> str:
             task = (raw_args or "").strip().split()[0] if (raw_args or "").strip() else ""
             if not task:
-                return "用法：/pause <任务号>"
-            return (
-                "暂停请求已记录（Prefer-D1）：宿主将 /pause 绑到 "
-                "BargeInController.pause(task_id)。 task=%s" % task
-            )
+                return "用法：/%s <任务号>（当前未接线，不会暂停任务）" % _verb("pause")
+            return ("暂停命令当前未接线：没有执行暂停，任务状态未改变。 task=%s" % task)
 
         def _cmd_cancel(raw_args: str = "") -> str:
             task = (raw_args or "").strip().split()[0] if (raw_args or "").strip() else ""
             if not task:
-                return "用法：/cancel <任务号>"
-            return (
-                "取消请求已记录（Prefer-D1）：宿主将 /cancel 绑到 "
-                "BargeInController.cancel(task_id)。 task=%s" % task
-            )
+                return "用法：/%s <任务号>（当前未接线，不会取消任务）" % _verb("cancel")
+            return ("取消命令当前未接线：没有执行取消，任务状态未改变。 task=%s" % task)
 
-        register_command("status", _cmd_status, "任务进度短路径（不启动模型回合）：/status <任务号>",
-                         args_hint="<任务号>")
-        register_command("pause", _cmd_pause, "暂停任务（waiting_user）：/pause <任务号>",
-                         args_hint="<任务号>")
-        register_command("cancel", _cmd_cancel, "取消任务：/cancel <任务号>",
-                         args_hint="<任务号>")
+        _register_verb("status", _cmd_status,
+                       "任务进度短路径（不启动模型回合）：/<verb> <任务号>",
+                       args_hint="<任务号>")
+        _register_verb("pause", _cmd_pause,
+                       "暂停任务（当前未接线，不会暂停）：/<verb> <任务号>",
+                       args_hint="<任务号>")
+        _register_verb("cancel", _cmd_cancel,
+                       "取消任务（当前未接线，不会取消）：/<verb> <任务号>",
+                       args_hint="<任务号>")
 
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
