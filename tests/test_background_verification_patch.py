@@ -71,7 +71,7 @@ def _stage_original(tmp_path: Path) -> Path:
         )),
         (patcher.REGISTRY_REL, patcher.transform_registry, (
             (patcher.REG_HELPER, ""),
-            (patcher.HANDLE_NEW, patcher.HANDLE_OLD),
+            *((new, old) for old, new in patcher.REGISTRY_HANDLERS),
         )),
     ):
         target = stage / relative
@@ -80,11 +80,27 @@ def _stage_original(tmp_path: Path) -> Path:
         if transformed == installed:
             pristine = installed
             for new, old in replacements:
-                assert pristine.count(new) == 1
-                pristine = pristine.replace(new, old, 1)
+                count = pristine.count(new)
+                if count:
+                    assert count == 1
+                    pristine = pristine.replace(new, old, 1)
+            assert pristine != installed
             assert transform(pristine) == installed
             target.write_text(pristine, encoding="utf-8")
     return stage
+
+
+def test_registry_patch_supports_direct_and_wait_policy_handlers():
+    spec = importlib.util.spec_from_file_location("background_verification_patch_shapes", PATCH)
+    patcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(patcher)
+    for old, new in patcher.REGISTRY_HANDLERS:
+        pristine = "def _handle_process(args, **kw):\n" + old
+        installed = patcher.transform_registry(pristine)
+        assert installed.count(new) == 1
+        assert installed.count(patcher.REG_HELPER) == 1
+        assert patcher.transform_registry(installed) == installed
+        compile(installed, "<process-registry>", "exec")
 
 
 def _stage_patched(tmp_path: Path) -> Path:

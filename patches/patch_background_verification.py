@@ -199,6 +199,10 @@ HANDLE_OLD = '''        handler, redact = _SESSION_ACTIONS[action]
         result = apply_wait_poll_policy(action, session_id, handler(session_id, args))
         return json.dumps(_redact_process_result(result) if redact else result, ensure_ascii=False)
 '''
+HANDLE_OLD_DIRECT = '''        handler, redact = _SESSION_ACTIONS[action]
+        result = handler(session_id, args)
+        return json.dumps(_redact_process_result(result) if redact else result, ensure_ascii=False)
+'''
 HANDLE_NEW = '''        handler, redact = _SESSION_ACTIONS[action]
         from tools.process_registry_wait_policy import apply_wait_poll_policy
         result = apply_wait_poll_policy(action, session_id, handler(session_id, args))
@@ -214,6 +218,24 @@ HANDLE_NEW = '''        handler, redact = _SESSION_ACTIONS[action]
             logger.debug("background verification bridge failed", exc_info=True)
         return json.dumps(result, ensure_ascii=False)
 '''
+HANDLE_NEW_DIRECT = '''        handler, redact = _SESSION_ACTIONS[action]
+        result = handler(session_id, args)
+        if redact:
+            result = _redact_process_result(result)
+        try:
+            _record_completed_verification_evidence(
+                action=action, session_id=session_id, result=result,
+                caller_session_id=str(kw.get("session_id") or ""),
+                caller_task_id=str(kw.get("task_id") or ""),
+            )
+        except Exception:
+            logger.debug("background verification bridge failed", exc_info=True)
+        return json.dumps(result, ensure_ascii=False)
+'''
+REGISTRY_HANDLERS = (
+    (HANDLE_OLD, HANDLE_NEW),
+    (HANDLE_OLD_DIRECT, HANDLE_NEW_DIRECT),
+)
 
 
 def _agent_dir(value: str | None) -> Path:
@@ -257,19 +279,22 @@ def transform_evidence(source: str) -> str:
 def transform_registry(source: str) -> str:
     """Apply helper + dispatcher wiring, or prove both are complete exactly once."""
     helper_count = source.count(REG_HELPER)
-    handle_new_count = source.count(HANDLE_NEW)
-    handle_old_count = source.count(HANDLE_OLD)
-    if (helper_count, handle_new_count) == (1, 1):
-        if handle_old_count:
+    new_counts = tuple(source.count(new) for _, new in REGISTRY_HANDLERS)
+    old_counts = tuple(source.count(old) for old, _ in REGISTRY_HANDLERS)
+    if helper_count == 1 and sum(new_counts) == 1:
+        if sum(old_counts):
             raise ValueError("partial process registry patch: old and new handler coexist")
         return source
-    # The pristine source has exactly one old handler and neither new fragment.
-    if (helper_count, handle_new_count, handle_old_count) == (0, 0, 1) and MARKER not in source:
+    # Hermes releases differ on whether wait/poll results pass through the
+    # optional wait-policy wrapper; preserve either known handler contract.
+    if helper_count == 0 and sum(new_counts) == 0 and sum(old_counts) == 1 and MARKER not in source:
+        variant = old_counts.index(1)
+        old_handler, new_handler = REGISTRY_HANDLERS[variant]
         source = _replace_once(
             source, "def _handle_process(args, **kw):",
             REG_HELPER + "def _handle_process(args, **kw):", "process handler",
         )
-        return _replace_once(source, HANDLE_OLD, HANDLE_NEW, "process session action return")
+        return _replace_once(source, old_handler, new_handler, "process session action return")
     raise ValueError("partial process registry patch: expected helper and handler fragments exactly once")
 
 
