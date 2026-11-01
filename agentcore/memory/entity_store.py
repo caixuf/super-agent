@@ -346,7 +346,7 @@ class EntityStore:
                 ent_name = "格式规范"
                 ent_id = "ent-zero-emoji"
 
-            kw_tokens = self._extract_search_tokens(sec)
+            kw_tokens = self._extract_distinctive_tokens(sec)
             self.add_entity(ent_id, ent_name, [ent_name], "knowledge", sec[:60])
             self.add_rule(rule_id, ent_id, sec[:40], sec, polarity, kw_tokens)
             count += 1
@@ -538,6 +538,64 @@ class EntityStore:
                     })
 
             return results
+
+    # 停用词：中文里高频但零区分度，写进 keywords 只会让无关查询命中。
+    _STOPWORD_BIGRAMS = frozenset({
+        "什么", "做什", "怎么", "么的", "么连", "的怎", "是用", "用来", "来做",
+        "这个", "那个", "我们", "你们", "他们", "可以", "需要", "如果", "因为",
+        "所以", "但是", "不过", "就是", "已经", "还是", "或者", "以及", "并且",
+        "一个", "没有", "不是", "这些", "那些", "自己", "时候", "现在", "之后",
+        "之前", "直接", "必须", "严格", "绝不", "绝对", "禁止", "严禁",
+    })
+
+    def _extract_distinctive_tokens(self, text: str) -> List[str]:
+        """写 keywords 用的严格分词：只留有区分度的锚点词。
+
+        与 `_extract_search_tokens`（查询侧，保留宽松二字切分以利召回）刻意分开：
+        写入侧的 keywords 一旦混入「什么」「做什」这类碎片，会让任意查询都命中该规则，
+        导致无关规则被顶到首位（实测 score 从 19.5 抬到 32）。
+
+        保留三类：
+        1. 英文/数字词（含 IP、版本号、`Xid 79` 这类，区分度最高）；
+        2. known_keywords 白名单里的实体锚点词；
+        3. 中文二字组合，但剔除停用词表里的高频虚词碎片（如「什么」「做什」「用来」）。
+
+        第 3 类仍是二字切分，只是把零区分度的那批滤掉——这是最小改动，
+        既保留中文召回能力，又不让噪音词污染 keywords 列。
+        """
+        if not isinstance(text, str) or not text.strip():
+            return []
+
+        tokens = set()
+
+        # 1. 英文/数字词
+        for w in re.findall(r"[a-zA-Z0-9_\-\.:]+", text):
+            if len(w) >= 2:
+                tokens.add(w.lower())
+                tokens.add(w)
+
+        # 2. 实体锚点词（与查询侧共用同一份白名单，保证两侧口径一致）
+        known = [
+            "灌灌", "3090", "掉卡", "重启", "软重启", "硬重启", "电源", "Nuvo",
+            _TAG_EM, "跑测机", "跳板机", _IP_EM, _IP_GG,
+            "代理", "7899", "7897", "7892", "proxy", "本机", "5060", "开发本",
+            "FIFO", "调度", "队列", "凭据", "token", "secret", "master_key",
+            "emoji", "零emoji", "PASS", "FAIL",
+        ]
+        low = text.lower()
+        for kw in known:
+            if kw.lower() in low:
+                tokens.add(kw)
+
+        # 3. 中文二字组合，但剔除停用词
+        chars = re.findall(r"[\u4e00-\u9fff]", text)
+        bigrams = [chars[i] + chars[i + 1] for i in range(len(chars) - 1)]
+        for bg in bigrams:
+            if bg in self._STOPWORD_BIGRAMS:
+                continue
+            tokens.add(bg)
+
+        return sorted(tokens)
 
     def _extract_search_tokens(self, text: str) -> List[str]:
         if not isinstance(text, str) or not text.strip():
