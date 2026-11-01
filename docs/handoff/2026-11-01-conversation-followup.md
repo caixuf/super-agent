@@ -92,3 +92,42 @@ HERMES_SOURCE=<host> TMPDIR=<short-temp> python3 -m pytest
 ```
 
 No real model calls or user-channel messages were made by these tests.
+
+## Authorized push and activation
+
+Following the user's existing push/deploy request, code commit
+`03c1c2c0824c8305ce390aa02cdf2c3ce671df78` was pushed normally to main.
+Only the seven reviewed release files were committed. Fifteen pre-existing
+unrelated changed/untracked files retained their captured SHA-256 hashes.
+The memory worker's file was excluded from this comparison because it is part
+of this release, not an original user edit.
+
+At activation the gateway reported zero active agents. Exactly two runtime
+files were backed up and atomically replaced after before-hash checks:
+
+- `<host>/agent/agent_runtime_helpers.py`
+- `<profile>/agentcore/patches/patch_chinese_continue_intent.py`
+
+No broad installer, model configuration change, session reset, schema write or
+spool ingestion was performed. One systemd restart activated the update; PID
+changed from 2288706 to 2315779. Service active/running, NRestarts=0, installed
+patch `--check` returns 0, both runtime hashes match the deployment record,
+and the existing local `/health` endpoint returned HTTP 200 / status=ok.
+
+Private backup and hash manifest:
+`<profile>/state-snapshots/20261101-122050-conversation-followup/`.
+Only restore these two files if their current hashes still match the recorded
+deployed hashes; review later changes instead of overwriting drift. Restore
+the backups with recorded modes in an authorized idle window, restart the same
+service once, and repeat health/patch checks. Never reset the host checkout.
+
+These checks do not prove real-model compliance or user-channel delivery. A
+future real task may reveal other wordings missed by this bounded mitigation;
+record that as a new regression rather than asserting all conversation issues
+are fixed. Memory lifecycle integration remains a separate next task.
+
+Post-activation read-back regression against copied installed source:
+`tests/test_chinese_continue_intent_patch.py tests/test_memory_health.py
+tests/test_repo_neutrality.py`: **113 passed in 9.97s**. This includes the
+three observed action tails, real-finalizer replay, continuation caps and
+non-action safety cases. No model or channel requests were made.
