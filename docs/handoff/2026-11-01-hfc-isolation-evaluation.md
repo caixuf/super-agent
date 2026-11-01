@@ -1,7 +1,8 @@
 # HFC v5.0.13 isolation evaluation
 
-Status: source-compatible with bot1's installed Hermes, but not yet activated.
-The current production Gateway is still bot1's existing card path.
+Status: activated on bot1 at 2026-11-01 11:30 UTC after the evaluation below.
+Gateway/sidecar readiness passed; real-client turn and button acceptance remain
+pending. See the cutover runbook for deployment and rollback evidence.
 
 ## Why evaluate
 
