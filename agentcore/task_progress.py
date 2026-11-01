@@ -93,7 +93,20 @@ def snapshot(row: Optional[Dict[str, Any]], *, now: float) -> Dict[str, Any]:
         started = float(started) if started else 0.0
     except (TypeError, ValueError):
         started = 0.0
+    # A finished task's clock stops when it finished. Measuring a terminal task
+    # against ``now`` keeps growing it forever: a six-second command read as two
+    # hours on a card frozen earlier, and the reader had no way to tell that the
+    # number was the age of the *entry*, not the length of the work.
     elapsed = max(0, int(now - started)) if started else 0
+    if started and verdict(data) in ("done", "failed", "cancelled"):
+        finished = data.get("updated_at") or data.get("heartbeat_at")
+        try:
+            finished = float(finished) if finished else 0.0
+        except (TypeError, ValueError):
+            finished = 0.0
+        if finished >= started:
+            elapsed = int(finished - started)
+
     done, total = data.get("progress_done"), data.get("progress_total")
     percent = None
     try:

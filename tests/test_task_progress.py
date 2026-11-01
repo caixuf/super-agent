@@ -227,3 +227,35 @@ def test_a_claimed_finish_awaits_its_evidence_on_the_card():
 
     multi = render_many([snap], title="任务")
     assert "待验收" in multi
+
+
+def test_finished_task_clock_stops_at_finish():
+    """终态任务的耗时不随 wall clock 增长。
+
+    实测事故：一个 6 秒跑完的命令，33 分钟后在冻结的卡片上显示成两小时——
+    因为 elapsed 一直用 now 减 started_at。读者无从分辨那是「活了多久」
+    还是「跑了多久」。真实耗时就在账本里（updated_at - started_at）。
+    """
+    finished = dict(ROW, state="done", verdict=None, updated_at=1006.0)
+    finished.pop("verdict", None)
+    snap = snapshot(finished, now=1000.0 + 7500)     # 两小时后才被重新渲染
+    assert snap["verdict"] == "done"
+    assert snap["elapsed"] == 6, "终态任务应停在真实耗时 6 秒，而不是 7500 秒"
+
+    # 失败与取消同样停表
+    for word in ("failed", "cancelled"):
+        row = dict(ROW, state=word, updated_at=1003.0)
+        assert snapshot(row, now=1000.0 + 9999)["elapsed"] == 3, word
+
+
+def test_running_task_clock_still_advances():
+    """非终态仍然按 wall clock 走，不能把它也冻住。"""
+    running = dict(ROW, updated_at=1010.0)
+    assert snapshot(running, now=1300.0)["elapsed"] == 300
+
+
+def test_terminal_task_without_finish_stamp_falls_back_to_now():
+    """账本没记 updated_at 时不编造耗时，退回原来的算法。"""
+    row = dict(ROW, state="done")
+    row.pop("updated_at", None)
+    assert snapshot(row, now=1100.0)["elapsed"] == 100
