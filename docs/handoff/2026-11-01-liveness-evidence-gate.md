@@ -43,6 +43,7 @@ Codex 那条 memory 线在 13:31 已经收尾（`task_complete`，`b5d17ce` 推�
 | 全量（对齐 origin 后） | 同上 | 2047 passed / 47 skipped，267s，exit 0 |
 | 全量（合入 memory 线） | 同上 | 2106 passed / 47 skipped，279s，exit 0 |
 | 全量（合入上游卡片补丁） | 同上 | 2107 passed / 47 skipped，284s，exit 0 |
+| 全量（最终 HEAD `2b458ea`） | 同上 | 2107 passed / 47 skipped，277s，exit 0 |
 | 全量（<remote-host> 独立复跑） | 同一条命令，另一台机器 | 2091 passed / 73 skipped，1573s，exit 0 |
 
 两台机器的数字不同是正常的，不是漏跑：<remote-host> 的 skip 多 26 条，因为它的 real-host 用例会真跑而
@@ -71,8 +72,8 @@ Codex 那条 memory 线在 13:31 已经收尾（`task_complete`，`b5d17ce` 推�
 
 ## 5. 未完成与风险
 
-- Codex 自报的「偶发失败根因未确认」仍未查清。本轮五次全量（本机四次 + <remote-host> 一次）没有复现，
-  但这不等于它不存在——四次绿不能证明第五次必然绿。
+- Codex 自报的「偶发失败根因未确认」仍未查清。本轮六次全量（本机五次 + <remote-host> 一次）没有复现，
+  但这不等于它不存在——多次绿不能证明下一次必然绿。
 - `unverified` 是**新增状态**，任何按 `state NOT IN ('done','failed','cancelled')` 自行判断"还在跑"的旧读法会把它算作活动任务。
   仓内已全部改成显式排除，仓外如有消费方需自行核对。
 - `proactive_watch.py` 此前只部署在 `~/.config/systemd/user`，仓库里没有单元文件：换机器或重装就静默失去这套观察。
