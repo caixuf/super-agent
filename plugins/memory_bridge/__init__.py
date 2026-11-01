@@ -90,11 +90,18 @@ def _register_progressive_tools(ctx, engine: Path) -> None:
         log.warning("progressive tools unavailable: %s", type(exc).__name__)
         return
 
+    identity = {
+        "user_id": ctx.get_config("user_id", ""),
+        "agent_id": ctx.get_config("agent_id", ""),
+        "profile": ctx.profile_name,
+    }
+
     def memory_search_l1(**kwargs):
         return progressive.search(
             str(kwargs.get("query") or ""),
             limit=int(kwargs.get("limit") or progressive.PREFETCH_L1_LIMIT),
             ebm=kwargs.get("ebm"),
+            **identity,
         )
 
     def memory_timeline_l2(**kwargs):
@@ -106,13 +113,14 @@ def _register_progressive_tools(ctx, engine: Path) -> None:
             query=kwargs.get("query"),
             window=int(kwargs.get("window") or progressive.PREFETCH_L1_LIMIT),
             ebm=kwargs.get("ebm"),
+            **identity,
         )
 
     def memory_get_observations_l3(**kwargs):
         ids = kwargs.get("ids") or []
         if isinstance(ids, str):
             ids = [x.strip() for x in ids.split(",") if x.strip()]
-        return progressive.get_observations(ids)
+        return progressive.get_observations(ids, **identity)
 
     for name, fn, desc in (
         ("memory_search_l1", memory_search_l1,

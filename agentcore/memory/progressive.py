@@ -88,6 +88,8 @@ def search(
     *,
     limit: int = PREFETCH_L1_LIMIT,
     user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    profile: Optional[str] = None,
     ebm: Optional[str] = None,
     kinds: Optional[Sequence[str]] = None,
     scopes: Optional[Sequence[str]] = None,
@@ -121,6 +123,8 @@ def search(
         recalled = memory_store.recall_facts(
             q,
             user_id=user_id,
+            agent_id=agent_id,
+            profile=profile,
             ebm=ebm,
             kinds=kinds,
             scopes=scopes,
@@ -185,6 +189,8 @@ def timeline(
     query: Optional[str] = None,
     window: Optional[int] = None,
     user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    profile: Optional[str] = None,
     ebm: Optional[str] = None,
     kinds: Optional[Sequence[str]] = None,
     scopes: Optional[Sequence[str]] = None,
@@ -202,7 +208,8 @@ def timeline(
         if len(id_list) > cap:
             id_list = id_list[:cap]
             trimmed = True
-        fetched = memory_store.get_facts_by_ids(id_list, user_id=user_id)
+        fetched = memory_store.get_facts_by_ids(
+            id_list, user_id=user_id, agent_id=agent_id, profile=profile)
         rows = list(fetched.get("results") or [])
     else:
         q = (query or "").strip()
@@ -225,6 +232,8 @@ def timeline(
             recalled = memory_store.recall_facts(
                 q,
                 user_id=user_id,
+                agent_id=agent_id,
+                profile=profile,
                 ebm=ebm,
                 kinds=kinds,
                 scopes=scopes,
@@ -291,6 +300,8 @@ def get_observations(
     ids: Sequence[str],
     *,
     user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    profile: Optional[str] = None,
     hard_cap: int = GET_OBSERVATIONS_CAP,
     raise_on_cap: bool = False,
 ) -> Dict[str, Any]:
@@ -316,7 +327,8 @@ def get_observations(
             "reason": "empty_ids",
         }
 
-    fetched = memory_store.get_facts_by_ids(id_list, user_id=user_id)
+    fetched = memory_store.get_facts_by_ids(
+        id_list, user_id=user_id, agent_id=agent_id, profile=profile)
     by_id = {str(r.get("fact_id")): r for r in (fetched.get("results") or []) if isinstance(r, dict)}
     results: List[Dict[str, Any]] = []
     missing: List[str] = []

@@ -18,7 +18,10 @@ def main(argv=None):
     try:
         configure_memory_from_binding_file(a.bindings,a.profile)
         from agentcore.memory import memory_store
-        result=memory_store.recall_facts(a.query,limit=6)
+        result=memory_store.recall_facts(
+            a.query, user_id=memory_store.get_config().default_user,
+            agent_id=memory_store.get_config().default_agent,
+            profile=a.profile, shared_legacy=True, limit=6)
         if result.get("ok") is not True:
             print(json.dumps({"ok":False,"error":"memory_recall_unavailable"})); return 2
         rows=[]
