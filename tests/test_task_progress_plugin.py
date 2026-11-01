@@ -1510,3 +1510,45 @@ def test_unknown_primary_still_checks_known_alias_collisions(tmp_path, monkeypat
     assert not {'status', 'pause', 'cancel', 'taskstatus', 'taskpause', 'taskcancel'} & set(ctx.commands)
     for callback in ctx.unload_callbacks:
         callback()
+
+
+def test_terminal_hook_settles_card_when_turn_id_shape_differs(tmp_path, monkeypatch):
+    """终态钩子的 turn_id 与开场时形状不同，卡片仍必须收尾。
+
+    实测事故：开场钩子收到 ``<sid>:<sid>:<tid>``，终态钩子收到干净的 ``<tid>``。
+    ``_entry_key`` 算出的两个 key 不同，`_set_turn` 什么都不改，前台状态停在
+    running；聚合因此永远拿不到终态，卡片一直显示「运行中」，而账本里任务
+    早已 done。用户看到的正是「任务状态已完成，卡片还转」。
+    """
+    monkeypatch.setattr(plugin, "_capture_session_key", lambda: "route-a")
+    posted, edited = [], []
+
+    def post(ctx, route, text, *, allow_bound_context=False):
+        posted.append((route, text))
+        return {"ok": True, "message_id": "msg-" + route}
+
+    def edit(ctx, route, message_id, text):
+        edited.append((route, message_id, text))
+        return {"ok": True, "edited": True, "message_id": message_id}
+
+    monkeypatch.setattr(plugin, "_post_to_session", post)
+    monkeypatch.setattr(plugin, "_edit_to_session", edit)
+    ctx = Ctx(tmp_path, _settings(tmp_path, foreground_min_seconds=0, poll_seconds=2))
+    plugin.register(ctx)
+
+    sid = "20261101_134537_9fbe7b28"
+    # 开卡：宿主给的是拼接过的 turn_id
+    ctx.hooks["pre_llm_call"](session_id=sid, turn_id=sid + ":" + sid + ":1905e47a")
+    assert _wait(lambda: len(posted) == 1), posted
+    assert "进行中" in posted[0][1] or "已接收" in posted[0][1]
+
+    # 收尾：宿主换成干净 turn_id —— 这正是漏掉的路径
+    ctx.hooks["on_session_end"](session_id=sid, turn_id="1905e47a", completed=True)
+
+    # 宿主在回合结束后仍会再跑一次 poll（poll_seconds=2），终态帧在那一轮发出。
+    assert _wait(lambda: edited, timeout=6.0), "终态钩子必须落地一次编辑，不能因为 key 不匹配就静默丢弃"
+    last = edited[-1][2]
+    assert "已完成" in last, last
+    assert "进行中" not in last, "卡片不得停留在进行中"
+    for callback in ctx.unload_callbacks:
+        callback()

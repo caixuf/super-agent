@@ -240,7 +240,8 @@ class _Entry:
     """One editable entry shared by a foreground turn and its background tasks."""
 
     __slots__ = ("key", "message", "writer", "tasks", "foreground", "session_key",
-                 "owner", "snap", "last_emit_at", "final", "frozen", "edit_state")
+                 "owner", "snap", "last_emit_at", "final", "frozen", "edit_state",
+                 "terminal_pending")
 
     def __init__(self, key: str, message: Any, tasks, *, foreground=None, session_key="", owner=""):
         self.key = key
@@ -255,6 +256,8 @@ class _Entry:
         self.final = False
         self.frozen = False
         self.edit_state = "confirmed"
+        #: Set by the terminal lifecycle hook so the next poll bypasses the throttle.
+        self.terminal_pending = False
 
 
 def _settings(ctx) -> dict:
@@ -481,6 +484,8 @@ def register(ctx) -> None:
     card_state = modules["task_card"].CardState
     state = getattr(ctx, "state", None)
     entries: Dict[str, _Entry] = {}
+    #: Terminal-publish workers, joined on unload so none outlives the plugin.
+    _terminal_threads: list = []
     lock = threading.Lock()
     stop = threading.Event()
     wake = threading.Event()
@@ -536,6 +541,86 @@ def register(ctx) -> None:
         record["edit_state"] = edit_state
         members[key] = record
         return _state_set("entries", members)
+
+    def _rehydrate_entry(key: str, state_word: str) -> bool:
+        """Rebuild an in-memory entry from its durable record, for a terminal frame.
+
+        Returns True when the entry now exists and can be edited. A record without a
+        message id cannot be edited, so it is not treated as success — announcing a
+        finish we cannot render would be the same lie in a different place.
+        """
+        record = dict((_state_get("entries", {}) or {}).get(key) or {})
+        message_id = str(record.get("message_id") or "")
+        if not message_id:
+            return False
+        session_key = str(record.get("session_key") or "")
+        owner = str(record.get("owner") or "")
+        tasks = [t for t in (record.get("tasks") or []) if isinstance(t, str)]
+        foreground = record.get("foreground")
+        if not isinstance(foreground, dict):
+            foreground = {}
+        foreground = dict(foreground)
+        foreground.update(state=state_word, phase="本轮已完成" if state_word == "done" else "状态待确认",
+                          detail="")
+        try:
+            entry = _Entry(key, _RouteMessage(ctx, session_key, message_id), tasks,
+                           foreground=foreground, session_key=session_key, owner=owner)
+        except Exception:
+            logger.debug("task-progress: cannot rehydrate %s", key, exc_info=True)
+            return False
+        with lock:
+            existing = entries.get(key)
+            if existing is not None:
+                return True
+            entries[key] = entry
+        return True
+
+    def _publish_terminal_now(key: str, state_word: str) -> None:
+        """Publish the terminal frame on a short-lived thread.
+
+        Two constraints meet here. The hook must return immediately — it runs on the
+        host's turn-teardown path, and a slow transport there stalls the turn (its own
+        test pins that). And the frame must not wait for the next poll — the loop may
+        be mid-sleep, and a frozen/throttled entry would never pick it up, leaving the
+        card parked on 进行中 while the ledger says done. A one-shot thread satisfies
+        both: the hook returns at once, and the edit is attempted now.
+        """
+        try:
+            entry = entries.get(key)
+            if entry is None or entry.final:
+                return
+        except Exception:
+            return
+
+        def _run() -> None:
+            try:
+                with lock:
+                    entry = entries.get(key)
+                    if entry is None or entry.final:
+                        return
+                now = time.time()
+                snaps = _snaps(entry)
+                head, foreground = _head(entry, snaps, now)
+                text = _render_entry(entry, snaps, foreground)
+                result = _publish(entry, text, final=True)
+                if not result.get("ok"):
+                    entry.final = False
+                    logger.debug("task-progress: terminal publish deferred for %s: %s",
+                                 key, result.get("error"))
+                    return
+                entry.snap = head
+                entry.last_emit_at = now
+                _close_card(store, entry, card_state, progress)
+            except Exception:
+                logger.debug("task-progress: terminal publish failed for %s", key, exc_info=True)
+
+        with lock:
+            entry.terminal_pending = True
+        worker = threading.Thread(target=_run, name="task-progress-terminal", daemon=True)
+        with lock:
+            _terminal_threads.append(worker)
+        worker.start()
+        wake.set()
 
     def _publish(entry: _Entry, text: str, *, final: bool) -> dict:
         if entry.final:
@@ -849,8 +934,11 @@ def register(ctx) -> None:
                 continue
             snaps = _snaps(entry)
             head, foreground = _head(entry, snaps, now)
-            if not progress.should_emit(entry.snap, head, last_emit_at=entry.last_emit_at,
-                                        now=now, min_interval=float(settings["min_interval"])):
+            # A terminal frame requested by the lifecycle hook must not be dropped by
+            # the throttle: waiting out min_interval here is what left cards spinning.
+            forced = entry.terminal_pending
+            if not forced and not progress.should_emit(entry.snap, head, last_emit_at=entry.last_emit_at,
+                                                       now=now, min_interval=float(settings["min_interval"])):
                 continue
             text = _render_entry(entry, snaps, foreground)
             final = bool(head.get("terminal"))
@@ -883,6 +971,7 @@ def register(ctx) -> None:
                 continue
             entry.snap = head
             entry.last_emit_at = now
+            entry.terminal_pending = False
             if final:
                 _close_card(store, entry, card_state, progress)
 
@@ -1068,6 +1157,32 @@ def register(ctx) -> None:
         if not session_id or not turn_id:
             return None
         key = _entry_key(turn_id, session_id, "")
+        # The host does not pass the same ``turn_id`` shape to every hook: the turn
+        # that opened the card can key as "<sid>:<sid>:<tid>" while the terminal hook
+        # arrives as "<tid>". Keying only by this hook's own turn_id then matches
+        # nothing, the foreground state never leaves "running", and the card sits on
+        # 运行中 forever while the ledger says done. Resolve the entry from whichever
+        # source still knows about it: live memory first, then the durable record —
+        # the card was posted, so the record exists even when no in-memory entry does.
+        if key not in entries:
+            with lock:
+                candidates = list(entries.keys())
+            if not candidates:
+                candidates = [k for k in (_state_get("entries", {}) or {})
+                              if isinstance(k, str)]
+            matched = [k for k in candidates
+                       if isinstance(k, str) and session_id in k
+                       and k.rstrip().endswith(turn_id)]
+            if not matched:
+                matched = [k for k in candidates
+                           if isinstance(k, str) and session_id in k]
+            if matched:
+                key = sorted(matched)[-1]
+                logger.info(
+                    "task-progress: terminal hook turn_id %r did not key an entry; "
+                    "settling %s for session %s",
+                    str(turn_id)[:40], key[-40:], str(session_id)[:40],
+                )
         if completed is True and failed is not True and interrupted is not True:
             state_word, phase, detail = "done", "本轮已完成", ""
         elif failed is True:
@@ -1084,10 +1199,19 @@ def register(ctx) -> None:
                 pending.update(state=state_word, phase=phase, detail=detail,
                                terminal_at=time.time())
                 turns[key] = pending
+        if not existed:
+            # The card is posted and the durable record names its message id, but no
+            # in-memory entry survived (a restart, or the foreground entry was never
+            # materialized). Rebuild just enough of it to write the terminal frame —
+            # otherwise the card is unreachable and stays on its last running frame.
+            existed = _rehydrate_entry(key, state_word)
+            if existed:
+                pending = None
         if not existed and pending is None:
             return None
         if existed:
             _set_turn(key, phase=phase, detail=detail, state=state_word)
+            _publish_terminal_now(key, state_word)
         with lock:
             if not is_opening:
                 turns.pop(key, None)
@@ -1280,6 +1404,13 @@ def register(ctx) -> None:
         stop.set()
         wake.set()
         thread.join(timeout=5.0)
+        # Terminal-publish threads are short-lived but must not outlive the plugin:
+        # a stray edit landing after unload writes to a card this instance no longer
+        # owns, and in tests it lands in the next case's fake transport.
+        with lock:
+            stragglers = [t for t in _terminal_threads if t.is_alive()]
+        for worker in stragglers:
+            worker.join(timeout=2.0)
 
     on_unload = getattr(ctx, "on_unload", None)
     if callable(on_unload):
