@@ -9,12 +9,13 @@
 #   5. **不覆盖现场业务身份**：本仓只有通用骨架，生效身份 = 骨架 + 业务叠加层。
 #      默认**不动** $HERMES_HOME/SOUL.md（那上面有业务叠加层），只在显式开关下合成。
 #   6. **不动任何源**：只从本仓读、往部署位写；业务仓只读引用。
-#   7. **启用插件只写启用记录**：优先官方 `hermes plugins enable`；目标还不能被
+#   7. **插件配置保持保守**：优先官方 `hermes plugins enable`；目标还不能被
 #      官方命令寻址时（全新 profile）改用 install/enable_plugins.py 的最小文本合并。
 #      回退合并只增删 `plugins.enabled` / `plugins.disabled` 两个列表的行，不整文件重写
 #      config.yaml（注释/顺序/密钥/entries 逐字节保留）。
-#      `plugins.entries.*.settings`（engine_root / queue_root / allowed_roots）仍属部署配置，
-#      本脚本不猜值。官方命令可能请求正在运行的网关重载插件（不重启进程）；要严格只落文件
+#      安全默认设置仅填缺失的插件 entry；已有 entry / 显式关闭逐字节保留。
+#      queue_root / allowed_roots / 凭据等仍属部署配置，本脚本不猜值。
+#      官方命令可能请求正在运行的网关重载插件（不重启进程）；要严格只落文件
 #      设 PLUGIN_ENABLE_MODE=merge。
 #
 # 用法
@@ -45,6 +46,7 @@ DO_PLUGINS=1
 DO_SKILLS=1
 DO_PATCH=1
 DO_BASELINE=0
+REQUIRE_READY=0
 BUSINESS_SKILLS_SRC="${BUSINESS_SKILLS_SRC:-}"
 INSTALL_BUSINESS_SKILLS="${INSTALL_BUSINESS_SKILLS:-0}"
 # auto = 官方入口可用就用，否则最小合并；cli = 只用官方；merge = 只改文件（不碰运行中的网关）
@@ -78,6 +80,7 @@ install.sh — 智能体本体安装器（幂等 / 支持 --dry-run）
   --skip-plugins            不装按 profile 的插件副本，也不写 plugins.enabled / plugins.disabled
   --skip-skills             不装技能
   --skip-patch              不打消息平台适配补丁
+  --require-ready           安装后执行只读就绪门禁；配置或运行时证据不完整时非零退出
   --apply-baseline          写入**通用能力基线**（轮次/派工上限/无人值守档）。默认**不动**配置；
                             只走官方 `hermes config set`，逐条打印改动与复原口径。
                             写保护开关（protected_instruction_files）不在此步 —— 另行人工决定并留痕
@@ -93,7 +96,9 @@ install.sh — 智能体本体安装器（幂等 / 支持 --dry-run）
   6. plugins/*/               -> <HERMES_HOME>/plugins/<连字符名>/（按 profile 的插件副本；
                                  目录名里的下划线转连字符，跳过 __pycache__ / *.pyc）
      落位后把带 plugin.yaml 的插件名写进该 profile config 的 plugins.enabled，
-     并把同名项从 plugins.disabled 移出（幂等；不动 plugins.entries / 其它键）。
+     保留 plugins.disabled / entry.enabled:false / settings.enabled:false 的显式关闭。
+     为缺失 entry 补图文建议、任务状态、长任务守卫、同事目录和团队登记的安全默认设置；
+     已有 entry 不覆盖。登记不等于创建同事实例，Gateway 派工不自动开启。
      plugins/localvec 没有 manifest，属 memory.provider，不在此列表。
   7. skills/**/SKILL.md       -> <HERMES_HOME>/skills/<name>/    （通用技能；examples/ 是范本，不安装）
   8. 对 Hermes 安装树打补丁（可 --skip-patch）：
@@ -132,6 +137,7 @@ while [ $# -gt 0 ]; do
     --skip-skills)         DO_SKILLS=0 ;;
     --skip-patch)          DO_PATCH=0 ;;
     --apply-baseline)      DO_BASELINE=1 ;;
+    --require-ready)       REQUIRE_READY=1 ;;
     -h|--help)             usage; exit 0 ;;
     *) fail "未知参数：$1"; usage; exit 1 ;;
   esac
@@ -217,6 +223,7 @@ install_skill_tree() {  # 幂等装一棵技能树（递归找 SKILL.md，按目
 # 插件启用：优先官方入口，否则最小幂等合并（只动 plugins.enabled / disabled）
 # ---------------------------------------------------------------------------- #
 ENABLER="$REPO_ROOT/install/enable_plugins.py"
+DEFAULTS="$REPO_ROOT/install/plugin_defaults.py"
 PLUGIN_ENABLE_NAMES=()
 PLUGIN_ENABLE_ROOT=""
 PLUGIN_ENABLE_PROFILE=""
@@ -307,9 +314,9 @@ merge_plugin_enable() {  # 最小幂等合并；无变更时不写盘
   [ "$DRY_RUN" = "1" ] && args+=(--dry-run)
   out="$(python3 "$ENABLER" "${args[@]}")" || rc=$?
   if [ "$rc" = "2" ]; then
-    warn "配置结构超出最小合并的安全范围（未改动）：$TARGET_HOME/config.yaml"
+    fail "配置结构超出最小合并的安全范围（未改动）：$TARGET_HOME/config.yaml"
     warn "  人工执行：hermes${PLUGIN_ENABLE_PROFILE:+ --profile $PLUGIN_ENABLE_PROFILE} plugins enable <name>"
-    return 0
+    return 1
   elif [ "$rc" != "0" ]; then
     fail "写插件启用记录失败（enable_plugins.py 退出码 $rc）"
     return 1
@@ -348,6 +355,9 @@ enable_profile_plugins() {  # 先只读检查：全在就不再触发 CLI / 写�
   if [ "$rc" = "2" ]; then
     merge_plugin_enable
     return $?
+  elif [ "$rc" != "0" ]; then
+    fail "无法检查插件启用记录（退出码 $rc）"
+    return 1
   fi
   while IFS=$'\t' read -r status payload; do
     case "$status" in
@@ -372,7 +382,12 @@ enable_profile_plugins() {  # 先只读检查：全在就不再触发 CLI / 写�
   fi
   if plugin_enable_official_target && official_plugin_enable "${missing[@]}"; then
     # 官方命令写的是不是这个 profile，要复核；仍有缺口才回退合并。
+    rc=0
     out="$(python3 "$ENABLER" "${cargs[@]}")" || rc=$?
+    if [ "$rc" != "0" ]; then
+      fail "官方入口后无法复核插件配置（退出码 $rc）"
+      return 1
+    fi
     still=()
     while IFS=$'\t' read -r status payload; do
       case "$status" in
@@ -380,17 +395,48 @@ enable_profile_plugins() {  # 先只读检查：全在就不再触发 CLI / 写�
       esac
     done <<< "$out"
     if [ "${#still[@]}" -gt 0 ]; then
+      if [ "$PLUGIN_ENABLE_MODE" = "cli" ]; then
+        fail "PLUGIN_ENABLE_MODE=cli：官方入口后仍有未启用项，不回退写文件"
+        return 1
+      fi
       warn "官方入口后仍有未启用项：${still[*]} —— 回退最小合并"
       merge_plugin_enable || return $?
     fi
     return 0
   fi
   if [ "$PLUGIN_ENABLE_MODE" = "cli" ]; then
-    warn "PLUGIN_ENABLE_MODE=cli：官方入口不可用，未写启用记录"
+    fail "PLUGIN_ENABLE_MODE=cli：官方入口不可用，未写启用记录"
     warn "  人工执行：hermes --profile <profile> plugins enable <name>"
-    return 0
+    return 1
   fi
   merge_plugin_enable
+}
+
+filter_opted_out_plugins() {
+  local -a args=(--config "$TARGET_HOME/config.yaml")
+  local name out rc=0
+  for name in "${PLUGIN_ENABLE_NAMES[@]}"; do args+=(--eligible-name "$name"); done
+  out="$(python3 "$DEFAULTS" "${args[@]}")" || rc=$?
+  if [ "$rc" != "0" ]; then
+    fail "无法检查插件显式关闭项（plugin_defaults.py 退出码 $rc）"
+    return 1
+  fi
+  PLUGIN_ENABLE_NAMES=()
+  while IFS= read -r name; do
+    [ -n "$name" ] && PLUGIN_ENABLE_NAMES+=("$name")
+  done <<< "$out"
+}
+
+install_plugin_defaults() {
+  local -a args=(--config "$TARGET_HOME/config.yaml" --home "$TARGET_HOME"
+                 --engine-root "$REPO_ROOT" --profile "$TARGET_PROFILE")
+  local rc=0
+  [ "$DRY_RUN" = "1" ] && args+=(--dry-run)
+  python3 "$DEFAULTS" "${args[@]}" || rc=$?
+  if [ "$rc" != "0" ]; then
+    fail "安全插件默认设置失败（plugin_defaults.py 退出码 $rc）"
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------------------- #
@@ -412,6 +458,10 @@ fi
 DEPLOY_DIR="${DEPLOY_DIR_ARG:-$TARGET_HOME/agentcore}"
 SOUL_DEST="$TARGET_HOME/SOUL.md"
 SKILLS_DEST="$TARGET_HOME/skills"
+TARGET_PROFILE="${PROFILE:-default}"
+if [ -z "$PROFILE" ] && [ "$(basename "$(dirname "$TARGET_HOME")")" = "profiles" ]; then
+  TARGET_PROFILE="$(basename "$TARGET_HOME")"
+fi
 HERMES_AGENT_DIR="${HERMES_AGENT_DIR:-$HOME/.hermes/hermes-agent}"
 
 log "  目标 home       = $TARGET_HOME"
@@ -437,7 +487,7 @@ fi
 
 step "② 检查本仓源资产"
 for need in identity/SOUL.generic.md identity/agents toolsets patches plugins \
-            install/enable_plugins.py \
+            install/enable_plugins.py install/plugin_defaults.py \
             patches/feishu_card_replies.patch patches/apply_feishu_card_replies.py \
             patches/patch_card_finalize.py patches/patch_card_markdown_native.py \
             patches/patch_feishu_update_retry.py skills; do
@@ -542,17 +592,19 @@ if [ "$DO_PLUGINS" = "1" ]; then
   step "⑧ 插件（按 profile）-> $TARGET_HOME/plugins"
   install_plugin_tree "$REPO_ROOT/plugins" "$TARGET_HOME/plugins"
   mapfile -t PLUGIN_ENABLE_NAMES < <(plugin_enable_names)
+  filter_opted_out_plugins
   if [ "${#PLUGIN_ENABLE_NAMES[@]}" -eq 0 ]; then
     warn "没有带 plugin.yaml 的插件可启用（localvec 没有 manifest，属 memory.provider，另行配置）"
   else
     enable_profile_plugins
   fi
+  install_plugin_defaults
   mapfile -t PLUGIN_SETTINGS_GATED < <(plugin_settings_gated_names)
   if [ "${#PLUGIN_SETTINGS_GATED[@]}" -gt 0 ]; then
     log "  以下插件以 settings.enabled 为总开关：只在 plugins.enabled 里**不算生效**，还要"
-    log "  写 plugins.entries.<name>.settings.enabled: true（并按模板补 engine_root/queue_root/roles 等）："
+    log "  检查 plugins.entries.<name>.settings；缺失项已补安全默认，其余部署值须按模板配置："
     for name in "${PLUGIN_SETTINGS_GATED[@]}"; do
-      log "    - $name    → plugins.entries.$name.settings   （模板见 plugins/*/README.md）"
+    log "    - $name    → plugins.entries.$name.settings   （模板见 plugins/$name/README.md）"
     done
     log "  验收口径：**工具面里出现该工具**才算生效；配置文件里那一行不是证据："
     log "    hermes ${PROFILE:+-p $PROFILE }tools list   |   hermes ${PROFILE:+-p $PROFILE }plugins list"
@@ -701,8 +753,8 @@ cat <<EOF
   # 5) 插件验收与部署侧设置（本脚本不猜业务路径）
   #    - 验收口径：**工具面里出现该工具**才算生效；配置文件里那一行不算证据
   #    - 官方改法：hermes ${PROFILE:+-p $PROFILE }plugins enable <name>
-  #    - plugins.entries.<name>.settings（engine_root / queue_root / allowed_roots 等）
-  #      仍是部署配置，按 plugins/<name>/README.md 的模板补齐；本脚本只写 enabled/disabled
+  #    - 缺失的安全默认项会写入 plugins.entries；已有 entry 和显式关闭保留
+  #    - queue_root / allowed_roots / 凭据等仍是部署配置，按 plugins/<name>/README.md 补齐
   #    - localvec 不是 plugins.enabled 项：配 memory.provider: localvec 及其 recall_cmd
 
   # 6) 升级后首查：后台完成回执有没有真的回到会话（只读，逐个 durable 队列根跑）
@@ -714,6 +766,18 @@ cat <<EOF
   #    - 投递健康：积压连续 60s 未清会在共享 ops-alert outbox 入一条 fault 事件；
   #      宿主需跑 agentcore.ops_alert_daemon/发送器才会真正送达（否则只堆在库里 + 一条 WARNING）
 EOF
+
+if [ "$REQUIRE_READY" = "1" ]; then
+  if [ "$DRY_RUN" = "1" ]; then
+    log "  [plan] 安装后就绪门禁：python3 tools/redeploy_check.py --readiness-profile $TARGET_HOME"
+  else
+    step "⑬ 只读配置与运行时就绪门禁"
+    python3 "$REPO_ROOT/tools/redeploy_check.py" --readiness-profile "$TARGET_HOME" || {
+      fail "就绪证据不完整；安装资产已保留，但门禁未通过"
+      exit 1
+    }
+  fi
+fi
 
 step "完成"
 if [ "$DRY_RUN" = "1" ]; then

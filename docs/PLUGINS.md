@@ -16,12 +16,12 @@
 
 - **不要手编** `plugins:` 或 `mcp_servers:` —— 与现场配置同源，一个缩进就能把网关弄坏。
   用官方的连接 / 安装入口去装、去授权：`hermes plugins enable <name>`。
-- 唯一例外是**安装器的启用记录最小合并**（`install/install.sh` 第 ⑧ 步；全新 profile 自动回退，
+- 唯一例外是**安装器的启用记录与缺失安全默认项**（`install/install.sh` 第 ⑧ 步；全新 profile 自动回退，
   也可 `PLUGIN_ENABLE_MODE=merge` 强制）：它只增删 `plugins.enabled` / `plugins.disabled`
-  两个列表的行，其它键、注释、内联密钥逐字节不动；结构超出它能证明的范围（flow mapping、
-  重复 `plugins:`、非列表值等）会**拒绝并打印官方命令**，绝不猜着改。
-  `plugins.entries.*.settings`（engine_root / queue_root / allowed_roots…）一律由部署配置提供，
-  安装器不写、不改。
+  两个列表的行；另一个小型文本合并器只为**缺失**的 `plugins.entries` 写安全默认项。
+  已有 entry、关闭项、其它键、注释与内联密钥保留；结构超出可证明范围会拒绝写入。
+  默认值只包括本仓引擎路径、profile 本地账本/登记库路径和只读分析岗位；`queue_root`、
+  `allowed_roots`、凭据等部署值仍由部署方提供。
 - **启用后要重启网关（或由官方 `hermes plugins enable` 触发的插件热重载）才生效**。判定
   「是否真生效」的唯一可靠方法是**看工具面里出现了该工具**，
   不是看配置文件里有没有那一行（写了但没起效是最常见的假绿）。
@@ -42,7 +42,8 @@
   ——「派工时必须把角色契约全文内联进 context，子 agent 不知道父会话的任何事」。
 - **做**：`install/install.sh` 把 `plugins/<snake_case>/` 以连字符名落位到
   `<profile>/plugins/`，并把带 `plugin.yaml` 的插件名写进该 profile config 的
-  `plugins.enabled`（同名项从 `plugins.disabled` 移出）。`--skip-plugins` 两步都跳过。
+  `plugins.enabled`，但保留 `plugins.disabled`、`entry.enabled: false` 与
+  `settings.enabled: false` 的显式关闭；只给缺失 entry 补安全默认值。`--skip-plugins` 两步都跳过。
   入口优先级：目标 profile 已能被官方命令寻址 → `hermes plugins enable <name>`；
   全新 profile / 无 CLI → 最小文本合并（见第 2 节）。
 - **不做**：任何业务工具名、业务 MCP 服务本体、业务插件、业务凭据键名 ——
@@ -60,7 +61,8 @@
 `colleague-catalog` · `colleague-team` · `durable-dispatch` · `illustrated-delivery` ·
 `local-model-grounding` · `markdown-delivery` · `memory-bridge` · `task-status` · `task-progress`
 
-`install/install.sh` 的 ⑧ 步会把这份名单打出来（只写 `plugins.enabled`/`disabled`，不猜业务参数）。
+`install/install.sh` 的 ⑧ 步会把这份名单打出来，并仅为缺失 entry 设置安全默认值；
+`--require-ready` 可追加只读门禁，但静态配置齐全也不代表运行时工具注册或端到端投递已验证。
 
 ## 6. 同事类插件的当前就绪度（两件，别混）
 

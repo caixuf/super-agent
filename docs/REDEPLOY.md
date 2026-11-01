@@ -33,7 +33,7 @@ bash install/install.sh --profile <name> --compose-soul <业务叠加层.md>
 | ③ 工具集 | `toolsets/<name>/` → 部署位 |
 | ⑤b 渲染引擎 | `tools/`（含 `mermaid.min.js`）→ 部署位 |
 | ⑥ 运行时基线 | `runtime/` 骨架（占位符，不是现场配置） |
-| ⑦⑧ 插件 | `plugins/<下划线名>/` → `<profile>/plugins/<连字符名>/`，并把带 `plugin.yaml` 的插件名写进 `<profile>/config.yaml` 的 `plugins.enabled` |
+| ⑦⑧ 插件 | 安装副本与启用记录；保留显式关闭项，并只为缺失 entry 补安全默认值 |
 | ⑩ 宿主补丁 | 先 `apply_feishu_card_replies.py`，再 `patch_card_finalize.py`（顺序不可换） |
 
 ## 3. 插件从「装了」到「工具面里看得见」
@@ -41,8 +41,8 @@ bash install/install.sh --profile <name> --compose-soul <业务叠加层.md>
 这是最容易假绿的一步。三件事缺一不可：
 
 1. **启用记录**：安装器已写 `plugins.enabled`；有官方 CLI 时优先 `hermes --profile <p> plugins enable <name>`。
-2. **`plugins.entries.<name>.settings`**：按各插件 `README.md` 的模板补（`engine_root`、`queue_root`、
-   `outbox_root` 等部署路径），安装器不猜这些值。
+2. **`plugins.entries.<name>.settings`**：安装器只补缺失的安全默认项；`queue_root`、
+   `allowed_roots`、`outbox_root`、凭据等部署值仍按各插件 `README.md` 配置。
 3. **工具面清单**：`platform_toolsets.<platform>` 若是一份**显式保存的清单**，新插件的工具集必须
    显式加进去，否则「插件已加载、工具不出现」：
 
@@ -55,6 +55,9 @@ bash install/install.sh --profile <name> --compose-soul <业务叠加层.md>
 
 验收只看一件事：**工具面里出现那个工具**（一次真实调用或 `hermes tools list` 里能看到）。
 配置文件里的那一行不算证据。
+
+`bash install/install.sh --require-ready` 会生成只读静态配置报告，并因运行时注册与端到端投递
+尚未有独立证据而失败关闭。该选项适合把“未证实”挡在验收门外，不代表安装器能启动或验证生产服务。
 
 ## 4. 只住在本机、不进仓的东西（必须逐项给值）
 

@@ -142,6 +142,9 @@ def test_fresh_install_enables_manifest_plugins(tmp_path):
     assert _plugin_list(text, "disabled") in (None, [])
     # localvec 没有 manifest：它不是 plugins.enabled 项。
     assert "localvec" not in text
+    assert "engine_root:" in text
+    assert "team_id:" in text
+    assert (home / "agentcore-state" / "colleague-team").stat().st_mode & 0o077 == 0
     for name in ENABLE_NAMES:
         assert f"[OK] 启用 {name}" in proc.stdout
 
@@ -210,13 +213,16 @@ platform_toolsets:
     assert "engine_root: /opt/canonical-engine" in text
     assert "queue_root: /var/lib/analysis-queue" in text
     assert "platform_toolsets:" in text and "- terminal" in text
-    # 只增删两个启用列表：保留既有项顺序，追加缺失项；显式 disable 的项被移出。
-    assert _plugin_list(text, "enabled") == ["existing-plugin", *ENABLE_NAMES]
-    assert _plugin_list(text, "disabled") == ["some-other-plugin"]
+    # 保留显式关闭；其余名字按原顺序追加，已有部署 entry 不覆盖。
+    assert _plugin_list(text, "enabled") == [
+        "existing-plugin", *(name for name in ENABLE_NAMES if name != "longtask-guard")
+    ]
+    assert _plugin_list(text, "disabled") == ["longtask-guard", "some-other-plugin"]
+    assert "engine_root: /opt/canonical-engine" in text
     # 写入前留了可回滚的备份。
     backups = list(home.glob("config.yaml.bak.*"))
-    assert len(backups) == 1
-    assert backups[0].read_text(encoding="utf-8") == original
+    assert len(backups) == 2
+    assert original in [backup.read_text(encoding="utf-8") for backup in backups]
 
 
 def test_null_plugins_value_is_replaced_with_enable_list(tmp_path):
@@ -252,12 +258,45 @@ def test_missing_plugins_key_is_appended_without_touching_other_keys(tmp_path):
     assert config.read_bytes() == before
 
 
+def test_explicit_entry_opt_out_is_preserved(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    config = home / "config.yaml"
+    original = """plugins:
+  enabled: []
+  disabled: [longtask-guard]
+  entries:
+    task-status:
+      enabled: false
+      settings:
+        enabled: false
+        api_key: keep-this
+"""
+    config.write_text(original, encoding="utf-8")
+
+    proc = _run(home, "--skip-patch")
+    assert proc.returncode == 0, proc.stderr
+    text = config.read_text(encoding="utf-8")
+    assert "  - longtask-guard" not in text
+    assert "enabled: false" in text
+    assert "api_key: keep-this" in text
+    assert "task-status:" in text
+
+
+def test_require_ready_fails_closed_without_runtime_evidence(tmp_path):
+    home = tmp_path / "home"
+    proc = _run(home, "--skip-patch", "--require-ready")
+    assert proc.returncode == 1
+    assert "runtime_tool_registration_unverified" in proc.stdout
+    assert "就绪证据不完整" in proc.stderr
+
+
 def test_cli_mode_never_falls_back_to_text_merge(tmp_path):
     """PLUGIN_ENABLE_MODE=cli 是操作员的明确选择：不可寻址就报告，不偷偷改文件。"""
     home = tmp_path / "home"
     proc = _run(home, "--skip-patch", env_extra={"PLUGIN_ENABLE_MODE": "cli"})
-    assert proc.returncode == 0, proc.stderr
-    assert "PLUGIN_ENABLE_MODE=cli" in proc.stdout
+    assert proc.returncode == 1, proc.stderr
+    assert "PLUGIN_ENABLE_MODE=cli" in proc.stderr
     assert not (home / "config.yaml").exists()
 
 
@@ -317,7 +356,8 @@ def test_official_hermes_entry_point_is_used_for_existing_profile(tmp_path):
     for name in ENABLE_NAMES:
         assert any(line.endswith(f"plugins enable {name}") for line in enable_calls), name
         assert any("--profile demo" in line for line in enable_calls)
-    # 官方命令写了每个 profile 的配置；没有回退合并，也没有多出备份。
+    # 官方命令写启用列表；安全默认 entry 仍由本地最小写入补齐。
     text = (profile / "config.yaml").read_text(encoding="utf-8")
     assert _plugin_list(text, "enabled") == list(ENABLE_NAMES)
-    assert not list(profile.glob("config.yaml.bak.*"))
+    assert "team_id:" in text
+    assert list(profile.glob("config.yaml.bak.*"))
