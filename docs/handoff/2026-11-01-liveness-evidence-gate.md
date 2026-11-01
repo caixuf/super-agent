@@ -1,7 +1,7 @@
 # 运行时证据闸门 — 收尾记录
 
 日期：2026-11-01，Asia/Shanghai。
-状态：代码已提交并推送 `main`（`a017910`），本机与 emily 均已同步；emily 的独立全量复跑在进行中，结果尚未回来。
+状态：代码已提交并推送 `main`（`a017910`），本机与 <remote-host> 均已同步；<remote-host> 的独立全量复跑在进行中，结果尚未回来。
 
 ## 1. 接手时的事实
 
@@ -61,13 +61,13 @@ Codex 那条 memory 线在 13:31 已经收尾（`task_complete`，`b5d17ce` 推�
 
 - 本机 profile 的 `task-progress` 与 `illustrated-delivery` 插件副本原先落后于仓库，`task-progress` 还缺 `legacy_messages.py`
   （新代码会 import 它，缺了直接报错）。已同步并在 14:2x 热重载网关：`reloaded=true`，3 个适配器重接，无 error。
-- emily 的检出停在 `56fea05`，同一批改动以脏树形式存在。已先备份（`~/backup/dirty_20261101_141550.patch`、
+- <remote-host> 的检出停在 `56fea05`，同一批改动以脏树形式存在。已先备份（`~/backup/dirty_20261101_141550.patch`、
   `dirty_tree_20261101_141550.tar.gz`）再丢弃，快进到 `a017910`，工作区干净。
 
 ## 5. 未完成与风险
 
-- **emily 的独立全量复跑尚未回来**。本机四次全量全绿，但两台机器的宿主依赖不同（emily 的 real-host 用例会真跑），
-  不能把本机的绿当成 emily 的绿。
+- **<remote-host> 的独立全量复跑尚未回来**。本机四次全量全绿，但两台机器的宿主依赖不同（<remote-host> 的 real-host 用例会真跑），
+  不能把本机的绿当成 <remote-host> 的绿。
 - Codex 自报的「偶发失败根因未确认」仍未查清。本次四次全量没有复现，但这不等于它不存在。
 - `unverified` 是**新增状态**，任何按 `state NOT IN ('done','failed','cancelled')` 自行判断"还在跑"的旧读法会把它算作活动任务。
   仓内已全部改成显式排除，仓外如有消费方需自行核对。
