@@ -168,3 +168,11 @@ Post-delivery read-back and checks in the original project working tree:
 - Both installed-host `--check` commands returned 1 (absent), as intended.
   The running gateway remained active with the same process ID.
 - `git diff --check` passed. No commit, push, deployment or restart occurred.
+
+
+## Subsequent authorized deployment
+
+The earlier no-deployment statements above describe the offline repair phase.
+After explicit user authorization, commit `27ca8ba` was pushed and deployed.
+See `2026-11-01-conversation-deployment.md` for activation, health checks,
+remaining acceptance boundaries and the targeted rollback procedure.
