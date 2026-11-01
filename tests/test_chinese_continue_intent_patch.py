@@ -35,6 +35,11 @@ def detector(source=PRISTINE):
     '先跑一遍回归。',
     '我先定位失败的位置。',
     'Found the config. Let me now update it.',
+    '找到根因了。看这个测试怎么判定。',
+    '检查报了一项失败。查这个新失败的根因。',
+    '本机没有这个配置。看灌灌那段召回。',
+    '查一下这次失败的原因。',
+    '查看这段日志。',
 ])
 def test_action_tails_reuse_existing_classifier(text):
     assert detector()(text)
@@ -60,6 +65,29 @@ def test_action_tails_reuse_existing_classifier(text):
     '先检查日志可以吗。',
     '先检查日志要等到明天。',
     '现在重启服务。',
+    '建议看这个测试怎么判定。',
+    '你看这个测试怎么判定。',
+    '看这个测试怎么判定？',
+    '查这个新失败的根因吗？',
+    '查这个新失败的根因已经完成。',
+    '看这个测试怎么判定，等你确认再执行。',
+    '看这份报告。',
+    '查不到这次失败的根因。',
+    '查看日志没有发现异常。',
+    '查看日志即可。',
+    '查看日志需要什么工具。',
+    '查一下失败日志不用执行命令。',
+    '查一下天气。',
+    '检查失败，根因是超时。',
+    '查看日志无异常。',
+    '查到失败原因是超时。',
+    '看过这个测试了。',
+    '看日志就能解决，你自己操作。',
+    '查看日志：已通过。',
+    '看这个测试怎么判定。结果已经核对。',
+    '“查这个新失败的根因。”',
+    '> 查这个新失败的根因。',
+    '```text\n查这个新失败的根因。\n```',
     'x' * 401 + '。先检查日志。',
 ])
 def test_normal_answers_advice_and_approval_waits_do_not_act(text):
@@ -128,6 +156,13 @@ def test_real_host_classifier_on_copied_source_when_available():
     ('检查报了一项失败。先查清是不是超时引发的。', 0, True, False, 'break'),
     ('检查完成，根因是超时。', 0, True, True, 'break'),
     ('建议先检查日志。', 0, True, True, 'break'),
+    ('找到根因了。看这个测试怎么判定。', 0, True, True, 'continue'),
+    ('检查报了一项失败。查这个新失败的根因。', 0, True, True, 'continue'),
+    ('本机没有这个配置。看灌灌那段召回。', 0, True, True, 'continue'),
+    ('看这个测试怎么判定。', 2, True, True, 'break'),
+    ('看这个测试怎么判定。', 0, False, True, 'break'),
+    ('看这个测试怎么判定。', 0, True, False, 'break'),
+    ('看这个测试怎么判定？', 0, True, True, 'break'),
 ])
 def test_real_host_finalizer_control_flow(tmp_path, text, attempt, enabled, has_tools, expected):
     host_var = os.environ.get('HERMES_SOURCE')
@@ -170,15 +205,18 @@ agent.quiet_mode = True
 agent._build_assistant_message = lambda msg, reason: {'role':'assistant','content':msg.content,'finish_reason':reason}
 messages = [{'role':'user','content':'检查失败并修复'}, {'role':'assistant','tool_calls':[{'id':'t'}]},
             {'role':'tool','content':'1 failed','tool_call_id':'t'}]
-with patch('agent.turn_final_response.apply_stop_gates', return_value=SimpleNamespace(
-    continue_turn=False, pending_verification_response=None, pending_verification_response_previewed=False)), patch(
-    'agent.turn_finalizer.apply_llm_output_transform', side_effect=lambda a,t,**kw: (t,False,None)):
-    v = finish_text_response(agent, assistant_message=SimpleNamespace(content=text,tool_calls=[]),
+def finish(text, attempt):
+    return finish_text_response(agent, assistant_message=SimpleNamespace(content=text,tool_calls=[]),
         response=None,finish_reason='stop',messages=messages,api_messages=[],conversation_history=[],
         api_call_count=1,user_message='检查失败并修复',active_system_prompt='test',final_response=None,
         _turn_exit_reason=None,_preflight_compression_blocked=False,codex_ack_continuations=attempt,
         truncated_response_parts=[],length_continue_retries=0,_pending_verification_response=None,
         _pending_verification_response_previewed=False,effective_task_id=None)
+
+with patch('agent.turn_final_response.apply_stop_gates', return_value=SimpleNamespace(
+    continue_turn=False, pending_verification_response=None, pending_verification_response_previewed=False)), patch(
+    'agent.turn_finalizer.apply_llm_output_transform', side_effect=lambda a,t,**kw: (t,False,None)):
+    v = finish(text, attempt)
 assert v.action == expected, (v.action, expected)
 if expected == 'continue':
     assert v.final_response is None
@@ -189,6 +227,27 @@ if expected == 'continue':
 else:
     assert v.final_response == text
     assert messages[-1]['finish_reason'] == 'stop'
+# Deterministic control-flow replay, not a live model or delivery acceptance.
+# A completed tool result is followed by a normal final answer; the early
+# announcement must not become the final row or suppress later completion.
+if expected == 'continue' and attempt == 0:
+    assert not any(m.get('finish_reason') == 'stop' for m in messages)
+    messages.extend([
+        {'role':'assistant','tool_calls':[{'id':'verify'}]},
+        {'role':'tool','content':'1 passed; exit_code=0','tool_call_id':'verify'},
+    ])
+    answer = '检查完成，回归通过。'
+    with patch('agent.turn_final_response.apply_stop_gates', return_value=SimpleNamespace(
+        continue_turn=False, pending_verification_response=None, pending_verification_response_previewed=False)), patch(
+        'agent.turn_finalizer.apply_llm_output_transform', side_effect=lambda a,t,**kw: (t,False,None)):
+        done = finish(answer, v.codex_ack_continuations)
+    assert done.action == 'break'
+    assert done.final_response == answer
+    assert done.codex_ack_continuations == 0
+    assert messages[-1]['finish_reason'] == 'stop'
+    assert messages[-1]['content'] == answer
+    assert sum(m.get('finish_reason') == 'stop' for m in messages) == 1
+    agent._flush_messages_to_session_db.assert_called_once()
 print('real-finalizer-passed')
 '''
     result = subprocess.run([sys.executable, '-c', script, json.dumps([text, attempt, enabled, has_tools, expected])],
@@ -210,3 +269,52 @@ def test_already_patched_host_with_changed_safety_guard_is_rejected():
     drifted = updated.replace('len(t) > _TRAILING_CONTINUE_INTENT_MAX_CHARS', 'False')
     with pytest.raises(ValueError, match='preconditions changed'):
         patcher.patched_source(drifted)
+
+
+def test_exact_legacy_patch_upgrades_without_touching_surroundings():
+    legacy = PRISTINE.replace(patcher.OLD, patcher.NEW)
+    legacy = legacy.replace('def trailing_continue_intent',
+                            patcher.LEGACY_HELPER + 'def trailing_continue_intent')
+    source = '# unrelated local patch' + chr(10) + legacy + chr(10) + 'OTHER = 42' + chr(10)
+    upgraded = patcher.patched_source(source)
+    assert upgraded == source.replace(patcher.LEGACY_HELPER, patcher.HELPER)
+    assert patcher.patched_source(upgraded) == upgraded
+    f = detector(upgraded)
+    assert f('找到根因了。看这个测试怎么判定。')
+    assert f('检查报了一项失败。查这个新失败的根因。')
+    assert f('本机没有这个配置。看灌灌那段召回。')
+
+
+def test_legacy_helper_drift_is_not_overwritten(tmp_path):
+    legacy = PRISTINE.replace(patcher.OLD, patcher.NEW).replace(
+        'def trailing_continue_intent', patcher.LEGACY_HELPER + 'def trailing_continue_intent')
+    target = tmp_path / patcher.TARGET
+    target.parent.mkdir(parents=True)
+    target.write_text(legacy.replace('暂不', 'custom-guard'))
+    before = target.read_bytes()
+    result = subprocess.run([sys.executable, str(PATCH), '--apply', '--agent-dir', str(tmp_path)],
+                            text=True, capture_output=True)
+    assert result.returncode == 2
+    assert target.read_bytes() == before
+
+
+def test_cli_legacy_upgrade_check_is_read_only_and_apply_is_idempotent(tmp_path):
+    legacy = PRISTINE.replace(patcher.OLD, patcher.NEW).replace(
+        'def trailing_continue_intent', patcher.LEGACY_HELPER + 'def trailing_continue_intent')
+    target = tmp_path / patcher.TARGET
+    target.parent.mkdir(parents=True)
+    target.write_text(legacy)
+
+    def run(mode):
+        return subprocess.run([sys.executable, str(PATCH), mode, '--agent-dir', str(tmp_path)],
+                              capture_output=True, text=True)
+
+    before = target.read_bytes()
+    assert run('--check').returncode == 1
+    assert target.read_bytes() == before
+    assert run('--apply').returncode == 0
+    upgraded = target.read_bytes()
+    assert upgraded != before
+    assert run('--check').returncode == 0
+    assert run('--apply').returncode == 0
+    assert target.read_bytes() == upgraded

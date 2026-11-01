@@ -57,6 +57,33 @@ def _stage_original(tmp_path: Path) -> Path:
                 continue
             os.symlink(item, destination / item.name, target_is_directory=item.is_dir())
         shutil.copy2(HOST / package / copied_name, destination / copied_name)
+    # The developer host may already have this release installed. Reconstruct
+    # only exact known pristine fragments in the isolated copies, so absent/
+    # partial-patch tests do not depend on installation state. No host write.
+    spec = importlib.util.spec_from_file_location("background_fixture_patch", PATCH)
+    patcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(patcher)
+    for relative, transform, replacements in (
+        (patcher.EVIDENCE_REL, patcher.transform_evidence, (
+            (patcher.EVIDENCE_NEW, patcher.EVIDENCE_OLD),
+            (patcher.TRANSACTION_NEW, patcher.TRANSACTION_OLD),
+            (patcher.INSERT_NEW, patcher.INSERT_OLD),
+        )),
+        (patcher.REGISTRY_REL, patcher.transform_registry, (
+            (patcher.REG_HELPER, ""),
+            (patcher.HANDLE_NEW, patcher.HANDLE_OLD),
+        )),
+    ):
+        target = stage / relative
+        installed = target.read_text(encoding="utf-8")
+        transformed = transform(installed)  # rejects unknown/partial drift
+        if transformed == installed:
+            pristine = installed
+            for new, old in replacements:
+                assert pristine.count(new) == 1
+                pristine = pristine.replace(new, old, 1)
+            assert transform(pristine) == installed
+            target.write_text(pristine, encoding="utf-8")
     return stage
 
 
