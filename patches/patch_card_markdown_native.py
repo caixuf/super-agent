@@ -37,9 +37,152 @@ ANCHOR_AFTER = '''def _markdown_needs_post(text: str) -> bool:
 '''
 
 HELPERS = (
-    '''# Cards accepted these structures natively (JSON 2.0) long ago, so a reply containing\n# headings or tables no longer has to leave the card as a post. Only what JSON 2.0 cannot\n# express here (block quotes, horizontal rules, fenced code, >5 tables) still falls back.\n_CARD_UNSUPPORTED_RE = re.compile(r"(?m)(^\\s*>\\s+|^\\s*---+\\s*$|^\\s*```|^\\s*~~~)")\n_CARD_TABLE_HEADER_RE = re.compile(r"^\\s*\\|.*\\|\\s*$")\n_CARD_TABLE_DIVIDER_RE = re.compile(r"^\\s*\\|?\\s*:?-{2,}:?\\s*(\\|\\s*:?-{2,}:?\\s*)+\\|?\\s*$")\n_CARD_TABLE_MAX = 5\n_CARD_V2_ENV = "HERMES_FEISHU_CARD_V2"\n_CARD24_ENV = "HERMES_FEISHU_CARD_24"\n\n\ndef _card_v2_enabled() -> bool:\n    """Native tables need card JSON 2.0, which older clients render as '请升级客户端'.\n\n    Opt-in per deployment: unset keeps the previous behaviour (complex markdown -> post).\n    """\n    return (os.environ.get(_CARD_V2_ENV) or "").strip().lower() in ("1", "true", "yes", "on")\n\n\ndef _md_table_cells(line: str) -> list[str]:\n    return [cell.strip().replace("\\\\|", "|") for cell in line.strip().strip("|").split("|")]\n\n\ndef _card_tables(lines: list[str]) -> list[tuple[int, int, dict[str, Any]]]:\n    """Locate GFM pipe tables: ``[(start, stop, element)]``; ``stop`` is exclusive."""\n    found: list[tuple[int, int, dict[str, Any]]] = []\n    index = 0\n    while index < len(lines) - 1:\n        line = lines[index]\n        if not (_CARD_TABLE_HEADER_RE.match(line) and _CARD_TABLE_DIVIDER_RE.match(lines[index + 1])):\n            index += 1\n            continue\n        stop = index + 2\n        while stop < len(lines) and _CARD_TABLE_HEADER_RE.match(lines[stop]):\n            stop += 1\n        if len(found) < _CARD_TABLE_MAX:\n            header = _md_table_cells(line)\n            rows = [{"c%d" % n: (row[n] if n < len(row) else "")\n                     for n in range(len(header))}\n                    for row in (_md_table_cells(text) for text in lines[index + 2:stop])]\n            found.append((index, stop, {\n                "tag": "table", "page_size": 10, "row_height": "low",\n                "freeze_first_column": len(header) > 2,\n                "header_style": {"text_size": "normal", "background_style": "grey", "bold": True},\n                "columns": [{"name": "c%d" % n, "display_name": header[n] or " ",\n                             "data_type": "lark_md", "width": "auto", "vertical_align": "top"}\n                            for n in range(len(header))],\n                "rows": rows,\n            }))\n        index = stop\n    return found\n\n\ndef build_card_elements(content: str) -> list[dict[str, Any]]:\n    """One markdown reply -> card elements: markdown blocks with native tables in place."""\n    if not content:\n        return [{"tag": "markdown", "content": " "}]\n    lines = content.splitlines()\n    elements: list[dict[str, Any]] = []\n    cursor = 0\n    for start, stop, table in _card_tables(lines):\n        prose = "\\n".join(lines[cursor:start])\n        if prose.strip():\n            elements.append({"tag": "markdown", "content": prose})\n        elements.append(table)\n        cursor = stop\n    tail = "\\n".join(lines[cursor:])\n    if tail.strip() or not elements:\n        elements.append({"tag": "markdown", "content": tail or " "})\n    return elements\n\n\n_CARD24_INLINE_MD_RE = re.compile(r"\\*\\*(.+?)\\*\\*|`([^`]+)`|\\[([^\\]]+)\\]\\(([^)]+)\\)")\n\n\ndef _card24_text(content: str) -> str:\n    """Markdown -> the plain-text subset card_components v2 accepts (no markdown tag)."""\n    text = _CARD24_INLINE_MD_RE.sub(\n        lambda m: m.group(1) or m.group(2) or ("%s (%s)" % (m.group(3), m.group(4))), content or "")\n    text = text.replace("**", "").replace("`", "")\n    return re.sub(r"(?m)^#{1,6}\\s+", "", text)\n\n\ndef card_components_v2() -> bool:\n    """Card 2.4 ('card_components' v2) rejects the 1.0 ``markdown``/``note`` tags.\n\n    Opt-in per deployment; the 2.0 path (markdown + table components) stays the default.\n    """\n    return (os.environ.get(_CARD24_ENV) or "").strip().lower() in ("1", "true", "yes", "on")\n\n\ndef build_card24_elements(content: str) -> list[dict[str, Any]]:\n    """Same split as the 2.0 builder: plain_text blocks, tables with plain-text cells."""\n    elements = build_card_elements(content)\n    for element in elements:\n        if element.get("tag") != "table":\n            continue\n        for column in element["columns"]:\n            column["data_type"] = "text"\n        for row in element["rows"]:\n            for column in element["columns"]:\n                row[column["name"]] = _card24_text(str(row.get(column["name"], "")))\n    return [element if element.get("tag") == "table"\n            else {"tag": "div",
-                  "text": {"tag": "plain_text", "content": _card24_text(element.get("content", "")) or " "}}\n            for element in elements]\n\n\ndef card_renders_markdown(text: str) -> bool:\n    """True when every construct in *text* has a native card representation."""\n    text = text or ""\n    if _CARD_UNSUPPORTED_RE.search(text):\n        return False\n    lines = text.splitlines()\n    # A table beyond the five-per-card limit keeps its divider rows as prose: count those, too.\n    dividers = sum(1 for index in range(len(lines) - 1)\n                   if _CARD_TABLE_HEADER_RE.match(lines[index])\n                   and _CARD_TABLE_DIVIDER_RE.match(lines[index + 1]))\n    return dividers == len(_card_tables(lines))\n\n\n_CARD24_INLINE_MD_RE = re.compile(r"\\*\\*(.+?)\\*\\*|`([^`]+)`|\\[([^\\]]+)\\]\\(([^)]+)\\)")\n\n\ndef _card24_text(content: str) -> str:\n    """Markdown -> the plain-text subset card_components v2 accepts (no markdown tag)."""\n    text = _CARD24_INLINE_MD_RE.sub(\n        lambda m: m.group(1) or m.group(2) or ("%s (%s)" % (m.group(3), m.group(4))), content or "")\n    text = text.replace("**", "").replace("`", "")\n    return re.sub(r"(?m)^#{1,6}\\s+", "", text)\n\n\ndef card_components_v2() -> bool:\n    """Card 2.4 ('card_components' v2) rejects the 1.0 ``markdown``/``note`` tags.\n\n    Opt-in per deployment; the 2.0 path (markdown + table components) stays the default.\n    """\n    return (os.environ.get(_CARD24_ENV) or "").strip().lower() in ("1", "true", "yes", "on")\n\n\ndef build_card24_elements(content: str) -> list[dict[str, Any]]:\n    """Same split as the 2.0 builder: plain_text blocks, tables with plain-text cells."""\n    elements = build_card_elements(content)\n    for element in elements:\n        if element.get("tag") != "table":\n            continue\n        for column in element["columns"]:\n            column["data_type"] = "text"\n        for row in element["rows"]:\n            for column in element["columns"]:\n                row[column["name"]] = _card24_text(str(row.get(column["name"], "")))\n    return [element if element.get("tag") == "table"\n            else {"tag": "div",
-                  "text": {"tag": "plain_text", "content": _card24_text(element.get("content", "")) or " "}}\n            for element in elements]\n\n\ndef card_renders_markdown(text: str) -> bool:\n    """True when every construct in *text* has a native card representation."""\n    text = text or ""\n    if _CARD_UNSUPPORTED_RE.search(text):\n        return False\n    lines = text.splitlines()\n    # A table beyond the five-per-card limit keeps its divider rows as prose: count those, too.\n    dividers = sum(1 for index in range(len(lines) - 1)\n                   if _CARD_TABLE_HEADER_RE.match(lines[index])\n                   and _CARD_TABLE_DIVIDER_RE.match(lines[index + 1]))\n    return dividers == len(_card_tables(lines))\n''')
+    '''# Cards render headings, tables, block quotes, horizontal rules and fenced code
+# natively — verified against the live API on both card JSON 1.0 and 2.0 (all returned
+# code=0). The old regex excluded them and cost every reply containing a code block or a
+# `---` divider its card, which read as "the card UI is broken". Only the per-card table
+# cap still forces a fallback, and that is counted exactly below.
+_CARD_UNSUPPORTED_RE = re.compile(r"(?!x)x")  # matches nothing; kept for call-site compat
+# Lines inside a fence are code, not markdown: a `| a | b |` row in a shell snippet must
+# not be lifted into a table element (it would be torn out of the block that renders it).
+_CARD_FENCE_RE = re.compile(r"^\\s*(?:```|~~~)")
+_CARD_TABLE_HEADER_RE = re.compile(r"^\\s*\\|.*\\|\\s*$")
+_CARD_TABLE_DIVIDER_RE = re.compile(r"^\\s*\\|?\\s*:?-{2,}:?\\s*(\\|\\s*:?-{2,}:?\\s*)+\\|?\\s*$")
+_CARD_TABLE_MAX = 5
+_CARD_V2_ENV = "HERMES_FEISHU_CARD_V2"
+_CARD24_ENV = "HERMES_FEISHU_CARD_24"
+
+
+def _card_v2_enabled() -> bool:
+    """Native tables need card JSON 2.0, which older clients render as '请升级客户端'.
+
+    Opt-in per deployment: unset keeps the previous behaviour (complex markdown -> post).
+    """
+    return (os.environ.get(_CARD_V2_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _md_table_cells(line: str) -> list[str]:
+    return [cell.strip().replace("\\\\|", "|") for cell in line.strip().strip("|").split("|")]
+
+
+def _fenced_line_flags(lines: list[str]) -> list[bool]:
+    """Per-line: is it inside (or the opening/closing of) a code fence?"""
+    flags: list[bool] = []
+    inside = False
+    for line in lines:
+        if _CARD_FENCE_RE.match(line):
+            flags.append(True)
+            inside = not inside
+            continue
+        flags.append(inside)
+    return flags
+
+
+def _card_tables(lines: list[str]) -> list[tuple[int, int, dict[str, Any]]]:
+    """Locate GFM pipe tables: ``[(start, stop, element)]``; ``stop`` is exclusive.
+
+    Fenced regions are skipped: a pipe-shaped row inside a shell/python snippet is code
+    that the markdown block must render verbatim, not a table to lift out of it.
+    """
+    found: list[tuple[int, int, dict[str, Any]]] = []
+    fenced = _fenced_line_flags(lines)
+    index = 0
+    while index < len(lines) - 1:
+        line = lines[index]
+        if fenced[index] or not (_CARD_TABLE_HEADER_RE.match(line) and _CARD_TABLE_DIVIDER_RE.match(lines[index + 1])):
+            index += 1
+            continue
+        stop = index + 2
+        while stop < len(lines) and not fenced[stop] and _CARD_TABLE_HEADER_RE.match(lines[stop]):
+            stop += 1
+        if len(found) < _CARD_TABLE_MAX:
+            header = _md_table_cells(line)
+            rows = [{"c%d" % n: (row[n] if n < len(row) else "")
+                     for n in range(len(header))}
+                    for row in (_md_table_cells(text) for text in lines[index + 2:stop])]
+            found.append((index, stop, {
+                "tag": "table", "page_size": 10, "row_height": "low",
+                "freeze_first_column": len(header) > 2,
+                "header_style": {"text_size": "normal", "background_style": "grey", "bold": True},
+                "columns": [{"name": "c%d" % n, "display_name": header[n] or " ",
+                             "data_type": "lark_md", "width": "auto", "vertical_align": "top"}
+                            for n in range(len(header))],
+                "rows": rows,
+            }))
+        index = stop
+    return found
+
+
+def build_card_elements(content: str) -> list[dict[str, Any]]:
+    """One markdown reply -> card elements: markdown blocks with native tables in place."""
+    if not content:
+        return [{"tag": "markdown", "content": " "}]
+    lines = content.splitlines()
+    elements: list[dict[str, Any]] = []
+    cursor = 0
+    for start, stop, table in _card_tables(lines):
+        prose = "\\n".join(lines[cursor:start])
+        if prose.strip():
+            elements.append({"tag": "markdown", "content": prose})
+        elements.append(table)
+        cursor = stop
+    tail = "\\n".join(lines[cursor:])
+    if tail.strip() or not elements:
+        elements.append({"tag": "markdown", "content": tail or " "})
+    return elements
+
+
+_CARD24_INLINE_MD_RE = re.compile(r"\\*\\*(.+?)\\*\\*|`([^`]+)`|\\[([^\\]]+)\\]\\(([^)]+)\\)")
+
+
+def _card24_text(content: str) -> str:
+    """Markdown -> the plain-text subset card_components v2 accepts (no markdown tag)."""
+    text = _CARD24_INLINE_MD_RE.sub(
+        lambda m: m.group(1) or m.group(2) or ("%s (%s)" % (m.group(3), m.group(4))), content or "")
+    text = text.replace("**", "").replace("`", "")
+    return re.sub(r"(?m)^#{1,6}\\s+", "", text)
+
+
+def card_components_v2() -> bool:
+    """Card 2.4 ('card_components' v2) rejects the 1.0 ``markdown``/``note`` tags.
+
+    Opt-in per deployment; the 2.0 path (markdown + table components) stays the default.
+    """
+    return (os.environ.get(_CARD24_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def build_card24_elements(content: str) -> list[dict[str, Any]]:
+    """Same split as the 2.0 builder: plain_text blocks, tables with plain-text cells."""
+    elements = build_card_elements(content)
+    for element in elements:
+        if element.get("tag") != "table":
+            continue
+        for column in element["columns"]:
+            column["data_type"] = "text"
+        for row in element["rows"]:
+            for column in element["columns"]:
+                row[column["name"]] = _card24_text(str(row.get(column["name"], "")))
+    return [element if element.get("tag") == "table"
+            else {"tag": "div",
+                  "text": {"tag": "plain_text", "content": _card24_text(element.get("content", "")) or " "}}
+            for element in elements]
+
+
+def card_renders_markdown(text: str) -> bool:
+    """True when every construct in *text* has a native card representation."""
+    text = text or ""
+    if _CARD_UNSUPPORTED_RE.search(text):
+        return False
+    lines = text.splitlines()
+    fenced = _fenced_line_flags(lines)
+    # A table beyond the five-per-card limit keeps its divider rows as prose: count those, too.
+    # Fenced lines are excluded on BOTH sides — a `|---|` inside a code block is snippet text,
+    # not a divider, and counting it made every reply with a piped shell command lose its card.
+    dividers = sum(1 for index in range(len(lines) - 1)
+                   if not fenced[index] and not fenced[index + 1]
+                   and _CARD_TABLE_HEADER_RE.match(lines[index])
+                   and _CARD_TABLE_DIVIDER_RE.match(lines[index + 1]))
+    return dividers == len(_card_tables(lines))''')
 
 
 SEND_OLD = '''        if (getattr(self, "_card_replies", False) and (metadata or {}).get("expect_edits")

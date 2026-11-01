@@ -148,9 +148,34 @@ def test_plain_prose_uses_markdown_blocks_without_tables(patched):
 
 
 def test_unsupported_construct_flags_a_post(patched):
+    """Only the per-card table cap still forces a post.
+
+    Fenced code, block quotes and horizontal rules used to be rejected here on the belief that
+    card JSON could not express them. It can: both 1.0 and 2.0 cards were sent to a live chat
+    with all three constructs and returned code=0, and 2.0 was confirmed rendering by the owner.
+    Rejecting them cost every reply containing a code block or a `---` divider its card.
+    """
     assert patched["card_renders_markdown"]("普通 **粗体** 与 `code`")
-    assert not patched["card_renders_markdown"]("```bash\necho 1\n```")
-    assert not patched["card_renders_markdown"]("> quote")
+    assert patched["card_renders_markdown"]("```bash\necho 1\n```")
+    assert patched["card_renders_markdown"]("> quote")
+    assert patched["card_renders_markdown"]("上面\n\n---\n\n下面")
+    # The six-table reply still cannot be a card: Feishu caps tables per card at five.
+    assert not patched["card_renders_markdown"](
+        "\n\n".join(["| a | b |\n|---|---|\n| 1 | 2 |"] * 6))
+
+
+def test_fenced_pipe_rows_are_not_lifted_into_tables(patched):
+    """A `| a | b |` row inside a fence is snippet text, not a table.
+
+    Awk/shell one-liners commonly contain pipes; splitting them into a table element tore the
+    code block apart and left the prose around it mangled.
+    """
+    snippet = "```bash\nawk -F'|' '{print $2}' f\n| not | a | table |\n|---|---|\n```"
+    assert patched["card_renders_markdown"](snippet)
+    assert patched["_card_tables"](snippet.splitlines()) == []
+    # A real table outside the fence is still detected.
+    mixed = snippet + "\n\n| 项 | 值 |\n|---|---|\n| 状态 | ok |\n"
+    assert len(patched["_card_tables"](mixed.splitlines())) == 1
 
 
 # --- 0.22 host shape -------------------------------------------------------------------
