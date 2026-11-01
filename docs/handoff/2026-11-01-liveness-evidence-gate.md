@@ -1,7 +1,7 @@
 # 运行时证据闸门 — 收尾记录
 
 日期：2026-11-01，Asia/Shanghai。
-状态：代码已提交并推送 `main`（`a017910`），本机与 <remote-host> 均已同步；<remote-host> 的独立全量复跑在进行中，结果尚未回来。
+状态：代码已提交并推送 `main`（`ecee438`），本机与 <remote-host> 均已同步；两台机器的全量复跑都已完成并通过。
 
 ## 1. 接手时的事实
 
@@ -43,6 +43,11 @@ Codex 那条 memory 线在 13:31 已经收尾（`task_complete`，`b5d17ce` 推�
 | 全量（对齐 origin 后） | 同上 | 2047 passed / 47 skipped，267s，exit 0 |
 | 全量（合入 memory 线） | 同上 | 2106 passed / 47 skipped，279s，exit 0 |
 | 全量（合入上游卡片补丁） | 同上 | 2107 passed / 47 skipped，284s，exit 0 |
+| 全量（<remote-host> 独立复跑） | 同一条命令，另一台机器 | 2091 passed / 73 skipped，1573s，exit 0 |
+
+两台机器的数字不同是正常的，不是漏跑：<remote-host> 的 skip 多 26 条，因为它的 real-host 用例会真跑而
+本机那套缺对应环境；它多跑的那部分换来 1573s 的耗时（本机 284s），单是 I/O 等待就占了大头。
+把两台机器都跑一遍的意义就在这里——本机的绿不能替代 <remote-host> 的绿。
 
 测试环境约束（不设就会假红）：`TMPDIR` 必须是短路径（memory recall 的 unix socket 有 108 字节上限），
 `SUPER_AGENT_MEMORY_FILE` 指向空文件（否则 golden 场景测的是宿主记忆文案），
@@ -66,8 +71,11 @@ Codex 那条 memory 线在 13:31 已经收尾（`task_complete`，`b5d17ce` 推�
 
 ## 5. 未完成与风险
 
-- **<remote-host> 的独立全量复跑尚未回来**。本机四次全量全绿，但两台机器的宿主依赖不同（<remote-host> 的 real-host 用例会真跑），
-  不能把本机的绿当成 <remote-host> 的绿。
-- Codex 自报的「偶发失败根因未确认」仍未查清。本次四次全量没有复现，但这不等于它不存在。
+- Codex 自报的「偶发失败根因未确认」仍未查清。本轮五次全量（本机四次 + <remote-host> 一次）没有复现，
+  但这不等于它不存在——四次绿不能证明第五次必然绿。
 - `unverified` 是**新增状态**，任何按 `state NOT IN ('done','failed','cancelled')` 自行判断"还在跑"的旧读法会把它算作活动任务。
   仓内已全部改成显式排除，仓外如有消费方需自行核对。
+- `proactive_watch.py` 此前只部署在 `~/.config/systemd/user`，仓库里没有单元文件：换机器或重装就静默失去这套观察。
+  本次补了 `runtime/superagent-proactive.{service,timer}` 并 `systemd-analyze verify` 通过，但**已部署的两台机器仍用旧单元**，
+  是否切换成仓库版本交给人决定（旧单元里写死的是各自的实际路径）。
+
