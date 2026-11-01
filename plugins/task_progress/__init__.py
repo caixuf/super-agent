@@ -281,8 +281,23 @@ def _store(ctx, modules: dict, settings: dict):
     return modules["card_store"].CardStore(path)
 
 
+def _message_transport():
+    try:
+        return importlib.import_module('gateway.plugin_messages')
+    except ModuleNotFoundError as exc:
+        if exc.name != 'gateway.plugin_messages':
+            raise
+    name = '_super_agent_task_progress_legacy_messages'
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name('legacy_messages.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sys.modules[name] = module
+    return sys.modules[name]
+
+
 def _resolve_target(ctx, session_key: str):
-    from gateway import plugin_messages
+    plugin_messages = _message_transport()
     from gateway.run import _gateway_runner_ref
     runner = _gateway_runner_ref()
     if runner is None:
@@ -322,7 +337,7 @@ def _run_edit_on_loop(coro, timeout: float = 15.0):
 
 async def _edit_only_unlocked(target, message_id: str, text: str, *, plugin_id: str) -> dict:
     """Edit one existing message without the host API's send-on-edit fallback."""
-    from gateway import plugin_messages
+    plugin_messages = _message_transport()
     if not isinstance(message_id, str) or not message_id:
         return {"ok": False, "error": "missing_message_id"}
     if target.live is not None:
@@ -405,7 +420,7 @@ def _capture_session_key() -> str:
 
 
 def _post_to_session(ctx, session_key: str, text: str, *, allow_bound_context=False) -> dict:
-    if not session_key or allow_bound_context:
+    if (not session_key or allow_bound_context) and callable(getattr(ctx, 'post_message', None)):
         # Only a synchronous lifecycle hook may use its already-bound host context.
         try:
             handle = ctx.post_message(text)
@@ -413,7 +428,7 @@ def _post_to_session(ctx, session_key: str, text: str, *, allow_bound_context=Fa
                     "message_id": getattr(handle, "message_id", None), "handle": handle}
         except Exception:
             return {"ok": False, "error": "no_conversation"}
-    from gateway import plugin_messages
+    plugin_messages = _message_transport()
     target, error = _resolve_target(ctx, session_key)
     if target is None:
         return {"ok": False, "error": error or "no_conversation"}
