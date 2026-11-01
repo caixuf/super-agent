@@ -76,3 +76,17 @@ tool progress, buttons/clarification, final answer retention, reconnect and
 multi-instance routing. Also decide whether to disable bot1's existing card,
 task-progress and adapter-card producers; running both would duplicate cards
 or fight over native suppression. No such switch has been made.
+
+## Further acceptance evidence
+
+- 678 server/interaction/card/HTTP-focused HFC tests passed in 141.28s using
+  a private HOME and HFC state. This expands beyond installation into first
+  cards, content validation, in-place updates, retries, interaction
+  continuation, terminal states and empty-card indexing behavior.
+- A direct real Feishu smoke card was created and PATCHed successfully using
+  bot1's existing app credentials and one private chat. No id, secret or
+  answer text is retained here. This proves API permission and CardKit update,
+  not Gateway/model interaction or visual client acceptance.
+- A one-producer cutover/rollback runbook is recorded in
+  `2026-11-01-hfc-cutover-runbook.md`. The existing task-progress and native
+  card producer must not remain active beside HFC without an ownership test.
