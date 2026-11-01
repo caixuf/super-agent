@@ -94,6 +94,10 @@ def _ledger():
 
 #: The host's own background-spawn receipt (``terminal(background=True)`` result body).
 _SPAWN_RECEIPT_OUTPUT = "Background process started"
+#: A declared foreground wait budget at or below this many seconds is honoured:
+#: the caller asked for a result, not for a spawn receipt. 180s keeps an ordinary
+#: test run in the foreground while still catching a genuinely long command.
+DEFAULT_FOREGROUND_TIMEOUT = 180.0
 #: Tracked background process ids: ``proc_`` + short hex suffix.
 _PROCESS_ID = re.compile(r"proc_[0-9a-f]{1,}")
 
@@ -379,6 +383,23 @@ def readable_label(command: str) -> str:
     return text.rsplit("/", 1)[-1][:60]
 
 
+def _foreground_timeout_ceiling() -> float:
+    """A declared wait budget at or below this many seconds stays foreground.
+
+    Rationale: the guard exists to stop a *hidden* long wait from occupying the
+    turn. Once the caller writes an explicit ``timeout``, the wait is not hidden
+    — and turning the call into a background spawn throws away the exit code
+    they asked for. Zero disables the exemption.
+    """
+    raw = os.environ.get("LONGTASK_GUARD_FOREGROUND_TIMEOUT", "").strip()
+    if not raw:
+        return DEFAULT_FOREGROUND_TIMEOUT
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_FOREGROUND_TIMEOUT
+
+
 def classify(args: dict[str, Any]) -> Optional[str]:
     """返回该 `terminal` 调用命中的长任务说明；不是长任务则 None。纯函数，便于钉住判定。"""
     if not isinstance(args, dict):
@@ -389,6 +410,13 @@ def classify(args: dict[str, Any]) -> Optional[str]:
 
     # 已经是后台就没必要动它（重复改写会让 notify 语义漂移）。
     if args.get("background"):
+        return None
+
+    # 调用方已经写死了等待上限，说明他要的就是这次调用的结果（通常是退出码）。
+    # 把它改成后台，等于把答案换成了句“已启动”。
+    ceiling = _foreground_timeout_ceiling()
+    declared = args.get("timeout")
+    if ceiling > 0 and isinstance(declared, (int, float)) and 0 < declared <= ceiling:
         return None
 
     for segment in _shell_segments(command):

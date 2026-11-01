@@ -66,6 +66,38 @@ def test_timeout_env_wrapped_pytest_converts_even_with_tool_timeout():
     )
 
 
+def test_short_declared_timeout_keeps_the_call_in_the_foreground():
+    """A caller who names a wait budget wants the result in this very call.
+
+    The guard exists to stop a *hidden* long wait from occupying the turn. When
+    the caller already bounded the wait, converting it to a background spawn
+    hides the very exit code they asked for -- the terminal returns "started"
+    and the verification they were about to do reads as unverified.
+    """
+    assert _hit("pytest tests/auth -q", timeout=120) is None
+    assert _hit("docker build -t img .", timeout=90) is None
+
+
+def test_a_long_declared_timeout_still_converts():
+    """A generous budget is a safety net, not a request to block this call."""
+    assert _hit("pytest tests -q", timeout=580)
+
+
+def test_the_threshold_is_configurable(monkeypatch):
+    """The ceiling comes from the environment at call time, not at import time."""
+    monkeypatch.setenv("LONGTASK_GUARD_FOREGROUND_TIMEOUT", "300")
+    assert guard.classify({"command": "pytest tests -q", "timeout": 240}) is None
+    assert guard.classify({"command": "pytest tests -q", "timeout": 400})
+
+    monkeypatch.setenv("LONGTASK_GUARD_FOREGROUND_TIMEOUT", "0")
+    assert guard.classify({"command": "pytest tests -q", "timeout": 60})
+
+
+def test_a_malformed_threshold_falls_back_to_the_default(monkeypatch):
+    monkeypatch.setenv("LONGTASK_GUARD_FOREGROUND_TIMEOUT", "not-a-number")
+    assert guard.classify({"command": "pytest tests -q", "timeout": 120}) is None
+
+
 def test_already_background_is_left_alone():
     """已经是后台就别再改 —— 重复改写会让 notify 语义漂移。"""
     assert _hit("pytest tests", background=True) is None

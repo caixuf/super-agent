@@ -72,6 +72,7 @@ _MAX_EDIT_LOCKS = 512
 _VERDICT_WORD = {
     "queued": "已接收",
     "running": "进行中",
+    "unverified": "待验收",
     "done": "已完成",
     "failed": "未完成",
     "cancelled": "已取消",

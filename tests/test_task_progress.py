@@ -81,6 +81,13 @@ def test_aggregate_reports_the_worst_unfinished_story_without_hiding_failures():
     assert aggregate([snap("done"), snap("lost")])["verdict"] == "failed"
     assert aggregate([snap("done"), snap("cancelled")])["verdict"] == "done"
     assert aggregate([snap("cancelled"), snap("cancelled")])["verdict"] == "cancelled"
+    # A task parked on a human decision is not finished; the card must not say 已完成.
+    assert aggregate([snap("waiting_user")])["verdict"] == "waiting_user"
+    assert aggregate([snap("awaiting_plan_approval")])["verdict"] == "waiting_user"
+    assert aggregate([snap("done"), snap("waiting_user")])["verdict"] == "waiting_user"
+    assert aggregate([snap("waiting_user")])["terminal"] is False
+    # A word nobody taught us must never be announced as a finish.
+    assert aggregate([snap("frobnicating")])["verdict"] == "unknown"
     assert aggregate([snap("running", elapsed=90), snap("running", elapsed=30)])["elapsed"] == 90
 
     text = render_many([snap("running", "collect", "pytest tests"), snap("running", "bundle", "npm build")],
@@ -169,3 +176,54 @@ def test_the_plugin_copy_of_the_word_table_matches_the_engine():
     spec.loader.exec_module(module)
 
     assert dict(module._VERDICT_WORD) == dict(VERDICT_WORD)
+
+
+# --------------------------------------------------------------------------- #
+# Baseline doc vs installer: a floor written in one place must exist in both
+# --------------------------------------------------------------------------- #
+
+def test_the_baseline_doc_and_the_installer_name_the_same_keys():
+    """`runtime/BASELINE.md` is the contract; `install/install.sh` enforces it.
+
+    They drift silently: a floor added to the doc but not to the installer is a
+    rule nobody applies, and a key in the installer missing from the doc is an
+    undocumented floor that later looks arbitrary. The one deliberate exception
+    is the write-protection switch, which the installer refuses to touch.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    doc = (root / "runtime" / "BASELINE.md").read_text(encoding="utf-8")
+    doc_keys = {
+        m.group(1) for m in re.finditer(r"^\| `([a-z][\w.]*)` \|", doc, re.M)
+    }
+    installer = (root / "install" / "install.sh").read_text(encoding="utf-8")
+    block = installer.split('for kv in "agent.max_turns', 1)[1].split("do\n", 1)[0]
+    install_keys = {
+        m.group(1) for m in re.finditer(r'"([a-z][\w.]*) [^"]+"', "for kv in \"agent.max_turns" + block)
+    }
+
+    assert install_keys, "installer baseline list not found"
+    assert install_keys <= doc_keys, "installer writes a floor the doc never states: %s" % (
+        install_keys - doc_keys)
+    # Every documented floor is applied, except the one the installer must not touch.
+    assert doc_keys - install_keys == {"security.protected_instruction_files"}, (
+        doc_keys - install_keys)
+
+
+def test_a_claimed_finish_awaits_its_evidence_on_the_card():
+    """`unverified` must never read as finished or as merely accepted."""
+    from agentcore.task_progress import render, render_many
+
+    snap = {"task_id": "proc_x", "label": "跑测试套（pytest）", "verdict": "unverified",
+            "state": "unverified", "phase": "", "percent": None, "elapsed": 30,
+            "detail": "待验收：文件不存在", "artifacts": (), "terminal": False}
+
+    single = render(snap)
+    assert "待验收" in single
+    assert "已完成" not in single
+    assert "已接收" not in single
+
+    multi = render_many([snap], title="任务")
+    assert "待验收" in multi

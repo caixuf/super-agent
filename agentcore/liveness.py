@@ -37,8 +37,12 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 #: Terminal states are write-once. ``stalled`` / ``lost`` are observations that a
 #: later heartbeat may still clear (a runner can be restarted).
 TERMINAL_STATES = frozenset({"done", "failed", "cancelled"})
+#: ``unverified`` is a claim, not a finish: a runner said the work is done, but the
+#: evidence the task registered at start does not agree yet. It stays updatable so a
+#: later check can settle it — and it never counts as finished for a reader.
+UNVERIFIED = "unverified"
 KNOWN_STATES = frozenset(
-    {"queued", "running", "stalled", "lost", "done", "failed", "cancelled"})
+    {"queued", "running", "stalled", "lost", UNVERIFIED, "done", "failed", "cancelled"})
 DEFAULT_STALL_SECONDS = 120.0
 DEFAULT_DB_PATH = Path.home() / ".local" / "state" / "agentcore" / "liveness.db"
 
@@ -64,6 +68,7 @@ CREATE TABLE IF NOT EXISTS task_liveness (
   exit_code     INTEGER,
   artifacts     TEXT NOT NULL DEFAULT '[]',
   tail          TEXT NOT NULL DEFAULT '',
+  expects       TEXT NOT NULL DEFAULT '[]',
   seq           INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_liveness_state ON task_liveness(state);
@@ -120,16 +125,58 @@ def is_pid_alive(pid: Optional[int], pid_start: Optional[str] = None) -> bool:
 
 def _row_dict(row: sqlite3.Row) -> Dict[str, Any]:
     data = dict(row)
-    try:
-        data["artifacts"] = json.loads(data.get("artifacts") or "[]")
-    except (TypeError, ValueError):
-        data["artifacts"] = []
+    for key in ("artifacts", "expects"):
+        try:
+            data[key] = json.loads(data.get(key) or "[]")
+        except (TypeError, ValueError):
+            data[key] = []
     return data
 
 
 def _bounded_tail(text: Any, limit: int = 4000) -> str:
     value = "" if text is None else str(text)
     return value[-max(1, int(limit)):]
+
+
+def _expectation_failures(row: Dict[str, Any], *, exit_code: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Which registered expectations this finished task does not satisfy.
+
+    A runner saying "done" is one claim; the evidence the task registered when it
+    started is another. When they disagree the task is not finished -- it is
+    *unverified*, and a reader must see that instead of a false completion.
+    """
+    raw = row.get("expects")
+    try:
+        items = json.loads(raw) if isinstance(raw, str) else list(raw or ())
+    except (TypeError, ValueError):
+        return []
+    failures: List[Dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "")
+        if kind == "file":
+            path = Path(str(item.get("path") or "")).expanduser()
+            minimum = int(item.get("min_bytes") or 1)
+            try:
+                size = path.stat().st_size if path.is_file() else -1
+            except OSError:
+                size = -1
+            if size < minimum:
+                failures.append({"kind": kind, "path": str(path),
+                                 "reason": "文件不存在或小于 %d 字节" % minimum})
+        elif kind == "exit0":
+            code = exit_code if exit_code is not None else row.get("exit_code")
+            if code != 0:
+                failures.append({"kind": kind, "reason": "退出码 %r 不是 0" % (code,)})
+        elif kind == "artifact":
+            wanted = str(item.get("path") or "")
+            if wanted and wanted not in (row.get("artifacts") or ()):
+                failures.append({"kind": kind, "path": wanted, "reason": "产物未登记"})
+        else:
+            # An expectation nobody can evaluate is not satisfied by default.
+            failures.append({"kind": kind, "reason": "未知验收类型 %r" % kind})
+    return failures
 
 
 class LivenessLedger:
@@ -183,6 +230,12 @@ class LivenessLedger:
                 try:
                     with self.db() as db:
                         db.executescript(_SCHEMA)
+                        # Older ledgers predate `expects`; add the column once.
+                        columns = {row[1] for row in db.execute(
+                            "PRAGMA table_info(task_liveness)").fetchall()}
+                        if "expects" not in columns:
+                            db.execute(
+                                "ALTER TABLE task_liveness ADD COLUMN expects TEXT NOT NULL DEFAULT '[]'")
                         row = db.execute(
                             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_liveness'"
                         ).fetchone()
@@ -213,7 +266,8 @@ class LivenessLedger:
                  pid: Optional[int] = None, pid_start: Optional[str] = None,
                  host: str = "", deadline: Optional[float] = None,
                  phase: str = "", detail: str = "", state: str = "queued",
-                 artifacts: Sequence[str] = (), started_at: Optional[float] = None) -> Dict[str, Any]:
+                 artifacts: Sequence[str] = (), started_at: Optional[float] = None,
+                 expects: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
         """Create or refresh a non-terminal task row.
 
         Re-registering an existing non-terminal task keeps its original
@@ -236,19 +290,23 @@ class LivenessLedger:
                 """INSERT INTO task_liveness
                    (task_id, kind, owner, label, state, started_at, heartbeat_at,
                     updated_at, deadline, phase, detail, pid, pid_start, host,
-                    artifacts, seq)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+                    artifacts, expects, seq)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
                    ON CONFLICT(task_id) DO UPDATE SET
                      kind=excluded.kind, owner=excluded.owner, label=excluded.label,
                      heartbeat_at=excluded.heartbeat_at, updated_at=excluded.updated_at,
                      deadline=excluded.deadline, phase=excluded.phase,
                      detail=excluded.detail, pid=excluded.pid,
                      pid_start=excluded.pid_start, host=excluded.host,
-                     artifacts=excluded.artifacts, seq=task_liveness.seq+1
+                     artifacts=excluded.artifacts,
+                     expects=CASE WHEN excluded.expects='[]' THEN task_liveness.expects
+                                  ELSE excluded.expects END,
+                     seq=task_liveness.seq+1
                    WHERE task_liveness.state NOT IN ('done','failed','cancelled')""",
                 (task_id, kind, owner or "", label or "", state, started, now, now,
                  deadline, phase or "", detail or "", pid, pid_start, host or "",
-                 json.dumps(list(artifacts or ()))))
+                 json.dumps(list(artifacts or ())),
+                 json.dumps([dict(item) for item in (expects or ())], ensure_ascii=False)))
             row = db.execute("SELECT * FROM task_liveness WHERE task_id=?", (task_id,)).fetchone()
         return _row_dict(row) if row is not None else {"task_id": task_id, "state": state}
 
@@ -284,10 +342,12 @@ class LivenessLedger:
             db.execute("BEGIN IMMEDIATE")
             db.execute(
                 "UPDATE task_liveness SET " + ", ".join(sets) +
-                " WHERE task_id=? AND state NOT IN ('done','failed','cancelled')",
+                " WHERE task_id=? AND state NOT IN ('done','failed','cancelled','unverified')",
                 params)
             row = db.execute("SELECT * FROM task_liveness WHERE task_id=?", (task_id,)).fetchone()
-        if row is None or row["state"] in TERMINAL_STATES:
+        if row is None or row["state"] in TERMINAL_STATES or row["state"] == UNVERIFIED:
+            # A task waiting on its own evidence accepts no heartbeat: it already
+            # claimed the work is over, so "still running" would be a second lie.
             return None
         return _row_dict(row)
 
@@ -318,9 +378,11 @@ class LivenessLedger:
             db.execute("BEGIN IMMEDIATE")
             db.execute(
                 "UPDATE task_liveness SET " + ", ".join(sets) +
-                " WHERE task_id=? AND state NOT IN ('done','failed','cancelled')", params)
+                " WHERE task_id=? AND state NOT IN ('done','failed','cancelled','unverified')", params)
             row = db.execute("SELECT * FROM task_liveness WHERE task_id=?", (task_id,)).fetchone()
-        if row is None or row["state"] in TERMINAL_STATES:
+        if row is None or row["state"] in TERMINAL_STATES or row["state"] == UNVERIFIED:
+            # A task waiting on its own evidence accepts no heartbeat: it already
+            # claimed the work is over, so "still running" would be a second lie.
             return None
         return _row_dict(row)
 
@@ -342,8 +404,19 @@ class LivenessLedger:
             if row["state"] in TERMINAL_STATES:
                 db.rollback()
                 return {"ok": True, "changed": False, "task": _row_dict(row)}
+            target = state
+            verdict = {}
+            if state == "done":
+                # The gate: a claimed finish must also satisfy the evidence the task
+                # registered at start, or it is only `unverified`.
+                failures = _expectation_failures(_row_dict(row), exit_code=exit_code)
+                if failures:
+                    target = UNVERIFIED
+                    verdict = {"unmet": failures}
+                    summary = "；".join(str(item.get("reason")) for item in failures)[:300]
+                    detail = (detail + " | " if detail else "") + "待验收：" + summary
             sets = ["state=?", "updated_at=?", "heartbeat_at=?", "seq=seq+1"]
-            params: List[Any] = [state, now, now]
+            params: List[Any] = [target, now, now]
             if exit_code is not None:
                 sets.append("exit_code=?")
                 params.append(int(exit_code))
@@ -356,6 +429,53 @@ class LivenessLedger:
             if tail is not None:
                 sets.append("tail=?")
                 params.append(_bounded_tail(tail))
+            params.append(task_id)
+            db.execute("UPDATE task_liveness SET " + ", ".join(sets) + " WHERE task_id=?", params)
+            row = db.execute("SELECT * FROM task_liveness WHERE task_id=?", (task_id,)).fetchone()
+        result = {"ok": True, "changed": True, "task": _row_dict(row)}
+        if target != state:
+            # The caller asked for `done`; the evidence did not agree.
+            result["gate"] = dict(verdict, requested=state, settled=target)
+        return result
+
+    def verify(self, task_id: str, *, exit_code: Optional[int] = None,
+               require_owner: Optional[str] = None) -> Dict[str, Any]:
+        """Re-check a task that claimed done but has not passed its own evidence.
+
+        Returns ``changed=True`` only when every registered expectation now holds and
+        the task settles as ``done``. A task that is still short keeps its
+        ``unverified`` state and reports what is missing.
+        """
+        now = self._now()
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM task_liveness WHERE task_id=?", (task_id,)).fetchone()
+            if row is None or (require_owner is not None and row["owner"] != require_owner):
+                db.rollback()
+                return {"ok": False, "changed": False, "error": "unknown_task",
+                        "task_id": task_id}
+            if row["state"] in TERMINAL_STATES:
+                db.rollback()
+                return {"ok": True, "changed": False, "task": _row_dict(row)}
+            if row["state"] != UNVERIFIED:
+                db.rollback()
+                return {"ok": False, "changed": False, "error": "not_awaiting_evidence",
+                        "task": _row_dict(row)}
+            failures = _expectation_failures(_row_dict(row), exit_code=exit_code)
+            if failures:
+                summary = "；".join(str(item.get("reason")) for item in failures)[:300]
+                db.execute(
+                    "UPDATE task_liveness SET detail=?, updated_at=?, seq=seq+1 WHERE task_id=?",
+                    ("待验收：" + summary, now, task_id))
+                row = db.execute("SELECT * FROM task_liveness WHERE task_id=?", (task_id,)).fetchone()
+                db.commit()
+                return {"ok": True, "changed": False, "unmet": failures,
+                        "task": _row_dict(row)}
+            sets = ["state='done'", "updated_at=?", "heartbeat_at=?", "seq=seq+1"]
+            params: List[Any] = [now, now]
+            if exit_code is not None:
+                sets.append("exit_code=?")
+                params.append(int(exit_code))
             params.append(task_id)
             db.execute("UPDATE task_liveness SET " + ", ".join(sets) + " WHERE task_id=?", params)
             row = db.execute("SELECT * FROM task_liveness WHERE task_id=?", (task_id,)).fetchone()
@@ -376,7 +496,7 @@ class LivenessLedger:
         with self.db() as db:
             cur = db.execute(
                 "UPDATE task_liveness SET tail=?, updated_at=?, seq=seq+1 "
-                "WHERE task_id=? AND state NOT IN ('done','failed','cancelled')",
+                "WHERE task_id=? AND state NOT IN ('done','failed','cancelled','unverified')",
                 (_bounded_tail(text, limit), self._now(), task_id))
             return cur.rowcount == 1
 
@@ -452,7 +572,7 @@ class LivenessLedger:
             where.append("owner=?")
             params.append(owner)
         if active_only:
-            where.append("state NOT IN ('done','failed','cancelled')")
+            where.append("state NOT IN ('done','failed','cancelled','unverified')")
         sql = "SELECT * FROM task_liveness"
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -478,7 +598,8 @@ class LivenessLedger:
         if owner is not None and (not isinstance(owner, str) or not owner):
             raise ValueError('owner must be a nonempty string')
         with self.db() as db:
-            sql = "SELECT * FROM task_liveness WHERE state NOT IN ('done','failed','cancelled')"
+            sql = ("SELECT * FROM task_liveness WHERE state NOT IN "
+                   "('done','failed','cancelled','unverified')")
             params = ()
             if owner is not None:
                 sql += " AND owner=?"

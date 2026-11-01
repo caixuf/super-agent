@@ -95,6 +95,45 @@ def test_file_marker_satisfies_the_contract(tmp_path):
     assert _records(tmp_path)[-1]['artifact_present'] is True
 
 
+def test_attached_document_satisfies_the_contract(tmp_path):
+    """A real document shipped through the media channel is a delivery.
+
+    The chat's ``MEDIA:`` line is how the file actually reaches the reader, so a
+    reply that carries it has delivered, even without a ``##FILE:`` marker.
+    """
+    doc = tmp_path / 'report.html'
+    doc.write_text('<html><body>report</body></html>', encoding='utf-8')
+    context = _context(tmp_path)
+    _advice, transformed, _final = _turn(
+        context, PROGRESS, '完整文档见附件。\n\nMEDIA:%s' % doc)
+
+    assert transformed is None
+    assert _records(tmp_path)[-1]['artifact_present'] is True
+
+
+def test_media_line_pointing_nowhere_does_not_count(tmp_path):
+    """Naming a file is not sending one; a dead path must still warn."""
+    context = _context(tmp_path)
+    _advice, transformed, _final = _turn(
+        context, PROGRESS, '见附件。\n\nMEDIA:%s' % (tmp_path / 'missing.html'))
+
+    assert transformed is not None
+    assert '交付校验未通过' in transformed
+    assert _records(tmp_path)[-1]['artifact_present'] is False
+
+
+def test_a_screenshot_is_not_the_document(tmp_path):
+    """A PNG preview travels the same channel but is not the deliverable."""
+    shot = tmp_path / 'page-01.png'
+    shot.write_bytes(b'\x89PNG\r\n\x1a\n')
+    context = _context(tmp_path)
+    _advice, transformed, _final = _turn(
+        context, PROGRESS, '效果如上。\n\nMEDIA:%s' % shot)
+
+    assert transformed is not None
+    assert _records(tmp_path)[-1]['artifact_present'] is False
+
+
 def test_ordinary_code_url_does_not_count_as_a_delivered_document(tmp_path):
     context = _context(tmp_path)
     _advice, transformed, _final = _turn(

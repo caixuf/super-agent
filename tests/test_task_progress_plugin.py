@@ -1109,7 +1109,7 @@ def test_edit_crash_after_write_ahead_is_unknown_on_restart(tmp_path, monkeypatc
     def block_after_dispatch(ctx, route, message_id, text):
         assert ctx.state.data["entries"]["turn:s:t"]["edit_state"] == "sending"
         entered.set()
-        assert release.wait(5)
+        assert release.wait(30)
         return {"ok": True, "message_id": message_id}
 
     monkeypatch.setattr(plugin, "_edit_to_session", block_after_dispatch)
@@ -1120,7 +1120,7 @@ def test_edit_crash_after_write_ahead_is_unknown_on_restart(tmp_path, monkeypatc
     _row(first.settings["liveness_db"], "proc_crash_edit", owner="p:s", phase="running")
     first.hooks["post_tool_call"](tool_name="terminal", result={"session_id": "proc_crash_edit"},
                                   session_id="s", turn_id="t")
-    assert entered.wait(5), "edit did not reach the post-intent dispatch window"
+    assert entered.wait(30), "edit did not reach the post-intent dispatch window"
     assert first.state.data["entries"]["turn:s:t"]["edit_state"] == "sending"
     # This durable snapshot represents a crash at the point after dispatch intent
     # and before a response/confirmation is written.

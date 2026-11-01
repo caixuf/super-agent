@@ -19,12 +19,32 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# A delivered document is either a bridge file marker or a document URL.
-# Ordinary code/review URLs deliberately do not count.
+# A delivered document is either a bridge file marker or a document URL, or a
+# complete document attached through the chat's own media channel. Ordinary
+# code/review URLs deliberately do not count. A bare image does NOT count: the
+# reader asked for the document, and a screenshot of it is not the document.
 _DOC_LINK = re.compile(
     r'(?m)^\s*##FILE:\s*\S+'
     r'|https?://[^\s]*(?:/docx/|/wiki/|/docs/|/drive/|/sheets/|/slides/)'
 )
+# `MEDIA:` is how Hermes ships a file to the chat. Only self-contained documents
+# qualify here -- a PNG preview passes through the same channel and must not be
+# mistaken for the deliverable.
+_MEDIA_DOC = re.compile(r'(?m)^\s*MEDIA:\s*(\S+?\.(?:html|htm|pdf))\s*$', re.I)
+
+
+def _delivered(text) -> bool:
+    """Whether the reply actually handed over a document, not just a path."""
+    text = text or ''
+    if _DOC_LINK.search(text):
+        return True
+    for match in _MEDIA_DOC.finditer(text):
+        try:
+            if Path(match.group(1)).is_file():
+                return True
+        except OSError:
+            continue
+    return False
 _GUARD_NOTE = (
     "\n\n---\n"
     "⚠️ 交付校验未通过：本轮要求图文文档，但最终回复里没有检测到文档链接或 `##FILE`。"
@@ -157,7 +177,7 @@ class _DeliveryGuard:
         advice = entry['advice']
         if advice.get('mode') != 'artifact':
             return None
-        if _DOC_LINK.search(response_text or ''):
+        if _delivered(response_text):
             return None
         if entry['warned']:
             return None
@@ -180,7 +200,7 @@ class _DeliveryGuard:
             'kind': advice.get('kind'),
             'reason_code': advice.get('reason_code'),
             'artifact_expected': advice.get('mode') == 'artifact',
-            'artifact_present': bool(_DOC_LINK.search(assistant_response or '')),
+            'artifact_present': bool(_delivered(assistant_response or '')),
             'guard_warned': entry['warned'],
             'user_chars': len(user_message) if isinstance(user_message, str) else 0,
             'response_chars': len(assistant_response or ''),

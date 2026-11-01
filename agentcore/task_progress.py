@@ -48,6 +48,9 @@ def verdict(row: Optional[Dict[str, Any]]) -> str:
         return state
     if state in _STUCK:
         return state
+    if state == "unverified":
+        # A claim of completion that has not passed its own evidence.
+        return "unverified"
     if state in ("queued", "running", "waiting_user", "awaiting_plan_approval"):
         return state
     return "unknown"
@@ -70,6 +73,8 @@ def card_state(row: Optional[Dict[str, Any]]) -> CardState:
         return CardState.WAITING_USER
     if word == "awaiting_plan_approval":
         return CardState.AWAITING_PLAN_APPROVAL
+    if word == "unverified":
+        return CardState.WAITING_USER      # someone must look at the evidence
     if word == "running":
         return CardState.RUNNING
     return CardState.QUEUED
@@ -188,7 +193,7 @@ def render(snap: Dict[str, Any], *, title: str = "") -> str:
     lines.append("**%s**" % head[:90])
     if display_name and display_name not in head:
         lines.append("岗位：%s" % display_name[:80])
-    lines.append("状态：%s%s" % (_STATE_WORD[card_state(snap)], _state_suffix(snap)))
+    lines.append("状态：%s%s" % (_state_text(snap), _state_suffix(snap)))
     age = snap.get("heartbeat_age_s")
     if age is not None and not snap.get("terminal"):
         try:
@@ -266,15 +271,22 @@ def aggregate(snaps) -> Dict[str, Any]:
         verdict = "running"
     elif any(w in ("failed", "lost", "stalled") for w in words):
         verdict = "failed"          # a failure is never hidden behind a success
+    elif any(w in _WAITING_VERDICTS for w in words):
+        # A task parked on a human decision has not finished. Without this arm
+        # the word falls through to `done`, and the card tells the user the work
+        # is complete while the system is still waiting for their approval.
+        verdict = "waiting_user"
     elif any(w == "done" for w in words):
         verdict = "done"            # part of the work landed; one cancelled sibling is not the story
     elif any(w == "cancelled" for w in words):
         verdict = "cancelled"
     else:
-        verdict = "done"
+        # An unrecognised word means the ledger said something we cannot read.
+        # Claiming `done` here would announce a finish nobody observed.
+        verdict = "unknown"
     signature = "|".join("%s:%s:%s:%s" % (s.get("task_id") or "", s.get("verdict") or "",
                                           s.get("phase") or "", s.get("percent")) for s in items)
-    return {"verdict": verdict, "terminal": verdict != "running",
+    return {"verdict": verdict, "terminal": verdict not in _NON_TERMINAL_VERDICTS,
             "elapsed": max(int(s.get("elapsed") or 0) for s in items), "tasks": len(items),
             "signature": signature}
 
@@ -282,34 +294,16 @@ def aggregate(snaps) -> Dict[str, Any]:
 #: Ledger phases that carry no information for a reader.
 _QUIET_PHASES = frozenset({"", "started", "queued", "running"})
 
-_HEAD_ICON = {
-    CardState.QUEUED: "⏳",
-    CardState.RUNNING: "🔵",
-    CardState.WAITING_USER: "⏳",
-    CardState.AWAITING_PLAN_APPROVAL: "⏳",
-    CardState.DONE: "🟢",
-    CardState.FAILED: "🔴",
-    CardState.CANCELLED: "⚪",
-}
+#: Verdicts meaning "a human still owes an answer" — not finished, not running.
+_WAITING_VERDICTS = frozenset({"waiting_user", "awaiting_plan_approval"})
 
-_VERDICT_ICON = {
-    "queued": "⏳",
-    "running": "🔵",
-    "done": "🟢",
-    "failed": "🔴",
-    "cancelled": "⚪",
-    "stalled": "🟡",
-    "lost": "🔴",
-    "waiting_user": "⏳",
-    "awaiting_plan_approval": "⏳",
-}
+#: Verdicts where more work may still arrive; the card must not print a finish time.
+_NON_TERMINAL_VERDICTS = frozenset({"running", "unknown", "unverified"}) | _WAITING_VERDICTS
 
 
 def format_verdict_pill(verdict: Optional[str]) -> str:
-    """Format a verdict into a clean status pill with an icon."""
-    word = verdict_word(verdict)
-    icon = _VERDICT_ICON.get(str(verdict or ""), "▫️")
-    return f"{icon} `{word}`" if word else ""
+    """The reader-facing word for a verdict, as plain text (no glyph, no decoration)."""
+    return verdict_word(verdict)
 
 
 #: One word per ledger verdict, for every line a reader sees. The ledger's
@@ -320,6 +314,7 @@ def format_verdict_pill(verdict: Optional[str]) -> str:
 VERDICT_WORD = {
     "queued": "已接收",
     "running": "进行中",
+    "unverified": "待验收",
     "done": "已完成",
     "failed": "未完成",
     "cancelled": "已取消",
@@ -328,6 +323,14 @@ VERDICT_WORD = {
     "waiting_user": "等待用户",
     "awaiting_plan_approval": "等待计划审批",
 }
+
+
+def _state_text(snap: Dict[str, Any]) -> str:
+    """The reader-facing state: a claimed finish without its evidence is 待验收."""
+    word = str(snap.get("verdict") or snap.get("state") or "")
+    if word == "unverified":
+        return VERDICT_WORD["unverified"]
+    return _STATE_WORD[card_state(snap)]
 
 
 def verdict_word(verdict: Optional[str]) -> str:
@@ -339,18 +342,16 @@ def render_many(snaps, *, title: str = "任务") -> str:
     """One entry over several tasks: a rich header, structured bullet items, and elapsed time."""
     items = [s for s in (snaps or ()) if isinstance(s, dict)]
     if not items:
-        return "**%s**\n状态：⏳ **已接收**\n（暂无新进展，收到进度会更新这一条）" % title
+        return "**%s**\n状态：已接收\n（暂无新进展，收到进度会更新这一条）" % title
     head = aggregate(items)
     heading = ("任务" if head["tasks"] == 1
                else "任务（本轮 %d 个后台任务）" % head["tasks"])
-    state = card_state({"state": head["verdict"]})
-    state_icon = _HEAD_ICON.get(state, "▫️")
-    state_str = _STATE_WORD[state]
+    state_str = _state_text({"state": head["verdict"]})
     elapsed_str = _clock_text(int(head["elapsed"]))
 
     lines = [
         "**%s**" % heading,
-        f"状态：{state_icon} **{state_str}** ｜ 已用（最长）：`{elapsed_str}`",
+        "状态：%s ｜ 已用（最长）：`%s`" % (state_str, elapsed_str),
         "",
     ]
     for snap in items[:6]:
@@ -362,9 +363,9 @@ def render_many(snaps, *, title: str = "任务") -> str:
         if snap.get("percent") is not None:
             extra_bits.append("%.0f%%" % snap["percent"])
         extra_str = f" ({' · '.join(extra_bits)})" if extra_bits else ""
-        lines.append(f"• **{label}** ｜ {pill}{extra_str}")
+        lines.append("· **%s** ｜ %s%s" % (label, pill, extra_str))
     if len(items) > 6:
-        lines.append("• …另有 %d 个" % (len(items) - 6))
+        lines.append("· …另有 %d 个" % (len(items) - 6))
     return "\n".join(lines)[:MAX_TEXT]
 
 # --------------------------------------------------------------------------- #
