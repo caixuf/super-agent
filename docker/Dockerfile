@@ -19,13 +19,16 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HOME=/root
 
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /opt/super-agent
 COPY . /opt/super-agent
 
 # 本仓运行时零第三方依赖；测试与打包只需要这些。
 # markdown 必须装：它是文档渲染链（tools/arch_doc.py）的唯一可选依赖，缺它时那组测试只能整体
 # skip —— 干净室就变成「没验证过渲染链却报全绿」，那是最坏的一种假绿。
-RUN python3 -m pip install "pytest>=7.0" setuptools wheel "markdown>=3.4"
+RUN python3 -m pip install "pytest>=7.0" setuptools wheel "markdown>=3.4" "pyyaml>=6.0"
 
 # 默认动作：干净室自检（仓自检 → 包安装 → 安装器 → 幂等 → 合成身份 → 引擎端到端）
 CMD ["bash", "docker/clean_room_check.sh"]

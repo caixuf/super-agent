@@ -112,3 +112,21 @@ def test_literal_marker_text_is_not_a_mermaid_code_element(tmp_path):
     arch.render(html, 'Reference', body)
     metrics = browser.inspect_document(html, expected_diagrams=0)
     assert metrics['residualDiagramCode'] == 0
+
+
+def test_browser_prefers_cached_chromium_before_snap(tmp_path, monkeypatch):
+    import importlib.util
+    import os
+    from pathlib import Path
+    module_path = Path(__file__).resolve().parents[1] / "tools/doc_browser.py"
+    spec = importlib.util.spec_from_file_location("browser_discovery_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    binary = tmp_path / "chromium-1234/chrome-linux64/chrome"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
+    monkeypatch.setattr(module, "__file__", str(tmp_path / "engine/tools/doc_browser.py"))
+    monkeypatch.delenv("ARCH_DOC_BROWSER", raising=False)
+    assert module.find_browser() == str(binary)

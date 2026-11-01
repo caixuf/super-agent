@@ -24,7 +24,19 @@ class BrowserError(RuntimeError):
 
 def find_browser(candidates=()):
     configured = os.environ.get('ARCH_DOC_BROWSER')
-    names = ([configured] if configured else []) + list(candidates) + [
+    # Playwright's downloaded Chromium works without the Snap launcher, whose
+    # confined home often cannot access the temporary DevTools profile in WSL.
+    cache = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", str(Path.home() / ".cache/ms-playwright")))
+    local_cache = Path(__file__).resolve().parent.parent / ".browser-cache"
+    marker = local_cache.parent / ".browser-path"
+    try:
+        prepared = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        prepared = ""
+    cached = sorted(cache.glob("chromium-*/chrome-linux64/chrome"), reverse=True)
+    if local_cache != cache:
+        cached.extend(sorted(local_cache.glob("chromium-*/chrome-linux64/chrome"), reverse=True))
+    names = ([configured] if configured else []) + ([prepared] if prepared else []) + [str(p) for p in cached] + list(candidates) + [
         str(Path.home() / '.local/bin/chromium'), str(Path.home() / '.local/bin/google-chrome'),
         'chromium', 'chromium-browser', 'google-chrome', 'google-chrome-stable',
     ]

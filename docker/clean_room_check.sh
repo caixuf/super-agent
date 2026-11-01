@@ -6,7 +6,7 @@
 #   ② 包安装          离开仓目录仍可 import；随包 .so 在包内（打包元数据正确）
 #   ③ dry-run         零副作用：一个文件都不许建
 #   ④ 真实安装        资产落位；绝不覆盖现场身份；示例技能不得装成生产技能；
-#                     没有 Hermes 时补丁步骤必须优雅跳过而不是报错
+#                     没有 Hermes 时须明确选择 --skip-patch，不能伪报完整部署
 #   ⑤ 幂等            重跑退出码 0、识别出「已一致」、文件集合不变
 #   ⑥ 合成生效身份    骨架 + 业务叠加层；占位符必须被替换干净
 #   ⑦ 引擎端到端      写入 → 汇合 → 召回（离线确定性嵌入，不依赖网络/模型）
@@ -71,7 +71,7 @@ fi
 # --------------------------------------------------------------------------- #
 step "③ --dry-run 必须零副作用"
 rm -rf "$HOME/.hermes"
-if bash "$REPO/install/install.sh" --dry-run --profile "$PROFILE" > "$LOG" 2>&1; then
+if bash "$REPO/install/install.sh" --dry-run --profile "$PROFILE" --skip-patch > "$LOG" 2>&1; then
   pass "--dry-run 退出码 0"
 else
   tail -15 "$LOG" | indent
@@ -86,7 +86,7 @@ fi
 
 # --------------------------------------------------------------------------- #
 step "④ 真实安装（模拟「没有 Hermes CLI 的新机器」）"
-if bash "$REPO/install/install.sh" --profile "$PROFILE" > "$LOG" 2>&1; then
+if bash "$REPO/install/install.sh" --profile "$PROFILE" --skip-patch > "$LOG" 2>&1; then
   pass "安装器退出码 0"
 else
   tail -20 "$LOG" | indent
@@ -152,10 +152,12 @@ else
   bad "examples/ 被当成生产技能装了 $n_ex 个"
 fi
 
-if grep -qE 'Hermes 安装树不存在|跳过补丁' "$LOG"; then
-  pass "没有 Hermes 时补丁步骤优雅跳过（不是失败）"
+if bash "$REPO/install/install.sh" --profile "$PROFILE" > "$LOG.missing" 2>&1; then
+  bad "缺少 Hermes 补丁目标却返回成功"
+elif grep -q "Hermes 安装树不存在" "$LOG.missing"; then
+  pass "缺少 Hermes 补丁目标时明确失败"
 else
-  bad "补丁步骤没有优雅跳过"
+  bad "缺少 Hermes 时没有明确的补丁失败"
 fi
 
 # ⑩ 段（人工步骤）必须把变量都展开：这里是那个 unbound 缺陷的回归哨兵
@@ -175,7 +177,7 @@ sed -n '/需要人工执行的步骤/,$p' "$LOG" | head -12 | indent
 # --------------------------------------------------------------------------- #
 step "⑤ 幂等：同一目标重跑一遍"
 before="$(find "$P" -type f | sort | md5sum | cut -d' ' -f1)"
-if bash "$REPO/install/install.sh" --profile "$PROFILE" > "$LOG" 2>&1; then
+if bash "$REPO/install/install.sh" --profile "$PROFILE" --skip-patch > "$LOG" 2>&1; then
   pass "重跑退出码 0"
 else
   tail -20 "$LOG" | indent
@@ -197,7 +199,7 @@ fi
 # --------------------------------------------------------------------------- #
 step "⑥ 合成生效身份（骨架 + 业务叠加层）"
 printf '# 业务叠加层（示例）\n- 业务技能源 / 业务 MCP 工具 / 业务领域词表由业务仓提供。\n' > /tmp/overlay.md
-if bash "$REPO/install/install.sh" --profile "$PROFILE" --compose-soul /tmp/overlay.md > "$LOG" 2>&1; then
+if bash "$REPO/install/install.sh" --profile "$PROFILE" --skip-patch --compose-soul /tmp/overlay.md > "$LOG" 2>&1; then
   pass "合成退出码 0"
 else
   tail -20 "$LOG" | indent

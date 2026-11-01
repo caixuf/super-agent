@@ -262,52 +262,56 @@ class LocalVecProvider(MemoryProvider):
         return self._last
 
     def _fallback_sqlite_recall(self, query: str) -> Optional[Tuple[str, int, bool]]:
-        """Dual-track recall fallback: automatic fallback to SQLite FTS5 / curated store if localvec fails."""
+        """Scoped, read-only fallback; missing identity is a recall failure."""
         try:
             import sqlite3
-            from agentcore.memory.config import get_config
-            from agentcore.memory.memory_scale import coarse_filter
-            cfg_db = self._cfg.get("sqlite_db")
-            db_path = str(cfg_db) if cfg_db else str(get_config().db_path)
-            if not os.path.isfile(db_path):
+            from pathlib import Path
+            db = self._cfg.get("sqlite_db")
+            user = self._cfg.get("user_id")
+            agent = self._cfg.get("agent_id")
+            profile = self._cfg.get("profile")
+            if (not isinstance(db, str) or not Path(db).is_absolute()
+                    or any(not isinstance(x, str) or not x.strip()
+                           for x in (user, agent, profile))):
                 return None
-            conn = sqlite3.connect(db_path, timeout=2.0)
+            path = Path(db)
+            if not path.is_file():
+                return None
+            conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2.0)
             conn.row_factory = sqlite3.Row
             try:
-                row_ids = coarse_filter(conn, query, limit=self._limit)
-                rows = []
-                if row_ids:
-                    placeholders = ",".join("?" * len(row_ids))
-                    rows = conn.execute(
-                        f"SELECT fact_id, statement, subject FROM working_fact WHERE rowid IN ({placeholders})",
-                        row_ids
-                    ).fetchall()
-                if not rows:
-                    # Dual-track fallback: check curated store / subject & statement substring
-                    clean_q = re.sub(r"[^\w\u4e00-\u9fff]", "", query)
-                    if clean_q:
-                        like_param = f"%{clean_q}%"
-                        rows = conn.execute(
-                            "SELECT fact_id, statement, subject FROM working_fact "
-                            "WHERE status='active' AND (statement LIKE ? OR subject LIKE ?) "
-                            "ORDER BY created_at DESC LIMIT ?",
-                            (like_param, like_param, self._limit)
-                        ).fetchall()
+                scope = ("f.user_id=? AND f.agent_id=? AND f.status='active' "
+                         "AND EXISTS (SELECT 1 FROM fact_tags t WHERE t.fact_id=f.fact_id "
+                         "AND t.key='profile' AND t.value=?)")
+                # Do not depend on the host importing the engine package.
+                # All terms are bounded and passed as SQL parameters.
+                terms = [term[:128] for term in re.findall(r"[\w\u4e00-\u9fff]+", query[:4096])[:8]]
+                if not terms:
+                    return None
+                clauses = []
+                parameters = []
+                for term in terms:
+                    term = term.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+                    clauses.append("(f.statement LIKE ? ESCAPE '!' OR f.subject LIKE ? ESCAPE '!')")
+                    parameters.extend(["%" + term + "%", "%" + term + "%"])
+                rows = conn.execute(
+                    f"SELECT f.fact_id, f.statement, f.subject FROM working_fact f "
+                    f"WHERE {scope} AND (" + " OR ".join(clauses) + ") "
+                    "ORDER BY f.created_at DESC LIMIT ?",
+                    (user, agent, profile, *parameters, self._limit),
+                ).fetchall()
                 if not rows:
                     return None
-                formatted_rows = [
-                    {"fact_id": r["fact_id"], "statement": r["statement"], "subject": r["subject"]}
-                    for r in rows
-                ]
-                block, count = format_recall(formatted_rows, limit=self._limit,
-                                             max_chars=int(self._cfg.get('max_chars') or 1800))
-                if block:
-                    return (block, count, True)
+                formatted = [{"fact_id": r["fact_id"], "statement": r["statement"], "subject": r["subject"]}
+                             for r in rows]
+                block, count = format_recall(formatted, limit=self._limit,
+                                             max_chars=int(self._cfg.get("max_chars") or 1800))
+                return (block, count, True) if block else None
             finally:
                 conn.close()
         except Exception as exc:
-            logger.debug("[localvec] fallback sqlite recall failed: %s", exc)
-        return None
+            logger.debug("[localvec] scoped fallback failed: %s", type(exc).__name__)
+            return None
 
     def _start_recall(self, query: str, key: tuple[str, str], event: threading.Event) -> None:
         try:

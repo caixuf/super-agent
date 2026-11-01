@@ -49,13 +49,7 @@ def _attempt_token():
 
 
 def _trusted_containment_available(runner):
-    """Check if trusted whole-attempt containment (cgroup, container, or provider) is available."""
-    if os.environ.get("AGENTCORE_CONTAINMENT_UNIT"):
-        return True
-    if os.environ.get("AGENTCORE_CONTAINMENT_CONTAINER"):
-        return True
-    if getattr(runner, "trusted_containment", False):
-        return True
+    """No current host adapter proves attempt-bound whole-turn containment."""
     return False
 
 
@@ -102,10 +96,9 @@ def main():
         job = json.load(sys.stdin)
         if not isinstance(job, dict) or set(job) != {"job", "attempt", "payload"}:
             raise ValueError("invalid_queue_envelope")
-        # A token scan alone cannot certify whole-attempt containment. If a token
-        # is present, require trusted containment (cgroup, container, or provider)
-        # before execution to prevent side effects before proving quiescence.
-        if _attempt_token() is not None and not _trusted_containment_available(runner):
+        # A token or a runner assertion cannot certify whole-attempt containment.
+        # Until an attempt-bound host adapter exists, refuse before side effects.
+        if _attempt_token() is None or not _trusted_containment_available(runner):
             raise RuntimeError("attempt_containment_unavailable")
         result = execute_payload(job["payload"], runner=runner, authorize_assignment=authorize)
         evidence = _attempt_evidence(runner)

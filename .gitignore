@@ -3,6 +3,9 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 .venv/
+.superagent-venv/
+.browser-cache/
+.browser-path
 tools/assets/mermaid.min.js
 !tools/assets/mermaid.min.js
 identity/manifests/
