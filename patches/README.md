@@ -23,6 +23,12 @@
 - `exec_approval_text`（默认 false）—— 审批以纯文本下发（把 `/approve` 指引写进消息体）。
   卡片回调需要平台应用订阅 `card.action.trigger` 并配回调地址；没配时按钮点了没反应。
 
+回复卡片还依赖 `streaming.enabled: true`（配置顶层）。`streaming.transport: off`
+或 `display.platforms.feishu.streaming: false` 也会关闭卡片所需的预览路径。
+只开 `card_replies` 不会把普通非流式消息变成卡片；`--config` 会检查这些前置条件。
+需要原生表格时，在网关进程环境设置 `HERMES_FEISHU_CARD_V2=1`，使用 Card JSON 2.0。
+配置/环境修改后重启网关，确认新进程已连接消息平台；代码探针通过不等于实际投递验收。
+
 ## 用法
 
 ```bash

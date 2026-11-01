@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import os
 import sys
 from pathlib import Path
@@ -265,6 +266,10 @@ def _missing(text):
     adapter, so checking the union would report the other shapes as missing on a good tree.
     An already-patched tree reports its probes as present for whichever shape it became.
     """
+    # The broken nested branch contains NOTE_PROBE too; a substring is not
+    # evidence that the adapter can load. Repair this exact known shape first.
+    if NOTE_MALFORMED in text:
+        return [(NOTE_MALFORMED, NOTE_NEW)]
     steps = steps_for(text)
     if not steps:
         return []
@@ -298,6 +303,12 @@ def main() -> int:
         print("[FAIL] 认不出这棵树的形态（既无 0.22 锚点，也无 _markdown_needs_post / 旧辅助块）")
         return 2
     missing = _missing(text)
+    if args.check or not missing:
+        try:
+            ast.parse(text, filename=str(path))
+        except SyntaxError as exc:
+            print("[FAIL] adapter 语法错误：%s" % exc)
+            return 2
     if args.check:
         if not missing:
             print("[PASS] 卡片原生表格补丁：在位（形态 %s，%d 步全中）" % (shape_of(text), len(steps)))
@@ -309,6 +320,7 @@ def main() -> int:
     if not missing:
         print("[PASS] 已在位，无需重放")
         return 0
+    text = text.replace(NOTE_MALFORMED, NOTE_NEW)
     # Pass 1 assembles the final text from the ORIGINAL file; pass 2 writes it. An earlier
     # step can therefore absorb a later step's anchor (helpers carry their own markers)
     # without the later pass having to rewrite text it just produced.
@@ -335,6 +347,11 @@ def main() -> int:
     still = _missing(text)
     if still:
         print("[FAIL] 应用后仍缺 %d 处（本文件不支持该树形，请人工核对）" % len(still))
+        return 2
+    try:
+        ast.parse(text, filename=str(path))
+    except SyntaxError as exc:
+        print("[FAIL] 拒绝写入有语法错误的 adapter：%s" % exc)
         return 2
     path.write_text(text, encoding="utf-8")
     print("[PASS] 补丁已应用；重启网关后生效")

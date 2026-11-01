@@ -128,6 +128,12 @@ def apply() -> int:
     return 0
 
 
+def _config_enabled(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def config_check() -> int:
     """用适配器自己的配置链验证 card_replies 的生效值（抓「写了配置但读不到」）。"""
     profile = _profile_dir()
@@ -156,6 +162,21 @@ def config_check() -> int:
         print(f"[INFO] profile 配置的平台级 {key} = {value!r}")
         if value is not None and value not in (True, "true", "True", 1, "1"):
             flagged.append(key)
+    if _config_enabled(((raw.get("platforms") or {}).get("feishu") or {}).get("card_replies")):
+        stream = raw.get("streaming") or {}
+        mode = stream.get("mode")
+        enabled = (_config_enabled(stream["enabled"]) if "enabled" in stream
+                   else mode is not None and mode is not False and str(mode).strip().lower() != "off")
+        transport = stream.get("transport")
+        if transport is None:
+            transport = mode
+        display_platforms = (raw.get("display") or {}).get("platforms") or {}
+        override = (display_platforms.get("feishu") or {}).get("streaming")
+        if (not enabled or transport is False or str(transport).strip().lower() == "off"
+                or (override is not None and not _config_enabled(override))):
+            print("[FAIL] card_replies 已开启，但 streaming 未生效；检查 streaming.enabled、"
+                  "streaming.transport 和 display.platforms.feishu.streaming（卡片依赖流式预览）")
+            flagged.append("streaming")
     if not any((((raw.get("platforms") or {}).get("feishu") or {}).get(k)) is not None
                for k in ("card_replies", "exec_approval_text")):
         print("[WARN] 两项均未配置；功能在位但未启用（卡片默认关、审批仍走卡片按钮）")

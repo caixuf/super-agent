@@ -264,3 +264,50 @@ def test_0_22_tree_is_not_silently_skipped(tmp_path):
                             capture_output=True, text=True)
     assert result.returncode == 2, result.stdout
     assert "认不出" in result.stdout
+
+
+@pytest.mark.parametrize("source", [PRISTINE, ADAPTER_022], ids=["pristine", "022"])
+def test_malformed_tip_is_repaired_despite_present_probe(tmp_path, source):
+    spec = importlib.util.spec_from_file_location("_patch_tip", PATCH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    tree = tmp_path / "agent"
+    target = tree / "plugins/platforms/feishu/adapter.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(source, encoding="utf-8")
+    command = [sys.executable, str(PATCH), "--agent-dir", str(tree)]
+    first = subprocess.run(command + ["--apply"], capture_output=True, text=True)
+    assert first.returncode == 0, first.stdout + first.stderr
+    broken = target.read_text().replace(module.NOTE_NEW, module.NOTE_MALFORMED)
+    assert broken != target.read_text()
+    target.write_text(broken, encoding="utf-8")
+    with pytest.raises(IndentationError):
+        compile(broken, str(target), "exec")
+    check = subprocess.run(command + ["--check"], capture_output=True, text=True)
+    assert check.returncode != 0, check.stdout
+    repair = subprocess.run(command + ["--apply"], capture_output=True, text=True)
+    assert repair.returncode == 0, repair.stdout + repair.stderr
+    repaired = target.read_text()
+    compile(repaired, str(target), "exec")
+    assert module.NOTE_MALFORMED not in repaired
+    again = subprocess.run(command + ["--apply"], capture_output=True, text=True)
+    assert again.returncode == 0 and "已在位" in again.stdout
+    assert target.read_text() == repaired
+
+
+@pytest.mark.parametrize('already_patched', [False, True])
+def test_unknown_syntax_error_is_rejected_without_writing(tmp_path, already_patched):
+    tree = tmp_path / 'agent'
+    target = tree / 'plugins/platforms/feishu/adapter.py'
+    target.parent.mkdir(parents=True)
+    target.write_text(ADAPTER_022)
+    command = [sys.executable, str(PATCH), '--agent-dir', str(tree)]
+    if already_patched:
+        result = subprocess.run(command + ['--apply'], capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+    broken = target.read_text() + '\nif True:\n'
+    target.write_text(broken)
+    for mode in ('--check', '--apply'):
+        result = subprocess.run(command + [mode], capture_output=True, text=True)
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert target.read_text() == broken
