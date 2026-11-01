@@ -121,65 +121,47 @@ def current_boot_id() -> str:
 
 
 def verify_systemd_containment(unit: str, *, boot_id: str | None = None) -> dict:
-    """Verify that a systemd transient unit and its control group are completely stopped.
+    """Observe a unit, without claiming that it contains a particular attempt.
 
-    If the unit is inactive or failed and its control group has 0 surviving processes,
-    setsid or unshared processes inside that unit could not have survived.
+    A unit name alone does not bind a Gateway-launched turn or its descendants
+    to that cgroup. Missing units, inaccessible cgroups and failed queries are
+    unknown, not evidence of quiescence.
     """
     if not isinstance(unit, str) or not unit.strip():
         raise ValueError("invalid_unit_name")
-
     cur_boot = current_boot_id()
-    if boot_id and cur_boot and boot_id != cur_boot:
-        return {"ok": False, "reason": "boot_id_mismatch", "unit": unit}
-
+    if not cur_boot or (boot_id and boot_id != cur_boot):
+        return {"ok": False, "reason": "boot_id_unavailable_or_mismatch", "unit": unit}
     try:
-        p_active = subprocess.run(["systemctl", "--user", "is-active", unit],
-                                  capture_output=True, text=True, timeout=5)
-        active_state = p_active.stdout.strip()
-        p_cgroup = subprocess.run(["systemctl", "--user", "show", unit, "--property=ControlGroup", "--value"],
-                                  capture_output=True, text=True, timeout=5)
-        cgroup_rel = p_cgroup.stdout.strip()
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"ok": False, "reason": "systemctl_query_failed", "error": type(exc).__name__, "unit": unit}
-
-    if active_state in ("active", "activating", "reloading"):
-        return {"ok": False, "reason": "unit_still_active", "active_state": active_state, "unit": unit}
-
-    cgroup_procs_empty = True
-    survivors = []
-    if cgroup_rel:
-        cgroup_base = Path("/sys/fs/cgroup")
-        cgroup_dir = cgroup_base / cgroup_rel.lstrip("/")
-        procs_file = cgroup_dir / "cgroup.procs"
-        if procs_file.exists():
-            try:
-                procs = procs_file.read_text().split()
-                if procs:
-                    survivors = [int(p) for p in procs if p.isdigit()]
-                    cgroup_procs_empty = len(survivors) == 0
-            except OSError:
-                pass
-
-    if not cgroup_procs_empty or survivors:
-        return {"ok": False, "reason": "cgroup_has_surviving_procs", "survivors": survivors, "unit": unit}
-
-    return {
-        "ok": True,
-        "unit": unit,
-        "boot_id": cur_boot,
-        "active_state": active_state,
-        "cgroup": cgroup_rel,
-        "survivors": []
-    }
+        active = subprocess.run(["systemctl", "--user", "is-active", unit],
+                                capture_output=True, text=True, timeout=5)
+        group = subprocess.run(["systemctl", "--user", "show", unit, "--property=ControlGroup", "--value"],
+                               capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return {"ok": False, "reason": "systemctl_query_failed", "unit": unit}
+    state = active.stdout.strip()
+    if state in ("active", "activating", "reloading"):
+        return {"ok": False, "reason": "unit_still_active", "active_state": state, "unit": unit}
+    if state not in ("inactive", "failed") or group.returncode != 0:
+        return {"ok": False, "reason": "unit_state_unknown", "unit": unit}
+    relative = group.stdout.strip()
+    if not relative.startswith("/") or ".." in Path(relative).parts:
+        return {"ok": False, "reason": "cgroup_unavailable", "unit": unit}
+    directory = Path("/sys/fs/cgroup") / relative.lstrip("/")
+    try:
+        # cgroup.events is recursive; an empty parent cgroup.procs alone does
+        # not exclude processes in children.
+        events = dict(line.split() for line in (directory / "cgroup.events").read_text().splitlines())
+    except (OSError, ValueError):
+        return {"ok": False, "reason": "cgroup_unavailable", "unit": unit}
+    if events.get("populated") != "0":
+        return {"ok": False, "reason": "cgroup_populated_or_unknown", "unit": unit}
+    return {"ok": False, "reason": "attempt_cgroup_binding_unproven", "unit": unit,
+            "active_state": state, "cgroup": relative, "boot_id": cur_boot}
 
 
 def verify_docker_containment(container: str, *, attempt_token: str | None = None) -> dict:
-    """Verify that a docker container has stopped or been removed.
-
-    If container is removed (NotFound) or Exited/Dead, no process inside its
-    namespaces survives.
-    """
+    """Observe a container; no attempt binding or host side effects are proved."""
     if not isinstance(container, str) or not container.strip():
         raise ValueError("invalid_container_name")
 
@@ -191,7 +173,7 @@ def verify_docker_containment(container: str, *, attempt_token: str | None = Non
         return {"ok": False, "reason": "docker_command_failed", "error": type(exc).__name__, "container": container}
 
     if p_inspect.returncode != 0:
-        return {"ok": True, "container": container, "state": "removed", "survivors": []}
+        return {"ok": False, "reason": "docker_inspect_failed_or_missing", "container": container}
 
     try:
         parts = p_inspect.stdout.strip().split(":::")
@@ -201,21 +183,26 @@ def verify_docker_containment(container: str, *, attempt_token: str | None = Non
     except (json.JSONDecodeError, IndexError):
         return {"ok": False, "reason": "docker_inspect_parse_failed", "container": container}
 
+    if not isinstance(state, dict) or not isinstance(labels, dict) or not isinstance(envs, list):
+        return {"ok": False, "reason": "docker_inspect_parse_failed", "container": container}
     if attempt_token:
         token_found = (
             labels.get("agentcore.attempt_token") == attempt_token or
-            any(e.startswith(f"{ENV}={attempt_token}") for e in envs if isinstance(e, str))
+            any(e == f"{ENV}={attempt_token}" for e in envs if isinstance(e, str))
         )
         if not token_found:
             return {"ok": False, "reason": "attempt_token_mismatch", "container": container}
 
-    running = state.get("Running", False)
+    running = state.get("Running")
     status = state.get("Status", "")
-    if running or status in ("running", "restarting"):
+    if running is True or status in ("running", "restarting", "paused"):
         return {"ok": False, "reason": "container_still_running", "status": status, "container": container,
                 "survivors": [container]}
 
-    return {"ok": True, "container": container, "status": status, "exit_code": state.get("ExitCode"), "survivors": []}
+    if running is not False or status not in ("exited", "dead"):
+        return {"ok": False, "reason": "container_state_unknown", "container": container}
+    return {"ok": False, "reason": "attempt_container_binding_unproven", "container": container,
+            "status": status, "exit_code": state.get("ExitCode")}
 
 
 def sweep_and_verify(token: str, *,
@@ -224,80 +211,25 @@ def sweep_and_verify(token: str, *,
                      runner_contained: bool = False,
                      grace: float = 2.0,
                      timeout: float = 10.0) -> dict:
-    """Best-effort cleanup followed by trusted containment verification.
-
-    If trusted proof (systemd cgroup, docker container, or confirmed in-process runner)
-    demonstrates whole-attempt containment, returns a whole_attempt evidence dict with
-    quiescent=True. Otherwise returns quiescent=False.
-    """
+    """Best-effort cleanup; currently no supplied option proves whole-attempt containment."""
     token = checked_token(token)
     base_sweep = sweep(token, grace=grace, timeout=timeout)
     if base_sweep.get("survivors"):
         return base_sweep
 
-    if systemd_unit:
-        cg_res = verify_systemd_containment(systemd_unit)
-        if not cg_res.get("ok"):
-            return {
-                "token": token,
-                "signalled": base_sweep.get("signalled", []),
-                "survivors": cg_res.get("survivors", [systemd_unit]),
-                "quiescent": False,
-                "token_scan_empty": True,
-                "proof_scope": "cgroup_verification_failed",
-                "reason": cg_res.get("reason"),
-                "observed_at": time.time(),
-            }
+    if systemd_unit or docker_container:
+        observation = (verify_systemd_containment(systemd_unit) if systemd_unit
+                       else verify_docker_containment(docker_container, attempt_token=token))
         return {
-            "token": token,
-            "signalled": base_sweep.get("signalled", []),
-            "survivors": [],
-            "quiescent": True,
-            "proof_scope": "whole_attempt",
-            "containment_type": "systemd_unit",
-            "unit": systemd_unit,
-            "boot_id": cg_res.get("boot_id"),
-            "token_scan_empty": True,
+            "token": token, "signalled": base_sweep.get("signalled", []),
+            "survivors": observation.get("survivors", []), "quiescent": False,
+            "token_scan_empty": True, "proof_scope": "containment_unproven",
+            "reason": observation.get("reason", "attempt_binding_unproven"),
             "observed_at": time.time(),
         }
 
-    if docker_container:
-        dk_res = verify_docker_containment(docker_container, attempt_token=token)
-        if not dk_res.get("ok"):
-            return {
-                "token": token,
-                "signalled": base_sweep.get("signalled", []),
-                "survivors": dk_res.get("survivors", [docker_container]),
-                "quiescent": False,
-                "token_scan_empty": True,
-                "proof_scope": "docker_verification_failed",
-                "reason": dk_res.get("reason"),
-                "observed_at": time.time(),
-            }
-        return {
-            "token": token,
-            "signalled": base_sweep.get("signalled", []),
-            "survivors": [],
-            "quiescent": True,
-            "proof_scope": "whole_attempt",
-            "containment_type": "docker_container",
-            "container": docker_container,
-            "token_scan_empty": True,
-            "observed_at": time.time(),
-        }
-
-    if runner_contained and base_sweep.get("token_scan_empty"):
-        return {
-            "token": token,
-            "signalled": base_sweep.get("signalled", []),
-            "survivors": [],
-            "quiescent": True,
-            "proof_scope": "whole_attempt",
-            "containment_type": "runner_in_process",
-            "token_scan_empty": True,
-            "observed_at": time.time(),
-        }
-
+    # A caller-provided boolean and an empty environment scan do not prove
+    # that a turn and all its descendants were confined or have stopped.
     return base_sweep
 
 

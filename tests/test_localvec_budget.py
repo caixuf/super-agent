@@ -274,14 +274,22 @@ def test_dual_track_recall_fallback_to_sqlite(tmp_path, monkeypatch):
             status TEXT NOT NULL DEFAULT 'active',
             workspace_id TEXT,
             user_id TEXT,
+            agent_id TEXT,
             created_at REAL
         )
     """)
     conn.execute("""
         INSERT INTO working_fact VALUES
-        ('fact-01', '踩踏板门限确定为5.0%', '门限设定', 'active', 'ws', 'u1', 1000.0),
-        ('fact-02', '离合器控制逻辑更新', '离合器', 'active', 'ws', 'u1', 1001.0)
+        ('fact-01', '踩踏板门限确定为5.0%', '门限设定', 'active', 'ws', 'u1', 'a1', 1000.0),
+        ('fact-02', '离合器控制逻辑更新', '离合器', 'active', 'ws', 'u1', 'a1', 1001.0),
+        ('fact-03', '踏板门限属于别的身份', '门限设定', 'active', 'ws', 'u2', 'a1', 1002.0),
+        ('fact-04', '踏板门限属于别的配置', '门限设定', 'active', 'ws', 'u1', 'a1', 1003.0),
+        ('fact-05', '踏板门限已经废弃', '门限设定', 'superseded', 'ws', 'u1', 'a1', 1004.0)
     """)
+    conn.execute("CREATE TABLE fact_tags (fact_id TEXT, key TEXT, value TEXT)")
+    conn.executemany("INSERT INTO fact_tags VALUES (?, 'profile', ?)",
+                     [('fact-01', 'p1'), ('fact-02', 'p1'), ('fact-03', 'p1'),
+                      ('fact-04', 'other'), ('fact-05', 'p1')])
     conn.commit()
     ensure_fts(conn)
     conn.close()
@@ -290,14 +298,15 @@ def test_dual_track_recall_fallback_to_sqlite(tmp_path, monkeypatch):
     monkeypatch.setattr(module, 'RecallStatus', lambda **kwargs: types.SimpleNamespace(**kwargs))
     provider = module.LocalVecProvider()
     provider._cmd = ['configured']
-    provider._cfg = {"sqlite_db": str(db_path)}
+    provider._cfg = {"sqlite_db": str(db_path), "user_id": "u1", "agent_id": "a1", "profile": "p1"}
 
     # Subprocess fails (simulate vector recall error/unavailable)
     monkeypatch.setattr(module.subprocess, 'run', lambda *a, **k: types.SimpleNamespace(returncode=1, stdout=''))
 
-    # Prefetch should trigger dual-track fallback to SQLite FTS5 / working_fact
+    # Prefetch uses the scoped SQLite fallback after the subprocess fails.
     result = provider.prefetch("踏板门限")
     assert "踩踏板门限确定为5.0%" in result
+    assert "属于别的身份" not in result and "属于别的配置" not in result and "已经废弃" not in result
     status = provider.recall_status()
     assert status is not None
     assert "降级" in status.provider_label
@@ -312,8 +321,15 @@ def test_dual_track_recall_fallback_to_sqlite(tmp_path, monkeypatch):
     res_unpacked = provider.prefetch("踏板门限")
     assert "踩踏板门限确定为5.0%" in res_unpacked
 
-    # Edge Case 2: Substring/curated fallback when coarse_filter returns 0 matches
+    # A separate substring also stays within the same principal scope.
     # "控制逻辑" substring matching within "离合器控制逻辑更新"
     res_curated = provider.prefetch("控制逻辑")
     assert "离合器控制逻辑更新" in res_curated
 
+
+
+def test_sqlite_fallback_rejects_missing_principal(tmp_path, monkeypatch):
+    module = load(monkeypatch)
+    provider = module.LocalVecProvider()
+    provider._cfg = {"sqlite_db": str(tmp_path / "memory.db")}
+    assert provider._fallback_sqlite_recall("anything") is None

@@ -72,73 +72,63 @@ def register(ctx):
 
 
 def _register_progressive_tools(ctx, engine: Path) -> None:
-    """Optional L1/L2/L3 tool ops. Prefetch default stays L1 via runtime_bridge."""
-    register = getattr(ctx, "register_tool", None)
-    if not callable(register):
+    """Expose scoped L1/L2/L3 operations without importing engine modules into Hermes."""
+    import json
+    import subprocess
+    import sys
+
+    data = ctx.get_config("data_dir", "")
+    user = ctx.get_config("user_id", "")
+    agent = ctx.get_config("agent_id", "")
+    profile = getattr(ctx, "profile_name", "")
+    endpoint = ctx.get_config("embed_url", "")
+    script = engine / "tools/memory_progressive.py"
+    if (not isinstance(data, str) or not Path(data).is_absolute()
+            or not all(isinstance(x, str) and x.strip() for x in (user, agent, profile))
+            or not isinstance(endpoint, str) or not script.is_file()):
+        log.warning("progressive tools unavailable: scoped memory settings missing")
         return
-    import importlib.util
+    private_python = engine / ".superagent-venv/bin/python"
+    python = str(private_python) if private_python.is_file() else sys.executable
+    command = [python, str(script), "--data-dir", data, "--user", user, "--agent", agent,
+               "--profile", profile, "--embed-url", endpoint]
+    definitions = (
+        ("memory_search_l1", "search", "Search scoped memory index without returning full bodies.",
+         {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, ["query"]),
+        ("memory_timeline_l2", "timeline", "Read scoped memory timeline stubs.",
+         {"ids": {"type": "array", "items": {"type": "string"}}, "query": {"type": "string"},
+          "window": {"type": "integer", "minimum": 1, "maximum": 50}}, []),
+        ("memory_get_observations_l3", "get", "Read selected scoped memory observations.",
+         {"ids": {"type": "array", "items": {"type": "string"}, "maxItems": 20}}, ["ids"]),
+    )
 
-    def _load(name: str, rel: str):
-        spec = importlib.util.spec_from_file_location(name, engine / rel)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
-
-    try:
-        progressive = _load("_agentcore_progressive", "agentcore/memory/progressive.py")
-    except Exception as exc:
-        log.warning("progressive tools unavailable: %s", type(exc).__name__)
-        return
-
-    identity = {
-        "user_id": ctx.get_config("user_id", ""),
-        "agent_id": ctx.get_config("agent_id", ""),
-        "profile": ctx.profile_name,
-    }
-
-    def memory_search_l1(**kwargs):
-        return progressive.search(
-            str(kwargs.get("query") or ""),
-            limit=int(kwargs.get("limit") or progressive.PREFETCH_L1_LIMIT),
-            ebm=kwargs.get("ebm"),
-            **identity,
-        )
-
-    def memory_timeline_l2(**kwargs):
-        ids = kwargs.get("ids") or []
-        if isinstance(ids, str):
-            ids = [x.strip() for x in ids.split(",") if x.strip()]
-        return progressive.timeline(
-            ids or None,
-            query=kwargs.get("query"),
-            window=int(kwargs.get("window") or progressive.PREFETCH_L1_LIMIT),
-            ebm=kwargs.get("ebm"),
-            **identity,
-        )
-
-    def memory_get_observations_l3(**kwargs):
-        ids = kwargs.get("ids") or []
-        if isinstance(ids, str):
-            ids = [x.strip() for x in ids.split(",") if x.strip()]
-        return progressive.get_observations(ids, **identity)
-
-    for name, fn, desc in (
-        ("memory_search_l1", memory_search_l1,
-         "L1 memory index search: fact_id/subject/kind/class/cost — no full body."),
-        ("memory_timeline_l2", memory_timeline_l2,
-         "L2 chronological stubs for ids or query window — body-light."),
-        ("memory_get_observations_l3", memory_get_observations_l3,
-         "L3 full statement+tags+details for explicit fact_ids only."),
-    ):
-        try:
-            register(name=name, toolset="memory_bridge", description=desc, handler=fn)
-        except TypeError:
+    def handler(operation):
+        def call(args=None, *, session_id=None, **kwargs):
+            if not isinstance(session_id, str) or not session_id.strip():
+                return json.dumps({"ok": False, "error": "memory_session_required"})
+            if not isinstance(args, dict):
+                return json.dumps({"ok": False, "error": "invalid_arguments"})
             try:
-                register(name=name, toolset="memory_bridge", description=desc, fn=fn)
-            except Exception as exc:
-                log.warning("register %s failed: %s", name, type(exc).__name__)
-        except Exception as exc:
-            log.warning("register %s failed: %s", name, type(exc).__name__)
+                request = json.dumps({"operation": operation, "arguments": args}, ensure_ascii=False)
+                if len(request.encode("utf-8")) > 32768:
+                    raise ValueError("request too large")
+                proc = subprocess.run(command, input=request, text=True, capture_output=True, timeout=20)
+                if proc.returncode or len(proc.stdout.encode("utf-8")) > 131072:
+                    raise RuntimeError("memory subprocess failed")
+                result = json.loads(proc.stdout)
+                if not isinstance(result, dict):
+                    raise ValueError("invalid memory result")
+                return json.dumps(result, ensure_ascii=False)
+            except Exception:
+                return json.dumps({"ok": False, "error": "memory_operation_unavailable"})
+        return call
+
+    for name, operation, description, properties, required in definitions:
+        schema = {"name": name, "description": description, "parameters": {
+            "type": "object", "properties": properties, "required": required,
+            "additionalProperties": False}}
+        ctx.register_tool(name=name, toolset="memory_bridge", description=description,
+                          schema=schema, handler=handler(operation))
 
 
 # Patch register() to also expose progressive tools when enabled.

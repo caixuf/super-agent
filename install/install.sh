@@ -4,19 +4,14 @@
 # 设计原则
 #   1. **幂等**：重复跑不报错、不重复劳动（逐文件 cmp 判定，已一致就跳过）。
 #   2. **--dry-run 只打印计划**：不改系统、不建目录、不写文件。
-#   3. **不启停任何服务**：本脚本只落文件；systemd 单元的安装命令**打印**给人工执行。
+#   3. 新 profile 默认启动网关；已配置派工时准备 worker。已有网关不自动重启。
 #   4. **不碰凭据**：只拷骨架文件；env 键名清单与真实 .env 都由人工自建。
 #   5. **不覆盖现场业务身份**：本仓只有通用骨架，生效身份 = 骨架 + 业务叠加层。
 #      默认**不动** $HERMES_HOME/SOUL.md（那上面有业务叠加层），只在显式开关下合成。
 #   6. **不动任何源**：只从本仓读、往部署位写；业务仓只读引用。
-#   7. **插件配置保持保守**：优先官方 `hermes plugins enable`；目标还不能被
-#      官方命令寻址时（全新 profile）改用 install/enable_plugins.py 的最小文本合并。
-#      回退合并只增删 `plugins.enabled` / `plugins.disabled` 两个列表的行，不整文件重写
-#      config.yaml（注释/顺序/密钥/entries 逐字节保留）。
-#      安全默认设置仅填缺失的插件 entry；已有 entry / 显式关闭逐字节保留。
-#      queue_root / allowed_roots / 凭据等仍属部署配置，本脚本不猜值。
-#      官方命令可能请求正在运行的网关重载插件（不重启进程）；要严格只落文件
-#      设 PLUGIN_ENABLE_MODE=merge。
+#   7. **插件配置保持保守**：优先官方 `hermes plugins enable`，否则最小文本合并。
+#      补充安全默认设置时保留已有值和显式关闭；业务路径、权限与服务由部署方提供。
+#      官方命令可能请求运行中的网关重载插件；要严格只落文件，设 PLUGIN_ENABLE_MODE=merge。
 #
 # 用法
 #   bash install/install.sh --help
@@ -45,8 +40,15 @@ DO_SOUL_LIVE=0
 DO_PLUGINS=1
 DO_SKILLS=1
 DO_PATCH=1
+DO_WORKER=1
+DO_GATEWAY=1
+DO_MEMORY=1
+MEMORY_EMBED_URL="${SUPERAGENT_MEMORY_EMBED_URL:-http://127.0.0.1:8910}"
+NEW_PROFILE=0
+DO_DEPS=1
 DO_BASELINE=0
 REQUIRE_READY=0
+ANALYSIS_ROOT=""
 BUSINESS_SKILLS_SRC="${BUSINESS_SKILLS_SRC:-}"
 INSTALL_BUSINESS_SKILLS="${INSTALL_BUSINESS_SKILLS:-0}"
 # auto = 官方入口可用就用，否则最小合并；cli = 只用官方；merge = 只改文件（不碰运行中的网关）
@@ -57,7 +59,7 @@ step() { printf '\n== %s\n' "$*"; }
 ok()   { printf '  [OK] %s\n' "$*"; }
 skip() { printf '  [--] %s\n' "$*"; }
 warn() { printf '  [WARN] %s\n' "$*"; }
-fail() { printf '  [FAIL] %s\n' "$*" >&2; }
+fail() { printf '  [FAIL] %s\n' "$*" >&2; return 1; }
 
 usage() {
   cat <<'EOF'
@@ -81,6 +83,12 @@ install.sh — 智能体本体安装器（幂等 / 支持 --dry-run）
   --skip-skills             不装技能
   --skip-patch              不打消息平台适配补丁
   --require-ready           安装后执行只读就绪门禁；配置或运行时证据不完整时非零退出
+  --skip-worker             不配置或启动持久任务 worker
+  --skip-gateway            不为新 profile 安装或启动网关服务
+  --skip-memory             不为新 profile 配置自动记忆
+  --memory-embed-url URL    BGE 本地服务地址（默认 http://127.0.0.1:8910）
+  --skip-deps               跳过私有 Python 渲染与配置依赖（仅资产安装/测试）
+  --analysis-root PATH      配置允许读取的绝对目录（具名 profile 自动启动 worker）
   --apply-baseline          写入**通用能力基线**（轮次/派工上限/无人值守档）。默认**不动**配置；
                             只走官方 `hermes config set`，逐条打印改动与复原口径。
                             写保护开关（protected_instruction_files）不在此步 —— 另行人工决定并留痕
@@ -91,7 +99,8 @@ install.sh — 智能体本体安装器（幂等 / 支持 --dry-run）
      （生效身份另见 --compose-soul / --deploy-soul）
   2. identity/agents/*.md     -> <DEPLOY_DIR>/agents/            （派工契约参考位）
   3. toolsets/*/              -> <DEPLOY_DIR>/toolsets/
-  4. runtime/*                -> <DEPLOY_DIR>/runtime/
+  4. agentcore/*              -> <DEPLOY_DIR>/agentcore/（引擎源码）
+     runtime/*                -> <DEPLOY_DIR>/runtime/
   5. patches/*                -> <DEPLOY_DIR>/patches/
   6. plugins/*/               -> <HERMES_HOME>/plugins/<连字符名>/（按 profile 的插件副本；
                                  目录名里的下划线转连字符，跳过 __pycache__ / *.pyc）
@@ -118,7 +127,7 @@ install.sh — 智能体本体安装器（幂等 / 支持 --dry-run）
                             merge = 只改文件（不请求运行中的网关重载插件）。
 
 不做什么:
-  * 不启动/停止/重启任何服务（systemd 命令只打印）
+  * 已有网关不自动重启；新 profile 默认启动网关，已配置派工时默认启用 worker
   * 不读写任何 .env / 凭据
   * 不修改部署源（只读）
 EOF
@@ -136,6 +145,12 @@ while [ $# -gt 0 ]; do
     --skip-plugins)        DO_PLUGINS=0 ;;
     --skip-skills)         DO_SKILLS=0 ;;
     --skip-patch)          DO_PATCH=0 ;;
+    --skip-worker)         DO_WORKER=0 ;;
+    --skip-gateway)        DO_GATEWAY=0 ;;
+    --skip-memory)         DO_MEMORY=0 ;;
+    --memory-embed-url)    MEMORY_EMBED_URL="${2:?--memory-embed-url 需要参数}"; shift ;;
+    --skip-deps)           DO_DEPS=0 ;;
+    --analysis-root)        ANALYSIS_ROOT="${2:?--analysis-root 需要参数}"; shift ;;
     --apply-baseline)      DO_BASELINE=1 ;;
     --require-ready)       REQUIRE_READY=1 ;;
     -h|--help)             usage; exit 0 ;;
@@ -212,7 +227,15 @@ install_skill_tree() {  # 幂等装一棵技能树（递归找 SKILL.md，按目
       skip "$label 技能已一致 $name"; n=$((n + 1)); continue
     fi
     run mkdir -p "$SKILLS_DEST"
-    run rm -rf "$dest"
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+      # Preserve local edits before replacing a managed skill on upgrade.
+      local backup_root="$TARGET_HOME/skill-backups" backup
+      backup="$backup_root/$name.$(date +%Y%m%d-%H%M%S).$$"
+      run mkdir -p "$backup_root"
+      run cp -a "$dest" "$backup"
+      warn "现有技能已备份：$backup"
+      run rm -rf "$dest"
+    fi
     run cp -r "$(dirname "$sk")" "$dest"
     ok "$label 安装技能 $name"; n=$((n + 1))
   done < <(find "$src" -name SKILL.md -print0 | sort -z)
@@ -428,8 +451,10 @@ filter_opted_out_plugins() {
 }
 
 install_plugin_defaults() {
+  local engine="$DEPLOY_DIR"
+  [ "$DRY_RUN" = "1" ] && engine="$REPO_ROOT"
   local -a args=(--config "$TARGET_HOME/config.yaml" --home "$TARGET_HOME"
-                 --engine-root "$REPO_ROOT" --profile "$TARGET_PROFILE")
+                 --engine-root "$engine" --profile "$TARGET_PROFILE")
   local rc=0
   [ "$DRY_RUN" = "1" ] && args+=(--dry-run)
   python3 "$DEFAULTS" "${args[@]}" || rc=$?
@@ -438,6 +463,22 @@ install_plugin_defaults() {
     return 1
   fi
 }
+if [ -n "$PROFILE" ]; then
+  if [[ ! "$PROFILE" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]]; then
+    fail "profile 名称无效：仅允许小写字母、数字、-、_，且以字母或数字开头"
+  fi
+fi
+
+if [ -n "$ANALYSIS_ROOT" ]; then
+  if [ "$DO_PLUGINS" = "0" ]; then
+    fail "--analysis-root 不能与 --skip-plugins 同时使用"
+  fi
+  case "$ANALYSIS_ROOT" in
+    /*) ;;
+    *) fail "--analysis-root 必须是绝对路径" ;;
+  esac
+  [ -d "$ANALYSIS_ROOT" ] || fail "--analysis-root 目录不存在"
+fi
 
 # ---------------------------------------------------------------------------- #
 step "① 解析目标 Hermes"
@@ -473,13 +514,28 @@ log "  模式            = $([ "$DRY_RUN" = 1 ] && echo 'DRY-RUN（只打印）'
 if command -v hermes >/dev/null 2>&1; then
   ok "Hermes CLI：$(command -v hermes)  $(hermes --version 2>/dev/null | head -1 || true)"
 else
-  warn "未找到 hermes CLI —— 资产可先落位，但补丁与技能要等 Hermes 装好再跑"
+  if [ "$DRY_RUN" = "1" ] || [ "$DO_PATCH" = "0" ]; then
+    warn "未找到 hermes CLI；当前仅检查或安装资产，不能视为完整部署"
+  else
+    fail "未找到 hermes CLI；请先安装 Hermes，或明确使用 --skip-patch 仅安装资产"
+  fi
 fi
 if [ -d "$TARGET_HOME" ]; then
   ok "目标 home 存在"
 else
   warn "目标 home 不存在，将创建：$TARGET_HOME"
-  run mkdir -p "$TARGET_HOME"
+  if [ -n "$PROFILE" ] && [ -z "$HERMES_HOME_ARG" ] && [ "$DO_PATCH" = "1" ]; then
+    NEW_PROFILE=1
+    if [ "$DRY_RUN" = "1" ]; then
+      log "    [plan] hermes profile create $PROFILE --no-alias --no-skills"
+    else
+      env -u HERMES_HOME hermes profile create "$PROFILE" --no-alias --no-skills
+      [ -d "$TARGET_HOME" ] || fail "Hermes 未创建目标 profile"
+      : > "$TARGET_HOME/.superagent-gateway-pending"
+    fi
+  else
+    run mkdir -p "$TARGET_HOME"
+  fi
 fi
 if [ -d "$HOME/.hermes/profiles" ]; then
   log "  已有 profile：$(ls "$HOME/.hermes/profiles" 2>/dev/null | tr '\n' ' ')"
@@ -488,12 +544,26 @@ fi
 step "② 检查本仓源资产"
 for need in identity/SOUL.generic.md identity/agents toolsets patches plugins \
             install/enable_plugins.py install/plugin_defaults.py \
+            install/enable_plugins.py install/configure_defaults.py install/configure_delivery.py install/configure_gateway.py install/setup_worker.py install/setup_memory.py install/bootstrap_dependencies.py \
             patches/feishu_card_replies.patch patches/apply_feishu_card_replies.py \
             patches/patch_card_finalize.py patches/patch_card_markdown_native.py \
-            patches/patch_feishu_update_retry.py skills; do
+            patches/patch_feishu_update_retry.py patches/patch_feishu_delivery_uuid.py skills; do
   if [ -e "$REPO_ROOT/$need" ]; then ok "$need"
   else fail "缺少源资产：$REPO_ROOT/$need"; exit 1; fi
 done
+
+CONFIG_PY=python3
+step "②b 配置与渲染依赖"
+if [ "$DO_DEPS" = "1" ]; then
+  if [ "$DRY_RUN" = "1" ]; then
+    log "    [plan] 在 $DEPLOY_DIR/.superagent-venv 准备私有 Python 依赖"
+  else
+    python3 "$REPO_ROOT/install/bootstrap_dependencies.py" "$DEPLOY_DIR"
+    CONFIG_PY="$DEPLOY_DIR/.superagent-venv/bin/python"
+  fi
+else
+  warn "跳过私有依赖；配置和文档渲染依赖必须由环境提供"
+fi
 
 # ---------------------------------------------------------------------------- #
 step "③ 身份：通用骨架"
@@ -541,6 +611,13 @@ else
 fi
 
 # ---------------------------------------------------------------------------- #
+step "③b 引擎源码与部署工具 -> $DEPLOY_DIR"
+for helper in setup_worker.py setup_memory.py configure_defaults.py; do
+  install_file "$REPO_ROOT/install/$helper" "$DEPLOY_DIR/install/$helper"
+done
+install_tree "$REPO_ROOT/agentcore" "$DEPLOY_DIR/agentcore"
+install_tree "$REPO_ROOT/skills/illustrated-doc-rendering" "$DEPLOY_DIR/skills/illustrated-doc-rendering"
+
 step "④ 派工契约 -> $DEPLOY_DIR/agents"
 install_tree "$REPO_ROOT/identity/agents" "$DEPLOY_DIR/agents"
 
@@ -597,12 +674,19 @@ if [ "$DO_PLUGINS" = "1" ]; then
     warn "没有带 plugin.yaml 的插件可启用（localvec 没有 manifest，属 memory.provider，另行配置）"
   else
     enable_profile_plugins
+    install_plugin_defaults
+    if [ "$DRY_RUN" = "1" ]; then
+      log "    [plan] 配置无需外部服务的默认能力"
+    else
+      DEFAULT_ARGS=("$TARGET_HOME/config.yaml" "$DEPLOY_DIR")
+      [ -z "$ANALYSIS_ROOT" ] || DEFAULT_ARGS+=("$ANALYSIS_ROOT")
+      "$CONFIG_PY" "$REPO_ROOT/install/configure_defaults.py" "${DEFAULT_ARGS[@]}"
+    fi
   fi
-  install_plugin_defaults
   mapfile -t PLUGIN_SETTINGS_GATED < <(plugin_settings_gated_names)
   if [ "${#PLUGIN_SETTINGS_GATED[@]}" -gt 0 ]; then
-    log "  以下插件以 settings.enabled 为总开关：只在 plugins.enabled 里**不算生效**，还要"
-    log "  检查 plugins.entries.<name>.settings；缺失项已补安全默认，其余部署值须按模板配置："
+    log "  以下插件以 settings.enabled 为总开关；通用缺省项已补齐，其他仍需按需配置："
+    log "  请核对 plugins.entries.<name>.settings 和对应依赖："
     for name in "${PLUGIN_SETTINGS_GATED[@]}"; do
     log "    - $name    → plugins.entries.$name.settings   （模板见 plugins/$name/README.md）"
     done
@@ -637,6 +721,7 @@ if [ "$DO_PATCH" = "1" ]; then
   FINALIZE="$REPO_ROOT/patches/patch_card_finalize.py"
   NATIVE="$REPO_ROOT/patches/patch_card_markdown_native.py"
   UPDATE_RETRY="$REPO_ROOT/patches/patch_feishu_update_retry.py"
+  DELIVERY_UUID="$REPO_ROOT/patches/patch_feishu_delivery_uuid.py"
   if [ "$DRY_RUN" = "1" ]; then
     log "    [plan] HERMES_AGENT_DIR=$HERMES_AGENT_DIR python3 $APPLY --check"
     log "    [plan] HERMES_AGENT_DIR=$HERMES_AGENT_DIR python3 $APPLY --apply"
@@ -647,8 +732,9 @@ if [ "$DO_PATCH" = "1" ]; then
     log "    [plan] python3 $NATIVE --apply --agent-dir $HERMES_AGENT_DIR   （仅当 --check 不在位）"
     log "    [plan] python3 $UPDATE_RETRY --check --agent-dir $HERMES_AGENT_DIR"
     log "    [plan] python3 $UPDATE_RETRY --apply --agent-dir $HERMES_AGENT_DIR   （仅当 --check 不在位）"
+    log "    [plan] python3 $DELIVERY_UUID --hermes-root $HERMES_AGENT_DIR [--apply]"
   elif [ ! -d "$HERMES_AGENT_DIR" ]; then
-    warn "Hermes 安装树不存在（$HERMES_AGENT_DIR），跳过补丁。装好 Hermes 后重跑本步。"
+    fail "Hermes 安装树不存在（$HERMES_AGENT_DIR），无法应用补丁。装好 Hermes 后重跑本步。"
   else
     if HERMES_AGENT_DIR="$HERMES_AGENT_DIR" python3 "$APPLY" --check; then
       skip "卡片流式补丁已整块在位"
@@ -680,9 +766,84 @@ if [ "$DO_PATCH" = "1" ]; then
     else
       fail "卡片原地更新重试补丁重放失败（上游锚点可能已漂移，退出码 2）；人工核对后重跑"
     fi
+    if python3 "$DELIVERY_UUID" --hermes-root "$HERMES_AGENT_DIR"; then
+      skip "消息平台交付 UUID 补丁已在位"
+    elif python3 "$DELIVERY_UUID" --hermes-root "$HERMES_AGENT_DIR" --apply; then
+      ok "消息平台交付 UUID 补丁已应用（需在空闲窗口重启网关）"
+    else
+      fail "消息平台交付 UUID 补丁失败；请核对 Hermes 版本"
+    fi
   fi
 else
   step "⑩ 跳过补丁（--skip-patch）"
+fi
+
+# Configure direct delivery only after the complete patch sequence succeeded.
+# An explicit existing delivery policy is never changed.
+if [ "$DO_PLUGINS" = "1" ] && [ "$DO_PATCH" = "1" ] && [ -n "$ANALYSIS_ROOT" ]; then
+  if [ "$DRY_RUN" = "1" ]; then
+    log "    [plan] 为新派工配置直投与历史回执时间边界"
+  else
+    "$CONFIG_PY" "$REPO_ROOT/install/configure_delivery.py" "$TARGET_HOME/config.yaml" "$DEPLOY_DIR"
+  fi
+fi
+
+# ---------------------------------------------------------------------------- #
+step "⑩b 持久任务 worker"
+if [ "$DO_PLUGINS" = "1" ] && [ "$DO_WORKER" = "1" ] && [ -n "$PROFILE" ] && [ -z "$HERMES_HOME_ARG" ]; then
+  if [ "$DRY_RUN" = "1" ]; then
+    log "    [plan] 若持久派工已配置，生成匹配 worker 并启用用户服务"
+  elif "$CONFIG_PY" - "$TARGET_HOME/config.yaml" <<'PY'
+import sys, yaml
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = yaml.safe_load(f) or {}
+plugins = data.get("plugins") or {}
+settings = (((plugins.get("entries") or {}).get("durable-dispatch") or {}).get("settings") or {})
+entry = (plugins.get("entries") or {}).get("durable-dispatch") or {}
+sys.exit(0 if settings.get("enabled") is True and entry.get("enabled") is not False
+         and "durable-dispatch" not in (plugins.get("disabled") or []) else 1)
+PY
+  then
+    "$CONFIG_PY" "$REPO_ROOT/install/setup_worker.py" --profile-home "$TARGET_HOME" \
+      --engine-root "$DEPLOY_DIR" --profile "$PROFILE" --apply --activate
+  else
+    warn "持久派工未配置；worker 未启动，不能提交持久任务。先配置队列、授权范围及模型服务。"
+  fi
+else
+  skip "worker 自动配置（未指定具名 profile、跳过插件或使用 --skip-worker）"
+fi
+
+# New profiles get a dedicated, explicitly scoped store. Never migrate an
+# existing profile's memory provider or consume existing backlog automatically.
+step "⑩c 新 profile 自动记忆"
+if [ "$DO_MEMORY" = "1" ] && [ "$DO_PLUGINS" = "1" ] && [ -n "$PROFILE" ] && [ -z "$HERMES_HOME_ARG" ] && { [ "$NEW_PROFILE" = "1" ] || [ -f "$TARGET_HOME/.superagent-gateway-pending" ]; }; then
+  if [ "$DRY_RUN" = "1" ]; then
+    log "    [plan] 配置独立记忆库、同身份召回和记忆 worker；检查模型与嵌入服务"
+  else
+    "$CONFIG_PY" "$REPO_ROOT/install/setup_memory.py" --profile-home "$TARGET_HOME" \
+      --engine-root "$DEPLOY_DIR" --profile "$PROFILE" --user "$PROFILE" --agent "$PROFILE" \
+      --embed-url "$MEMORY_EMBED_URL" --python "$(command -v "$CONFIG_PY")" --apply --activate
+  fi
+else
+  skip "已有 profile、资产安装或 --skip-memory；不迁移既有记忆"
+fi
+
+# Only create/start a service for a profile created in this invocation.
+# Existing gateways are never restarted or implicitly started.
+step "⑩d 新 profile 网关"
+if [ "$DO_GATEWAY" = "1" ] && [ -n "$PROFILE" ] && [ -z "$HERMES_HOME_ARG" ] && { [ "$NEW_PROFILE" = "1" ] || [ -f "$TARGET_HOME/.superagent-gateway-pending" ]; }; then
+  if [ "$DRY_RUN" = "1" ]; then
+    log "    [plan] 配置新 profile 的独立网关（不改变已有 profile）"
+    log "    [plan] hermes -p $PROFILE gateway install --if-missing --start-now --start-on-login"
+    log "    [plan] hermes -p $PROFILE gateway ensure --timeout 45"
+  else
+    "$CONFIG_PY" "$REPO_ROOT/install/configure_gateway.py" "$TARGET_HOME/config.yaml"
+    env -u HERMES_HOME hermes -p "$PROFILE" gateway install --if-missing --start-now --start-on-login
+    env -u HERMES_HOME hermes -p "$PROFILE" gateway ensure --timeout 45
+    rm -f "$TARGET_HOME/.superagent-gateway-pending"
+  fi
+else
+  skip "已有 profile、资产安装或 --skip-gateway；不改变网关状态"
 fi
 
 # ---------------------------------------------------------------------------- #
@@ -724,7 +885,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------- #
-step "⑫ 需要人工执行的步骤（本脚本不启停任何服务）"
+step "⑫ 需要人工执行的步骤（网关不会自动重启）"
 cat <<EOF
 
   当前 profile      : ${PROFILE:-default（未指定 --profile）}
@@ -783,5 +944,7 @@ step "完成"
 if [ "$DRY_RUN" = "1" ]; then
   log "  DRY-RUN 结束：以上 [plan] 行是唯一会发生的动作（其实没发生）。"
 else
-  log "  通用资产已落位。上面 ⑫ 的人工步骤仍需执行。"
+  log "  通用资产已落位；这不代表所有能力已通过验收。"
+  printf '  检查缺口：%q %q --profile-home %q --profile %q\n' \
+    "$CONFIG_PY" "$DEPLOY_DIR/tools/deployment_readiness.py" "$TARGET_HOME" "${PROFILE:-default}"
 fi

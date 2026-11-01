@@ -1,0 +1,8 @@
+.git
+.superagent-venv
+.browser-cache
+.browser-path
+.venv
+**/__pycache__
+.pytest_cache
+*.pyc

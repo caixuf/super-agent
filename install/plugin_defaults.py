@@ -36,6 +36,9 @@ def _mapping(lines, start, end):
             raise config_text.Unsupported("tab indentation")
         if config_text._indent(lines[i]) != child_indent:
             continue
+        # YAML permits a block sequence at the same indentation as its key.
+        if lines[i].lstrip().startswith("- "):
+            continue
         match = re.fullmatch(r"\s*([A-Za-z0-9_-]+)\s*:(.*)", lines[i])
         if not match or match[1] in keys:
             raise config_text.Unsupported("ambiguous plugin mapping key")

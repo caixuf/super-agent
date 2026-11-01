@@ -286,6 +286,15 @@ def check_patches(result):
                 result.ok(script + " applies, verifies, re-applies")
             else:
                 result.bad(script + " applies and verifies", (applied.stderr or verified.stdout)[-200:])
+        uuid = REPO / "patches" / "patch_feishu_delivery_uuid.py"
+        cmd = [sys.executable, str(uuid), "--hermes-root", str(tree)]
+        applied = run(cmd + ["--apply"])
+        verified = run(cmd)
+        replay = run(cmd + ["--apply"])
+        if applied.returncode == verified.returncode == replay.returncode == 0:
+            result.ok("Feishu delivery UUID patch applies, verifies, re-applies")
+        else:
+            result.bad("Feishu delivery UUID patch", (applied.stderr or verified.stderr or replay.stderr)[-300:])
 
 
 def check_card_roundtrip(result):

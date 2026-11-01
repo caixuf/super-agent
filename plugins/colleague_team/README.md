@@ -46,7 +46,7 @@ bootstrap = ColleagueGatewayBootstrap(..., gateway_host=host,
 
 没注入时 `connection_for_profile` 报 `gateway_connector_required`、会话创建报 `session_store_factory_required`，不会退回任何隐式 import。插件启用派工时会同时调用 `colleague_gateway_service.configure_session_env(get_session_env)`；没有这个注入，派工工具拒绝运行（`session_env_provider_required`），因为无法判断当前是否 cron 会话。
 
-宿主必须自己提供 readiness attestation；仅能连上 Gateway 不代表成员 ready。当前仓库还没有可供生产直接使用的 Provisioner backend，也没有在现有服务中启动 bootstrap，因此工具仍不可用，不能通过设置开关伪装完成接入。Gateway 回执 terminal 不会自动关闭 reservation；后台进程未有宿主 quiescence 证据时保持占用。插件不发送 Feishu 消息。
+宿主必须自己提供 readiness attestation；仅能连上 Gateway 不代表成员 ready。当前仓库还没有可供生产直接使用的 Provisioner backend，也没有在现有服务中启动 bootstrap，因此工具仍不可用，不能通过设置开关伪装完成接入。单凭 unit 名、容器标签、进程令牌或 runner 的布尔声明无法证明完整任务已被隔离并停止；在真实任务绑定和停止证明接入前，worker 在执行前拒绝派工。Gateway 回执 terminal 不会自动关闭 reservation；后台进程未有宿主 quiescence 证据时保持占用。插件不发送 Feishu 消息。
 
 查状态时会附带一条简短说明：排队、处理中、状态待确认，以及「同事已回复但后台工作仍待确认」分别显示。只有答复已确认且后台占用已关闭，才说任务完成。
 
