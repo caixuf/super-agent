@@ -63,6 +63,9 @@ bash install/install.sh --profile <name> --apply-baseline                # 显�
 安装器**不做**：不启停任何服务（systemd 命令只打印给人执行）、不读写 `.env` / 凭据、
 不覆盖现场身份（默认不动 `SOUL.md`）、不改部署源（只读）。
 
+Feishu 流式卡片由外部 HFC sidecar 管理，版本与只读验收入口见
+[`integrations/hfc/README.md`](integrations/hfc/README.md)。
+
 ---
 
 ## 干净室部署验证（Docker）

@@ -77,6 +77,10 @@ bash install/install.sh --profile <name> --compose-soul <业务叠加层.md> \
 `bash install/install.sh --require-ready` 会生成只读静态配置报告，并因运行时注册与端到端投递
 尚未有独立证据而失败关闭。该选项适合把“未证实”挡在验收门外，不代表安装器能启动或验证生产服务。
 
+Feishu 卡片的外部 HFC 运行态另走 [`integrations/hfc/README.md`](../integrations/hfc/README.md)；
+`tools/hfc_acceptance.py` 检查锁定版本、Hermes 兼容、sidecar 健康和观测到的回合样本。
+它不发送测试消息，客户端视觉表现、按钮回调和重复投递仍需私有测试会话人工验收。
+
 ## 4. 只住在本机、不进仓的东西（必须逐项给值）
 
 | 项 | 在哪 | 怎么来 |

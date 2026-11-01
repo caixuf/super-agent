@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "distribution": "hermes-feishu-streaming-card",
+  "version": "5.0.13",
+  "repository": "https://github.com/baileyh8/hermes-feishu-streaming-card",
+  "commit": "e072763f1b6e3170a24be70fc7474df05ee0552f",
+  "license": "MIT",
+  "ownership": "upstream_cli_and_sidecar"
+}
