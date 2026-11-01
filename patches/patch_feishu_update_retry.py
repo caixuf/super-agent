@@ -147,35 +147,35 @@ def _agent_dir(explicit: str | None) -> Path:
     return root.expanduser()
 
 
-def _missing(text: str) -> list[tuple[str, str, str]]:
-    """返回尚未到位、且锚点确实存在的步骤。"""
-    if PROBE in text:
-        return []
-    missing: list[tuple[str, str, str]] = []
-    for name, old, new in (
-        ("helper", ANCHOR_AFTER, ANCHOR_AFTER + "\n\n\n" + HELPER.rstrip("\n")),
-        ("card-frame", CARD_OLD, CARD_NEW),
-        ("text-frame", TEXT_OLD, TEXT_NEW),
-    ):
-        if text.count(old) == 0:
-            continue                     # 这棵树没有这一处形态
-        missing.append((name, old, new))
-    return missing
+#: 三步，各带一个在位探针 —— 崩了要能指出是哪一处形态变了。
+STEPS = (
+    ("helper", ANCHOR_AFTER, ANCHOR_AFTER + "\n\n\n" + HELPER.rstrip("\n"),
+     "模块级 logger 定义", "def _feishu_update_retryable"),
+    ("card-frame", CARD_OLD, CARD_NEW, "edit_message 的 patch 调用", 'what="Card patch"'),
+    ("text-frame", TEXT_OLD, TEXT_NEW, "_update 的 update 调用", 'what="Message update"'),
+)
 
 
-def _report_missing(text: str) -> list[str]:
-    """缺口清单，用于 --check 输出与 apply 后的复核。"""
-    if PROBE in text:
-        return []
-    problems = []
-    if CARD_OLD not in text and "Card patch" not in text:
-        problems.append("card-frame 锚点缺失（edit_message 的 patch 调用形态变了）")
-    if TEXT_OLD not in text and "Message update" not in text:
-        problems.append("text-frame 锚点缺失（_update 的 update 调用形态变了）")
-    if ANCHOR_AFTER not in text:
-        problems.append("helper 锚点缺失（模块级 logger 定义形态变了）")
-    return problems
+def _missing(text: str) -> tuple[list[tuple[str, str, str]], list[str]]:
+    """返回 (待改步骤, 漂移说明)。
 
+    每步各凭自己的探针判定是否在位，所以**打了大半的树**照样能指出还缺哪一处，
+    而不是被总探针一句「在位」带过。锚点一次没命中是**漂移**（上游形态变了），
+    不是「这棵树本来就没有」，必须报出来；命中多于一次同样拒绝 —— 批量替换一个
+    不该批量替换的位置，比不替换更糟。
+    """
+    todos, drifted = [], []
+    for name, old, new, what, probe in STEPS:
+        if probe in text:
+            continue
+        count = text.count(old)
+        if count == 0:
+            drifted.append("%s 锚点缺失（%s 形态变了）" % (name, what))
+        elif count > 1:
+            drifted.append("%s 锚点命中 %d 次（应为 1）" % (name, count))
+        else:
+            todos.append((name, old, new))
+    return todos, drifted
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
@@ -190,27 +190,27 @@ def main() -> int:
         print("[FAIL] 找不到 %s" % path)
         return 2
     text = path.read_text(encoding="utf-8")
+    todos, drifted = _missing(text)
 
     if args.check:
         if PROBE in text:
             print("[PASS] 卡片原地更新重试补丁：在位")
             return 0
         print("[FAIL] 卡片原地更新重试补丁：不在位")
-        for problem in _report_missing(text):
+        for problem in drifted:
             print("  - %s" % problem)
         print("  表现：一次网络抖动就让整条回复降级成纯文本，同一条回复出现两份副本。")
         return 1
 
-    missing = _missing(text)
-    if not missing:
+    if drifted:
+        for problem in drifted:
+            print("[FAIL] %s ——文件已漂移，请人工核对" % problem)
+        return 2
+    if not todos:
         print("[PASS] 已在位，无需重放")
         return 0
 
-    for name, old, new in missing:
-        count = text.count(old)
-        if count != 1:
-            print("[FAIL] %s: 锚点命中 %d 次（应为 1）——文件已漂移，请人工核对" % (name, count))
-            return 2
+    for name, old, new in todos:
         text = text.replace(old, new, 1)
         print("[OK] 已改 %s" % name)
 

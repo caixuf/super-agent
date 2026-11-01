@@ -150,3 +150,51 @@ def test_patch_is_idempotent(tmp_path):
     twice = (target / "adapter.py").read_text(encoding="utf-8")
     assert once == twice, "第二次 apply 不得改动文件"
     assert twice.count("def _feishu_update_retryable") == 1
+
+
+def _load_patcher():
+    spec = importlib.util.spec_from_file_location("_update_retry_patcher", PATCHER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_drift_is_reported_and_refused(tmp_path):
+    """上游改了锚点形态时，补丁必须报出是哪一处并拒绝写入（退出码 2）。
+
+    静默跳过是最坏的结局：安装器以为成功，用户继续看到降级的回复。
+    """
+    if not SOURCE_ADAPTER.is_file():
+        pytest.skip("宿主 adapter 不在本机，跳过")
+    patcher = _load_patcher()
+    target = tmp_path / "plugins" / "platforms" / "feishu"
+    target.mkdir(parents=True)
+    # 从**未打过**的原版出发：宿主树上那份可能已经打过了，probe 在位会掩盖漂移。
+    text = _pristine_adapter_text(patcher)
+    # 上游把 patch 调用改名 = card-frame 那一处形态真的变了
+    drifted_text = text.replace("self._client.im.v1.message.patch",
+                                "self._client.im.v1.message.patch_renamed")
+    assert drifted_text != text, "构造漂移失败：锚点没命中，本用例失去意义"
+    (target / "adapter.py").write_text(drifted_text, encoding="utf-8")
+
+    todos, drifted = patcher._missing(drifted_text)
+    assert any("card-frame" in d for d in drifted), drifted
+    assert not any(name == "card-frame" for name, _o, _n in todos)
+
+    result = subprocess.run([sys.executable, str(PATCHER), "--apply", "--agent-dir", str(tmp_path)],
+                            capture_output=True, text=True)
+    assert result.returncode == 2, result.stdout
+    assert "card-frame" in result.stdout
+    assert (target / "adapter.py").read_text(encoding="utf-8") == drifted_text, "拒绝写入时不得改动文件"
+
+
+def _pristine_adapter_text(patcher) -> str:
+    """宿主 adapter 的**未打补丁**原文。
+
+    宿主树上那份可能已经打过了，直接拿它做漂移实验会被在位探针掩盖 —— 探针在，
+    每一步都判「已到位」，漂移永远看不见。这里用补丁自带的 old/new 反向还原。
+    """
+    text = SOURCE_ADAPTER.read_text(encoding="utf-8")
+    for _name, old, new, _what, _probe in patcher.STEPS:
+        text = text.replace(new, old)
+    return text
