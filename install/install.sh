@@ -439,7 +439,8 @@ step "② 检查本仓源资产"
 for need in identity/SOUL.generic.md identity/agents toolsets patches plugins \
             install/enable_plugins.py \
             patches/feishu_card_replies.patch patches/apply_feishu_card_replies.py \
-            patches/patch_card_finalize.py skills; do
+            patches/patch_card_finalize.py patches/patch_card_markdown_native.py \
+            patches/patch_feishu_update_retry.py skills; do
   if [ -e "$REPO_ROOT/$need" ]; then ok "$need"
   else fail "缺少源资产：$REPO_ROOT/$need"; exit 1; fi
 done
@@ -583,6 +584,7 @@ if [ "$DO_PATCH" = "1" ]; then
   APPLY="$REPO_ROOT/patches/apply_feishu_card_replies.py"
   FINALIZE="$REPO_ROOT/patches/patch_card_finalize.py"
   NATIVE="$REPO_ROOT/patches/patch_card_markdown_native.py"
+  UPDATE_RETRY="$REPO_ROOT/patches/patch_feishu_update_retry.py"
   if [ "$DRY_RUN" = "1" ]; then
     log "    [plan] HERMES_AGENT_DIR=$HERMES_AGENT_DIR python3 $APPLY --check"
     log "    [plan] HERMES_AGENT_DIR=$HERMES_AGENT_DIR python3 $APPLY --apply"
@@ -591,6 +593,8 @@ if [ "$DO_PATCH" = "1" ]; then
     log "    [plan] python3 $FINALIZE --apply --agent-dir $HERMES_AGENT_DIR   （仅当 --check 不在位）"
     log "    [plan] python3 $NATIVE --check --agent-dir $HERMES_AGENT_DIR"
     log "    [plan] python3 $NATIVE --apply --agent-dir $HERMES_AGENT_DIR   （仅当 --check 不在位）"
+    log "    [plan] python3 $UPDATE_RETRY --check --agent-dir $HERMES_AGENT_DIR"
+    log "    [plan] python3 $UPDATE_RETRY --apply --agent-dir $HERMES_AGENT_DIR   （仅当 --check 不在位）"
   elif [ ! -d "$HERMES_AGENT_DIR" ]; then
     warn "Hermes 安装树不存在（$HERMES_AGENT_DIR），跳过补丁。装好 Hermes 后重跑本步。"
   else
@@ -614,6 +618,15 @@ if [ "$DO_PATCH" = "1" ]; then
       ok "卡片原生表格补丁已重放（**需重启网关**才生效）"
     else
       fail "卡片原生表格补丁重放失败（上游锚点可能已漂移，退出码 2）；人工核对后重跑"
+    fi
+    # 卡片一开，一条回复就是一串 PATCH 帧；这层补丁给这些原地更新加重试，
+    # 否则一次 DNS 抖动就让整条回复降级成纯文本，同一条回复出现两份副本。
+    if python3 "$UPDATE_RETRY" --check --agent-dir "$HERMES_AGENT_DIR"; then
+      skip "卡片原地更新重试补丁已整块在位"
+    elif python3 "$UPDATE_RETRY" --apply --agent-dir "$HERMES_AGENT_DIR"; then
+      ok "卡片原地更新重试补丁已重放（**需重启网关**才生效）"
+    else
+      fail "卡片原地更新重试补丁重放失败（上游锚点可能已漂移，退出码 2）；人工核对后重跑"
     fi
   fi
 else

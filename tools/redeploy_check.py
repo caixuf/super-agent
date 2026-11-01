@@ -143,7 +143,7 @@ def check_patches(result):
             shutil.copy2(source, tree / relative)
         env = dict(os.environ, HERMES_AGENT_DIR=str(tree))
         for script in ("apply_feishu_card_replies.py", "patch_card_finalize.py",
-                       "patch_card_markdown_native.py"):
+                       "patch_card_markdown_native.py", "patch_feishu_update_retry.py"):
             path = REPO / "patches" / script
             check = run([sys.executable, str(path), "--check"], env=env)
             if check.returncode not in (0, 1):
