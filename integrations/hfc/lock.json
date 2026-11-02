@@ -5,5 +5,10 @@
   "repository": "https://github.com/baileyh8/hermes-feishu-streaming-card",
   "commit": "e072763f1b6e3170a24be70fc7474df05ee0552f",
   "license": "MIT",
-  "ownership": "upstream_cli_and_sidecar"
+  "ownership": "upstream_cli_and_sidecar",
+  "known_delivery_blockers": [
+    "terminal_ack_before_platform_delivery",
+    "terminal_not_sent_reported_as_success",
+    "superseded_terminal_answer_suppressed"
+  ]
 }

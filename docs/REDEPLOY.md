@@ -80,6 +80,8 @@ bash install/install.sh --profile <name> --compose-soul <业务叠加层.md> \
 Feishu 卡片的外部 HFC 运行态另走 [`integrations/hfc/README.md`](../integrations/hfc/README.md)；
 `tools/hfc_acceptance.py` 检查锁定版本、Hermes 兼容、sidecar 健康和观测到的回合样本。
 它不发送测试消息，客户端视觉表现、按钮回调和重复投递仍需私有测试会话人工验收。
+当前锁定版本存在已复现的消息交付缺陷，默认验收被 `no_known_delivery_loss` 阻断；
+`--infrastructure-only` 的 ready 不表示可生产启用，也不解除版本隔离。
 
 ## 4. 只住在本机、不进仓的东西（必须逐项给值）
 

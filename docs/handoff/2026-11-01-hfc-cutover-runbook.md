@@ -1,5 +1,10 @@
 # HFC cutover / rollback runbook for bot1
 
+> 2026-11-02 safety hold: the unchanged v5.0.13 pin has reproducible reply-loss
+> paths and is blocked for new interaction acceptance. See
+> [delivery investigation](../reports/2026-11-02-hfc-delivery-loss.md).
+> This historical deployment record is not evidence of a current delivery fix.
+
 ## Deployment result — 2026-11-01 11:30 UTC
 
 HFC v5.0.13 is now active on bot1. This is infrastructure acceptance, **not**

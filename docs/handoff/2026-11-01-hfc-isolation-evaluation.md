@@ -1,5 +1,10 @@
 # HFC v5.0.13 isolation evaluation
 
+> 2026-11-02 safety hold: the unchanged v5.0.13 pin has reproducible reply-loss
+> paths and is blocked for new interaction acceptance. See
+> [delivery investigation](../reports/2026-11-02-hfc-delivery-loss.md).
+> This historical deployment record is not evidence of a current delivery fix.
+
 Status: activated on bot1 at 2026-11-01 11:30 UTC after the evaluation below.
 Gateway/sidecar readiness passed; real-client turn and button acceptance remain
 pending. See the cutover runbook for deployment and rollback evidence.

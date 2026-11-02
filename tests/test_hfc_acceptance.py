@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from tools import hfc_acceptance
 from tools.hfc_acceptance import LOCK, evaluate_report
 
 PINNED_COMMIT = json.loads(LOCK.read_text(encoding="utf-8"))["commit"]
@@ -33,7 +34,13 @@ def _report():
     }
 
 
-def test_full_gate_requires_runtime_and_turn_evidence():
+def test_full_gate_requires_runtime_and_turn_evidence(tmp_path, monkeypatch):
+    # A future reviewed release can pass; the current pin remains quarantined.
+    lock = json.loads(LOCK.read_text())
+    lock["known_delivery_blockers"] = []
+    reviewed = tmp_path / "lock.json"
+    reviewed.write_text(json.dumps(lock))
+    monkeypatch.setattr(hfc_acceptance, "LOCK", reviewed)
     result = _evaluate(_report())
     assert result["status"] == "ready"
     assert result["blockers"] == []
@@ -65,3 +72,29 @@ def test_unpinned_source_commit_fails_closed():
     result = evaluate_report(_report(), installed_commit="f" * 40)
     assert result["status"] == "blocked"
     assert "pinned_cli_source_commit" in result["blockers"]
+
+
+def test_known_delivery_loss_blocks_even_healthy_runtime_and_completed_samples():
+    result = _evaluate(_report())
+    assert result["status"] == "blocked"
+    assert result["blockers"] == ["no_known_delivery_loss"]
+    assert len(result["known_delivery_blockers"]) == 3
+    assert result["interaction_gate_passed"] is False
+
+
+def test_infrastructure_ready_is_not_interaction_gate_pass():
+    result = _evaluate(_report(), require_turn=False)
+    assert result["status"] == "ready"
+    assert result["known_delivery_blockers"]
+    assert result["interaction_gate_passed"] is False
+
+
+def test_absent_delivery_review_fails_closed(tmp_path, monkeypatch):
+    lock = json.loads(LOCK.read_text())
+    lock.pop("known_delivery_blockers")
+    unchecked = tmp_path / "lock.json"
+    unchecked.write_text(json.dumps(lock))
+    monkeypatch.setattr(hfc_acceptance, "LOCK", unchecked)
+    result = _evaluate(_report())
+    assert "no_known_delivery_loss" in result["blockers"]
+    assert result["known_delivery_blockers"] == ["delivery_safety_review_missing"]

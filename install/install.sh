@@ -18,6 +18,7 @@
 #   bash install/install.sh --dry-run                        # 看计划
 #   bash install/install.sh --profile <profile>              # 真装（通用 + 示例）
 #   bash install/install.sh --profile <profile> --skip-plugins
+#   bash install/superagent.sh install --profile <profile> --apply  # 统一受管根
 #   bash install/install.sh --profile <profile> --compose-soul /path/to/overlay.md
 #   INSTALL_BUSINESS_SKILLS=1 BUSINESS_SKILLS_SRC=<dir> bash install/install.sh
 #   PLUGIN_ENABLE_MODE=merge bash install/install.sh --profile <profile>   # 只改文件
@@ -35,6 +36,7 @@ DRY_RUN=0
 PROFILE=""
 HERMES_HOME_ARG=""
 DEPLOY_DIR_ARG=""
+MANAGED_ROOT_ARG=""
 SOUL_COMPOSE_ARG=""
 DO_SOUL_LIVE=0
 DO_PLUGINS=1
@@ -70,6 +72,7 @@ install.sh — 智能体本体安装器（幂等 / 支持 --dry-run）
 
 开关:
   --dry-run                 只打印将执行的计划，不改系统
+  --managed-root PATH       统一受管根；将本仓资产安装到该根，不修改 Hermes 源
   --profile NAME            目标 Hermes profile（默认：由 $HERMES_HOME 推断，否则 default）
   --hermes-home PATH        Hermes home 全路径（覆盖 --profile 推断）
   --deploy-dir PATH         agentcore 托管资产的部署根（默认 <HERMES_HOME>/agentcore）
@@ -139,6 +142,7 @@ while [ $# -gt 0 ]; do
     --profile)             PROFILE="${2:?--profile 需要参数}"; shift ;;
     --hermes-home)         HERMES_HOME_ARG="${2:?--hermes-home 需要参数}"; shift ;;
     --deploy-dir)          DEPLOY_DIR_ARG="${2:?--deploy-dir 需要参数}"; shift ;;
+    --managed-root)        MANAGED_ROOT_ARG="${2:?--managed-root 需要参数}"; shift ;;
     --compose-soul)        SOUL_COMPOSE_ARG="${2:?--compose-soul 需要参数}"; shift ;;
     --deploy-soul)         DO_SOUL_LIVE=1 ;;
     --business-skills-src) BUSINESS_SKILLS_SRC="${2:?--business-skills-src 需要参数}"; shift ;;
@@ -496,7 +500,11 @@ else
   TARGET_HOME="$HOME/.hermes"
 fi
 
-DEPLOY_DIR="${DEPLOY_DIR_ARG:-$TARGET_HOME/agentcore}"
+if [ -n "$MANAGED_ROOT_ARG" ]; then
+  DEPLOY_DIR="${DEPLOY_DIR_ARG:-$MANAGED_ROOT_ARG/current}"
+else
+  DEPLOY_DIR="${DEPLOY_DIR_ARG:-$TARGET_HOME/agentcore}"
+fi
 SOUL_DEST="$TARGET_HOME/SOUL.md"
 SKILLS_DEST="$TARGET_HOME/skills"
 TARGET_PROFILE="${PROFILE:-default}"

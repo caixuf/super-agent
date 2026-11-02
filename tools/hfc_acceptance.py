@@ -81,8 +81,13 @@ def evaluate_report(report, *, installed_commit=None, require_turn=True):
         "integrity_safe": integrity.get("mode") == "safe",
         "generation_matches": readiness.get("generation_match") is True,
     }
+    known_blockers = lock.get("known_delivery_blockers")
+    delivery_safety_reviewed = (
+        isinstance(known_blockers, list) and not known_blockers
+    )
     if require_turn:
         checks.update({
+            "no_known_delivery_loss": delivery_safety_reviewed,
             "turn_started_observed": _positive(timing.get("started_samples")),
             "first_answer_observed": _positive(timing.get("first_answer_samples")),
             "turn_completed_observed": _positive(timing.get("completed_samples")),
@@ -107,6 +112,10 @@ def evaluate_report(report, *, installed_commit=None, require_turn=True):
         "checks": checks,
         "blockers": blockers,
         "notices": warnings,
+        "known_delivery_blockers": known_blockers if isinstance(known_blockers, list)
+            else ["delivery_safety_review_missing"],
+        # Automated checks only; the manual client criteria below remain required.
+        "interaction_gate_passed": require_turn and not blockers and delivery_safety_reviewed,
         "manual_client_acceptance_required": [
             "first_card_rendering",
             "in_place_updates_and_single_terminal_card",

@@ -36,7 +36,7 @@
 | 文档 | `docs/` | —— | `MIGRATION.md`（八层迁移清单 + 资产表）、`PLUGINS.md`（插件/MCP/工具集注册）、`POOL_RUNTIME.md`、`DISPATCH_ANALYSIS.md`、`REDEPLOY.md` |
 | 平台适配补丁 | `patches/` | `<HERMES_HOME>/agentcore/patches/` | 消息平台适配：Card 2.4 流式卡片 + 纯文字审批；幂等重放与内容探针校验 |
 | 插件集 | `plugins/` | `<HERMES_HOME>/plugins/<name>` + profile `config.yaml` 的 `plugins.enabled` | `longtask_guard/`（前台长任务自动转后台 + 心跳/账本登记）、`task_status/`（长任务活体快照：state/elapsed/heartbeat age/tail）、`durable_dispatch/`（持久任务提交与状态查询）、`colleague_team/` 与 `colleague_catalog/`（研发团队管理与目录呈现）、`markdown_delivery/`（大文档直发与租户级共享）、`write_guard/`（写保护门禁）等 13 款通用插件 |
-| 安装器 | `install/install.sh` | —— | 幂等、`--dry-run` 零副作用、不启停服务、不碰凭据、不覆盖现场身份 |
+| 安装器 | `install/superagent.sh` + `tools/superagent.py` | —— | 单根受管安装、版本 release、原子切换/回滚、manifest 卸载；`install/install.sh` 保留为兼容入口 |
 | 干净室验证 | `docker/` | —— | 容器里从一个空 HOME 装一遍，20 项断言 |
 | 迁移口径 | `docs/MIGRATION.md` | —— | 「只在盘上」的漏项清单 + 可量化验收 |
 
@@ -49,7 +49,22 @@ bash verify.sh                 # ← 先跑这个：静态 + 单测 + 安装 dry
 bash verify.sh --with-docker   # 再加干净室部署验证（建镜像，几分钟）
 bash verify.sh --with-checks   # 再加宿主特性矩阵（需 Hermes 树 / Node；缺依赖的组降级 WARN）
 
-bash install/install.sh --help              # 全部开关
+## 一键安装 / 整包升级
+
+Super Agent 的统一安装根、版本账本、升级回滚和完整卸载入口见
+[`docs/ONE_COMMAND_INSTALL.md`](docs/ONE_COMMAND_INSTALL.md)。
+
+```bash
+./install/superagent.sh plan --profile <profile>
+./install/superagent.sh install --profile <profile> --apply
+./install/superagent.sh update --profile <profile> --apply
+./install/superagent.sh uninstall --profile <profile> --apply
+```
+
+默认先出计划；只有 `--apply` 才修改系统。
+
+bash install/superagent.sh plan --profile <name>   # 推荐入口：先看整包计划
+bash install/install.sh --help              # 兼容入口：全部底层开关
 bash install/install.sh --dry-run           # 只打印计划，**不改系统**
 bash install/install.sh --profile <name>    # 真装（通用资产；示例技能不会被装成生产技能）
 bash install/install.sh --profile <name> --compose-soul <业务叠加层.md>   # 合成生效身份
@@ -65,6 +80,7 @@ bash install/install.sh --profile <name> --apply-baseline                # 显�
 
 Feishu 流式卡片由外部 HFC sidecar 管理，版本与只读验收入口见
 [`integrations/hfc/README.md`](integrations/hfc/README.md)。
+**当前锁定的 HFC v5.0.13 已复现吞回复路径，暂停新生产启用；基础设施健康不等于交付安全。**
 
 ---
 
