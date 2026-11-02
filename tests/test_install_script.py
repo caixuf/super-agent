@@ -372,7 +372,7 @@ def test_missing_hermes_tree_fails_unless_patches_explicitly_skipped(tmp_path):
     missing = tmp_path / "missing-hermes"
     proc = _run(tmp_path / "profile", env_extra={"HERMES_AGENT_DIR": str(missing)})
     assert proc.returncode != 0
-    assert "Hermes 安装树不存在" in proc.stderr
+    assert "未找到 hermes CLI；请先安装 Hermes，或明确使用 --skip-patch 仅安装资产" in proc.stderr
     assert _run(tmp_path / "profile2", "--skip-patch",
                 env_extra={"HERMES_AGENT_DIR": str(missing)}).returncode == 0
 
