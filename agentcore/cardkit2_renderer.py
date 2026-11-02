@@ -15,18 +15,19 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tup
 
 logger = logging.getLogger(__name__)
 
-# Native Unicode semantic indicator tokens
-INDICATOR_ACTIVE = "⏳"
-INDICATOR_DONE = "✓"
-INDICATOR_ERROR = "✗"
-INDICATOR_TIMER = "⏱"
-INDICATOR_STEP = "🔹"
-INDICATOR_WARN = "⚠️"
+# Zero-emoji engineering indicators conforming to Super Agent discipline:
+# Strict ASCII & clean typographic symbols; no playful cartoons or emoji bloat.
+INDICATOR_ACTIVE = "[BUSY]"
+INDICATOR_DONE = "[OK]"
+INDICATOR_ERROR = "[FAIL]"
+INDICATOR_TIMER = "耗时:"
+INDICATOR_STEP = "步数:"
+INDICATOR_WARN = "[TIMEOUT-WARN]"
 
-# Horizontal rule delimiter
-DIVIDER = "━━━━━━━━━━━━━━━━"
+# Horizontal rule delimiter (clean typographic hairline)
+DIVIDER = "────────────────"
 
-# Low-frequency title color breathing cycle
+# Low-frequency title color breathing cycle (calm terminal hues)
 TITLE_COLORS = ("blue", "turquoise", "wathet", "blue-300")
 
 
@@ -216,32 +217,32 @@ def build_streaming_progress_body(
     is_error: bool = False,
     tip: str = "",
 ) -> str:
-    """Format single markdown body frame for streaming progress."""
+    """Format single markdown body frame for streaming progress (pure engineering aesthetics, zero-emoji)."""
     head = stage.strip() or action.strip() or "正在处理"
 
     if is_error:
         return f"{INDICATOR_ERROR} **{head}**\n{DIVIDER}\n已用 {elapsed} 秒"
 
     color = color_for_tick(tick)
-    title = f'<font color="{color}">{INDICATOR_ACTIVE} **{head}**</font>'
+    title = f'<font color="{color}">**{INDICATOR_ACTIVE} {head}**</font>'
 
     left = int(timeout - elapsed) if timeout and timeout > 0 else None
     if left is not None and left <= 120:
         left = max(0, left)
         return (
-            f"{INDICATOR_WARN} **即将超时，还剩 {left} 秒**\n"
+            f"**{INDICATOR_WARN} 即将超时，还剩 {left} 秒**\n"
             f"发送「取消」可提前停止\n"
             f"{DIVIDER}\n"
-            f"{INDICATOR_TIMER} 已用 {elapsed} 秒 · {INDICATOR_STEP} 完成 {tool_n} 步"
+            f"{INDICATOR_TIMER} {elapsed}s · {INDICATOR_STEP} {tool_n}"
         )
 
     parts = [title]
     if say:
         parts.append(say.strip())
 
-    meta = f"{DIVIDER}\n{INDICATOR_TIMER} 已用 **{elapsed}** 秒"
+    meta = f"{DIVIDER}\n{INDICATOR_TIMER} **{elapsed}s**"
     if tool_n > 0:
-        meta += f" · {INDICATOR_STEP} 完成 **{tool_n}** 步"
+        meta += f" · {INDICATOR_STEP} **{tool_n}**"
     parts.append(meta)
 
     if tip:
@@ -396,3 +397,4 @@ class CardStreamRenderer:
             await asyncio.sleep(0.05)
         self._inflight = None
         self._pending_payload = None
+
