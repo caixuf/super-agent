@@ -11,3 +11,4 @@ tools/assets/mermaid.min.js
 identity/manifests/
 identity/overlays/*.overlay.md
 
+dist/

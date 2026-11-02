@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Super Agent one-command installer.
 #
+#   ./install/superagent.sh package [--out-dir DIR]
 #   ./install/superagent.sh install [--profile NAME] [--apply]
 #   ./install/superagent.sh update  [--profile NAME] [--apply]
 #   ./install/superagent.sh doctor  [--profile NAME]
@@ -19,8 +20,11 @@ for arg in "$@"; do
   if [ -z "$cmd" ] && [[ "$arg" != --* ]]; then cmd="$arg"; else args+=("$arg"); fi
 done
 if [ -z "$cmd" ]; then
-  printf 'usage: %s {plan|install|update|doctor|uninstall|candidate-hermes} [--profile NAME] [--apply]\n' "$0" >&2
+  printf 'usage: %s {package|plan|install|update|doctor|uninstall|candidate-hermes} [--profile NAME] [--apply]\n' "$0" >&2
   exit 2
+fi
+if [ "$cmd" = "package" ]; then
+  exec "$PY" "$ROOT/tools/package_superagent.py" "${args[@]}"
 fi
 case "$cmd" in
   install|update|uninstall)
