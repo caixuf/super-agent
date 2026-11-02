@@ -210,7 +210,10 @@ def test_superseded_card_must_not_swallow_unseen_late_answer(hfc, tmp_path):
     asyncio.run(run())
 
 
-def test_successful_terminal_keeps_full_answer_and_duplicate_is_idempotent(hfc, tmp_path):
+@pytest.mark.parametrize("with_event_id", [False, True])
+def test_successful_terminal_keeps_full_answer_and_duplicate_is_idempotent(
+    hfc, tmp_path, with_event_id,
+):
     server, _ = hfc
 
     async def run():
@@ -219,12 +222,21 @@ def test_successful_terminal_keeps_full_answer_and_duplicate_is_idempotent(hfc, 
         try:
             await _post(client, _event("message.started", 0))
             answer = "normal-complete-final-marker"
-            result = await _post(client, _event("message.completed", 1, answer))
+            terminal = _event("message.completed", 1, answer)
+            if with_event_id:
+                terminal.update(event_id="terminal-delivery-proof-probe",
+                                producer="legacy-patch", phase="terminal",
+                                turn_id=terminal["message_id"])
+            result = await _post(client, terminal)
             for _ in range(200):
                 if any(answer in str(card) for card in platform.updated):
                     break
                 await asyncio.sleep(0.005)
             assert result.get("applied") is True
+            assert result.get("delivery") == {"outcome": "delivered"}, (
+                "Terminal ACK must reflect the completed platform update even "
+                "without event_id; stale unknown triggers duplicate native text"
+            )
             assert any(answer in str(card) for card in platform.updated)
             count = len(platform.sent), len(platform.updated)
             await _post(client, _event("message.completed", 2, answer))
@@ -250,6 +262,34 @@ def test_rejected_first_card_never_acknowledges_delivery(hfc, tmp_path):
             assert platform.sent == []
             assert not client.app[server.SESSIONS_KEY]
         finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("with_event_id", [False, True])
+def test_terminal_ack_timeout_keeps_unknown(hfc, tmp_path, monkeypatch, with_event_id):
+    server, _ = hfc
+    monkeypatch.setattr(server, "TERMINAL_ACK_TIMEOUT_SECONDS", 0.02)
+
+    async def run():
+        platform = _Platform()
+        client = await _client(server, tmp_path, platform)
+        try:
+            await _post(client, _event("message.started", 0))
+            platform.block_patch = asyncio.Event()
+            payload = _event("message.completed", 1, "blocked-final")
+            if with_event_id:
+                payload.update(event_id="blocked-terminal-probe",
+                               producer="legacy-patch", phase="terminal",
+                               turn_id=payload["message_id"])
+            result = await asyncio.wait_for(_post(client, payload), timeout=2)
+            assert result.get("applied") is True
+            assert result.get("delivery") == {"outcome": "unknown"}
+            assert not platform.updated
+        finally:
+            if platform.block_patch is not None:
+                platform.block_patch.set()
             await client.close()
 
     asyncio.run(run())

@@ -67,3 +67,13 @@ Do not hand-edit an installed Hermes target, copy these files into a live tree,
 or enable this beside another card producer. This candidate does not lift the
 super-agent HFC release quarantine until its lock is updated from reviewed,
 exact-revision evidence.
+
+## Follow-up: terminal response without event identity
+
+`terminal-ack-no-event-id.py.patch` applies **after** this directory's server
+repair. It fixes a stale `unknown` response on successfully delivered legacy
+terminal requests without `event_id`. Regression and a narrow sidecar deployment
+are recorded in `docs/reports/2026-11-02-hfc-unfenced-terminal-ack.md`.
+The original candidate-only status above describes the earlier investigation;
+this follow-up does not clear the integration release hold or certify the
+pre-existing manual Gateway hotfixes. Fresh user-turn acceptance is still needed.

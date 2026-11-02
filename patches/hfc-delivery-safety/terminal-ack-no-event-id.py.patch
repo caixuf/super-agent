@@ -1,0 +1,35 @@
+--- a/hermes_feishu_card/server.py
++++ b/hermes_feishu_card/server.py
+@@ -3696,19 +3696,20 @@
+             # The terminal task owns bounded retries and recovery; its cleanup
+             # callback still publishes the final delivery state.
+             pass
++    response_payload = _json_response_payload(response)
++    # Terminal delivery evidence is required for legacy events too, not just
++    # events with an event_id fence. Otherwise a successful PATCH still returns
++    # the pre-update unknown outcome and Hermes sends a duplicate native reply.
++    if _event_is_terminal(event) and response_payload.get("applied") is True:
++        session = request.app[SESSIONS_KEY].get(lock_key)
++        state = getattr(session, "terminal_delivery_state", "unknown") if session else "unknown"
++        outcome = "delivered" if state in {"delivered", "recovered"} else (
++            "not_sent" if state == "not_sent" else "unknown"
++        )
++        response_payload["delivery"] = {"outcome": outcome}
++        response = web.json_response(response_payload, status=response.status)
+     if fence_claim is not None:
+-        response_payload = _json_response_payload(response)
+-        # The response may have been prepared before a terminal task finished.
+-        # Project the final bounded delivery state into the idempotency record
+-        # and the HTTP response so replays cannot turn failure into success.
+-        if _event_is_terminal(event) and response_payload.get("applied") is True:
+-            session = request.app[SESSIONS_KEY].get(lock_key)
+-            state = getattr(session, "terminal_delivery_state", "unknown") if session else "unknown"
+-            outcome = "delivered" if state in {"delivered", "recovered"} else (
+-                "not_sent" if state == "not_sent" else "unknown"
+-            )
+-            response_payload["delivery"] = {"outcome": outcome}
+-            response = web.json_response(response_payload, status=response.status)
++        # Persist the same post-delivery response used by unfenced events.
+         if (
+             _event_has_runtime_admission(event)
+             and not _is_exact_runtime_admission_response_payload(
