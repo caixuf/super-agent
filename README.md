@@ -78,9 +78,13 @@ bash install/install.sh --profile <name> --apply-baseline                # 显�
 安装器**不做**：不启停任何服务（systemd 命令只打印给人执行）、不读写 `.env` / 凭据、
 不覆盖现场身份（默认不动 `SOUL.md`）、不改部署源（只读）。
 
-Feishu 流式卡片由外部 HFC sidecar 管理，版本与只读验收入口见
-[`integrations/hfc/README.md`](integrations/hfc/README.md)。
-**当前锁定的 HFC v5.0.13 已复现吞回复路径，暂停新生产启用；基础设施健康不等于交付安全。**
+### 交互与卡片架构（Native CardKit 2.0）
+卡片渲染已完全弃用外部 HFC sidecar，采用标准内置的 `agentcore.cardkit2_renderer`：
+- **Single-Inflight 异步旁路管道**：单在途调度 + Last-Write-Wins 待发合并，杜绝消息平台 API 频率超限与事件循环阻塞。
+- **CardKit 2.0 企业级语义配色**：`wathet`/`turquoise-50`（进行中）、`indigo`/`blue-50`（完成）、`carmine`/`red-50`（失败）。
+- **原生折叠排查面板**：自动收拢 `##STAGE:` 阶段与 `<think>` 推理链路，处理中展开、完成自动折叠。
+- **原子 Drain 屏障**：严格的 `close()` 与 `drain()` 协议，彻底消除旧进度卡片乱序覆写最终答案的顽疾。
+- **HFC 状态**：外部 HFC sidecar 存在吞回复及未围栏 Ack 风险，已被原生渲染器完全替代。相关历史留档见 [`integrations/hfc/README.md`](integrations/hfc/README.md)。
 
 ---
 
