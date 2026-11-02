@@ -96,7 +96,8 @@ def patched(tmp_path, monkeypatch):
                            capture_output=True, text=True)
     assert again.returncode == 0 and "已在位" in again.stdout
     source = target.read_text(encoding="utf-8")
-    assert "\\n" in source and "def card_components_v2" in source
+    assert "SHARED_CARD_RENDERER_VERSION = 1" in source
+    assert "def card_components_v2" in source
     namespace = {"re": re, "os": os, "Any": object, "time": time}
     exec(compile(source, "<patched-adapter>", "exec"), namespace)
     namespace["Adapter"] = namespace["Adapter"]
@@ -176,6 +177,51 @@ def test_fenced_pipe_rows_are_not_lifted_into_tables(patched):
     # A real table outside the fence is still detected.
     mixed = snippet + "\n\n| 项 | 值 |\n|---|---|\n| 状态 | ok |\n"
     assert len(patched["_card_tables"](mixed.splitlines())) == 1
+
+
+def test_patched_renderer_preserves_code_and_crlf_source(patched):
+    """The generated helper must preserve source text, not rely on escaped-newline literals."""
+    source = ("说明\r\n\r\n```python\r\nprint('| not | a table |')\r\n```\r\n\r\n"
+              "| 项 | 值 |\r\n|---|---|\r\n| 状态 | ok |\r\n\r\n结尾\r\n")
+    elements = patched["build_card_elements"](source)
+    assert [element["tag"] for element in elements] == ["markdown", "table", "markdown"]
+    assert elements[0]["content"].endswith("```\r\n\r\n")
+    assert "print('| not | a table |')\r\n" in elements[0]["content"]
+    assert elements[2]["content"] == "\r\n结尾\r\n"
+
+
+def test_old_full_helper_block_upgrades_to_canonical_idempotently(tmp_path):
+    """An installed pre-extraction helper block migrates once and then stays untouched."""
+    spec = importlib.util.spec_from_file_location("_patch_migration", PATCH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.LEGACY_HELPERS != module.HELPERS
+
+    tree = tmp_path / "agent"
+    target = tree / "plugins/platforms/feishu/adapter.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(PRISTINE, encoding="utf-8")
+    command = [sys.executable, str(PATCH), "--agent-dir", str(tree)]
+    installed = subprocess.run(command + ["--apply"], capture_output=True, text=True)
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+
+    canonical_source = target.read_text(encoding="utf-8")
+    old_source = canonical_source.replace(module.HELPERS, module.LEGACY_HELPERS, 1)
+    assert old_source != canonical_source
+    target.write_text(old_source, encoding="utf-8")
+    check = subprocess.run(command + ["--check"], capture_output=True, text=True)
+    assert check.returncode == 1 and "不在位" in check.stdout
+
+    upgraded = subprocess.run(command + ["--apply"], capture_output=True, text=True)
+    assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
+    migrated_source = target.read_text(encoding="utf-8")
+    assert module.LEGACY_HELPERS not in migrated_source
+    assert migrated_source.count(module.HELPERS) == 1
+    assert migrated_source == canonical_source
+
+    again = subprocess.run(command + ["--apply"], capture_output=True, text=True)
+    assert again.returncode == 0 and "已在位" in again.stdout
+    assert target.read_text(encoding="utf-8") == migrated_source
 
 
 # --- 0.22 host shape -------------------------------------------------------------------

@@ -36,7 +36,7 @@ ANCHOR_AFTER = '''def _markdown_needs_post(text: str) -> bool:
     return bool(_CARD_MARKDOWN_COMPLEX_RE.search(text or ""))
 '''
 
-HELPERS = (
+LEGACY_HELPERS = (
     '''# Cards render headings, tables, block quotes, horizontal rules and fenced code
 # natively — verified against the live API on both card JSON 1.0 and 2.0 (all returned
 # code=0). The old regex excluded them and cost every reply containing a code block or a
@@ -185,6 +185,13 @@ def card_renders_markdown(text: str) -> bool:
     return dividers == len(_card_tables(lines))''')
 
 
+# One source for host injection and the standalone HFC wheel. The host receives
+# ordinary source, not a runtime import from this checkout.
+_SHARED_RENDERER = Path(__file__).resolve().parents[1] / "agentcore/card_markdown.py"
+HELPERS = _SHARED_RENDERER.read_text(encoding="utf-8")
+HELPERS = HELPERS[HELPERS.index("# Cards render"):].rstrip("\n")
+
+
 SEND_OLD = '''        if (getattr(self, "_card_replies", False) and (metadata or {}).get("expect_edits")
                 and not any(_markdown_needs_post(chunk) for chunk in chunks)):'''
 SEND_NEW = '''        if (getattr(self, "_card_replies", False) and _card_v2_enabled()
@@ -283,11 +290,11 @@ RETURN_PROBE = "if card_components_v2():\n            # 2.4 rejects"
 #: Every shape the helper block has taken on a real host (the 2.4 upgrade rewrites it).
 #: shape of a host where only the 2.0 switch line was added by hand (no helper block)
 V2_ENV_ONLY = "_CARD_TABLE_MAX = 5\n_CARD_V2_ENV = \"HERMES_FEISHU_CARD_V2\"\n\n\n"
-V11_HELPERS_FULL = HELPERS.split("_CARD24_INLINE_MD_RE = re.compile(")[0].lstrip("\n").rstrip() + "\n"
+V11_HELPERS_FULL = LEGACY_HELPERS.split("_CARD24_INLINE_MD_RE = re.compile(")[0].lstrip("\n").rstrip() + "\n"
 #: signature of the first published version of the helper block (before the 2.4 branch).
-V11_HELPERS = HELPERS.split("_CARD24_INLINE_MD_RE = re.compile(")[0].lstrip("\n").rstrip() + "\n"
+V11_HELPERS = LEGACY_HELPERS.split("_CARD24_INLINE_MD_RE = re.compile(")[0].lstrip("\n").rstrip() + "\n"
 #: v1.1 as actually landed on a host: the 2.0 switch sits after card_renders_markdown.
-V11_HELPERS_TAIL = HELPERS.split("_CARD24_INLINE_MD_RE = re.compile(")[0].lstrip("\n") + '_CARD_V2_ENV = \"HERMES_FEISHU_CARD_V2\"' + "\n"
+V11_HELPERS_TAIL = LEGACY_HELPERS.split("_CARD24_INLINE_MD_RE = re.compile(")[0].lstrip("\n") + '_CARD_V2_ENV = \"HERMES_FEISHU_CARD_V2\"' + "\n"
 
 
 def _strip_24(value: str) -> str:
@@ -417,6 +424,8 @@ def _missing(text):
     if not steps:
         return []
     missing = []
+    if LEGACY_HELPERS in text:
+        missing.append((LEGACY_HELPERS, "SHARED_CARD_RENDERER_VERSION = 1"))
     for name, old, _new, probe in steps:
         if probe in text:
             continue
@@ -464,6 +473,7 @@ def main() -> int:
         print("[PASS] 已在位，无需重放")
         return 0
     text = text.replace(NOTE_MALFORMED, NOTE_NEW)
+    text = text.replace(LEGACY_HELPERS, HELPERS)
     # Pass 1 assembles the final text from the ORIGINAL file; pass 2 writes it. An earlier
     # step can therefore absorb a later step's anchor (helpers carry their own markers)
     # without the later pass having to rewrite text it just produced.

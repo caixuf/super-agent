@@ -79,12 +79,12 @@ class _Platform:
         self.updated.append(card)
 
 
-async def _client(server, tmp_path, platform):
+async def _client(server, tmp_path, platform, *, card_config=None):
     from aiohttp.test_utils import TestClient, TestServer
     from hermes_feishu_card.native_handoff import NativeHandoffStore
     app = server.create_app(
         platform,
-        card_config={"flush_interval_ms": 0},
+        card_config={"flush_interval_ms": 0, **(card_config or {})},
         native_handoff_store=NativeHandoffStore(tmp_path / "handoff"),
         session_store_directory=tmp_path / "display",
     )

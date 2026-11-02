@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import json
 
-from tools import hfc_acceptance
-from tools.hfc_acceptance import LOCK, evaluate_report
+import importlib.util
+from pathlib import Path
+_spec = importlib.util.spec_from_file_location("hfc_acceptance", str(Path(__file__).resolve().parents[1] / "tools" / "hfc_acceptance.py"))
+hfc_acceptance = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(hfc_acceptance)
+LOCK = hfc_acceptance.LOCK
+evaluate_report = hfc_acceptance.evaluate_report
 
 PINNED_COMMIT = json.loads(LOCK.read_text(encoding="utf-8"))["commit"]
 
