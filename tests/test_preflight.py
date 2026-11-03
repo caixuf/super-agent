@@ -69,15 +69,9 @@ def test_run_preflight_suite(tmp_path):
     with patch("socket.gethostbyname", return_value="1.2.3.4"):
         # Explicit clean baseline config to isolate test from host environment
         cfg_file = tmp_path / "config.yaml"
-        cfg_file.write_text(
-            "model:\n  default: flash\n"
-            "streaming:\n  enabled: true\n  transport: edit\n  buffer_threshold: 120\n  edit_interval: 0.8\n"
-            "display:\n  busy_ack_enabled: true\n  busy_input_mode: steer\n"
-            "  platforms:\n    feishu:\n      streaming: true\n      busy_ack_detail: true\n      cleanup_progress: true\n      tool_progress: false\n      thinking_progress: false\n"
-            "platforms:\n  feishu:\n    enabled: true\n    card_replies: true\n    exec_approval_text: true\n"
-            "plugins:\n  entries:\n    illustrated-delivery:\n      settings:\n        enforce_delivery: false\n",
-            encoding="utf-8",
-        )
+        import yaml
+        from agentcore.baseline_config import CORE_RUNTIME_BASELINE
+        cfg_file.write_text(yaml.dump(CORE_RUNTIME_BASELINE), encoding="utf-8")
         report = run_preflight_suite(probe_host="localhost", min_free_gb=0.1, config_path=cfg_file)
         assert report.all_passed is True
         summary_text = report.summary()
