@@ -28,6 +28,9 @@ class ConfigDeviation(NamedTuple):
 
 # The authoritative Super Agent 2.0 configuration baseline contract.
 CORE_RUNTIME_BASELINE: Dict[str, Any] = {
+    "model": {
+        "default": "flash",
+    },
     "streaming": {
         "enabled": True,
         "transport": "edit",

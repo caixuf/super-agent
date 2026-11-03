@@ -8,13 +8,19 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import math
 import os
-import re
-from contextlib import contextmanager
 from pathlib import Path
+import re
+import sys
 from typing import Sequence
+
+# Ensure repository root is on sys.path for test runners executing in subdirs or clean envs
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 import pytest
 

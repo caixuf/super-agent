@@ -16,6 +16,7 @@ def test_audit_config_empty_reports_deviations():
     deviations = audit_config_dict(empty_cfg)
     assert len(deviations) > 0
     paths = [d.key_path for d in deviations]
+    assert "model.default" in paths
     assert "streaming.transport" in paths
     assert "display.busy_input_mode" in paths
     assert "platforms.feishu.card_replies" in paths
@@ -24,6 +25,9 @@ def test_audit_config_empty_reports_deviations():
 
 def test_audit_config_matching_baseline_reports_clean():
     clean_cfg = {
+        "model": {
+            "default": "flash",
+        },
         "streaming": {
             "enabled": True,
             "transport": "edit",
@@ -91,6 +95,7 @@ def test_enforce_baseline_config_idempotent_repair(tmp_path):
     assert len(changes) >= 3
 
     repaired = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    assert repaired["model"]["default"] == "flash"
     assert repaired["streaming"]["transport"] == "edit"
     assert repaired["display"]["busy_input_mode"] == "steer"
     assert repaired["platforms"]["feishu"]["card_replies"] is True
@@ -101,3 +106,4 @@ def test_enforce_baseline_config_idempotent_repair(tmp_path):
     modified_again, changes_again = enforce_baseline_config(cfg_file, backup=True)
     assert modified_again is False
     assert changes_again == []
+
