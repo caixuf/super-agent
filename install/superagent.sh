@@ -26,6 +26,9 @@ fi
 if [ "$cmd" = "package" ]; then
   exec "$PY" "$ROOT/tools/package_superagent.py" "${args[@]}"
 fi
+if [ "$cmd" = "check" ] || [ "$cmd" = "preflight" ]; then
+  exec "$PY" -c "import sys; sys.path.insert(0, '$ROOT'); from agentcore.preflight import run_preflight_suite; r = run_preflight_suite(); print(r.summary()); sys.exit(0 if r.all_passed else 1)"
+fi
 case "$cmd" in
   install|update|uninstall)
     apply=0
