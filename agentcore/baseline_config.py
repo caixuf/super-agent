@@ -34,7 +34,7 @@ CORE_RUNTIME_BASELINE: Dict[str, Any] = {
     "streaming": {
         "enabled": True,
         "transport": "edit",
-        "buffer_threshold": 120,
+        "buffer_threshold": 20,
         "edit_interval": 0.8,
     },
     "display": {
@@ -45,7 +45,8 @@ CORE_RUNTIME_BASELINE: Dict[str, Any] = {
                 "streaming": True,
                 "busy_ack_detail": True,
                 "cleanup_progress": True,
-                "tool_progress": False,
+                "tool_progress": True,
+                "interim_assistant_messages": True,
                 "thinking_progress": False,
             }
         },
