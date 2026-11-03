@@ -210,6 +210,8 @@ def _note(state: CardState, elapsed: int, *, heartbeat_age_s: Optional[float] = 
         base = "启动中 %s" % clock
     elif phase_l == "canceling":
         base = "取消中 %s" % clock
+    elif phase_l == "stop_unconfirmed":
+        base = "停止尚未确认 %s" % clock
     elif phase_l == "stalled":
         base = "已停滞 %s" % clock
     elif phase_l == "lost":

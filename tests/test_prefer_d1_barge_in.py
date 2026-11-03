@@ -193,7 +193,7 @@ def test_bind_follow_up_helper_no_submit():
 
 
 # --------------------------------------------------------------------------- #
-# D1-3 cancel + same-card CANCELLED + <=1 C2 notify
+# D1-3 cancel request remains nonterminal; confirmed cancellation uses C2
 # --------------------------------------------------------------------------- #
 
 def test_d1_3_cancel_c2_at_most_once(tmp_path):
@@ -213,9 +213,16 @@ def test_d1_3_cancel_c2_at_most_once(tmp_path):
         assert out["verb"] == "cancel"
         assert out["second_exec"] is False
         st = pool.status(job)
-        assert st["status"] == "cancelled"
-        assert out["detail"]["c2_attempts"] == 1
-        # Same-card terminal.
+        assert st["status"] == "running"
+        assert st["stage"] == "canceling"
+        assert out["detail"]["c2_attempts"] == 0
+        assert not any(e[4] for e in card_t.emits)
+        assert delivery_t.calls == []
+        # The test executor, which launched no child, now acknowledges completion.
+        assert pool.finish(job, claimed["attempt"], False, {"reason": "stopped"})
+        emitter.cancel(detail="stopped")
+        bridge.notify_terminal(CardState.CANCELLED, detail="stopped", kick_delivery=True)
+        # Same-card terminal follows the ledger, not the control acknowledgement.
         finals = [e for e in card_t.emits if e[4] is True]
         assert finals
         assert finals[-1][3].state == "cancelled"
@@ -277,7 +284,9 @@ def test_pool_pause_alias_and_finalize_cancel(tmp_path):
     finally:
         os.close(fd)
     assert pool.finalize_cancel(job) is True
-    assert pool.status(job)["status"] == "cancelled"
+    assert pool.status(job)["status"] == "waiting_user"
+    assert pool.status(job)["stage"] == "canceling"
+    assert pool.receipts() == []
 
 
 # --------------------------------------------------------------------------- #

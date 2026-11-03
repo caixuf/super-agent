@@ -8,7 +8,7 @@ Control verbs
 - status / progress  -> ledger / pool poll (task_status spirit); zero new submit
 - follow-up          -> Tab queue on FollowUpQueue bound to task-id + owner
 - pause              -> pool.wait_for_user (thin pause alias) + same-card stage
-- cancel             -> pool finalize_cancel + same-card CANCELLED + Prefer-C2 <=1
+- cancel             -> pool request + same-card canceling; terminal only from ledger
 
 Urgency
 -------
@@ -482,7 +482,7 @@ class BargeInController:
         return self._emit_ack(ack)
 
     def pause(self, task_id: str, *, detail: str = "paused") -> dict:
-        """D1-4: soft-interrupt -> waiting_user; free worker slot; fast ack."""
+        """Park admission promptly; do not claim an executor slot already freed."""
         parked = False
         if self.pool is not None:
             pause = getattr(self.pool, "pause", None)
@@ -491,7 +491,7 @@ class BargeInController:
             else:
                 parked = bool(self.pool.wait_for_user(task_id, reason="paused"))
         view = None
-        if self.emitter is not None:
+        if parked and self.emitter is not None:
             pause_card = getattr(self.emitter, "pause", None)
             if callable(pause_card):
                 view = pause_card(detail=detail or "已暂停，等待继续")
@@ -503,7 +503,7 @@ class BargeInController:
                     hitl_summary=detail or "paused",
                 )
         if parked:
-            message = "已暂停（waiting_user）· 工人槽已释放"
+            message = "已记录暂停（waiting_user），后台停止确认前不可恢复执行"
         else:
             message = "暂停未生效（任务可能已终态或不存在）"
         ack = ControlAck(
@@ -519,35 +519,33 @@ class BargeInController:
         )
         return self._emit_ack(ack)
 
-    def cancel(self, task_id: str, *, detail: str = "cancelled") -> dict:
-        """D1-3: cancel + same-card CANCELLED + <=1 C2 notify attempt."""
-        finalized = False
+    def cancel(self, task_id: str, *, detail: str = "") -> dict:
+        """Acknowledge cancellation without inventing a stopped execution."""
+        accepted = False
+        row = None
         if self.pool is not None:
             finalize = getattr(self.pool, "finalize_cancel", None)
             if callable(finalize):
-                finalized = bool(finalize(task_id))
+                accepted = bool(finalize(task_id))
             else:
                 self.pool.cancel(task_id)
-                row = self.pool.status(task_id) or {}
-                if row.get("status") in ("waiting_user", "awaiting_plan_approval"):
-                    try:
-                        finalized = bool(self.pool.deny_from_user(
-                            task_id, reason=detail or "cancelled by user",
-                            policy="cancelled",
-                        ))
-                    except ValueError:
-                        finalized = False
-                else:
-                    finalized = bool(row.get("cancel")) or row.get("status") == "cancelled"
+            row = self.pool.status(task_id)
+            if not callable(finalize):
+                accepted = bool(row and row.get("cancel"))
+        status = (row or {}).get("status")
+        finalized = status == "cancelled"
+        pending = accepted and status not in (None, "completed", "failed", "cancelled")
         view = None
-        if self.emitter is not None and hasattr(self.emitter, "cancel"):
+        if accepted and finalized and self.emitter is not None and hasattr(self.emitter, "cancel"):
             view = self.emitter.cancel(detail=detail or "已取消")
+        elif pending and self.emitter is not None and hasattr(self.emitter, "mark_canceling"):
+            view = self.emitter.mark_canceling(detail="取消已请求，等待后台停止确认")
         delivery = None
-        if self.notify_bridge is not None and hasattr(self.notify_bridge, "notify_terminal"):
+        if accepted and finalized and self.notify_bridge is not None and hasattr(self.notify_bridge, "notify_terminal"):
             delivery = self.notify_bridge.notify_terminal(
                 CardState.CANCELLED, detail=detail or "cancelled", kick_delivery=True,
             )
-        elif self.pool is not None:
+        elif accepted and finalized and self.pool is not None:
             try:
                 from agentcore.completion_delivery import notify_on_terminal
                 delivery = notify_on_terminal(
@@ -555,13 +553,22 @@ class BargeInController:
                 )
             except Exception as exc:  # noqa: BLE001
                 delivery = {"status": "error", "error": type(exc).__name__}
+        if finalized:
+            message = "已取消"
+        elif pending:
+            message = "取消已请求，等待后台停止确认"
+        elif status in ("completed", "failed"):
+            message = "任务已终结，未更改原结果"
+        else:
+            message = "取消未生效（任务不存在或未记录取消请求）"
         ack = ControlAck(
-            ok=True, verb="cancel", task_id=task_id,
-            message="已取消" if finalized or view is not None else "取消已请求",
+            ok=bool(pending or finalized), verb="cancel", task_id=task_id,
+            message=message,
             second_exec=False, durable_dispatch_submit=False,
             detail={
                 "finalized": finalized,
-                "pool_status": (self.pool.status(task_id) if self.pool else None),
+                "cancel_requested": bool(pending or finalized),
+                "pool_status": row,
                 "card_state": getattr(view, "state", None),
                 "delivery": delivery,
                 "c2_attempts": 1 if delivery is not None else 0,

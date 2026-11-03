@@ -694,7 +694,20 @@ def register(ctx) -> None:
                     members[key] = record
                     _state_set("entries", members)
                     return
-                if key in entries or store.load(key) is not None:
+                existing = entries.get(key)
+                if existing is not None:
+                    # Opening can finish while _open reads the initial snapshot.
+                    # Recheck membership under the same lock as entry publication,
+                    # rather than losing the task at this hand-off boundary.
+                    if existing.owner != owner:
+                        return
+                    waiting = [task for task in tasks if task not in existing.tasks]
+                    if waiting:
+                        existing.tasks.extend(waiting)
+                        existing.snap = None
+                        _persist_entry(existing)
+                    return
+                if store.load(key) is not None:
                     return
                 members = dict(_state_get("entries", {}) or {})
                 prior = members.get(key) or {}

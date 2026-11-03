@@ -240,6 +240,9 @@ class ReadOnlyQueue:
             _fds.add(fd)
         worker_pid = os.getpid()
         try:
+            if not self.pool.begin_execution(row['id'], row['attempt']):
+                return {'state': 'stale_attempt', 'job_id': row['id'],
+                        'job_state': self.pool.status(row['id'])['status']}
             try:
                 payload = json.loads(row['payload'])
                 owner, _, _ = self._binding(payload['owner'], payload['origin'], payload['member_id'],

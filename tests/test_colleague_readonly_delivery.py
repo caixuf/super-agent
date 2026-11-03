@@ -276,10 +276,21 @@ def test_cancelled_after_crash_never_settles_unknown_execution(env):
     queue.pool.cancel(job)
     time.sleep(0.03)
     queue.run_once(lease=0.01)
-    assert queue.pool.status(job)['status'] == 'cancelled'
+    assert queue.pool.status(job)['status'] == 'running'
+    assert queue.pool.status(job)['stage'] == 'canceling'
+    assert queue.pool.receipts() == []
     transport = Transport()
     sender = ReadOnlyDelivery(queue, owner=args['owner'], transport=transport,
                               literal_text_only=True, no_implicit_retries=True)
+    assert sender.deliver(job)['state'] != 'delivered'
+    assert len(transport.sends) == 0
+    assert reg.work_status(supervisor=host, member_id='alice', generation=1)['tracked_open'] == 2
+    # This synthetic model was synchronous in this test process: SystemExit
+    # unwound its callback and it created no child/remote work. Its trusted owner
+    # can now acknowledge the return. Cancellation alone could not do so above.
+    attempt = queue.pool.status(job)['attempt']
+    assert queue.pool.finish(job, attempt, False, {'reason': 'synchronous callback returned'})
+    assert queue.pool.status(job)['status'] == 'cancelled'
     assert sender.deliver(job)['state'] == 'delivered_pending_execution_reconciliation'
     assert queue.pool.delivery_record(job)['acknowledged'] == 1
     assert reg.work_status(supervisor=host, member_id='alice', generation=1)['tracked_open'] == 1

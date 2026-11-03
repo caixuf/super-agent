@@ -255,6 +255,73 @@ def test_binding_loader_rejects_shared_session_or_injected_profile(tmp_path):
         load_profile_bindings(path)
 
 
+@pytest.mark.parametrize("field", [
+    "member_id", "generation", "owner_profile", "owner_session",
+    "hermes_profile", "hermes_session_id",
+])
+@pytest.mark.parametrize("escaped", [False, True])
+def test_binding_loader_rejects_duplicate_identity_fields(tmp_path, field, escaped):
+    entry = {
+        "member_id": "reviewer", "generation": 1, "owner_profile": "main",
+        "owner_session": "source-a", "hermes_profile": "reviewer",
+        "hermes_session_id": "local-" + "a" * 64,
+    }
+    # Even identical values are ambiguous. Escaped spellings must not evade
+    # duplicate detection after JSON decoding.
+    key = json.dumps(field) if not escaped else '"\\u%04x%s"' % (ord(field[0]), field[1:])
+    raw = '[{' + key + ':' + json.dumps(entry[field]) + ',' + json.dumps(entry)[1:] + ']'
+    path = tmp_path / "bindings.json"
+    path.write_text(raw, encoding="utf-8")
+    path.chmod(0o600)
+    with pytest.raises(ValueError, match="duplicate_binding_field"):
+        load_profile_bindings(path)
+
+
+@pytest.mark.parametrize("replacement_kind", ["symlink", "public_file"])
+def test_binding_loader_validates_the_file_it_actually_reads(tmp_path, monkeypatch, replacement_kind):
+    import io
+
+    entry = {
+        "member_id": "reviewer", "generation": 1, "owner_profile": "main",
+        "owner_session": "source-a", "hermes_profile": "reviewer",
+        "hermes_session_id": "local-" + "a" * 64,
+    }
+    path = tmp_path / "bindings.json"
+    path.write_text(json.dumps([entry]))
+    path.chmod(0o600)
+    target = tmp_path / "replacement.json"
+    target.write_text(json.dumps([{**entry, "owner_session": "source-b"}]))
+    target.chmod(0o600 if replacement_kind == "symlink" else 0o644)
+    replacement = tmp_path / "replacement-link"
+    if replacement_kind == "symlink":
+        replacement.symlink_to(target)
+    else:
+        replacement = target
+    original_io_open, original_os_open = io.open, os.open
+    swapped = False
+
+    def swap_before_open(file):
+        nonlocal swapped
+        if (not swapped and isinstance(file, (str, os.PathLike))
+                and os.fspath(file) == str(path)):
+            swapped = True
+            os.replace(replacement, path)
+
+    def io_open(file, *args, **kwargs):
+        swap_before_open(file)
+        return original_io_open(file, *args, **kwargs)
+
+    def os_open(file, *args, **kwargs):
+        swap_before_open(file)
+        return original_os_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(io, "open", io_open)
+    monkeypatch.setattr(os, "open", os_open)
+    with pytest.raises((ValueError, OSError)):
+        load_profile_bindings(path)
+    assert swapped, "the replacement must occur immediately before the actual open"
+
+
 def test_installed_hermes_parser_accepts_stdin_oneshot_with_exact_session_id():
     import os
     import subprocess

@@ -69,14 +69,27 @@ def load_profile_bindings(path: str | Path) -> dict[tuple[str, int, str, str], P
     Each inbound owner conversation maps to its own pre-created Hermes session ID.
     Title lookup is never used, because duplicate titles can resolve ambiguously.
     """
+    def unique_fields(pairs):
+        entry = {}
+        for key, value in pairs:
+            if key in entry:
+                raise ValueError("duplicate_binding_field")
+            entry[key] = value
+        return entry
+
     source = Path(path)
     if not source.is_absolute() or source.is_symlink():
         raise ValueError("absolute_binding_file_required")
-    info = source.stat()
-    if (not source.is_file() or info.st_mode & 0o077 or info.st_size > 65536
-            or (hasattr(os, "getuid") and info.st_uid != os.getuid())):
+    fd = os.open(source, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_size > 65536
+                or (hasattr(os, "getuid") and info.st_uid != os.getuid())):
+            raise ValueError("private_binding_file_required")
+        data = stream.read(65537)
+    if len(data) > 65536:
         raise ValueError("private_binding_file_required")
-    raw = json.loads(source.read_text(encoding="utf-8"))
+    raw = json.loads(data.decode("utf-8"), object_pairs_hook=unique_fields)
     if not isinstance(raw, list) or len(raw) > 4096:
         raise ValueError("invalid_bindings")
     result: dict[tuple[str, int, str, str], ProfileBinding] = {}

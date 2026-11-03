@@ -888,6 +888,54 @@ def test_background_tasks_arriving_during_first_send_are_merged(tmp_path):
         callback()
 
 
+def test_background_snapshot_finishing_after_foreground_open_is_merged(tmp_path, monkeypatch):
+    """Opening may finish while a background hook reads its first ledger snapshot."""
+    from agentcore.card_store import CardStore
+
+    posted, snapshot_entered, snapshot_release = (
+        threading.Event(), threading.Event(), threading.Event())
+    original_bind, original_snapshot = CardStore.bind, plugin._first_snap
+    edits = []
+    monkeypatch.setattr(plugin, "_capture_session_key", lambda: "route-opening-race")
+
+    def post(ctx, route, text, **kwargs):
+        posted.set()
+        return {"ok": True, "message_id": "msg-opening-race"}
+
+    def bind(self, *args, **kwargs):
+        assert snapshot_entered.wait(8)
+        return original_bind(self, *args, **kwargs)
+
+    def snapshot(*args, **kwargs):
+        snapshot_entered.set()
+        assert snapshot_release.wait(8)
+        return original_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(plugin, "_post_to_session", post)
+    monkeypatch.setattr(CardStore, "bind", bind)
+    monkeypatch.setattr(plugin, "_first_snap", snapshot)
+    monkeypatch.setattr(plugin, "_edit_to_session",
+                        lambda *args: edits.append(args) or {"ok": True})
+    ctx = Ctx(tmp_path, _settings(tmp_path, foreground_min_seconds=0))
+    plugin.register(ctx)
+    _row(ctx.settings["liveness_db"], "proc_opening_race", phase="compile")
+    ctx.hooks["pre_llm_call"](session_id="s", turn_id="t")
+    assert posted.wait(8)
+    hook = threading.Thread(target=lambda: ctx.hooks["post_tool_call"](
+        tool_name="terminal", result={"session_id": "proc_opening_race"},
+        session_id="s", turn_id="t"))
+    hook.start()
+    try:
+        assert snapshot_entered.wait(8)
+        assert _wait(lambda: ctx.state.data["entries"]["turn:s:t"]["send_state"] == "sent")
+    finally:
+        snapshot_release.set()
+        hook.join(timeout=8)
+    assert not hook.is_alive()
+    assert ctx.state.data["entries"]["turn:s:t"]["tasks"] == ["proc_opening_race"]
+    assert _wait(lambda: bool(edits))
+
+
 @pytest.mark.parametrize(("terminal", "expected"), [( {"completed": True}, "已完成"), ({"failed": True}, "未完成")])
 def test_foreground_terminal_arriving_during_blocked_send_is_applied(tmp_path, monkeypatch,
                                                                       terminal, expected):

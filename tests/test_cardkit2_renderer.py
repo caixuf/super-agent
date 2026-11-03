@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import pytest
 from typing import Any, Dict, List
 
@@ -21,7 +22,7 @@ def test_extract_stages_and_clean_text():
     )
     stages, clean = extract_stages_and_clean_text(raw)
     assert "正在排查问题" in stages
-    assert "正在分析日志链路" in stages
+    assert "正在分析日志链路" not in stages
     assert clean == "最终的分析结论文本"
 
 
@@ -145,3 +146,192 @@ def test_card_stream_renderer_close_prevents_late_override():
         assert len(received) == 1
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("raw", [
+    "<think>private-reasoning-sentinel</think>",
+    "<think>private-reasoning-sentinel",
+    "<THINK>private-reasoning-sentinel</THINK>\n公开结论",
+    "<think>##STAGE: private-reasoning-sentinel</think>\n公开结论",
+    "<think>outer<think>inner</think>private-reasoning-sentinel</think>\n公开结论",
+])
+def test_private_reasoning_never_becomes_visible_card_content(raw):
+    stages, clean = extract_stages_and_clean_text(raw)
+    assert "private-reasoning-sentinel" not in stages + clean
+    payload = build_cardkit2_payload(raw)
+    assert "private-reasoning-sentinel" not in json.dumps(payload)
+
+
+def test_private_reasoning_in_explicit_stage_is_not_published():
+    payload = build_cardkit2_payload(
+        "公开结论", stage_text="公开进度<think>private-stage-sentinel</think>",
+    )
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "公开进度" in serialized
+    assert "private-stage-sentinel" not in serialized
+
+
+def test_stream_drain_timeout_preserves_single_inflight():
+    async def run():
+        started = asyncio.Event()
+        release = asyncio.Event()
+        active = 0
+        peak = 0
+        patches = []
+
+        async def patch(card_id, payload):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            started.set()
+            try:
+                await release.wait()
+                patches.append(payload)
+            finally:
+                active -= 1
+
+        renderer = CardStreamRenderer("card-timeout", patch)
+        renderer.update_action("first")
+        await started.wait()
+        first_task = renderer._inflight
+        try:
+            with pytest.raises(TimeoutError):
+                await renderer.drain(budget=0.001)
+            assert renderer._inflight is first_task
+            assert not first_task.done()
+            renderer.update_action("second")
+            await asyncio.sleep(0)
+            assert peak == 1
+        finally:
+            renderer.close()
+            release.set()
+            await renderer.drain()
+        assert active == 0
+        assert len(patches) == 1
+
+    asyncio.run(run())
+
+
+def test_stream_drain_deadline_does_not_use_display_clock():
+    async def run():
+        release = asyncio.Event()
+
+        async def patch(card_id, payload):
+            await release.wait()
+
+        renderer = CardStreamRenderer("card-clock", patch, clock=lambda: 100.0)
+        renderer.update_action("first")
+        started_at = asyncio.get_running_loop().time()
+        try:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(renderer.drain(budget=0.001), timeout=0.5)
+            assert asyncio.get_running_loop().time() - started_at < 0.25
+            assert renderer._inflight is not None
+        finally:
+            renderer.close()
+            release.set()
+            await renderer.drain()
+
+    asyncio.run(run())
+
+
+def test_stream_drain_pumps_frame_queued_before_event_loop():
+    received = []
+
+    async def patch(card_id, payload):
+        received.append(payload)
+
+    renderer = CardStreamRenderer("card-before-loop", patch)
+    renderer.update_action("queued before event loop")
+    asyncio.run(renderer.drain())
+    renderer.close()
+    assert len(received) == 1
+
+
+def test_stream_drain_propagates_caller_cancellation():
+    async def run():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def patch(card_id, payload):
+            started.set()
+            await release.wait()
+
+        renderer = CardStreamRenderer("card-cancel", patch)
+        renderer.update_action("first")
+        await started.wait()
+        waiting = asyncio.create_task(renderer.drain())
+        await asyncio.sleep(0)
+        waiting.cancel()
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
+            assert renderer._inflight is not None
+            assert not renderer._inflight.done()
+        finally:
+            renderer.close()
+            release.set()
+            await renderer.drain()
+
+    asyncio.run(run())
+
+
+def test_progress_patch_failure_is_visible_and_does_not_log_content(caplog):
+    async def run():
+        async def patch(card_id, payload):
+            raise RuntimeError("synthetic-private-content-sentinel")
+
+        renderer = CardStreamRenderer("card-failed", patch)
+        renderer.update_action("first")
+        with pytest.raises(RuntimeError, match="progress_card_update_failed"):
+            await renderer.drain()
+        renderer.close()
+
+    asyncio.run(run())
+    assert "synthetic-private-content-sentinel" not in caplog.text
+
+
+def test_stream_drain_reports_patch_cancelled_before_start():
+    async def run():
+        async def patch(card_id, payload):
+            raise AssertionError("cancelled patch must not start")
+
+        renderer = CardStreamRenderer("card-prestart-cancel", patch)
+        renderer.update_action("first")
+        renderer._inflight.cancel()
+        await asyncio.sleep(0)
+        with pytest.raises(RuntimeError, match="progress_card_update_failed"):
+            await renderer.drain()
+        assert renderer._inflight is None
+        renderer.close()
+
+    asyncio.run(run())
+
+
+def test_stream_drain_reports_patch_cancelled_after_start():
+    async def run():
+        started = asyncio.Event()
+
+        async def patch(card_id, payload):
+            started.set()
+            await asyncio.Event().wait()
+
+        renderer = CardStreamRenderer("card-running-cancel", patch)
+        renderer.update_action("first")
+        await started.wait()
+        renderer._inflight.cancel()
+        renderer.close()
+        with pytest.raises(RuntimeError, match="progress_card_update_failed"):
+            await renderer.drain()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("budget", [0, -1, float("nan"), float("inf"), True])
+def test_stream_drain_rejects_invalid_budget(budget):
+    async def patch(card_id, payload):
+        pass
+
+    renderer = CardStreamRenderer("card-budget", patch)
+    with pytest.raises(ValueError, match="budget"):
+        asyncio.run(renderer.drain(budget=budget))

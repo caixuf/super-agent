@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
@@ -37,25 +38,38 @@ def color_for_tick(tick: int) -> str:
 
 
 def extract_stages_and_clean_text(text: str) -> Tuple[str, str]:
-    """Extract ``##STAGE:`` lines and ``<think>`` blocks from stream content.
+    """Extract public ``##STAGE:`` lines while withholding private reasoning.
 
-    Returns ``(stage_text, clean_text)``.
+    Returns ``(stage_text, clean_text)``. A truncated or nested reasoning block
+    is withheld too; collapsing it into a visible panel is not redaction.
     """
+    raw = text or ""
+    public: List[str] = []
+    depth = 0
+    cursor = 0
+    for marker in re.finditer(r"<\s*(/?)\s*think\b[^>]*>", raw, flags=re.IGNORECASE):
+        if not depth:
+            public.append(raw[cursor:marker.start()])
+        if marker.group(1):
+            depth = max(0, depth - 1)
+        else:
+            depth += 1
+        cursor = marker.end()
+    if not depth:
+        public.append(raw[cursor:])
+    # Streaming snapshots can end in an incomplete opening marker.
+    safe_text = re.sub(r"<\s*(?:t|th|thi|thin|think)\s*$", "",
+                       "".join(public), flags=re.IGNORECASE)
     stages: List[str] = []
     lines: List[str] = []
-    for line in (text or "").splitlines():
+    for line in safe_text.splitlines():
         if line.startswith("##STAGE:"):
             stages.append(line.replace("##STAGE:", "").strip())
         else:
             lines.append(line)
     clean = "\n".join(lines).strip()
 
-    m_think = re.search(r"<think>(.*?)</think>", clean, flags=re.DOTALL)
-    if m_think:
-        stages.append(m_think.group(1).strip())
-        clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL).strip()
-
-    return "\n\n".join(s for s in stages if s).strip(), clean or text
+    return "\n\n".join(s for s in stages if s).strip(), clean
 
 
 def build_cardkit2_payload(
@@ -80,8 +94,9 @@ def build_cardkit2_payload(
       - Footer metadata: 'grey-50'
     """
     extracted_stage, clean_text = extract_stages_and_clean_text(text)
+    explicit_stages, explicit_stage_text = extract_stages_and_clean_text(stage_text)
     combined_stage = "\n\n".join(
-        s for s in [stage_text.strip(), extracted_stage.strip()] if s
+        s for s in [explicit_stages, explicit_stage_text, extracted_stage] if s
     ).strip()
 
     if is_failed:
@@ -257,8 +272,10 @@ class CardStreamRenderer:
     Guarantees:
       1. Non-blocking callers (note/render are synchronous or lightweight async).
       2. Exactly one in-flight PATCH call at any given moment.
-      3. Last-Write-Wins on pending frames to avoid API rate limits.
-      4. Safe ``close()`` and ``drain()`` protocol preventing final answer clobbering.
+      3. Last-Write-Wins coalescing of pending frames, not a platform rate limit.
+      4. ``close(); await drain()`` settles client-side progress calls before
+         final delivery. Timeout/failure must be reconciled by the transport;
+         a local drain cannot prove remote ordering or delivery.
     """
 
     def __init__(
@@ -292,6 +309,7 @@ class CardStreamRenderer:
         self.last_rendered_body = ""
         self._inflight: Optional[asyncio.Task[None]] = None
         self._pending_payload: Optional[Dict[str, Any]] = None
+        self._patch_failed = False
 
     def update_stage(self, stage: str) -> None:
         """Update stage and trigger a render frame."""
@@ -371,8 +389,13 @@ class CardStreamRenderer:
         try:
             if not self.closed:
                 await self._patch_fn(self.card_id, payload)
+        except asyncio.CancelledError:
+            self._patch_failed = True
+            raise
         except Exception as exc:
-            logger.warning("Progress card update error: %s: %s", type(exc).__name__, exc)
+            self._patch_failed = True
+            # Transport exceptions may contain card content, URLs or secrets.
+            logger.warning("Progress card update error: %s", type(exc).__name__)
         finally:
             self._inflight = None
             self._pump()
@@ -383,18 +406,35 @@ class CardStreamRenderer:
         self._pending_payload = None
 
     async def drain(self, budget: float = 10.0) -> None:
-        """Wait for in-flight and pending patches to settle before sending final answer."""
-        deadline = self._clock() + budget
-        while self._clock() < deadline:
+        """Wait for progress calls, or raise without discarding a live handle.
+
+        Close admission first when handing off to final delivery. A timeout
+        deliberately leaves the in-flight operation observable and does not
+        cancel it: cancellation cannot undo a request already sent remotely.
+        """
+        if (isinstance(budget, bool) or not isinstance(budget, (int, float))
+                or not math.isfinite(budget) or budget <= 0):
+            raise ValueError("drain budget must be finite and positive")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + budget
+        while True:
+            # A task cancelled before its coroutine starts never executes
+            # _send's finally block. Retire only a proven terminal handle.
+            if self._inflight is not None and self._inflight.done():
+                if self._inflight.cancelled() or self._inflight.exception() is not None:
+                    self._patch_failed = True
+                self._inflight = None
+            self._pump()
             task = self._inflight
             if task is None and self._pending_payload is None:
                 break
-            if task is not None and not task.done():
-                try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout=max(0.1, deadline - self._clock()))
-                except (asyncio.TimeoutError, Exception):
-                    pass
-            await asyncio.sleep(0.05)
-        self._inflight = None
-        self._pending_payload = None
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError("progress_card_drain_timeout")
+            if task is not None:
+                done, _ = await asyncio.wait({task}, timeout=remaining)
+                if not done:
+                    raise TimeoutError("progress_card_drain_timeout")
+        if self._patch_failed:
+            raise RuntimeError("progress_card_update_failed")
 
