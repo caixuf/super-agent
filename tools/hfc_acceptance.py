@@ -21,6 +21,37 @@ _PROBE_VERSION = (
     "from importlib.metadata import version; "
     "print(version('hermes-feishu-streaming-card'))"
 )
+_PROBE_LOCAL_WHEEL = '''
+import hashlib, json, pathlib, zipfile
+from importlib.metadata import distribution
+from urllib.parse import urlsplit, unquote
+d = distribution('hermes-feishu-streaming-card')
+meta = json.loads(d.read_text('direct_url.json') or '{}')
+url = urlsplit(meta.get('url', ''))
+if url.scheme != 'file' or url.netloc not in ('', 'localhost'):
+    raise SystemExit(1)
+wheel = pathlib.Path(unquote(url.path))
+if not wheel.is_absolute() or wheel.suffix != '.whl' or not wheel.is_file():
+    raise SystemExit(1)
+with zipfile.ZipFile(wheel) as archive:
+    checked = 0
+    for entry in archive.infolist():
+        name = pathlib.PurePosixPath(entry.filename)
+        if entry.is_dir():
+            continue
+        if name.is_absolute() or '..' in name.parts or '\\\\' in entry.filename:
+            raise SystemExit(1)
+        if name.name == 'RECORD' and name.parent.name.endswith('.dist-info'):
+            continue  # Installers regenerate RECORD and direct_url.json.
+        installed = pathlib.Path(d.locate_file(entry.filename))
+        if not installed.is_file() or installed.read_bytes() != archive.read(entry):
+            raise SystemExit(1)
+        checked += 1
+    if not checked:
+        raise SystemExit(1)
+print(json.dumps({'kind': 'deployed_wheel', 'version': d.version,
+                 'wheel_sha256': hashlib.sha256(wheel.read_bytes()).hexdigest()}))
+'''
 
 
 def _mapping(value):
@@ -80,13 +111,24 @@ def installed_identity(executable):
     repository = str(direct_url.get("url", "")).removesuffix(".git")
     if repository == UPSTREAM_REPOSITORY and isinstance(commit, str):
         return {"kind": "upstream_pin", "commit": commit}
-    digest = str(_mapping(direct_url.get("archive_info")).get("hash") or "")
+    archive = _mapping(direct_url.get("archive_info"))
+    digest = str(archive.get("hash") or "")
+    if not digest and _mapping(archive.get("hashes")).get("sha256"):
+        digest = "sha256=" + archive["hashes"]["sha256"]
     if digest.startswith("sha256="):
         version = (_probe(executable, _PROBE_VERSION) or "").strip() or None
         return {"kind": "deployed_wheel", "wheel_sha256": digest[len("sha256="):],
                 "version": version}
     if isinstance(commit, str):
         return {"kind": "upstream_pin", "commit": commit}
+    # Some local-wheel installers omit archive_info hashes. Recover identity
+    # only after verifying the installed payload against every wheel member.
+    verified = _probe(executable, _PROBE_LOCAL_WHEEL)
+    if verified:
+        try:
+            return json.loads(verified)
+        except json.JSONDecodeError:
+            return None
     return None
 
 

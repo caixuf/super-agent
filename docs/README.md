@@ -13,6 +13,7 @@
 | [`DISPATCH_ANALYSIS.md`](DISPATCH_ANALYSIS.md) | 派工与只读分析链路 |
 | [`REDEPLOY.md`](REDEPLOY.md) | 重新部署与复验步骤 |
 | [`RELEASE_READINESS.md`](RELEASE_READINESS.md) | 本次发版核对：已验证修复、真实接线与未完成门禁 |
+| [`RELEASE_CAPABILITIES.md`](RELEASE_CAPABILITIES.md) | 完整版发版能力表：通用运行、业务适配、实例部署及逐项验收口径；不是已通过声明 |
 | [`FRONTDESK_BOUNDARY.md`](FRONTDESK_BOUNDARY.md) | 候选宿主的前台权限边界、可信配置、执行接缝与限制；未生产启用 |
 | [`MEMORY_IDENTITY_ROUTES.md`](MEMORY_IDENTITY_ROUTES.md) | IM 个人记忆身份路由、独立 Worker、撤销与部署边界；不替代整体多租户审计 |
 

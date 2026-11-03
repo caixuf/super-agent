@@ -28,6 +28,19 @@ class ConfigDeviation(NamedTuple):
 
 # The authoritative Super Agent 2.0 configuration baseline contract.
 CORE_RUNTIME_BASELINE: Dict[str, Any] = {
+    "tools": {
+        "tool_search": {
+            # Hermes v0.22.5's cold tools, with process_manage kept directly
+            # available whenever terminal can return a background handle.
+            "defer": [
+                "computer_use", "session_search", "image_generate", "todo_list",
+                "cronjob_manage", "browser_vault", "drive_preview", "gui_tour",
+                "desktop_preview", "annotate_preview", "manage_catalog", "show_tip",
+                "desktop_project", "close_terminal", "set_theme", "read_terminal",
+                "read_window_below", "focus_pane",
+            ],
+        },
+    },
     "model": {
         "default": "flash",
     },
@@ -108,9 +121,20 @@ def _traverse_baseline(
 
 def audit_config_dict(
     config: Mapping[str, Any],
-    baseline: Mapping[str, Any] = CORE_RUNTIME_BASELINE,
+    baseline: Optional[Mapping[str, Any]] = None,
 ) -> List[ConfigDeviation]:
     """Audit a configuration dictionary against the canonical baseline."""
+    if baseline is None:
+        baseline = copy.deepcopy(CORE_RUNTIME_BASELINE)
+        plugins = config.get("plugins") or {}
+        if isinstance(plugins, Mapping):
+            enabled = plugins.get("enabled") or []
+            disabled = plugins.get("disabled") or []
+            if "hermes-feishu-card" in enabled and "hermes-feishu-card" not in disabled:
+                # HFC must own final delivery as well as progress. A routine
+                # baseline repair must not re-enable the competing native path.
+                baseline["platforms"]["feishu"]["card_replies"] = False
+                baseline["platforms"]["feishu"]["exec_approval_text"] = False
     deviations: List[ConfigDeviation] = []
     leaves = _traverse_baseline(baseline)
 
@@ -143,7 +167,7 @@ def audit_config_dict(
 
 def enforce_baseline_config(
     config_path: Path,
-    baseline: Mapping[str, Any] = CORE_RUNTIME_BASELINE,
+    baseline: Optional[Mapping[str, Any]] = None,
     *,
     backup: bool = True,
 ) -> Tuple[bool, List[str]]:

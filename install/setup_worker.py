@@ -51,7 +51,10 @@ def plan(home: Path, engine: Path, unit_dir: Path, profile: str, python: Path):
     if configured_engine:
         if not isinstance(configured_engine, str) or not Path(configured_engine).is_absolute():
             raise ValueError("configured engine_root must be absolute")
-        engine = Path(configured_engine).resolve()
+        # Keep the managed `current` link in generated service/runner paths.
+        # Resolving it here pins the worker to yesterday's release after update
+        # or rollback even though Gateway plugins follow the current release.
+        engine = Path(configured_engine).absolute()
     if not (engine / "agentcore" / "analysis_runner.py").is_file():
         raise ValueError("engine lacks analysis_runner.py")
     if not python.is_absolute() or not python.is_file() or not os.access(python, os.X_OK):

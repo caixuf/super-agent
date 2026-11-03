@@ -194,7 +194,7 @@ _HEAVY_PATTERNS: tuple[tuple[str, str], ...] = (
 
 #: ``sleep`` 只有够久才值得转后台。``sleep 20`` 这类短等待转成后台，
 #: 代价是**多一次进程完成唤醒**，换来的只是省 20 秒 —— 净亏。
-_SLEEP_BACKGROUND_MIN_SECONDS = 30
+_SLEEP_BACKGROUND_MIN_SECONDS = DEFAULT_FOREGROUND_TIMEOUT + 1
 _SLEEP_UNITS: dict[str, int] = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 
 

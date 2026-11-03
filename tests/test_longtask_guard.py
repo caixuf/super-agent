@@ -53,7 +53,7 @@ def test_heavy_commands_are_converted(command):
 
 @pytest.mark.parametrize("command", [
     "cd /repo && bash docker/verify.sh",     # && 连接，第二段是长任务
-    "echo start; sleep 120; echo done",       # 复合命令里有长等待
+    "echo start; sleep 600; echo done",       # 复合命令里有长等待
 ])
 def test_compound_commands_are_detected(command):
     assert _hit(command), f"复合命令应命中：{command}"
@@ -108,6 +108,11 @@ def test_already_background_is_left_alone():
     "sleep 5",
     "sleep 20",
     "sleep 29",
+    "sleep 30",
+    "sleep 120",
+    "sleep 180",
+    "sleep 2m",
+    "echo start; sleep 120; echo done",
     "sleep 0.5",
     "sleep 20; ls -la",
 ])
@@ -117,10 +122,10 @@ def test_short_sleeps_are_never_converted(command):
 
 
 @pytest.mark.parametrize("command", [
-    "sleep 30",
-    "sleep 120",
-    "echo start; sleep 120; echo done",
-    "sleep 2m",
+    "sleep 181",
+    "sleep 600",
+    "echo start; sleep 600; echo done",
+    "sleep 5m",
     "sleep 1h",
 ])
 def test_long_sleeps_are_converted(command):

@@ -15,6 +15,26 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "install/setup_worker.py"
 
 
+def test_worker_follows_managed_release_after_switch(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("worker_setup", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    home = tmp_path / "profile"
+    home.mkdir()
+    current = tmp_path / "current"
+    current.symlink_to(REPO, target_is_directory=True)
+    config = {"plugins": {"enabled": ["durable-dispatch"], "entries": {
+        "durable-dispatch": {"settings": {"enabled": True, "queue_root": str(tmp_path / "queue"),
+            "allowed_roots": [str(tmp_path)], "engine_root": str(current)}}}}}
+    (home / "config.yaml").write_text(yaml.safe_dump(config))
+    files = module.plan(home, REPO, tmp_path / "units", "demo", Path(sys.executable).absolute())
+    runner = json.loads(files[home / "worker/runner.json"])
+    assert runner[1] == str(current / "agentcore/analysis_runner.py")
+    unit = files[tmp_path / "units/superagent-worker-demo.service"]
+    assert "PYTHONPATH=" + str(current) in unit
+
+
 def test_worker_setup_derives_policy_and_refuses_overwrite(tmp_path):
     home = tmp_path / "profile"
     home.mkdir()

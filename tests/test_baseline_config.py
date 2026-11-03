@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import yaml
+import copy
 from pathlib import Path
 
 from agentcore.baseline_config import (
@@ -9,6 +10,27 @@ from agentcore.baseline_config import (
     audit_config_dict,
     enforce_baseline_config,
 )
+
+
+def test_baseline_repair_preserves_hfc_as_the_only_producer(tmp_path):
+    config = copy.deepcopy(CORE_RUNTIME_BASELINE)
+    config["plugins"]["enabled"] = ["hermes-feishu-card"]
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config))
+    changed, _ = enforce_baseline_config(path)
+    assert changed
+    actual = yaml.safe_load(path.read_text())
+    assert actual["platforms"]["feishu"]["card_replies"] is False
+    assert actual["platforms"]["feishu"]["exec_approval_text"] is False
+    assert not audit_config_dict(actual)
+    assert enforce_baseline_config(path)[0] is False
+
+
+def test_disabled_hfc_does_not_take_native_delivery_ownership():
+    config = copy.deepcopy(CORE_RUNTIME_BASELINE)
+    config["plugins"]["enabled"] = ["hermes-feishu-card"]
+    config["plugins"]["disabled"] = ["hermes-feishu-card"]
+    assert not audit_config_dict(config)
 
 
 def test_audit_config_empty_reports_deviations():
@@ -71,6 +93,7 @@ def test_audit_config_matching_baseline_reports_clean():
             }
         },
     }
+    clean_cfg["tools"] = copy.deepcopy(CORE_RUNTIME_BASELINE["tools"])
     deviations = audit_config_dict(clean_cfg)
     assert len(deviations) == 0
 
@@ -102,6 +125,7 @@ def test_enforce_baseline_config_idempotent_repair(tmp_path):
 
     repaired = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
     assert repaired["model"]["default"] == "flash"
+    assert "process_manage" not in repaired["tools"]["tool_search"]["defer"]
     assert repaired["streaming"]["transport"] == "edit"
     assert repaired["display"]["busy_input_mode"] == "steer"
     assert repaired["platforms"]["feishu"]["card_replies"] is True

@@ -24,9 +24,9 @@
     "identity": "local reviewed wheel, not the pinned upstream release commit",
     "why": "The three known blockers are reproduced defects of the pinned release. The running artifact carries a reviewed source repair, so it has its own identity rather than borrowing the upstream commit.",
     "version": "5.0.13",
-    "wheel_sha256": "fcbd90431fb051afc6fd54d275d28f8841b469e9f0ef6bc5c7ba3f0a74ab0baa",
-    "installed_from": "file:///tmp/hfc-build/dist/hermes_feishu_streaming_card-5.0.13-py3-none-any.whl",
-    "venv": "~/.hermes/tools/hfc-terminal-ack-20261102/venv",
+    "wheel_sha256": "c625caa7e7a0f0554ce02c812b560902f628fe68f5db48c94fa64e47aee66b62",
+    "installed_from": "file:///home/caixuf/.hermes/tools/hfc-shared-final-20261102/hermes_feishu_streaming_card-5.0.13-py3-none-any.whl",
+    "venv": "~/.hermes/tools/hfc-shared-final-20261102/venv",
     "source_repairs": [
       "patches/hfc-delivery-safety/server.py.patch",
       "patches/hfc-delivery-safety/hook_runtime.py.patch",
@@ -36,9 +36,9 @@
     ],
     "evidence": {
       "verified_at": "2026-11-03",
-      "suite": "tests/test_hfc_delivery_contract.py",
-      "result": "8 passed",
-      "how": "HFC_SOURCE_ROOT=<venv>/lib/python3.12/site-packages PYTHONPATH=<same> python3 -m pytest -q tests/test_hfc_delivery_contract.py",
+      "suite": "tests/test_hfc_delivery_contract.py tests/test_hfc_shared_summary_delivery.py",
+      "result": "9 passed",
+      "how": "HFC_SOURCE_ROOT=<venv>/lib/python3.14/site-packages python3 -m pytest -q tests/test_hfc_delivery_contract.py tests/test_hfc_shared_summary_delivery.py",
       "covers": [
         "terminal_ack_before_platform_delivery",
         "terminal_not_sent_reported_as_success",
@@ -51,12 +51,21 @@
       "superseded_terminal_answer_suppressed"
     ],
     "not_verified": [
-      "real Feishu turn on a private test bot",
-      "client-side rendering, read back on a real device",
-      "restart and crash recovery on this exact build",
+      "real Gateway model turn, follow-up and final reply on this exact build",
+      "restart and crash recovery with an in-flight turn",
       "topic reply, clarify, approval and media round trips",
       "two consecutive long turns and a queued follow-up"
     ],
-    "owner_note": "Automated contracts passing is not interaction acceptance. The upstream pin stays quarantined; this record only identifies what is actually running."
+    "owner_note": "Automated contracts passing is not interaction acceptance. The upstream pin stays quarantined; this record only identifies what is actually running.",
+    "state_dir": "~/.hermes/superagent/caixuf/state/hfc",
+    "compatibility_exception": {
+      "version": "v0.22.5",
+      "missing_optional_anchors": [
+        "status_callback"
+      ],
+      "run_py_hash": "6bd46a82e3c1",
+      "base_py_hash": "da27e9566f61",
+      "why": "This fixed candidate supports all delivery anchors; only optional context-compaction status visibility is unavailable. Tool and answer updates remain supported. Full compatibility remains separately reported."
+    }
   }
 }

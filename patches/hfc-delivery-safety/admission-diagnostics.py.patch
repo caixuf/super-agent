@@ -1,0 +1,26 @@
+--- a/hermes_feishu_card/admission_completion.py
++++ b/hermes_feishu_card/admission_completion.py
+@@ -802,6 +802,23 @@
+         if (authority.retiring or getattr(live, "superseded", False)
+                 or authority.sessions.get(offer.authority_owner[0]) is not live):
+             return "authority-owner-stale"
++        verified = _verified()
++        if verified is None:
++            return "source-unverified"
++        cls = verified[1].SessionAuthority
++        for method in ("_schedule", "_drain", "_resolve_settled_waiter", "_execute_claimed", "_stamp_claim"):
++            if getattr(authority, method).__func__ is not getattr(cls, method):
++                return "authority-method-mismatch"
++        if authority.runner is not offer.runner():
++            return "authority-runner-mismatch"
++        if live.route != offer.session_key:
++            return "authority-route-mismatch"
++        if not _live_route_matches(live.source, offer.route):
++            return "authority-live-route-mismatch"
++        if getattr(offer.adapter(), "_app_id", None) != offer.app_id:
++            return "authority-adapter-mismatch"
++        if live.task is not asyncio.current_task():
++            return "authority-task-mismatch"
+         get_row = importlib.import_module("hermes_state_runtime").get_session_admission
+         row = get_row(authority.db, admission_id=offer.admission_id)
+         if isinstance(row, dict):
