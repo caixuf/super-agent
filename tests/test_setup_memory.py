@@ -23,6 +23,24 @@ def setup(home, units, *extra, python=sys.executable):
                           capture_output=True, text=True, timeout=30)
 
 
+def test_memory_preserves_managed_engine_symlink(tmp_path):
+    home = tmp_path / "profile"
+    home.mkdir()
+    (home / "config.yaml").write_text("plugins:\n  enabled: [memory-bridge]\n")
+    engine = tmp_path / "current"
+    engine.symlink_to(REPO, target_is_directory=True)
+    units = tmp_path / "units"
+    result = subprocess.run([sys.executable, str(SCRIPT), "--profile-home", str(home),
+                             "--engine-root", str(engine), "--profile", "p1", "--user", "u1",
+                             "--agent", "a1", "--embed-url", "http://127.0.0.1:8910",
+                             "--unit-dir", str(units), "--apply"], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    cfg = yaml.safe_load((home / "config.yaml").read_text())
+    assert cfg["plugins"]["entries"]["memory-bridge"]["settings"]["engine_root"] == str(engine)
+    assert cfg["memory"]["localvec"]["recall_cmd"][1] == str(engine / "tools/recall_memory.py")
+    assert "PYTHONPATH=" + str(engine) in (units / "superagent-memory-p1.service").read_text()
+
+
 def test_memory_default_uses_invoking_interpreter(tmp_path):
     home = tmp_path / "profile"
     home.mkdir()

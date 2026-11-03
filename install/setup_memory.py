@@ -143,7 +143,9 @@ def main():
         p.error("--activate requires the standard user systemd unit directory")
     # Keep a virtualenv's entry point instead of resolving it to the base Python.
     python = args.python.absolute()
-    plan = make_plan(args.profile_home.resolve(), args.engine_root.resolve(), args.profile,
+    # Keep the managed current symlink in saved config and units so upgrades do not pin an old release.
+    engine = args.engine_root.absolute()
+    plan = make_plan(args.profile_home.resolve(), engine, args.profile,
                      args.user, args.agent, args.embed_url, python, args.unit_dir.resolve(),
                      identity_routes_file=args.identity_routes_file)
     unit = plan["unit_path"]
@@ -196,8 +198,8 @@ def main():
                     pending = db.execute("SELECT count(*) FROM turn_events WHERE state NOT IN ('done','failed')").fetchone()[0]
                 if pending:
                     raise ValueError("memory queue contains pending turns; review before activation")
-            preflight_model(args.profile_home.resolve(), args.engine_root.resolve(), python)
-            environment = dict(os.environ, PYTHONPATH=str(args.engine_root.resolve()))
+            preflight_model(args.profile_home.resolve(), engine, python)
+            environment = dict(os.environ, PYTHONPATH=str(engine))
             probe_code = ("from agentcore.memory.bge_sidecar import make_embedder; "
                           "import sys; rows=make_embedder(sys.argv[1])(['synthetic readiness probe']); "
                           "raise SystemExit(0 if rows and len(rows[0]) == 1024 else 1)")
