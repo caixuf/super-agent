@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import stat
+import sys
 from typing import Any
 
 TASK_TOOLS = frozenset({"durable_submit", "durable_status", "durable_cancel", "task_status"})
@@ -47,11 +48,21 @@ def _settings(home: Path | str | None = None) -> dict[str, bool]:
     # duplicate-key rejection. Parsers are per call, never shared by threads.
     try:
         from ruamel.yaml import YAML
+    except ImportError:
+        host_sp = Path.home() / ".hermes/hermes-agent/venv/lib/python3.12/site-packages"
+        if host_sp.is_dir() and str(host_sp) not in sys.path:
+            sys.path.append(str(host_sp))
+        try:
+            from ruamel.yaml import YAML
+        except ImportError:
+            YAML = None
+
+    if YAML is not None:
         loader = YAML(typ="safe", pure=True)
         loader.version = (1, 1)
         loader.allow_duplicate_keys = False
         config = loader.load(raw)
-    except ImportError:
+    else:
         import yaml
         config = yaml.safe_load(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
     if config is None:
