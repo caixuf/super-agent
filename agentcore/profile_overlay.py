@@ -121,7 +121,7 @@ def collect_profile_overlay(
                     if env_p.is_file():
                         env_content = env_p.read_bytes()
                         env_target_name = env_p.name
-                        files[f"overlay/envs/{env_target_name}"] = (env_content, 0o600)
+                        files[f"overlay/envs/{env_target_name}"] = (env_content, 0o644)
                         # Replace in snippet with relative reference
                         srv_conf["env_file"] = f"{{{{PROFILE_HOME}}}}/{env_target_name}"
 
@@ -240,7 +240,12 @@ def apply_profile_overlay(
     if src_envs.is_dir():
         for env_f in src_envs.iterdir():
             if env_f.is_file():
-                shutil.copy2(env_f, profile_dir / env_f.name)
+                dest_env = profile_dir / env_f.name
+                shutil.copy2(env_f, dest_env)
+                try:
+                    dest_env.chmod(0o600)
+                except OSError:
+                    pass
 
     snippet_file = overlay_dir / "config_snippet.json"
     if snippet_file.is_file():
