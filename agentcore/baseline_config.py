@@ -59,6 +59,11 @@ CORE_RUNTIME_BASELINE: Dict[str, Any] = {
     },
     "plugins": {
         "entries": {
+            "task-progress": {
+                "settings": {
+                    "enabled": False,
+                }
+            },
             "illustrated-delivery": {
                 "settings": {
                     "enforce_delivery": False,

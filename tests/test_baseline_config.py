@@ -57,6 +57,11 @@ def test_audit_config_matching_baseline_reports_clean():
         },
         "plugins": {
             "entries": {
+                "task-progress": {
+                    "settings": {
+                        "enabled": False,
+                    }
+                },
                 "illustrated-delivery": {
                     "settings": {
                         "enforce_delivery": False,
@@ -100,6 +105,7 @@ def test_enforce_baseline_config_idempotent_repair(tmp_path):
     assert repaired["display"]["busy_input_mode"] == "steer"
     assert repaired["platforms"]["feishu"]["card_replies"] is True
     assert repaired["platforms"]["feishu"]["home_channel"] == "oc_private_channel"
+    assert repaired["plugins"]["entries"]["task-progress"]["settings"]["enabled"] is False
     assert repaired["plugins"]["entries"]["illustrated-delivery"]["settings"]["enforce_delivery"] is False
 
     # Second enforcement: already clean, no changes applied
