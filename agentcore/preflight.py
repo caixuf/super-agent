@@ -174,17 +174,105 @@ def check_config_baseline(config_path: Path | str | None = None) -> CheckItemRes
         )
 
 
+def check_feishu_api_latency(
+    target_url: str = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal",
+    max_acceptable_ms: float = 800.0,
+    timeout_s: float = 2.0,
+) -> CheckItemResult:
+    """探测飞书 OpenAPI 基础网络链路与往返延迟 (Round-Trip Time)。"""
+    t0 = time.monotonic()
+    req = urllib.request.Request(
+        target_url,
+        data=b"{}",
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    try:
+        # 即使无凭据返回 400/99991663，也证明 TCP 握手 + TLS + HTTP 往返闭环成功
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            status_code = resp.status
+    except urllib.error.HTTPError as err:
+        status_code = err.code
+    except Exception as exc:
+        dur_ms = (time.monotonic() - t0) * 1000.0
+        return CheckItemResult(
+            name="飞书 OpenAPI 往返延迟",
+            passed=False,
+            latency_ms=dur_ms,
+            message=f"连接失败: {exc}",
+            detail="飞书 OpenAPI 网关无法连接，请检查外网出口、HTTPS 代理或防火墙配置",
+        )
+
+    dur_ms = (time.monotonic() - t0) * 1000.0
+    passed = dur_ms <= max_acceptable_ms
+    msg = f"HTTP 往返 {dur_ms:.1f}ms (状态码: {status_code}, 预算: <={max_acceptable_ms}ms)"
+    detail = ""
+    if not passed:
+        msg = f"飞书 OpenAPI 链路严重超时 ({dur_ms:.1f}ms > {max_acceptable_ms}ms)"
+        detail = "往返延迟过高将击穿飞书 3 秒超时死线，导致平台频繁重试与雪崩，已阻断部署"
+
+    return CheckItemResult(
+        name="飞书 OpenAPI 往返延迟",
+        passed=passed,
+        latency_ms=dur_ms,
+        message=msg,
+        detail=detail,
+    )
+
+
+def check_idempotent_store_latency(
+    test_dir: Path | str | None = None,
+    max_acceptable_ms: float = 20.0,
+) -> CheckItemResult:
+    """探测网关幂等信箱本地存储 I/O 往返延迟。"""
+    import tempfile
+    t0 = time.monotonic()
+    try:
+        target_dir = Path(test_dir) if test_dir else Path(tempfile.gettempdir())
+        probe_file = target_dir / f".preflight_io_probe_{os.getpid()}_{time.time_ns()}.tmp"
+        probe_file.write_bytes(b"probe_token_1234567890")
+        _ = probe_file.read_bytes()
+        probe_file.unlink(missing_ok=True)
+        dur_ms = (time.monotonic() - t0) * 1000.0
+        passed = dur_ms <= max_acceptable_ms
+        msg = f"I/O 往返 {dur_ms:.2f}ms (预算: <={max_acceptable_ms}ms)"
+        detail = ""
+        if not passed:
+            msg = f"存储 I/O 延迟过高 ({dur_ms:.2f}ms > {max_acceptable_ms}ms)"
+            detail = "本地状态存储 I/O 阻塞，可能导致入站消息排队脱窗"
+        return CheckItemResult(
+            name="幂等信箱读写延迟",
+            passed=passed,
+            latency_ms=dur_ms,
+            message=msg,
+            detail=detail,
+        )
+    except Exception as exc:
+        dur_ms = (time.monotonic() - t0) * 1000.0
+        return CheckItemResult(
+            name="幂等信箱读写延迟",
+            passed=False,
+            latency_ms=dur_ms,
+            message=f"I/O 探测失败: {exc}",
+            detail="存储路径不可写或磁盘 I/O 故障",
+        )
+
+
 def run_preflight_suite(
     probe_host: str = "open.feishu.cn",
     min_free_gb: float = 5.0,
     config_path: Path | str | None = None,
+    include_network_api: bool = False,
 ) -> PreflightReport:
     """执行完整的启动与部署预检套件。"""
     results: List[CheckItemResult] = [
         check_dns_latency(target_host=probe_host),
         check_disk_space(min_free_gb=min_free_gb),
+        check_idempotent_store_latency(),
         check_config_baseline(config_path=config_path),
     ]
+    if include_network_api:
+        results.append(check_feishu_api_latency())
 
     all_passed = all(item.passed for item in results)
     return PreflightReport(all_passed=all_passed, items=results)

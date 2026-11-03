@@ -125,6 +125,35 @@ else
   skipped+=("真实消息平台交付（未设置 FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_TEST_CHAT_ID）")
 fi
 
+# ── ⑥.1 部署链路延迟硬门禁：探测关键往返延迟，拒绝带病上线
+section "⑥.1 部署链路延迟硬门禁（E2E Latency Gate）"
+if "$PY" -c '
+import sys
+from agentcore.preflight import (
+    check_dns_latency,
+    check_idempotent_store_latency,
+    check_feishu_api_latency,
+)
+checks = [
+    ("DNS 解析延迟", check_dns_latency("open.feishu.cn", max_acceptable_ms=300.0)),
+    ("幂等信箱读写延迟", check_idempotent_store_latency(max_acceptable_ms=20.0)),
+    ("飞书 OpenAPI 往返延迟", check_feishu_api_latency(max_acceptable_ms=800.0)),
+]
+failed = [c for c in checks if not c[1].passed]
+for name, res in checks:
+    tag = "[PASS]" if res.passed else "[FAIL]"
+    print(f"  {tag} {name:<20} ({res.latency_ms:.1f}ms) - {res.message}")
+    if not res.passed and res.detail:
+        print(f"         -> {res.detail}")
+if failed:
+    sys.exit(1)
+' >/tmp/verify_latency.log 2>&1; then
+  cat /tmp/verify_latency.log
+else
+  cat /tmp/verify_latency.log
+  fail "链路延迟超出预算硬门禁（阻断部署，防止线上 3 秒超时雪崩）"
+fi
+
 # ── ⑦ 模型上下文体检：端点必须说清窗口，不能靠手写 pin
 # 退出码 0 = 拿到窗口；1 = 端点可达但契约不满足；2 = 无配置/不可达，记为 SKIP。
 section "⑦ 模型上下文体检（端点契约）"

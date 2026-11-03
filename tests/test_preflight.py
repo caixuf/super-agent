@@ -10,6 +10,8 @@ from agentcore.preflight import (
     PreflightReport,
     check_disk_space,
     check_dns_latency,
+    check_feishu_api_latency,
+    check_idempotent_store_latency,
     check_tcp_port_available,
     run_preflight_suite,
 )
@@ -41,9 +43,42 @@ def test_check_tcp_port_available():
     assert "端口状态" in res.message
 
 
-def test_run_preflight_suite():
+def test_check_idempotent_store_latency(tmp_path):
+    res = check_idempotent_store_latency(test_dir=tmp_path, max_acceptable_ms=50.0)
+    assert res.passed is True
+    assert "I/O 往返" in res.message
+
+
+def test_check_feishu_api_latency_success():
+    with patch("urllib.request.urlopen") as mock_open:
+        mock_resp = mock_open.return_value.__enter__.return_value
+        mock_resp.status = 200
+        res = check_feishu_api_latency(max_acceptable_ms=1000.0)
+        assert res.passed is True
+        assert "HTTP 往返" in res.message
+
+
+def test_check_feishu_api_latency_timeout():
+    with patch("urllib.request.urlopen", side_effect=Exception("Connection timeout")):
+        res = check_feishu_api_latency()
+        assert res.passed is False
+        assert "连接失败" in res.message
+
+
+def test_run_preflight_suite(tmp_path):
     with patch("socket.gethostbyname", return_value="1.2.3.4"):
-        report = run_preflight_suite(probe_host="localhost", min_free_gb=0.1)
+        # Explicit clean baseline config to isolate test from host environment
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text(
+            "model:\n  default: flash\n"
+            "streaming:\n  enabled: true\n  transport: edit\n  buffer_threshold: 120\n  edit_interval: 0.8\n"
+            "display:\n  busy_ack_enabled: true\n  busy_input_mode: steer\n"
+            "  platforms:\n    feishu:\n      streaming: true\n      busy_ack_detail: true\n      cleanup_progress: true\n      tool_progress: false\n      thinking_progress: false\n"
+            "platforms:\n  feishu:\n    enabled: true\n    card_replies: true\n    exec_approval_text: true\n"
+            "plugins:\n  entries:\n    illustrated-delivery:\n      settings:\n        enforce_delivery: false\n",
+            encoding="utf-8",
+        )
+        report = run_preflight_suite(probe_host="localhost", min_free_gb=0.1, config_path=cfg_file)
         assert report.all_passed is True
         summary_text = report.summary()
         assert "[OK]" in summary_text
