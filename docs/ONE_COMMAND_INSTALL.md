@@ -59,6 +59,10 @@ python3 tools/superagent.py rollback --profile <profile>
 
 `install/setup_worker.py` 默认生成 stdlib worker。使用原生后端时，先为目标 Python 和宿主架构准备、校验独立的 `flowcoro_py.so`，再显式传入 `--backend flowcoro --flowcoro-dir <绑定目录>`。安装器会用目标解释器验证它确实加载该目录中的模块，并将受管 `current` 放在 `PYTHONPATH` 首位。缺失或不兼容时拒绝生成；已有不同文件仍拒绝覆盖。原生二进制不随源码包分发，更新和回退时应保留其版本和摘要记录。
 
+## 共享 Hermes 宿主依赖启动检查
+
+共享宿主可在启动前调用发布包中的 `tools/hermes_pm_preflight.py`，显式指定 `--hermes-root` 和 `--hermes-home`。检查只在依赖环境过期时调用 Hermes 官方 `pm install venv`，并在同步后再次验证。代理配置由宿主提供，只需传给启动检查进程；不要将令牌写入 unit。检查失败时应阻止宿主继续启动并保留日志。`TimeoutStartSec` 必须大于该检查的超时。此脚本不自动安装 systemd unit，也不证明全部 profile 已就绪。
+
 ## 干净 Hermes 候选
 
 内部迁移先构建独立候选树，不在现役 Hermes 上逐块抠补丁：
