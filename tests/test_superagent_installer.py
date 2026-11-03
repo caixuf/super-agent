@@ -934,7 +934,7 @@ def test_migration_does_not_rewrite_comments_or_secret_values(tmp_path):
     assert f"# historical path {old}" in got
     assert f"api_key: '{old}/credential'" in got
     assert f"engine_root: '{new}' # unchanged comment {old}" in got
-    assert f"allowed_roots: ['{new}/src']" in got
+    assert f"allowed_roots: ['{old}/src']" in got
     assert f"note: 'The source used to be {old}'" in got
 
 
@@ -1338,3 +1338,18 @@ def test_doctor_cron_observation_missing_or_corrupt_is_unknown(tmp_path):
     (tmp_path / "cron/jobs.json").write_text("not-json")
     (tmp_path / "cron/executions.db").write_bytes(b"bad")
     assert module._cron_observation(tmp_path)["state"] == "unknown"
+
+
+def test_migration_keeps_checkout_knowledge_sources_while_moving_engine(tmp_path):
+    profile = _seed_profile(tmp_path)
+    config = profile / "config.yaml"
+    old = "/home/caixuf/code/super-agent"
+    original = ("plugins:\n  entries:\n    local-model-grounding:\n      settings:\n"
+                f"        engine_root: {old}\n        docs_roots: [{old}/docs]\n"
+                f"        index_dir: {old}/index  # operator data\n")
+    config.write_text(original)
+    _run(tmp_path, "migrate-config", check=True)
+    updated = config.read_text()
+    assert f"engine_root: {tmp_path}/.hermes/superagent/demo/current" in updated
+    assert f"docs_roots: [{old}/docs]" in updated
+    assert f"index_dir: {old}/index  # operator data" in updated

@@ -990,7 +990,6 @@ def migrate_config(args: argparse.Namespace, plan: dict[str, Any], *, quiet: boo
     original = config.read_text(encoding="utf-8")
     managed = plan["managed_paths"]
     mapping = {
-        "/home/caixuf/code/super-agent": managed["engine_root"],
         "/home/caixuf/.local/state/agentcore/analysis-queue": managed["queue_root"],
         "/home/caixuf/.local/state/agentcore/memory-spool": managed["memory_spool"],
         "/home/caixuf/.local/state/agentcore/markdown-outbox": managed["markdown_outbox"],
@@ -998,7 +997,11 @@ def migrate_config(args: argparse.Namespace, plan: dict[str, Any], *, quiet: boo
         "/home/caixuf/.local/state/agentcore/colleague-team/registry.sqlite": managed["colleague_registry"],
     }
     updated = _migrate_owned_path_scalars(original, mapping)
-    updated = _migrate_plugin_engine_roots(updated, getattr(args, "legacy_engine_root", ()), managed["engine_root"])
+    # A checkout can also be a knowledge source or an authorized workspace.
+    # Move only explicit plugin engine roots; replacing every checkout-prefixed
+    # path would silently redirect unrelated data into an incomplete release.
+    legacy_engines = ("/home/caixuf/code/super-agent", *getattr(args, "legacy_engine_root", ()))
+    updated = _migrate_plugin_engine_roots(updated, legacy_engines, managed["engine_root"])
     if updated != original:
         _write_text_atomic(config, updated)
 
