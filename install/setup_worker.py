@@ -155,7 +155,8 @@ def main():
     # A virtualenv Python is commonly a symlink. Resolving it selects the base
     # interpreter and loses the private runtime prepared by the installer.
     python = args.python.absolute()
-    files = plan(args.profile_home.resolve(), args.engine_root.resolve(), args.unit_dir.resolve(),
+    engine = args.engine_root.absolute()
+    files = plan(args.profile_home.resolve(), engine, args.unit_dir.resolve(),
                  args.profile, python, backend=args.backend, flowcoro_dir=args.flowcoro_dir)
     for path, content in files.items():
         if path.exists() and (not path.is_file() or path.read_text(encoding="utf-8") != content):
@@ -176,8 +177,8 @@ def main():
                 active = db.execute("SELECT count(*) FROM jobs WHERE status NOT IN ('completed','failed','cancelled')").fetchone()[0]
             if active:
                 raise ValueError("queue contains nonterminal work; inspect it before starting a new worker")
-        engine_arg = config["plugins"]["entries"]["durable-dispatch"]["settings"].get("engine_root") or str(args.engine_root.resolve())
-        preflight_model(args.profile_home.resolve(), Path(engine_arg).resolve(), python)
+        engine_arg = config["plugins"]["entries"]["durable-dispatch"]["settings"].get("engine_root") or str(engine)
+        preflight_model(args.profile_home.resolve(), Path(engine_arg).absolute(), python)
         name = "superagent-worker-" + args.profile + ".service"
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
         subprocess.run(["systemctl", "--user", "enable", "--now", name], check=True)

@@ -161,7 +161,8 @@ def main(argv=None):
         if args.home is None or args.engine_root is None:
             parser.error("--home and --engine-root are required for defaults")
         home = args.home.resolve()
-        values = defaults(home, args.engine_root.resolve(strict=True), args.profile)
+        args.engine_root.resolve(strict=True)  # Reject missing target without pinning saved paths.
+        values = defaults(home, args.engine_root.absolute(), args.profile)
         # During dry-run, enable_plugins has not created the mapping on disk.
         if not text.strip() or config_text.inspect(text)["structure"] != "mapping":
             text, _ = config_text.merge(text, [])

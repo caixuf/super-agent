@@ -419,6 +419,45 @@ other: value
     assert config.read_text() == text
 
 
+def test_plugin_defaults_keep_current_symlink(tmp_path):
+    import yaml
+    home = tmp_path / "profile"
+    home.mkdir()
+    config = home / "config.yaml"
+    config.write_text("plugins:\n  enabled: [task-status]\n")
+    engine = tmp_path / "current"
+    engine.symlink_to(REPO_ROOT, target_is_directory=True)
+    proc = subprocess.run(["python3", str(REPO_ROOT / "install/plugin_defaults.py"),
+                           "--config", str(config), "--home", str(home), "--engine-root", str(engine),
+                           "--profile", "p1"], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    settings = yaml.safe_load(config.read_text())["plugins"]["entries"]["task-status"]["settings"]
+    assert settings["engine_root"] == str(engine)
+
+
+def test_worker_keeps_engine_symlink_without_config_override(tmp_path):
+    import json
+    import yaml
+    import sys
+    home = tmp_path / "profile"
+    home.mkdir()
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    engine = tmp_path / "current"
+    engine.symlink_to(REPO_ROOT, target_is_directory=True)
+    config = {"plugins": {"enabled": ["durable-dispatch"], "entries": {"durable-dispatch": {"settings": {
+        "enabled": True, "queue_root": str(tmp_path / "queue"), "allowed_roots": [str(sources)]}}}}}
+    (home / "config.yaml").write_text(yaml.safe_dump(config))
+    units = tmp_path / "units"
+    proc = subprocess.run([sys.executable, str(REPO_ROOT / "install/setup_worker.py"),
+        "--profile-home", str(home), "--engine-root", str(engine), "--unit-dir", str(units),
+        "--profile", "p1", "--apply"], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    runner = json.loads((home / "worker/runner.json").read_text())
+    assert runner[1] == str(engine / "agentcore/analysis_runner.py")
+    assert "PYTHONPATH=" + str(engine) in (units / "superagent-worker-p1.service").read_text()
+
+
 def test_defaults_refuse_unsupported_yaml_without_changing_it(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text("plugins: {entries: {}}\n")
