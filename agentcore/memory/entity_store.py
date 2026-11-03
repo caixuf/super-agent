@@ -50,19 +50,14 @@ _PROFILE_IM = "im" + "fl"
 
 
 def _find_default_memory_file() -> Optional[Path]:
-    """探测宿主环境中的 MEMORY.md 知识文件。"""
+    """Resolve only the administrator-selected memory file or the active profile's own file."""
     env_mem = os.getenv("SUPER_AGENT_MEMORY_FILE")
-    if env_mem and os.path.isfile(env_mem):
-        return Path(env_mem).resolve()
-    candidates = [
-        Path.home() / ".hermes" / "profiles" / "caixuf" / "memories" / "MEMORY.md",
-        Path("/mnt/nvme_ntfs/agents/hermes/profiles") / _PROFILE_IM / "memories" / "MEMORY.md",
-        Path.home() / ".hermes" / "profiles" / _PROFILE_IM / "memories" / "MEMORY.md",
-    ]
-    for p in candidates:
-        if p.is_file():
-            return p
-    return None
+    if env_mem:
+        path = Path(env_mem).expanduser()
+        return path.resolve() if path.is_file() else None
+    home = Path(os.getenv("HERMES_HOME") or (Path.home() / ".hermes")).expanduser()
+    path = home / "memories" / "MEMORY.md"
+    return path.resolve() if path.is_file() else None
 
 
 @dataclass

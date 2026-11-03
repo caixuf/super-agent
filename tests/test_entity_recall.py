@@ -161,3 +161,24 @@ def test_tools_recall_entity_dash_and_help_queries(tmp_path):
     assert store.recall(12345) == []  # type: ignore
     assert store.recall({"foo": "bar"}) == []  # type: ignore
 
+
+
+def test_default_memory_source_never_falls_back_to_another_profile(tmp_path, monkeypatch):
+    from agentcore.memory.entity_store import _find_default_memory_file
+    home = tmp_path / "home"
+    other = home / ".hermes" / "profiles" / "caixuf" / "memories" / "MEMORY.md"
+    other.parent.mkdir(parents=True)
+    other.write_text("other profile", encoding="utf-8")
+    active = home / ".hermes" / "profiles" / "imfl"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(active))
+    monkeypatch.delenv("SUPER_AGENT_MEMORY_FILE", raising=False)
+    assert _find_default_memory_file() is None
+    own = active / "memories" / "MEMORY.md"
+    own.parent.mkdir(parents=True)
+    own.write_text("own profile", encoding="utf-8")
+    assert _find_default_memory_file() == own.resolve()
+    monkeypatch.setenv("SUPER_AGENT_MEMORY_FILE", str(tmp_path / "missing.md"))
+    assert _find_default_memory_file() is None
+    monkeypatch.setenv("SUPER_AGENT_MEMORY_FILE", str(other))
+    assert _find_default_memory_file() == other.resolve()
