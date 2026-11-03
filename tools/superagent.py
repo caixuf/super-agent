@@ -1050,6 +1050,11 @@ def _apply_worker_pythonpath(profile: str, managed_current: Path, legacy_roots: 
     prepared = _planned_worker_pythonpath(profile, managed_current, legacy_roots)
     value = prepared["pythonpath"].replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
     target = Path.home() / ".config/systemd/user" / (prepared["service"] + ".d") / "99-superagent-engine.conf"
+    # A consolidated unit already using current needs no competing override.
+    if not target.exists() and not target.is_symlink():
+        observed = _worker_runtime_observation(profile, managed_current)
+        if observed["configured_pythonpath_matches"] is True:
+            return {"service": prepared["service"], "override": None, "configured": True}
     if target.is_symlink() or (target.exists() and not target.is_file()):
         raise ValueError("worker_override_not_regular")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1686,6 +1691,54 @@ def _assert_service_quiescent(name: str, *, cgroup_root: Path = Path("/sys/fs/cg
         raise RuntimeError("service control group is not empty")
 
 
+def _declared_runtime_services(args: argparse.Namespace) -> list[str]:
+    """Read explicitly owned services from the host's runtime manifest."""
+    import re
+    import yaml
+    manifest = getattr(args, "runtime_manifest", None)
+    if manifest is None:
+        return []
+    data = yaml.safe_load(Path(manifest).read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict) or data.get("profile", args.profile) != args.profile:
+        raise ValueError("invalid_runtime_service_manifest")
+    runtime = data.get("runtime") or {}
+    if not isinstance(runtime, dict):
+        raise ValueError("invalid_runtime_services")
+    names = runtime.get("managed_services", [])
+    if (not isinstance(names, list) or len(names) > 64
+            or any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_@.-]+\.service", name)
+                   for name in names) or len(set(names)) != len(names)):
+        raise ValueError("invalid_runtime_services")
+    return names
+
+
+def _managed_service_import_observation(service: str, managed_current: Path) -> bool | None:
+    """Observe Python's current import search path for a declared agentcore service."""
+    import importlib.machinery
+    try:
+        result = _run(["systemctl", "--user", "show", service, "--property=ActiveState", "--property=MainPID"])
+        if result.returncode:
+            return None
+        fields = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+        pid = int(fields.get("MainPID", "0"))
+        if fields.get("ActiveState") != "active" or pid <= 0:
+            return None
+        proc = Path("/proc") / str(pid)
+        args = [os.fsdecode(part) for part in proc.joinpath("cmdline").read_bytes().split(b"\0") if part]
+        if not any(args[i] == "-m" and args[i + 1].startswith("agentcore.") for i in range(len(args) - 1)):
+            return None
+        env = proc.joinpath("environ").read_bytes().split(b"\0")
+        value = next((os.fsdecode(x.split(b"=", 1)[1]) for x in env if x.startswith(b"PYTHONPATH=")), None)
+        if value is None:
+            return None
+        cwd = proc.joinpath("cwd").resolve(strict=True)
+        if importlib.machinery.PathFinder.find_spec("agentcore", [str(cwd)]) is not None:
+            return _first_engine_path_matches(str(cwd), managed_current)
+        return _first_engine_path_matches(value, managed_current)
+    except (OSError, ValueError, ImportError, subprocess.SubprocessError):
+        return None
+
+
 def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     root = _managed_root(args)
     current = root / "current"
@@ -1694,6 +1747,7 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     try:
         saved_config, gateway_service = _update_config_snapshot(args, profile_home, root)
         saved_links = _plugin_link_snapshot(profile_home)
+        extra_services = _declared_runtime_services(args)
     except (OSError, ValueError) as exc:
         print(json.dumps({"status": "blocked", "reason": "rollback_snapshot_failed", "error": type(exc).__name__}))
         return 1
@@ -1702,6 +1756,10 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         "worker": f"superagent-worker-{args.profile}.service",
         "memory": f"superagent-memory-{args.profile}.service",
     }
+    if set(extra_services) & set(services.values()):
+        print(json.dumps({"status": "blocked", "reason": "duplicate_runtime_service"}))
+        return 1
+    services.update({f"managed-{index}": name for index, name in enumerate(extra_services)})
     was_active = {
         label: _run(["systemctl", "--user", "is-active", "--quiet", name]).returncode == 0
         for label, name in services.items()
@@ -1757,6 +1815,14 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
             observed = _worker_runtime_observation(args.profile, root / "current")
             if observed.get("process_pythonpath_matches") is not True:
                 raise RuntimeError("worker_process_import_path_unproven")
+        for index, name in enumerate(extra_services):
+            if not was_active[f"managed-{index}"]:
+                continue
+            deadline = time.monotonic() + 10
+            while _managed_service_import_observation(name, root / "current") is not True:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("managed_service_import_path_unproven:" + name)
+                time.sleep(0.2)
         return 0
     except Exception as exc:
         rollback_errors = []

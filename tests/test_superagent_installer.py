@@ -1139,3 +1139,53 @@ def test_first_update_failure_restores_old_plugin_directory_and_clears_current(t
     assert old.is_dir() and not old.is_symlink()
     assert (old / "business_data").read_text() == "original"
     assert not (root / "current").exists() and not (root / "current").is_symlink()
+
+
+def test_update_restarts_declared_services_and_checks_loaded_path(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    root = tmp_path / ".hermes/superagent/demo"
+    release = root / "releases/new"
+    release.mkdir(parents=True)
+    manifest = tmp_path / "runtime.yaml"
+    manifest.write_text("profile: demo\nruntime:\n  drop_ins: {}\n  managed_services:\n    - agentcore-memory-demo.service\n")
+    monkeypatch.setattr(module.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(module, "_managed_root", lambda args: root)
+    monkeypatch.setattr(module, "_assert_service_quiescent", lambda _: None)
+    monkeypatch.setattr(module, "_release_valid", lambda _: True)
+    monkeypatch.setattr(module, "_manifest", lambda args: (root / "manifest.json", {"release": str(release)}))
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        active = "is-active" in command and "agentcore-memory-demo.service" in command
+        return subprocess.CompletedProcess(command, 0 if active or "is-active" not in command else 1, "", "")
+    monkeypatch.setattr(module, "_run", run)
+    monkeypatch.setattr(module, "install", lambda args, plan: 0)
+    seen = []
+    monkeypatch.setattr(module, "_managed_service_import_observation", lambda service, path: seen.append((service, path)) or True)
+    args = SimpleNamespace(profile="demo", runtime_manifest=manifest)
+    assert module.update(args, {"profile_home": str(profile)}) == 0
+    assert any("stop" in cmd and "agentcore-memory-demo.service" in cmd for cmd in calls)
+    assert any("start" in cmd and "agentcore-memory-demo.service" in cmd for cmd in calls)
+    assert seen == [("agentcore-memory-demo.service", root / "current")]
+
+
+def test_invalid_or_duplicate_declared_services_are_rejected(tmp_path):
+    from types import SimpleNamespace
+    module = _load_installer()
+    manifest = tmp_path / "runtime.yaml"
+    for entry in ("[bad/path.service]", "[same.service, same.service]", "[{}]"):
+        manifest.write_text("profile: demo\nruntime:\n  managed_services: " + entry + "\n")
+        with pytest.raises(ValueError, match="invalid_runtime_services"):
+            module._declared_runtime_services(SimpleNamespace(profile="demo", runtime_manifest=manifest))
+
+
+def test_consolidated_worker_does_not_create_an_override(tmp_path, monkeypatch):
+    module = _load_installer()
+    monkeypatch.setattr(module.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(module, "_planned_worker_pythonpath", lambda *_: {"service": "superagent-worker-demo.service", "pythonpath": "/managed/current"})
+    monkeypatch.setattr(module, "_worker_runtime_observation", lambda *_: {"configured_pythonpath_matches": True})
+    result = module._apply_worker_pythonpath("demo", tmp_path / "current", ["/legacy"])
+    assert result["configured"] is True and result["override"] is None
+    assert not (tmp_path / ".config/systemd/user/superagent-worker-demo.service.d/99-superagent-engine.conf").exists()
