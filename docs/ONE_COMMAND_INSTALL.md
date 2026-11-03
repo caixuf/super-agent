@@ -61,7 +61,7 @@ python3 tools/superagent.py rollback --profile <profile>
 
 ## 共享 Hermes 宿主依赖启动检查
 
-共享宿主可在启动前调用发布包中的 `tools/hermes_pm_preflight.py`，显式指定 `--hermes-root` 和 `--hermes-home`。检查只在依赖环境过期时调用 Hermes 官方 `pm install venv`，并在同步后再次验证。代理配置由宿主提供，只需传给启动检查进程；不要将令牌写入 unit。检查失败时应阻止宿主继续启动并保留日志。`TimeoutStartSec` 必须大于该检查的超时。此脚本不自动安装 systemd unit，也不证明全部 profile 已就绪。
+共享宿主可在启动前调用发布包中的 `tools/hermes_pm_preflight.py`，显式指定 `--hermes-root` 和 `--hermes-home`。检查只在依赖环境过期时调用 Hermes 官方 `pm install venv`，并在同步后再次验证。代理配置由宿主提供，只需传给启动检查进程；不要将令牌写入 unit。检查失败时应阻止宿主继续启动并保留日志。`TimeoutStartSec` 必须大于该检查的超时。可用 `install/setup_shared_host.py` 按显式的宿主、状态目录、unit 目录及可选代理生成独立服务：默认只计划，加 `--apply` 才写入；既有文件内容不同则拒绝覆盖。脚本不会启动服务，必须另行确认现场并启用。该准备不证明全部 profile 已就绪。
 
 ## 干净 Hermes 候选
 
