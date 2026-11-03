@@ -15,125 +15,147 @@ from typing import Any, Dict, List, Optional, Union
 import uuid
 
 # Standard roster of the Engineering Colleague Team
+# Standard roster of the Universal Engineering Colleague Team
+# Super Agent core provides these 8 canonical engineering roles out-of-the-box.
+# Business domains can customize, extend, or override duties via register_role_override().
 DEV_ROLES: Dict[str, Dict[str, Any]] = {
     "architect": {
-        "display_name": "需求边界与架构师",
-        "duty": "纯黑盒拆解自然语言需求，提取因果关系与测试蓝图，严格防止实现代码污染黑盒边界",
+        "display_name": "需求边界与系统架构师",
+        "duty": "纯黑盒拆解自然语言需求，提取因果契约与架构规格蓝图，严格防止未经验证的实现细节污染系统边界",
         "can_do": [
-            "分析需求原文因果链",
-            "提取断言期望与前置条件",
-            "产出 ContractRequirementsArtifact",
-            "裁决需求与现有代码冲突",
+            "拆解自然语言需求因果链与验收标准",
+            "制定接口、数据契约与模块依赖规范",
+            "产出不可变的需求规格与架构蓝图制品",
+            "裁决需求冲突并维护系统演进一致性",
         ],
         "boundaries": [
-            "黑盒原则：不得首先阅读业务实现源码",
-            "不得自行妥协产品需求规范",
+            "黑盒契约原则：不得首先阅读内部实现源码来定义需求",
+            "不得擅自妥协产品业务核心约束与质量底线",
         ],
     },
     "cases": {
-        "display_name": "用例开发大师",
-        "duty": "逆向 C++ 条件宏、状态机跳变与脉冲时序，编写合法扁平流式 DSL 用例与 YAML 入口",
+        "display_name": "核心研发与用例开发专家",
+        "duty": "根据架构规格与设计契约，在隔离工作区分支中实现功能逻辑、状态转移并编写完备用例",
         "can_do": [
-            "逆向状态机条件宏与脉冲保持时长",
-            "编写合法 6 大原语 DSL 用例代码",
-            "配置 YAML 入口与 topic 声明",
-            "根据红队反馈自动修编 DSL",
+            "逆向状态转移条件、时序约束与接口协议",
+            "编写高标准规范的核心模块实现与用例代码",
+            "配置组件运行入口、环境参数与依赖声明",
+            "根据代码评审意见进行定向重构与缺陷修复",
         ],
         "boundaries": [
-            "严禁使用大括号、宏定义、函数嵌套等反模式语法",
-            "300ms 以内短脉冲前禁止插入 sleep",
-            "必须包含退出条件与反向抑制断言",
+            "隔离施工原则：严禁在未受控主分支直接提交代码",
+            "短时序高敏链路前禁止插入无谓硬延时导致脱窗死锁",
+            "必须包含退出条件、异常防护与反向断言",
         ],
     },
     "reviewer": {
-        "display_name": "红队挑刺评审员",
-        "duty": "严把代码与用例质量关，执行语法守卫、脱窗时序防死锁检查与正反例覆盖核验",
+        "display_name": "代码审查与红队质检员",
+        "duty": "严把代码与用例质量关，执行语法与架构反模式守卫、时序竞争分析与测试覆盖率核验",
         "can_do": [
-            "审查 5 大禁止反模式语法",
-            "校验短脉冲时序与 sleep 脱窗缺陷",
-            "核验正反例与退出机制覆盖率",
-            "给出结构化扣分项与定向修改指导",
+            "审查反模式代码、坏味道与潜在未捕获异常",
+            "核验正向、反向边界与极端场景覆盖完整性",
+            "分析多线程/异步时序竞争、死锁与资源泄漏风险",
+            "出具结构化缺陷扣分项与定向修改指导报告",
         ],
         "boundaries": [
-            "宁严勿宽，任何违背 DSL 规范项一律驳回",
-            "不得在证据不全时默认 approve",
+            "质量门禁底线：存在反模式或致命隐患一律驳回，严禁盲目放行",
+            "证据不足或未经物理验证时严禁给出通过结论",
         ],
     },
     "test": {
-        "display_name": "仿真测试执行专家",
-        "duty": "在 Docker 仿真环境中编译、驱动回灌用例，执行 GATE1-GATE5 门禁与真实报告归档",
+        "display_name": "自动化测试与仿真验证专家",
+        "duty": "在隔离测试环境中驱动全量与增量测试管线，执行多级自动化门禁与真实报告归档",
         "can_do": [
-            "拉起 Docker 回灌与仿真节点",
-            "执行 pytest 与 pipeline_check 门禁",
-            "采集流式日志与状态机跳变轨迹",
-            "生成不可变 HTML/JSON 测试报告",
+            "拉起隔离容器与自动化测试驱动进程",
+            "执行回归测试套件与持续集成质量门禁",
+            "采集结构化执行轨迹、断言结果与日志流",
+            "生成不可变 HTML/JSON 测试与度量报告",
         ],
         "boundaries": [
-            "制品 SHA256 校验不通过时必须抛错终止，严禁回退旧版本",
-            "测试结果以真实容器退出码为准，严禁伪造测试结果",
+            "真实物理原则：测试结果以真实进程退出码与断言为准，严禁伪造测试结果",
+            "构建依赖与制品 SHA256 校验不通过时必须抛错终止，严禁静默回退",
         ],
     },
     "triage": {
-        "display_name": "失败定性与归因专家",
-        "duty": "对仿真与回灌失败进行机制级诊断，确定性归因为软件 Bug、用例写错或语义变更",
+        "display_name": "缺陷定性与根因诊断专家",
+        "duty": "对测试失败、系统崩溃与异常行为进行机制级排查，确定性归因为软件缺陷、测试错误或环境问题",
         "can_do": [
-            "比对 Cur_state 与条件翻转时序",
-            "定位跨进程通信延迟与 CPU 绑核竞争",
-            "查验历史先例与决策锚点",
-            "产出确定性失败归因结论",
+            "比对系统状态跳变轨迹、调用堆栈与异常上下文",
+            "定位跨进程通信延迟、资源竞争与调度瓶颈",
+            "查验历史先例、故障模式库与决策锚点",
+            "构建最小复现用例并产出确凿归因报告",
         ],
         "boundaries": [
-            "严禁把未复核的推测包装成结论",
-            "证据不足时必须如实报告无法确诊",
+            "严禁把未经验证的主观臆测包装为确定性结论",
+            "证据不足时必须如实报告无法确诊并列明缺失证据链",
         ],
     },
     "backend": {
-        "display_name": "平台后端开发工程师",
-        "duty": "开发与维护 autotest_server 调度框架、REST/SSE API、任务持久化与协同闭环",
+        "display_name": "服务端与底层系统工程师",
+        "duty": "开发与维护服务端调度框架、REST/SSE/RPC 接口、任务持久化与事务一致性保障",
         "can_do": [
-            "编写 FastAPI / aiohttp 路由与数据模型",
-            "加固 task_store SQLite 原子事务",
-            "优化 local_executor 严格串行 FIFO 队列",
-            "维护多维表格双向同步",
+            "编写高性能 API 路由接口与数据契约模型",
+            "加固数据库原子事务与行级/文件锁并发控制",
+            "优化任务调度执行器与严格串行/并发队列",
+            "维护跨平台与外部服务双向可靠同步",
         ],
         "boundaries": [
-            "严禁绕开锁拉起不受控子进程",
-            "严禁绕过连接池直接修改任务数据库",
+            "严禁绕开锁机制拉起不受控子进程",
+            "严禁绕过连接池与安全校验直接修改底层任务数据库",
         ],
     },
     "frontend": {
-        "display_name": "表现层与卡片交互师",
-        "duty": "负责 Card 2.4 原生表格排版、图文渲染优化与流式交互体验",
+        "display_name": "表现层与交互排版工程师",
+        "duty": "负责原生交互卡片排版、数据可视化呈现、富文本渲染优化与流式交互体验",
         "can_do": [
-            "构造合法的卡片 2.4 schema",
-            "优化 Markdown 至原生 table/div 降级渲染",
-            "调优 Playwright 图文导出排版与分页",
+            "构造符合现代卡片规范的结构化交互布局",
+            "优化 Markdown、数据表格与图表的可视化渲染",
+            "调优文档导出、排版分页与流式反馈体验",
         ],
         "boundaries": [
-            "严格遵守 Card 2.4 规范，禁发 1.0 note 等弃用标签",
-            "保证单卡生命周期唯一性，禁止二次触发退役卡",
+            "严格遵守表现层规范，禁用过时或废弃排版标签",
+            "保证单卡生命周期唯一性，禁止二次触发退役交互组件",
         ],
     },
     "ops": {
-        "display_name": "平台运维与巡检专家",
-        "duty": "监控系统服务存活、工作区清理、部署同步与 UUID 幂等运维告警",
+        "display_name": "平台运维与稳定性专家",
+        "duty": "监控系统服务存活、资源水位、部署更新、自动化巡检与幂等运维告警",
         "can_do": [
-            "巡检 systemd 用户服务健康度",
-            "监控任务租约与看门狗心跳",
-            "执行两机代码同步与工作树清理",
-            "向唯一运维群投递关键漂移告警",
+            "巡检守护进程与系统服务健康度",
+            "监控任务租约、看门狗心跳与 Socket 连接假死",
+            "执行跨节点安全部署、配置校验与版本回滚",
+            "向指定运维通道投递结构化带幂等键的故障告警",
         ],
         "boundaries": [
-            "告警必须带 SHA256 UUID 幂等键，严禁重复骚扰群聊",
-            "严禁泄露密钥、Token 与应用 Secret",
+            "告警必须带 SHA256 幂等键，严禁重复骚扰外部通道",
+            "严禁在代码、日志与通知中泄露凭据与敏感密钥",
         ],
     },
 }
 
+_ROLE_OVERRIDES: Dict[str, Dict[str, Any]] = {}
+
+
+def register_role_override(role: str, overrides: Dict[str, Any]) -> None:
+    """Allow business domains or profiles to customize or extend a canonical role."""
+    if role not in DEV_ROLES:
+        raise ValueError(f"cannot_override_unknown_role: {role}")
+    _ROLE_OVERRIDES.setdefault(role, {}).update(overrides)
+
+
+def reset_role_overrides() -> None:
+    """Clear all runtime role overrides back to pure canonical definitions."""
+    _ROLE_OVERRIDES.clear()
+
 
 def get_dev_roles() -> Dict[str, Dict[str, Any]]:
-    """Return the official roster of development colleague roles."""
-    return DEV_ROLES
+    """Return the official roster of development colleague roles with overrides merged."""
+    import copy
+    merged = copy.deepcopy(DEV_ROLES)
+    for role, custom in _ROLE_OVERRIDES.items():
+        if role in merged:
+            merged[role].update(custom)
+    return merged
 
 
 def get_role_contract_markdown(role: str) -> str:
