@@ -50,7 +50,8 @@ def _iter_sources():
 
 def _top_level_imports(tree: ast.AST):
     """产出 (行号, 顶层模块名 或 None(相对导入), 原文)。"""
-    for node in ast.walk(tree):
+    body = getattr(tree, "body", []) if isinstance(tree, ast.Module) else ast.iter_child_nodes(tree)
+    for node in body:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 yield node.lineno, alias.name.split(".")[0], f"import {alias.name}"
