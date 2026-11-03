@@ -137,7 +137,7 @@ from agentcore.preflight import (
 checks = [
     ("DNS 解析延迟", check_dns_latency("open.feishu.cn", max_acceptable_ms=300.0)),
     ("幂等信箱读写延迟", check_idempotent_store_latency(max_acceptable_ms=20.0)),
-    ("飞书 OpenAPI 往返延迟", check_feishu_api_latency(max_acceptable_ms=800.0)),
+    ("平台 OpenAPI 往返延迟", check_feishu_api_latency(max_acceptable_ms=800.0)),
 ]
 failed = [c for c in checks if not c[1].passed]
 for name, res in checks:

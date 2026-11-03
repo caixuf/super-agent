@@ -179,7 +179,7 @@ def check_feishu_api_latency(
     max_acceptable_ms: float = 800.0,
     timeout_s: float = 2.0,
 ) -> CheckItemResult:
-    """探测飞书 OpenAPI 基础网络链路与往返延迟 (Round-Trip Time)。"""
+    """探测平台 OpenAPI 基础网络链路与往返延迟 (Round-Trip Time)。"""
     t0 = time.monotonic()
     req = urllib.request.Request(
         target_url,
@@ -196,11 +196,11 @@ def check_feishu_api_latency(
     except Exception as exc:
         dur_ms = (time.monotonic() - t0) * 1000.0
         return CheckItemResult(
-            name="飞书 OpenAPI 往返延迟",
+            name="平台 OpenAPI 往返延迟",
             passed=False,
             latency_ms=dur_ms,
             message=f"连接失败: {exc}",
-            detail="飞书 OpenAPI 网关无法连接，请检查外网出口、HTTPS 代理或防火墙配置",
+            detail="平台 OpenAPI 网关无法连接，请检查外网出口、HTTPS 代理或防火墙配置",
         )
 
     dur_ms = (time.monotonic() - t0) * 1000.0
@@ -208,11 +208,11 @@ def check_feishu_api_latency(
     msg = f"HTTP 往返 {dur_ms:.1f}ms (状态码: {status_code}, 预算: <={max_acceptable_ms}ms)"
     detail = ""
     if not passed:
-        msg = f"飞书 OpenAPI 链路严重超时 ({dur_ms:.1f}ms > {max_acceptable_ms}ms)"
-        detail = "往返延迟过高将击穿飞书 3 秒超时死线，导致平台频繁重试与雪崩，已阻断部署"
+        msg = f"平台 OpenAPI 链路严重超时 ({dur_ms:.1f}ms > {max_acceptable_ms}ms)"
+        detail = "往返延迟过高将击穿平台 3 秒超时死线，导致平台频繁重试与雪崩，已阻断部署"
 
     return CheckItemResult(
-        name="飞书 OpenAPI 往返延迟",
+        name="平台 OpenAPI 往返延迟",
         passed=passed,
         latency_ms=dur_ms,
         message=msg,
