@@ -1,7 +1,7 @@
 """Prefer-D2 cancel/pause hard windows (STARTING / CANCELING).
 
 AC: D2-1 starting_timeout · D2-2 cancel_timeout · D2-3 soft cancel within window ·
-D2-4 finalize_cancel immediate · D2-5 pause waiting_user · D2-6 pool/liveness sweep ·
+D2-4 finalize_cancel acknowledges request · D2-5 pause waiting_user · D2-6 pool/liveness sweep ·
 card stage never healthy Running for pid-null / cancel=1.
 """
 from __future__ import annotations
@@ -99,7 +99,7 @@ def test_d2_1_within_start_window_stays_running(tmp_path):
         os.close(fd)
 
 
-def test_d2_2_canceling_hard_timeout_force_cancelled(tmp_path):
+def test_d2_2_canceling_window_can_revoke_unstarted_claim(tmp_path):
     pool = Pool(tmp_path)
     job = pool.submit("d2-cancel-to", {"goal": "x"}, origin=ORIGIN)
     claimed, fd = pool.claim()
@@ -114,11 +114,12 @@ def test_d2_2_canceling_hard_timeout_force_cancelled(tmp_path):
         db.execute("UPDATE jobs SET cancel_requested_at=? WHERE id=?", (past, job))
     try:
         forced = pool.enforce_windows(now=time.time())
-        assert any(f["id"] == job and f["reason"] == "cancel_timeout" for f in forced)
+        assert any(f["id"] == job and f["reason"] == "cancelled" for f in forced)
         st = pool.status(job)
         assert st["status"] == "cancelled"
         result = json.loads(st["result"])
-        assert result["reason"] == "cancel_timeout"
+        assert result["reason"] == "cancelled"
+        assert pool.begin_execution(job, claimed['attempt']) is False
         assert any(r.get("job") == job and r.get("status") == "cancelled" for r in pool.receipts())
     finally:
         os.close(fd)
@@ -148,17 +149,20 @@ def test_d2_3_soft_cancel_within_window_finish_observes(tmp_path):
         os.close(fd)
 
 
-def test_d2_4_finalize_cancel_immediate(tmp_path):
+def test_d2_4_finalize_cancel_waits_for_executor(tmp_path):
     pool = Pool(tmp_path)
     job = pool.submit("d2-fin", {"goal": "x"}, origin=ORIGIN)
     claimed, fd = pool.claim()
     try:
         assert pool.finalize_cancel(job) is True
         st = pool.status(job)
-        assert st["status"] == "cancelled"
-        result = json.loads(st["result"])
-        assert result["reason"] == "cancelled"
-        # Second call is no-op.
+        assert st["status"] == "running"
+        assert st["stage"] == "canceling"
+        assert pool.receipts() == []
+        assert pool.finalize_cancel(job) is True
+        # This fake executor has no processes and can acknowledge its finish.
+        assert pool.finish(job, claimed["attempt"], False, {"reason": "stopped"})
+        assert pool.status(job)["status"] == "cancelled"
         assert pool.finalize_cancel(job) is False
     finally:
         os.close(fd)

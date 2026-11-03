@@ -162,6 +162,48 @@ def test_approve_resumes_job_and_records_event(tmp_path):
     assert pending["status"] == "approved"
 
 
+def test_approve_keeps_pending_until_running_executor_confirms_stop(tmp_path):
+    pool = Pool(tmp_path / 'pool')
+    store = CardStore(tmp_path / 'cards.db')
+    job = pool.submit('approve-before-stop', {})
+    row, fd = pool.claim()
+    try:
+        assert pool.begin_execution(job, row['attempt'])
+        bridge = HitlBridge(pool, store)
+        assert bridge.enter_waiting_user(job)['ok']
+        pending = store.load_hitl(job)
+        refused = bridge.handle_action(task_id=job, action='approve',
+                                       request_id=pending['request_id'])
+        assert not refused['ok'] and not refused['resumed']
+        assert pool.status(job)['status'] == 'waiting_user'
+        assert store.load_hitl(job)['status'] == 'pending'
+        assert store.load_hitl(job)['event'] == pending['event']
+        assert pool.finish(job, row['attempt'], True, {'reason': 'owner returned'})
+        accepted = bridge.handle_action(task_id=job, action='approve',
+                                        request_id=pending['request_id'])
+        assert accepted['ok'] and accepted['resumed']
+        assert pool.status(job)['status'] == 'queued'
+        assert store.load_hitl(job)['status'] == 'approved'
+    finally:
+        os.close(fd)
+
+
+def test_deny_does_not_consume_pending_request_if_pool_refuses(tmp_path):
+    pool = Pool(tmp_path / 'pool')
+    store = CardStore(tmp_path / 'cards.db')
+    job = pool.submit('deny-stale-request', {})
+    bridge = HitlBridge(pool, store)
+    assert bridge.enter_waiting_user(job)['ok']
+    pending = store.load_hitl(job)
+    assert pool.resume_from_user(job)
+    refused = bridge.handle_action(task_id=job, action='deny', reason='stale',
+                                   request_id=pending['request_id'])
+    assert not refused['ok'] and not refused['denied']
+    assert pool.status(job)['status'] == 'queued'
+    assert store.load_hitl(job)['status'] == 'pending'
+    assert store.load_hitl(job)['event'] == pending['event']
+
+
 def test_deny_requires_reason_and_no_silent_resume(tmp_path):
     pool = Pool(tmp_path / "pool")
     store = CardStore(tmp_path / "cards.db")

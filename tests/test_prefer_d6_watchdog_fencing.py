@@ -29,25 +29,13 @@ ORIGIN = {
 }
 
 
-def _plant_dead_runner(pool, job, *, attempt, lease_age=120.0):
-    """Simulate finish-callback loss: running + fake dead PID + expired heartbeat."""
-    past = time.time() - lease_age
-    with pool.db() as db:
-        db.execute(
-            "UPDATE jobs SET status='running', attempt=?, heartbeat=?, "
-            "pid=?, pid_start=?, containment_token=NULL WHERE id=?",
-            (attempt, past, 1, "dead-boot:999999999", job),
-        )
-
-
-def test_d6_1_finish_callback_loss_watchdog_conditional_terminal(tmp_path):
+def test_d6_1_finish_callback_loss_watchdog_conditional_terminal(tmp_path, supervise_without_finish):
     pool = Pool(tmp_path)
     job = pool.submit("d6-callback-loss", {"goal": "x"}, origin=ORIGIN,
                       replay_safe=False, max_tries=1)
     claimed, fd = pool.claim()
     attempt = claimed["attempt"]
-    os.close(fd)  # release lock — worker crashed before finish
-    _plant_dead_runner(pool, job, attempt=attempt, lease_age=120.0)
+    supervise_without_finish(pool, (claimed, fd))
 
     report = pool.reconcile_watchdog(now=time.time(), lease=60)
     assert any(
@@ -65,15 +53,14 @@ def test_d6_1_finish_callback_loss_watchdog_conditional_terminal(tmp_path):
     assert sum(1 for r in pool.receipts() if r.get("job") == job) == 1
 
 
-def test_d6_1_finish_callback_loss_replay_safe_requeue(tmp_path):
+def test_d6_1_finish_callback_loss_replay_safe_requeue(tmp_path, supervise_without_finish):
     pool = Pool(tmp_path)
     job = pool.submit(
         "d6-callback-requeue", {"goal": "x"}, origin=ORIGIN, replay_safe=True, max_tries=3,
     )
     claimed, fd = pool.claim()
     attempt = claimed["attempt"]
-    os.close(fd)
-    _plant_dead_runner(pool, job, attempt=attempt, lease_age=120.0)
+    supervise_without_finish(pool, (claimed, fd))
     report = pool.reconcile_watchdog(now=time.time(), lease=60)
     assert any(
         a["id"] == job and a["status"] == "queued"
@@ -86,22 +73,13 @@ def test_d6_1_finish_callback_loss_replay_safe_requeue(tmp_path):
     assert len(pool.receipts()) == 0
 
 
-def test_d6_2_stale_attempt_finish_noop_live_intact(tmp_path):
+def test_d6_2_stale_attempt_finish_noop_live_intact(tmp_path, supervise_without_finish):
     pool = Pool(tmp_path)
     job = pool.submit("d6-stale-finish", {"goal": "x"}, origin=ORIGIN,
                       replay_safe=True, max_tries=5)
     first, fd1 = pool.claim()
     old_attempt = first["attempt"]
-    os.close(fd1)
-    # Dead PID identity (not pid NULL) so Prefer-D2 STARTING window does not fire;
-    # expired heartbeat + lock free → claim can mint a new attempt.
-    past = time.time() - 120
-    with pool.db() as db:
-        db.execute(
-            "UPDATE jobs SET heartbeat=?, pid=?, pid_start=?, "
-            "containment_token=NULL WHERE id=?",
-            (past, 1, "dead-boot:999999999", job),
-        )
+    supervise_without_finish(pool, (first, fd1))
     second, fd2 = pool.claim()
     try:
         new_attempt = second["attempt"]
@@ -229,14 +207,13 @@ def test_d6_6_d4_stalled_path_import_smoke():
     assert StalledCardBridge is not None
 
 
-def test_d6_daemon_calls_reconcile_watchdog(tmp_path):
+def test_d6_daemon_calls_reconcile_watchdog(tmp_path, supervise_without_finish):
     pool = Pool(tmp_path)
     job = pool.submit("d6-daemon", {"goal": "x"}, origin=ORIGIN,
                       replay_safe=False, max_tries=1)
     claimed, fd = pool.claim()
     attempt = claimed["attempt"]
-    os.close(fd)
-    _plant_dead_runner(pool, job, attempt=attempt, lease_age=120.0)
+    supervise_without_finish(pool, (claimed, fd))
     ledger = LivenessLedger(tmp_path / "live")
     events = []
     daemon = LivenessDaemon(ledger, events.append, interval=1.0, pool=pool)

@@ -106,16 +106,6 @@ class FakeNotifyTransport:
         raise AssertionError("Prefer-D7/C2 path must not spawn LLM")
 
 
-def _plant_dead_runner(pool, job, *, attempt, lease_age=120.0):
-    past = time.time() - lease_age
-    with pool.db() as db:
-        db.execute(
-            "UPDATE jobs SET status='running', attempt=?, heartbeat=?, "
-            "pid=?, pid_start=?, containment_token=NULL WHERE id=?",
-            (attempt, past, 1, "dead-boot:999999999", job),
-        )
-
-
 def _normalize_window_actions(report):
     if isinstance(report, dict):
         return list(report.get("actions") or [])
@@ -128,7 +118,7 @@ def _normalize_window_actions(report):
 # D7-1..D7-6 — one scripted wrap path (fake Feishu / fake clock)
 # --------------------------------------------------------------------------- #
 
-def test_prefer_d7_wrap_smoke_lifecycle(tmp_path):
+def test_prefer_d7_wrap_smoke_lifecycle(tmp_path, supervise_without_finish):
     """Full Prefer stream wrap smoke: stack existing knives, fake transport only."""
     clock = FakeClock(2000.0)
     pool = Pool(tmp_path / "pool")
@@ -244,6 +234,10 @@ def test_prefer_d7_wrap_smoke_lifecycle(tmp_path):
         ]
         assert forced == []
         assert cancel_pool.finalize_cancel(cancel_job) is True
+        assert cancel_pool.status(cancel_job)["status"] == "running"
+        assert cancel_pool.status(cancel_job)["stage"] == "canceling"
+        assert cancel_pool.receipts() == []
+        assert cancel_pool.finish(cancel_job, c_claimed["attempt"], False, {"reason": "stopped"})
         assert cancel_pool.status(cancel_job)["status"] == "cancelled"
         assert json.loads(cancel_pool.status(cancel_job)["result"])["reason"] == "cancelled"
     finally:
@@ -355,8 +349,7 @@ def test_prefer_d7_wrap_smoke_lifecycle(tmp_path):
     )
     wd_claimed, wd_fd = wd_pool.claim()
     wd_attempt = wd_claimed["attempt"]
-    os.close(wd_fd)
-    _plant_dead_runner(wd_pool, wd_job, attempt=wd_attempt, lease_age=120.0)
+    supervise_without_finish(wd_pool, (wd_claimed, wd_fd))
     report = wd_pool.reconcile_watchdog(now=time.time(), lease=60)
     assert any(
         a["id"] == wd_job and a["status"] == "failed"
@@ -371,14 +364,7 @@ def test_prefer_d7_wrap_smoke_lifecycle(tmp_path):
     )
     first, f_fd1 = fence_pool.claim()
     old_attempt = first["attempt"]
-    os.close(f_fd1)
-    past = time.time() - 120
-    with fence_pool.db() as db:
-        db.execute(
-            "UPDATE jobs SET heartbeat=?, pid=?, pid_start=?, "
-            "containment_token=NULL WHERE id=?",
-            (past, 1, "dead-boot:999999999", f_job),
-        )
+    supervise_without_finish(fence_pool, (first, f_fd1))
     second, f_fd2 = fence_pool.claim()
     try:
         new_attempt = second["attempt"]

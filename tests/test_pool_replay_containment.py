@@ -26,10 +26,11 @@ def test_replay_safe_blocked_when_attempt_not_quiescent(tmp_path):
     finished = pool.finish(job, claimed["attempt"], False, res)
     assert finished is True
 
-    # Must NOT return to queued; must be permanently failed with unquiesced reason
+    # Must NOT return to queued or imply a stopped terminal attempt.
     st = pool.status(job)
-    assert st["status"] == "failed"
-    assert "replay_aborted_unquiesced" in st["result"]
+    assert st["status"] == "running"
+    assert "attempt_stop_unproven" in st["result"]
+    assert pool.receipts() == []
 
     # Subsequent claims must find nothing to execute
     assert pool.claim() is None

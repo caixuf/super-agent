@@ -217,7 +217,7 @@ class HitlBridge:
             "request_id": request_id or "",
             "at": self._clock(),
         }
-        if self.store is not None and hasattr(self.store, "resolve_hitl"):
+        if ok and self.store is not None and hasattr(self.store, "resolve_hitl"):
             self.store.resolve_hitl(task_id, status="approved", event=event,
                                     request_id=request_id or None)
         return {"ok": bool(ok), "action": "approve", "event": event,
@@ -237,7 +237,7 @@ class HitlBridge:
             "reason": normalized,
             "at": self._clock(),
         }
-        if self.store is not None and hasattr(self.store, "resolve_hitl"):
+        if ok and self.store is not None and hasattr(self.store, "resolve_hitl"):
             self.store.resolve_hitl(task_id, status="denied", event=event,
                                     request_id=request_id or None)
         return {"ok": bool(ok), "action": "deny", "event": event,

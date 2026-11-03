@@ -13,6 +13,7 @@ import os
 import re
 from pathlib import Path
 import signal
+import socket
 import sqlite3
 import subprocess
 import threading
@@ -34,7 +35,7 @@ ORIGIN_REQUIRED = ('profile', 'session')
 # STARTING: claim stamped running with pid NULL until run_claimed Popen.
 # CANCELING: soft cancel() sets cancel=1 while status may still be running.
 START_WINDOW_S = 30.0   # fail-closed claim-without-PID (suggest 15–60s)
-CANCEL_WINDOW_S = 60.0  # soft-cancel fence then force terminal (suggest 30–120s)
+CANCEL_WINDOW_S = 60.0  # stop-confirmation escalation; never proof of stop
 PAUSE_QUIESCE_S = 30.0  # optional: escalate if pause left status=running (deliver-or-reason)
 
 
@@ -80,31 +81,32 @@ def display_stage(row):
     status = str(row.get("status") or "")
     if status in ("completed", "failed", "cancelled"):
         return status
+    if row.get("cancel"):
+        return "canceling"
+    if row.get('execution_state') in ('unconfirmed', 'launching'):
+        return "stop_unconfirmed" if row.get('execution_state') == 'unconfirmed' else "starting"
+    if row.get('execution_state') == 'supervised':
+        # Keep the supervisor identity for later proof validation, but do not
+        # present its failed stop observation as a healthy running execution.
+        result = row.get('result')
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except ValueError:
+                result = None
+        if isinstance(result, dict) and result.get('reason') == 'attempt_stop_unproven':
+            return 'stop_unconfirmed'
     if status == "waiting_user":
         # pause() aliases to waiting_user; CardView shows paused/waiting_user.
         return "paused"
     if status == "awaiting_plan_approval":
         return status
     if status == "running":
-        cancel = row.get("cancel") or 0
-        try:
-            cancel = int(cancel)
-        except (TypeError, ValueError):
-            cancel = 1 if cancel else 0
-        if cancel:
-            return "canceling"
         pid = row.get("pid")
         if pid is None:
             return "starting"
         return "running"
     if status == "queued":
-        cancel = row.get("cancel") or 0
-        try:
-            cancel = int(cancel)
-        except (TypeError, ValueError):
-            cancel = 1 if cancel else 0
-        if cancel:
-            return "canceling"
         return "queued"
     return status or "unknown"
 
@@ -139,7 +141,8 @@ class Pool:
             columns = {r[1] for r in db.execute('PRAGMA table_info(jobs)')}
             for name, kind in [('pid', 'INTEGER'), ('pid_start', 'TEXT'), ('deadline', 'REAL'),
                                ('origin', 'TEXT'), ('containment_token', 'TEXT'),
-                               ('cancel_requested_at', 'REAL')]:
+                               ('cancel_requested_at', 'REAL'),
+                               ('execution_state', 'TEXT'), ('supervisor_nonce', 'TEXT')]:
                 if name not in columns:
                     db.execute('ALTER TABLE jobs ADD COLUMN ' + name + ' ' + kind)
             outbox_columns = {r[1] for r in db.execute('PRAGMA table_info(outbox)')}
@@ -287,8 +290,11 @@ class Pool:
                     continue  # A surviving runner still owns this job, even after lease expiry.
                 keep = False
                 try:
+                    if row['status'] == 'running' and not self._attempt_stopped(row):
+                        continue
                     if row['cancel']:
-                        self._terminal(db, row['id'], 'cancelled', {'reason': 'cancelled'})
+                        if self._attempt_stopped(row):
+                            self._terminal(db, row['id'], 'cancelled', {'reason': 'cancelled'})
                         continue
                     if row['status'] == 'running':
                         if not self._replay_allowed(row):
@@ -301,13 +307,15 @@ class Pool:
                     if any(s != 'completed' for s in deps):
                         continue
                     token = uuid.uuid4().hex
-                    # The attempt token travels in the child environment, so even
-                    # descendants that leave the process group can be found later.
+                    # The token assists legacy cleanup; only the supervisor receipt
+                    # proves that this trusted local process tree has stopped.
                     attempt_token = containment.new_token()
-                    db.execute("UPDATE jobs SET status='running',attempt=?,heartbeat=?,tries=tries+1,pid=NULL,pid_start=NULL,deadline=NULL,containment_token=? WHERE id=?",
+                    db.execute("UPDATE jobs SET status='running',attempt=?,heartbeat=?,tries=tries+1,pid=NULL,pid_start=NULL,deadline=NULL,containment_token=?,execution_state='claimed',supervisor_nonce=NULL WHERE id=?",
                                (token, time.time(), attempt_token, row['id']))
                     keep = True
-                    return dict(row, attempt=token, containment_token=attempt_token, tries=row['tries'] + 1), fd
+                    return dict(row, attempt=token, containment_token=attempt_token,
+                                execution_state='claimed', supervisor_nonce=None,
+                                tries=row['tries'] + 1), fd
                 finally:
                     if not keep:
                         os.close(fd)
@@ -326,10 +334,20 @@ class Pool:
     def _stop_expired_runner(self, row):
         """Linux orphan recovery; match boot-local PID starttime before signalling.
 
-        A worker crash before PID registration remains conservatively locked.
-        Runners must stay in their assigned process group; this is not a sandbox.
+        Supervised attempts use the supervisor stop protocol. Legacy cleanup is
+        best effort only and cannot certify descendant exit. This is not a sandbox.
         """
         if not row['cancel'] and (not row['deadline'] or row['deadline'] > time.time()):
+            return
+        if row['execution_state'] == 'supervised':
+            pid = row['pid']
+            if pid and row['pid_start'] and self._process_start(pid) == row['pid_start']:
+                try:
+                    # Killing the supervisor would orphan precisely the children
+                    # it must adopt and reap. Its stop protocol performs cleanup.
+                    os.kill(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
             return
         token = row['containment_token'] if 'containment_token' in row.keys() else None
         if token:
@@ -344,9 +362,57 @@ class Pool:
         except (ProcessLookupError, PermissionError):
             pass
 
+    def _attempt_stopped(self, row):
+        """Private, attempt-bound supervisor receipt, never a runner JSON assertion.
+
+        Private queue files and the administrator runner are trusted. This proves
+        supervised process-tree exit, not hostile-code containment or remote work.
+        """
+        row = dict(row)
+        if not row.get('attempt') and not row.get('tries') and not row.get('pid'):
+            return True
+        # Every executor must atomically leave 'claimed' before any side effect.
+        # A terminal/reclaimed attempt then cannot pass its admission fence.
+        if row.get('execution_state') == 'claimed' and row.get('pid') is None:
+            return True
+        if row.get('execution_state') == 'finished':
+            return True
+        if row.get('execution_state') != 'supervised' or not row.get('supervisor_nonce'):
+            return False
+        try:
+            path = self.root / 'attempts' / row['attempt'] / 'stop.json'
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                import stat
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 4096
+                        or info.st_mode & 0o077 or info.st_nlink != 1
+                        or info.st_uid != os.getuid()):
+                    return False
+                evidence = json.loads(os.read(fd, 4097))
+            finally:
+                os.close(fd)
+        except (OSError, ValueError, TypeError):
+            return False
+        return (isinstance(evidence, dict)
+                and evidence.get('job') == row['id']
+                and evidence.get('attempt') == row['attempt']
+                and evidence.get('token') == row.get('containment_token')
+                and evidence.get('nonce') == row['supervisor_nonce']
+                and evidence.get('supervisor_pid') == row.get('pid')
+                and isinstance(row.get('pid_start'), str) and bool(row['pid_start'])
+                and evidence.get('supervisor_start') == row.get('pid_start')
+                and evidence.get('quiescent') is True
+                and type(evidence.get('exit_code')) is int
+                and type(evidence.get('child_started')) is bool
+                and (evidence.get('proof_scope') == 'subreaper_tree'
+                     or (evidence.get('proof_scope') == 'not_started'
+                         and evidence.get('child_started') is False)))
 
     def _replay_allowed(self, row):
         """Whether an expired running job may be re-queued (claim / Prefer-D2 shared)."""
+        if not self._attempt_stopped(row):
+            return False
         if isinstance(row, dict):
             token = row.get("containment_token")
             replay_safe = bool(row.get("replay_safe"))
@@ -358,6 +424,8 @@ class Pool:
             tries = int(row["tries"] or 0)
             max_tries = int(row["max_tries"] or 0)
         safe = replay_safe and tries < max_tries
+        if dict(row).get('execution_state') == 'supervised':
+            return safe  # Already verified the attempt-bound tree receipt above.
         if safe and token:
             if containment.tagged(token):
                 sw = containment.sweep(token, grace=0.1, timeout=0.2)
@@ -368,14 +436,12 @@ class Pool:
         return safe
 
     def enforce_windows(self, now=None, *, start_window_s=None, cancel_window_s=None):
-        """Prefer-D2: fail-closed STARTING + force-terminal CANCELING (pool = ledger authority).
+        """Prefer-D2 windows revoke admission or escalate cleanup, never invent stop.
 
         STARTING: status=running AND pid IS NULL past START_WINDOW_S (clock = claim heartbeat)
           → terminal failed reason=starting_timeout / claim_without_pid.
-        CANCELING: cancel=1 while still non-terminal past CANCEL_WINDOW_S
-          → force terminal cancelled reason=cancel_timeout + killpg/containment best-effort.
-        Soft cancel within the window: kill/sweep best-effort; finish/claim still terminal
-        cancelled when they observe the flag. Does not invent a second scheduler.
+        CANCELING requires a never-started job or an attempt-bound supervisor receipt.
+        Legacy attempts without stop evidence stay canceling, even past the window.
         """
         at = time.time() if now is None else float(now)
         start_w = float(START_WINDOW_S if start_window_s is None else start_window_s)
@@ -387,12 +453,13 @@ class Pool:
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             rows = db.execute(
-                "SELECT * FROM jobs WHERE status IN ('queued','running')"
+                "SELECT * FROM jobs WHERE status IN ('queued','running') OR "
+                "(cancel=1 AND status IN ('waiting_user','awaiting_plan_approval'))"
             ).fetchall()
             for row in rows:
                 row = dict(row)
                 job_id = row["id"]
-                # CANCELING hard timeout (queued or running with cancel flag).
+                # CANCELING escalation window; elapsed time is not stop evidence.
                 if row.get("cancel"):
                     stamp = row.get("cancel_requested_at")
                     if stamp is None:
@@ -401,15 +468,19 @@ class Pool:
                     age = at - float(stamp)
                     if age > cancel_w:
                         self._stop_expired_runner(row)
-                        self._terminal(
-                            db, job_id, "cancelled",
-                            {"reason": "cancel_timeout", "event": "canceling_hard_window"},
-                        )
-                        forced.append({"id": job_id, "status": "cancelled",
-                                       "reason": "cancel_timeout"})
+                        if self._attempt_stopped(row):
+                            self._terminal(
+                                db, job_id, "cancelled",
+                                {"reason": "cancelled", "event": "canceling_stop_confirmed"},
+                            )
+                            forced.append({"id": job_id, "status": "cancelled",
+                                           "reason": "cancelled"})
+                        else:
+                            db.execute("UPDATE jobs SET result=? WHERE id=?",
+                                       (json.dumps({"reason": "cancel_stop_unproven"}), job_id))
                         continue
                     # Within window: still attempt kill/sweep (soft cancel happy path assist).
-                    if row.get("status") == "running":
+                    if row.get("status") in ("running", "waiting_user", "awaiting_plan_approval"):
                         kill_rows.append(row)
                     continue
                 # STARTING fail-closed: running + pid NULL past window.
@@ -421,6 +492,10 @@ class Pool:
                     if clock is None:
                         clock = row.get("created") or at
                     if at - float(clock) > start_w:
+                        if not self._attempt_stopped(row):
+                            db.execute("UPDATE jobs SET result=? WHERE id=?",
+                                       (json.dumps({"reason": "starting_stop_unproven"}), job_id))
+                            continue
                         lock_fd = self._lock(job_id)
                         if lock_fd is None:
                             reason = "starting_timeout"
@@ -473,8 +548,9 @@ class Pool:
 
         One clear sweeper: runs Prefer-D2 ``enforce_windows`` first, then closes
         finish-callback-loss into conditional terminal OR replay-safe requeue when
-        evidence says the runner is dead (PID identity gone + job lock free + past
-        lease). Never marks completed/failed from stall silence alone (align D4).
+        evidence proves the supervised process tree stopped (bound stop receipt,
+        PID identity gone, job lock free and past lease). A legacy PID/token scan
+        alone is insufficient. Never marks terminal from stall silence alone.
         Watchdog passes the same attempt fence as finish/heartbeat — never force-
         terminals with a guessed/null attempt that could clobber a live claimer.
         Also observes expired outbox leases (reclaimable; logs delivered-missing-ack).
@@ -502,7 +578,7 @@ class Pool:
                 if not self._runner_identity_gone(row):
                     continue
                 token = row.get('containment_token')
-                if token:
+                if token and row.get('execution_state') != 'supervised':
                     try:
                         sw = containment.sweep(token, grace=0.05, timeout=0.15)
                         if sw.get('survivors') or not sw.get('token_scan_empty', True):
@@ -520,6 +596,8 @@ class Pool:
                     if fresh is None:
                         continue
                     fresh = dict(fresh)
+                    if not self._attempt_stopped(fresh):
+                        continue
                     if fresh.get('cancel'):
                         ok = self._terminal(
                             db, job_id, 'cancelled',
@@ -536,7 +614,8 @@ class Pool:
                     if self._replay_allowed(fresh):
                         updated = db.execute(
                             "UPDATE jobs SET status='queued',heartbeat=NULL,attempt=NULL,"
-                            "pid=NULL,pid_start=NULL,deadline=NULL,containment_token=NULL "
+                            "pid=NULL,pid_start=NULL,deadline=NULL,containment_token=NULL,"
+                            "execution_state='finished',supervisor_nonce=NULL "
                             "WHERE id=? AND attempt=? AND status='running'",
                             (job_id, attempt),
                         )
@@ -614,29 +693,56 @@ class Pool:
         with self.db() as db:
             return db.execute("SELECT 1 FROM jobs WHERE id=? AND attempt=? AND status='running' AND cancel=0", (job, attempt)).fetchone() is not None
 
+    def begin_execution(self, job, attempt, *, mode='synchronous'):
+        """Trusted executor admission fence; claim alone never authorizes effects.
+
+        Synchronous owners acknowledge their own callback completion with finish.
+        A crash while synchronous/launching is uncertain, not safe to auto-replay.
+        """
+        if mode not in ('synchronous', 'launching'):
+            raise ValueError('invalid_execution_mode')
+        with self.db() as db:
+            changed = db.execute(
+                "UPDATE jobs SET execution_state=? WHERE id=? AND attempt=? "
+                "AND status='running' AND cancel=0 AND execution_state='claimed'",
+                (mode, job, attempt),
+            )
+            return changed.rowcount == 1
+
     def finish(self, job, attempt, ok, result):
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute("SELECT * FROM jobs WHERE id=? AND attempt=? AND status='running'", (job, attempt)).fetchone()
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND attempt=? "
+                             "AND status IN ('running','waiting_user','awaiting_plan_approval')",
+                             (job, attempt)).fetchone()
             if row is None:
                 return False
+            unquiesced = (isinstance(result, dict) and (
+                result.get('attempt_quiescent') is False
+                or result.get('error') == 'attempt_not_quiescent'
+                or result.get('attempt_token_scan_empty') is False))
+            supervised_unknown = (row['execution_state'] in ('supervised', 'launching', 'unconfirmed')
+                                  and not self._attempt_stopped(row))
+            if unquiesced or supervised_unknown:
+                # Persist uncertainty without a terminal outbox or retry. A
+                # request/finish callback cannot overrule known surviving work.
+                db.execute("UPDATE jobs SET result=?,execution_state=CASE "
+                           "WHEN execution_state='supervised' THEN execution_state ELSE 'unconfirmed' END "
+                           "WHERE id=? AND attempt=?",
+                           (json.dumps({'reason': 'attempt_stop_unproven'}), job, attempt))
+                return True
+            if row['execution_state'] != 'supervised':
+                db.execute("UPDATE jobs SET execution_state='finished' WHERE id=? AND attempt=?",
+                           (job, attempt))
             if row['cancel']:
                 self._terminal(db, job, 'cancelled', {'reason': 'cancelled'})
+            elif row['status'] in ('waiting_user', 'awaiting_plan_approval'):
+                # Stop acknowledgement may arrive after a pause. Keep the human
+                # gate parked, but let a later resume verify this attempt stopped.
+                db.execute("UPDATE jobs SET result=? WHERE id=? AND attempt=?",
+                           (json.dumps(result), job, attempt))
             elif not ok and row['replay_safe'] and row['tries'] < row['max_tries']:
-                is_unquiesced = False
-                if isinstance(result, dict):
-                    if result.get('attempt_quiescent') is False:
-                        is_unquiesced = True
-                    elif result.get('error') == 'attempt_not_quiescent':
-                        is_unquiesced = True
-                    elif result.get('attempt_token_scan_empty') is False:
-                        is_unquiesced = True
-                if not is_unquiesced:
-                    db.execute("UPDATE jobs SET status='queued',heartbeat=NULL WHERE id=?", (job,))
-                else:
-                    unquiesced_res = dict(result) if isinstance(result, dict) else {'error': str(result)}
-                    unquiesced_res['reason'] = 'replay_aborted_unquiesced'
-                    self._terminal(db, job, 'failed', unquiesced_res)
+                db.execute("UPDATE jobs SET status='queued',heartbeat=NULL WHERE id=?", (job,))
             else:
                 self._terminal(db, job, 'completed' if ok else 'failed', result)
             return True
@@ -646,14 +752,14 @@ class Pool:
 
         Does not force terminal — runner / claim / enforce_windows observe the flag.
         ``cancel_requested_at`` is set once (COALESCE) so repeated cancel calls do not
-        refresh the CANCEL_WINDOW_S deadline. Prefer-D1 ``finalize_cancel`` remains the
-        immediate barge-in path.
+        refresh the CANCEL_WINDOW_S deadline. ``finalize_cancel`` additionally accepts
+        parked jobs, but cannot certify that an executing attempt has stopped.
         """
         with self.db() as db:
             db.execute(
                 "UPDATE jobs SET cancel=1, "
                 "cancel_requested_at=COALESCE(cancel_requested_at, ?) "
-                "WHERE id=? AND status IN ('queued','running')",
+                "WHERE id=? AND status IN ('queued','running','waiting_user','awaiting_plan_approval')",
                 (time.time(), job),
             )
 
@@ -662,15 +768,16 @@ class Pool:
         return self.wait_for_user(job, reason=reason or "paused")
 
     def finalize_cancel(self, job):
-        """Prefer-D1: cancel flag + terminal cancelled + outbox receipt (fast C2 path).
+        """Request cancellation, including parked jobs; return whether accepted.
 
-        Existing :meth:`cancel` only sets the flag for queued/running (durable_dispatch
-        semantics unchanged). This helper terminals any non-terminal row so barge-in
-        cancel is observable immediately and Prefer-C2 can drain <=1 notify.
+        Only a never-claimed job can finish immediately. An attempt token, even with
+        no registered PID or a free lock, is not proof that execution never started
+        or that all descendants stopped. Callers must read the authoritative status
+        rather than interpret this acknowledgement as a terminal receipt.
         """
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job,)).fetchone()
             if row is None:
                 return False
             if row["status"] in ("completed", "failed", "cancelled"):
@@ -680,7 +787,8 @@ class Pool:
                 "cancel_requested_at=COALESCE(cancel_requested_at, ?) WHERE id=?",
                 (time.time(), job),
             )
-            self._terminal(db, job, "cancelled", {"reason": "cancelled"})
+            if row["attempt"] is None and row["tries"] == 0 and row["pid"] is None:
+                self._terminal(db, job, "cancelled", {"reason": "cancelled"})
             return True
 
 
@@ -722,14 +830,16 @@ class Pool:
         """Return waiting_user / awaiting_plan_approval job to queued for re-claim."""
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job,)).fetchone()
             if row is None:
                 return False
             if row["status"] not in ("waiting_user", "awaiting_plan_approval"):
                 return False
+            if row['cancel'] or not self._attempt_stopped(row):
+                return False
             db.execute(
                 "UPDATE jobs SET status='queued', attempt=NULL, heartbeat=NULL, "
-                "pid=NULL, pid_start=NULL, deadline=NULL WHERE id=?",
+                "pid=NULL, pid_start=NULL, deadline=NULL, execution_state='finished',supervisor_nonce=NULL WHERE id=?",
                 (job,),
             )
             return True
@@ -750,10 +860,18 @@ class Pool:
             raise ValueError("deny_policy_invalid")
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job,)).fetchone()
             if row is None:
                 return False
             if row["status"] not in ("waiting_user", "awaiting_plan_approval"):
+                return False
+            if not self._attempt_stopped(row):
+                if policy == 'cancelled':
+                    db.execute("UPDATE jobs SET cancel=1,cancel_requested_at=COALESCE(cancel_requested_at,?),"
+                               "result=? WHERE id=?", (time.time(), json.dumps({
+                                   'reason': text_reason, 'event': 'hitl_denied',
+                                   'stop_status': 'unproven'}), job))
+                    return True
                 return False
             self._terminal(db, job, policy, {
                 "reason": text_reason,
@@ -766,7 +884,7 @@ class Pool:
         with self.db() as db:
             row = db.execute(
                 "SELECT id,status,attempt,tries,cancel,result,heartbeat,created,deadline,"
-                "pid,pid_start,cancel_requested_at FROM jobs WHERE id=?",
+                "pid,pid_start,cancel_requested_at,execution_state FROM jobs WHERE id=?",
                 (job,),
             ).fetchone()
             if row is None:
@@ -869,6 +987,11 @@ class Pool:
         token = row.get('containment_token')
         directory = self.root / 'attempts' / attempt
         proc = None
+        control = None
+        peer = None
+        evidence_fd = None
+        stop_sent = False
+        admitted = False
         try:
             if timeout <= 0 or lease <= 0 or max_output <= 0 or max_file <= 0:
                 raise ValueError('budgets must be positive')
@@ -876,22 +999,60 @@ class Pool:
             with (directory / 'input.json').open('w+') as inp, (directory / 'stdout').open('w+') as out, (directory / 'stderr').open('w+') as err:
                 json.dump({'job': job, 'attempt': attempt, 'payload': json.loads(row['payload'])}, inp)
                 inp.seek(0)
-                if not self.is_current(job, attempt):
+                if not self.begin_execution(job, attempt, mode='launching'):
                     raise RuntimeError('claim cancelled before runner launch')
+                admitted = True
                 import sys
-                guarded_command = [sys.executable, str(Path(__file__).with_name('exec_runner.py')),
-                                   str(max_file)] + command
+                control, peer = socket.socketpair(type=socket.SOCK_SEQPACKET)
+                nonce = uuid.uuid4().hex
+                evidence_fd = os.open(directory / 'stop.json',
+                                      os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+                guarded_command = [sys.executable, str(Path(__file__).with_name('attempt_supervisor.py')),
+                                   str(peer.fileno()), str(evidence_fd), str(fd)]
+                control.sendall(json.dumps({'job': job, 'attempt': attempt, 'token': token,
+                                             'nonce': nonce, 'max_file': max_file,
+                                             'command': command}).encode())
                 env = dict(os.environ)
-                if token:
-                    env[containment.ENV] = token
+                # Runner failure cleanup may sweep its own attempt token. The
+                # supervisor must survive that sweep to adopt/reap descendants.
+                env.pop(containment.ENV, None)
+                # Slow interpreter startup must not hold the dispatch database
+                # lock. Until registration commits and go is sent, this process
+                # cannot start a runner; Worker EOF closes the no-launch gap.
                 proc = subprocess.Popen(guarded_command, stdin=inp, stdout=out, stderr=err, cwd=directory,
-                                        start_new_session=True, pass_fds=(fd,), env=env)
+                                        start_new_session=True,
+                                        pass_fds=(fd, peer.fileno(), evidence_fd), env=env)
+                # Our duplicate would otherwise hide EOF from a failed peer.
+                peer.close()
+                peer = None
+                control.settimeout(5)
+                if control.recv(16) != b'ready':
+                    raise RuntimeError('supervisor did not become ready')
+                control.settimeout(None)
+                pid_start = self._process_start(proc.pid)
+                if not pid_start:
+                    raise RuntimeError('supervisor identity unavailable')
                 with self.db() as db:
-                    db.execute("UPDATE jobs SET pid=?,pid_start=?,deadline=? WHERE id=? AND attempt=? AND status='running'",
-                               (proc.pid, self._process_start(proc.pid), time.time() + timeout, job, attempt))
+                    db.execute('BEGIN IMMEDIATE')
+                    current = db.execute("SELECT status,cancel FROM jobs WHERE id=? AND attempt=? "
+                                         "AND status IN ('running','waiting_user','awaiting_plan_approval') "
+                                         "AND execution_state='launching'",
+                                         (job, attempt)).fetchone()
+                    if current is None:
+                        raise RuntimeError('claim revoked before supervisor registration')
+                    authorized = current['status'] == 'running' and not current['cancel']
+                    # Bind a revoked, never-launched supervisor too: its private
+                    # no-child receipt must remain verifiable after cancel/pause.
+                    db.execute("UPDATE jobs SET pid=?,pid_start=?,deadline=?,execution_state='supervised',"
+                               "supervisor_nonce=? WHERE id=? AND attempt=?",
+                               (proc.pid, pid_start, time.time() + timeout, nonce, job, attempt))
+                os.close(evidence_fd)
+                evidence_fd = None
+                control.sendall(b'go' if authorized else b'stop')
                 deadline = time.monotonic() + timeout
                 next_heartbeat = time.monotonic() + lease / 3
-                reason = None
+                reason = None if authorized else 'cancelled or lease revoked'
+                stop_deadline = None
                 while proc.poll() is None:
                     if time.monotonic() >= next_heartbeat:
                         current = self.heartbeat(job, attempt)
@@ -905,22 +1066,30 @@ class Pool:
                     elif os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size > max_output:
                         reason = 'output budget exceeded'
                     if reason:
-                        break
+                        if not stop_sent:
+                            try:
+                                control.sendall(b'stop')
+                            except (BrokenPipeError, ConnectionResetError):
+                                pass
+                            stop_sent = True
+                            stop_deadline = time.monotonic() + 5
+                    if stop_deadline is not None and time.monotonic() > stop_deadline:
+                        raise TimeoutError('supervisor stop confirmation unavailable')
                     time.sleep(min(0.2, lease / 4))
-                # Always quiesce descendants before releasing the inherited job lock.
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
                 proc.wait()
                 if reason is None:
                     if time.monotonic() > deadline:
                         reason = 'timeout'
                     elif os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size > max_output:
                         reason = 'output budget exceeded'
-                result = {'reason': reason or 'runner failed', 'exit_code': proc.returncode}
+                with self.db() as db:
+                    latest = db.execute('SELECT * FROM jobs WHERE id=? AND attempt=?', (job, attempt)).fetchone()
+                stopped = latest is not None and self._attempt_stopped(latest)
+                receipt = json.loads((directory / 'stop.json').read_text()) if stopped else {}
+                exit_code = receipt.get('exit_code', proc.returncode)
+                result = {'reason': reason or 'runner failed', 'exit_code': exit_code}
                 ok = False
-                if reason is None and proc.returncode == 0:
+                if reason is None and stopped and exit_code == 0:
                     out.seek(0)
                     try:
                         response = json.loads(out.read(max_output))
@@ -940,28 +1109,35 @@ class Pool:
                             result['runner_error'] = code
                     except (ValueError, UnicodeError, AttributeError):
                         pass
-                evidence = containment.sweep(token) if token else None
-                if evidence is not None:
-                    has_survivors = bool(evidence.get('survivors'))
-                    token_empty = evidence.get('token_scan_empty', True)
-                    main_exited = (proc.poll() is not None)
-                    attempt_quiescent = main_exited and token_empty and not has_survivors
-                    result['attempt_quiescent'] = attempt_quiescent
-                    result['attempt_token_scan_empty'] = token_empty
-                    if not attempt_quiescent or has_survivors:
-                        ok = False
-                        result.setdefault('reason', 'attempt did not quiesce')
+                result['attempt_quiescent'] = stopped
+                if not stopped:
+                    ok = False
+                    result['reason'] = 'attempt_stop_unproven'
                 self.finish(job, attempt, ok, result)
         except Exception as exc:
+            if proc is None and admitted:
+                # This executor has not created any child. Close the admission
+                # gap using its own fenced no-launch observation, not a timer.
+                with self.db() as db:
+                    db.execute("UPDATE jobs SET execution_state='finished' WHERE id=? AND attempt=? "
+                               "AND execution_state='launching'", (job, attempt))
             self.finish(job, attempt, False, {'reason': 'execution error', 'type': type(exc).__name__,
+                                             'attempt_quiescent': proc is None,
                                              'sqlite_code': getattr(exc, 'sqlite_errorname', None)})
         finally:
+            if peer is not None:
+                peer.close()
+            if evidence_fd is not None:
+                os.close(evidence_fd)
+            if control is not None:
+                control.close()  # EOF asks a surviving supervisor to stop and reap.
             if proc is not None:
                 try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    # Never SIGKILL the supervisor and manufacture an empty tree.
+                    # It retains the inherited job lock until reaping succeeds.
                     pass
-                proc.wait()
             os.close(fd)
         return True
 
