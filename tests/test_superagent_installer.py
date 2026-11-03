@@ -1353,3 +1353,38 @@ def test_migration_keeps_checkout_knowledge_sources_while_moving_engine(tmp_path
     assert f"engine_root: {tmp_path}/.hermes/superagent/demo/current" in updated
     assert f"docs_roots: [{old}/docs]" in updated
     assert f"index_dir: {old}/index  # operator data" in updated
+
+
+def test_update_rolls_back_post_migration_invariant_drift_before_start(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    config = profile / "config.yaml"
+    config.write_text("plugins:\n  entries:\n    grounding:\n      settings:\n        enabled: true\n")
+    original = config.read_bytes()
+    root = tmp_path / ".hermes/superagent/demo"
+    root.mkdir(parents=True)
+    runtime = tmp_path / "runtime.yaml"
+    runtime.write_text("profile: demo\nruntime:\n  config_invariants:\n"
+                       "    plugins.entries.grounding.settings.enabled: true\n")
+    monkeypatch.setattr(module.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(module, "_managed_root", lambda args: root)
+    monkeypatch.setattr(module, "_assert_service_quiescent", lambda name: None)
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1 if "is-active" in command else 0, "", "")
+    monkeypatch.setattr(module, "_run", run)
+    def install(args, plan):
+        config.write_text("plugins:\n  entries:\n    grounding:\n      settings:\n        enabled: false\n")
+        return 0
+    monkeypatch.setattr(module, "install", install)
+    monkeypatch.setattr(module, "_manifest", lambda args: (root / "install-manifest.json", {"release": str(root / "candidate")}))
+    monkeypatch.setattr(module, "_release_valid", lambda path: True)
+    args = SimpleNamespace(profile="demo", runtime_manifest=runtime)
+    assert module.update(args, {"profile_home": str(profile)}) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "rolled-back"
+    assert result["error"] == "runtime_invariants_changed_after_install"
+    assert config.read_bytes() == original
+    assert not any("start" in call for call in calls)

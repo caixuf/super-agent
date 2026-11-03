@@ -1974,6 +1974,14 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         _path, manifest = found
         if not _release_valid(Path(manifest["release"])):
             raise RuntimeError("release validation failed")
+        # Migration and plugin setup run after the preflight plan. Check the
+        # declared values again before restarting any service; update's normal
+        # exception path restores the previous config, links and release.
+        runtime_manifest = getattr(args, "runtime_manifest", None)
+        if runtime_manifest is not None:
+            invariants = _check_runtime_invariants(Path(runtime_manifest), profile_home, args.profile)
+            if any(item["status"] != "matched" for item in invariants):
+                raise RuntimeError("runtime_invariants_changed_after_install")
         _run(["systemctl", "--user", "daemon-reload"], check=True)
         for label, name in start_order:
             if was_active[label]:
