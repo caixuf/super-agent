@@ -189,11 +189,20 @@ class LocalVecProvider(MemoryProvider):
                 python = str(private_python) if private_python.is_file() else sys.executable
                 child._cfg = dict(self._cfg, sqlite_db=str(Path(route['data_dir']) / 'coding_memory_cv.db'),
                                   user_id=route['user_id'], agent_id=route['agent_id'], profile=route['profile'])
-                child._cmd = [python, str(self._route_engine / 'tools/recall_memory.py'),
-                              '--query-text={query}', '--data-dir', route['data_dir'],
-                              '--user', route['user_id'], '--agent', route['agent_id'],
-                              '--profile', route['profile'], '--embed-url', self._cfg.get('embed_url', ''),
-                              '--limit', str(self._limit)]
+                entity_db = self._cfg.get('combined_entity_db')
+                if entity_db is not None:
+                    entity_path = Path(entity_db) if isinstance(entity_db, str) else None
+                    script = self._route_engine / 'tools/recall_combined.py'
+                    if not entity_path or not entity_path.is_absolute() or not entity_path.is_file() or not script.is_file():
+                        return None
+                    # A partial SQLite fallback would hide missing entity rules.
+                    child._cfg.pop('sqlite_db', None)
+                    child._cmd = [python, str(script), '--query={query}', '--entity-db', str(entity_path)]
+                else:
+                    child._cmd = [python, str(self._route_engine / 'tools/recall_memory.py'), '--query-text={query}']
+                child._cmd += ['--data-dir', route['data_dir'], '--user', route['user_id'],
+                               '--agent', route['agent_id'], '--profile', route['profile'],
+                               '--embed-url', self._cfg.get('embed_url', ''), '--limit', str(self._limit)]
                 child._limit, child._timeout = self._limit, self._timeout
                 child._session_id = sid
                 router = self._router

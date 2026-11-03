@@ -291,6 +291,21 @@ def test_automatic_recall_fallback_and_cache_are_principal_scoped(tmp_path, host
     assert len(calls) == 2
 
 
+def test_routed_combined_recall_requires_authorized_route_and_disables_partial_fallback(tmp_path, host_context, monkeypatch):
+    module, provider, policy = make_provider(tmp_path, host_context, monkeypatch)
+    entity = tmp_path / "entities.db"
+    entity.touch()
+    provider._cfg["combined_entity_db"] = str(entity)
+    with host_context.bind():
+        child = provider._routed_provider("s1")
+        assert child is not None
+        assert child._cmd[1].endswith("tools/recall_combined.py")
+        assert child._cmd[child._cmd.index("--entity-db") + 1] == str(entity)
+        assert "sqlite_db" not in child._cfg
+    with host_context.bind(user="other", chat="other"):
+        assert provider._routed_provider("s1") is None
+
+
 def test_policy_revocation_discards_inflight_automatic_result(tmp_path, host_context, monkeypatch):
     module, provider, policy = make_provider(tmp_path, host_context, monkeypatch)
     entered, release = threading.Event(), threading.Event()
