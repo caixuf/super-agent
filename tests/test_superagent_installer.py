@@ -1312,3 +1312,29 @@ def test_doctor_queue_observation_does_not_claim_missing_or_invalid_database_is_
     with sqlite3.connect(tmp_path / "state.db") as db:
         db.execute("CREATE TABLE unrelated (id INTEGER)")
     assert module._gateway_queue_observation(tmp_path)["state"] == "unknown"
+
+
+def test_doctor_cron_observation_reports_failure_without_sensitive_content(tmp_path):
+    import sqlite3
+    module = _load_installer()
+    cron = tmp_path / "cron"
+    cron.mkdir()
+    (cron / "jobs.json").write_text(json.dumps({"jobs": [{"enabled": True, "prompt": "secret"}]}))
+    with sqlite3.connect(cron / "executions.db") as db:
+        db.execute("CREATE TABLE executions (status TEXT, delivery_outcome TEXT, started_at TEXT)")
+        db.execute("CREATE TABLE cron_incidents (state TEXT)")
+        db.execute("INSERT INTO executions VALUES ('failed', 'suppressed', '2026-11-04')")
+        db.executemany("INSERT INTO cron_incidents VALUES (?)", [('detected',), ('closed',)])
+    result = module._cron_observation(tmp_path)
+    assert result == {"state": "observed", "enabled_jobs": 1, "latest_status": "failed",
+                      "latest_delivery": "suppressed", "open_incidents": 1}
+    assert "secret" not in repr(result)
+
+
+def test_doctor_cron_observation_missing_or_corrupt_is_unknown(tmp_path):
+    module = _load_installer()
+    assert module._cron_observation(tmp_path)["state"] == "unknown"
+    (tmp_path / "cron").mkdir()
+    (tmp_path / "cron/jobs.json").write_text("not-json")
+    (tmp_path / "cron/executions.db").write_bytes(b"bad")
+    assert module._cron_observation(tmp_path)["state"] == "unknown"

@@ -1375,6 +1375,40 @@ def _legacy_colleague_settlement_observation(profile_home: Path) -> dict[str, An
         return report
 
 
+def _cron_observation(profile_home: Path) -> dict[str, Any]:
+    """Report cron failures without exposing job instructions or output."""
+    import sqlite3
+    from contextlib import closing
+
+    unknown = {"state": "unknown", "enabled_jobs": None, "latest_status": None,
+               "latest_delivery": None, "open_incidents": None}
+    jobs_path = profile_home / "cron" / "jobs.json"
+    db_path = profile_home / "cron" / "executions.db"
+    try:
+        if any(p.is_symlink() or not p.is_file() for p in (jobs_path, db_path)):
+            return unknown
+        if jobs_path.stat().st_size > 2 * 1024 * 1024:
+            return unknown
+        jobs_doc = json.loads(jobs_path.read_text(encoding="utf-8"))
+        jobs = jobs_doc if isinstance(jobs_doc, list) else jobs_doc.get("jobs")
+        if not isinstance(jobs, list) or any(not isinstance(job, dict) for job in jobs):
+            return unknown
+        with closing(sqlite3.connect(db_path.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+            db.execute("PRAGMA query_only = ON")
+            db.execute("BEGIN")
+            latest = db.execute("SELECT status, delivery_outcome FROM executions ORDER BY started_at DESC LIMIT 1").fetchone()
+            incidents = db.execute("SELECT COUNT(*) FROM cron_incidents WHERE state NOT IN ('closed', 'resolved')").fetchone()[0]
+        # Never surface arbitrary database fields such as exception text or prompts.
+        statuses = {"queued", "running", "completed", "failed", "cancelled", "unknown"}
+        deliveries = {"sent", "delivered", "failed", "suppressed", "unknown"}
+        return {"state": "observed", "enabled_jobs": sum(job.get("enabled") is True for job in jobs),
+                "latest_status": latest[0] if latest and latest[0] in statuses else ("unknown" if latest else None),
+                "latest_delivery": latest[1] if latest and latest[1] in deliveries else ("unknown" if latest else None),
+                "open_incidents": incidents}
+    except (OSError, ValueError, TypeError, AttributeError, sqlite3.Error):
+        return unknown
+
+
 def _gateway_queue_observation(profile_home: Path) -> dict[str, Any]:
     """Count blocked admissions without reading message content or changing state."""
     import sqlite3
@@ -1500,6 +1534,7 @@ def doctor(args: argparse.Namespace) -> int:
                       "worker_observation": _worker_runtime_observation(args.profile, current),
                       "colleague_settlement_observation": _legacy_colleague_settlement_observation(profile_home),
                       "gateway_queue_observation": _gateway_queue_observation(profile_home),
+                      "cron_observation": _cron_observation(profile_home),
                       "recall_diagnostics_observation": _recall_diagnostics_observation(profile_home, current),
                       "manifest": manifest}, indent=2))
     return 0 if ok else 1
