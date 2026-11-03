@@ -19,6 +19,9 @@ import sys
 import tarfile
 import tempfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from agentcore.profile_overlay import collect_profile_overlay, resolve_profile_dir
+
 REPO = Path(__file__).resolve().parents[1]
 REQUIRED = (
     "agentcore/liveness.py", "tools/superagent.py", "install/superagent.sh",
@@ -52,7 +55,8 @@ def compute_tree_sha256(root: Path) -> str:
     return digest.hexdigest()
 
 
-def build_package(output_dir: Path | None = None, *, allow_dirty: bool = False) -> Path:
+def build_package(output_dir: Path | None = None, *, allow_dirty: bool = False,
+                  profile_overlay: str | Path | None = None) -> Path:
     version, identity = get_git_version()
     dirty = identity.endswith("-dirty")
     if dirty and not allow_dirty:
@@ -110,6 +114,14 @@ def build_package(output_dir: Path | None = None, *, allow_dirty: bool = False) 
         if not any(name.startswith(directory + "/") for name in files):
             raise ValueError("required release directory is missing: " + directory)
 
+    overlay_meta = None
+    overlay_name = None
+    if profile_overlay:
+        p_dir = resolve_profile_dir(profile_overlay)
+        overlay_name = p_dir.name
+        overlay_files, overlay_meta = collect_profile_overlay(p_dir, overlay_name)
+        files.update(overlay_files)
+
     tree = hashlib.sha256()
     manifest = {}
     for name, (content, mode) in sorted(files.items(), key=lambda item: PurePosixPath(item[0])):
@@ -132,13 +144,16 @@ def build_package(output_dir: Path | None = None, *, allow_dirty: bool = False) 
         "tree_sha256": tree_hash,
         "files": manifest,
     }
+    if overlay_meta is not None:
+        info["overlay"] = overlay_meta
     files["release.json"] = (
         (json.dumps(info, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode(),
         0o644,
     )
     out_dir = (output_dir or REPO / "dist").resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    archive = out_dir / f"superagent-{identity}.tar.gz"
+    archive_name = f"superagent-{identity}.tar.gz" if not overlay_name else f"superagent-{identity}-overlay-{overlay_name}.tar.gz"
+    archive = out_dir / archive_name
     if archive.exists() or archive.is_symlink():
         raise FileExistsError("release archive already exists; use a new output directory")
     # Stage under a unique name and publish exclusively. Neither partial
@@ -168,9 +183,12 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, help="Output directory for tarball")
     parser.add_argument("--allow-dirty", action="store_true",
                         help="Build a non-publishable candidate from tracked working files")
+    parser.add_argument("--profile-overlay", type=str,
+                        help="Package custom profile assets (soul, skills, memories, mcp) into an overlay archive")
     args = parser.parse_args()
     try:
-        package = build_package(args.out_dir, allow_dirty=args.allow_dirty)
+        package = build_package(args.out_dir, allow_dirty=args.allow_dirty,
+                                profile_overlay=args.profile_overlay)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         # Do not echo arbitrary Git/OS error bodies or source contents.
         print(json.dumps({"status": "failed", "error": type(error).__name__,
@@ -179,14 +197,18 @@ def main() -> int:
         return 1
     with tarfile.open(package) as bundle:
         release = json.load(bundle.extractfile("release.json"))
-    print(json.dumps({
+    result = {
         "status": "packaged",
         "tarball": str(package),
         "filename": package.name,
         "size_bytes": package.stat().st_size,
         "sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
         "publishable": release["publishable"],
-    }, ensure_ascii=False, indent=2))
+    }
+    if "overlay" in release:
+        result["overlay"] = release["overlay"].get("overlay_name")
+        result["overlay_components"] = release["overlay"].get("components")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 

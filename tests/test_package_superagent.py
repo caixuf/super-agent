@@ -245,3 +245,22 @@ def test_package_shell_help_routes_to_builder():
                           env=dict(os.environ, PYTHON=sys.executable),
                           text=True, capture_output=True, check=True)
     assert "--allow-dirty" in proc.stdout
+
+
+def test_package_with_profile_overlay(package_repo, tmp_path):
+    module, _ = package_repo
+    prof = tmp_path / "mock_expert_profile"
+    prof.mkdir()
+    (prof / "SOUL.md").write_text("# Expert Soul\n", encoding="utf-8")
+    (prof / "memories").mkdir()
+    (prof / "memories" / "MEMORY.md").write_text("Memory text\n", encoding="utf-8")
+
+    archive = module.build_package(tmp_path / "out", profile_overlay=prof)
+    assert "-overlay-mock_expert_profile.tar.gz" in archive.name
+    files = archive_files(archive)
+    assert "overlay/SOUL.md" in files
+    assert "overlay/memories/MEMORY.md" in files
+    assert "overlay/metadata.json" in files
+    meta = json.loads(files["overlay/metadata.json"])
+    assert meta["overlay_name"] == "mock_expert_profile"
+    assert meta["components"]["has_soul"] is True

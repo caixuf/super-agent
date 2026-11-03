@@ -30,6 +30,9 @@ import tempfile
 import time
 from typing import Any, Sequence
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from agentcore.profile_overlay import apply_profile_overlay
+
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_ROOT = Path.home() / ".hermes" / "superagent"
 DEFAULT_HERMES = Path.home() / ".hermes" / "hermes-agent"
@@ -757,7 +760,7 @@ def _stage_release(plan: dict[str, Any]) -> Path:
     with tempfile.TemporaryDirectory(prefix=".staging-", dir=release.parent) as work:
         staged = Path(work) / "release"
         staged.mkdir()
-        for name in ("agentcore", "skills", "toolsets", "tools", "runtime", "patches"):
+        for name in ("agentcore", "skills", "toolsets", "tools", "runtime", "patches", "overlay"):
             if (REPO / name).is_dir():
                 _copy_tree(REPO / name, staged / name)
         managed_sources = [*PLUGIN_SOURCES, *(Path(p) for p in plan.get("external_plugins", []))]
@@ -821,6 +824,13 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     _relink_plugins(profile_home, release, plugins, plan.get("external_plugins", []), plan.get("memory_providers", []))
     migrate_config(args, plan, quiet=True)
     _enable_plugins(profile_home, plugins)
+    overlay_summary = None
+    if (release / "overlay").is_dir():
+        overlay_summary = apply_profile_overlay(
+            profile_home,
+            release / "overlay",
+            skip_overlay=getattr(args, "skip_overlay", False),
+        )
     release_history = list(previous_history)
     if previous is not None and previous.resolve() != release.resolve():
         release_history = [*release_history, str(previous.resolve())][-10:]
@@ -834,6 +844,7 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
                          for name in [*plugins, *plan.get("memory_providers", [])]},
         "config_plugin_entries": plugins,
         "legacy_card_patches_at_install": plan.get("legacy_card_patches", []),
+        "overlay_applied": overlay_summary,
     }
     _write_json_atomic(root / "install-manifest.json", manifest)
     print(json.dumps({"status": "installed", **manifest}, ensure_ascii=False, indent=2))
@@ -1099,6 +1110,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--profile-home", type=Path)
     parser.add_argument("--hermes-root", type=Path, default=DEFAULT_HERMES)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--skip-overlay", action="store_true",
+                        help="Skip applying profile overlay even if present in release archive")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("plan", "install", "update", "doctor", "uninstall",
                  "activate-release", "rollback", "migrate-config", "candidate-hermes", "install-hermes-candidate", "switch-gateway-source"):
