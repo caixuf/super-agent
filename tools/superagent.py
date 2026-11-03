@@ -1375,6 +1375,32 @@ def _legacy_colleague_settlement_observation(profile_home: Path) -> dict[str, An
         return report
 
 
+def _gateway_queue_observation(profile_home: Path) -> dict[str, Any]:
+    """Count blocked admissions without reading message content or changing state."""
+    import sqlite3
+    from contextlib import closing
+
+    report = {"state": "unknown", "queued": None, "started": None,
+              "unknown": None, "queued_blocked_by_unknown": None}
+    database = profile_home / "state.db"
+    try:
+        if database.is_symlink() or not database.is_file():
+            return report
+        with closing(sqlite3.connect(database.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+            db.execute("PRAGMA query_only = ON")
+            db.execute("BEGIN")
+            counts = dict(db.execute("SELECT status, COUNT(*) FROM session_admissions "
+                                     "WHERE status IN ('queued','started','unknown') GROUP BY status"))
+            blocked = db.execute("SELECT COUNT(*) FROM session_admissions q "
+                                 "WHERE q.status='queued' AND EXISTS (SELECT 1 FROM session_admissions u "
+                                 "WHERE u.target_session_id=q.target_session_id AND u.status='unknown')").fetchone()[0]
+        return {"state": "observed", "queued": counts.get("queued", 0),
+                "started": counts.get("started", 0), "unknown": counts.get("unknown", 0),
+                "queued_blocked_by_unknown": blocked}
+    except (OSError, ValueError, sqlite3.Error):
+        return report
+
+
 def _recall_diagnostics_observation(profile_home: Path, managed_current: Path | None = None) -> dict[str, Any]:
     """Observe configured recall reports; missing or old reports stay unknown."""
     import importlib.util
@@ -1473,6 +1499,7 @@ def doctor(args: argparse.Namespace) -> int:
                           args.profile, manifest.get("hermes_root")),
                       "worker_observation": _worker_runtime_observation(args.profile, current),
                       "colleague_settlement_observation": _legacy_colleague_settlement_observation(profile_home),
+                      "gateway_queue_observation": _gateway_queue_observation(profile_home),
                       "recall_diagnostics_observation": _recall_diagnostics_observation(profile_home, current),
                       "manifest": manifest}, indent=2))
     return 0 if ok else 1

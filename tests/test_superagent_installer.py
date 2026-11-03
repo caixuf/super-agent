@@ -1285,3 +1285,30 @@ def test_doctor_distinguishes_disk_binding_from_recall_health(tmp_path):
     config["memory"]["localvec"]["recall_cmd"][1] = "AGENTCORE_ROOT=/old/release"
     (home / "config.yaml").write_text(yaml.safe_dump(config))
     assert module._recall_diagnostics_observation(home, current)["disk_bindings"]["imfl"]["engine"] == "mismatched"
+
+
+def test_doctor_queue_observation_counts_blocked_without_exposing_content(tmp_path):
+    import sqlite3
+    module = _load_installer()
+    database = tmp_path / "state.db"
+    with sqlite3.connect(database) as db:
+        db.execute("CREATE TABLE session_admissions (status TEXT, target_session_id TEXT, payload TEXT)")
+        db.executemany("INSERT INTO session_admissions VALUES (?, ?, ?)", [
+            ("unknown", "a", "private"), ("queued", "a", "secret"),
+            ("queued", "a", "secret2"), ("queued", "b", "secret3"),
+            ("started", "c", "secret4"), ("terminal", "d", "secret5")])
+    report = module._gateway_queue_observation(tmp_path)
+    assert report == {"state": "observed", "queued": 3, "started": 1, "unknown": 1,
+                      "queued_blocked_by_unknown": 2}
+    assert "secret" not in repr(report) and "private" not in repr(report)
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT COUNT(*) FROM session_admissions").fetchone()[0] == 6
+
+
+def test_doctor_queue_observation_does_not_claim_missing_or_invalid_database_is_empty(tmp_path):
+    import sqlite3
+    module = _load_installer()
+    assert module._gateway_queue_observation(tmp_path)["state"] == "unknown"
+    with sqlite3.connect(tmp_path / "state.db") as db:
+        db.execute("CREATE TABLE unrelated (id INTEGER)")
+    assert module._gateway_queue_observation(tmp_path)["state"] == "unknown"
