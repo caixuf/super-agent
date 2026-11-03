@@ -65,10 +65,10 @@ _SOURCE_BUILD_DIRS = frozenset({".venv", ".pytest_cache", "build", "agentcore.eg
 
 def _run(
     cmd: Sequence[str], *, cwd: Path | None = None, check: bool = False,
-    env: dict[str, str] | None = None,
+    env: dict[str, str] | None = None, timeout: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     proc = subprocess.run(list(cmd), cwd=str(cwd) if cwd else None, text=True,
-                          capture_output=True, env=env or os.environ.copy())
+                          capture_output=True, env=env or os.environ.copy(), timeout=timeout)
     if check and proc.returncode:
         raise RuntimeError(
             f"command failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr[-1000:]}"
@@ -305,7 +305,7 @@ def _patch_state(hermes_root: Path, spec: tuple[str, str, str]) -> dict[str, Any
         return {"id": patch_id, "state": "missing-tool", "in_place": False}
     env = os.environ.copy()
     env["HERMES_AGENT_DIR"] = str(hermes_root)
-    if script_name == "apply_feishu_card_replies.py":
+    if script_name in {"apply_feishu_card_replies.py", "apply_feishu_card_lifecycle.py"}:
         command = [sys.executable, str(script), "--check"]
     elif script_name == "patch_feishu_delivery_uuid.py":
         command = [sys.executable, str(script), "--hermes-root", str(hermes_root)]
@@ -401,7 +401,7 @@ def _candidate_bootstrap_command(work: Path) -> list[str]:
 def _run_candidate(work: Path, args: Sequence[str], timeout: int = 1800) -> subprocess.CompletedProcess[str]:
     command = [*_candidate_bootstrap_command(work), *args]
     try:
-        return _run(command, cwd=work, env=_candidate_env(work))
+        return _run(command, cwd=work, env=_candidate_env(work), timeout=timeout)
     except subprocess.TimeoutExpired:
         raise RuntimeError("candidate_command_timeout") from None
 
@@ -448,8 +448,11 @@ def build_clean_hermes_candidate(args: argparse.Namespace, plan: dict[str, Any])
                     "path": str(work)}
         shutil.rmtree(work)
     work.parent.mkdir(parents=True, exist_ok=True)
-    checkout = _run(["git", "clone", "--quiet", "--depth=1", "--branch", CANDIDATE_TAG,
-                     "https://github.com/NousResearch/hermes-agent.git", str(work)])
+    try:
+        checkout = _run(["git", "clone", "--quiet", "--depth=1", "--branch", CANDIDATE_TAG,
+                         "https://github.com/NousResearch/hermes-agent.git", str(work)], timeout=120)
+    except subprocess.TimeoutExpired:
+        return {"status": "blocked", "reason": "candidate_clone_timeout"}
     if checkout.returncode != 0:
         return {"status": "blocked", "reason": "candidate_clone_failed"}
     head = _run(["git", "rev-parse", "HEAD"], cwd=work).stdout.strip()
@@ -562,6 +565,33 @@ def install_hermes_candidate(args: argparse.Namespace, plan: dict[str, Any]) -> 
                      ensure_ascii=False, indent=2))
     return 0
 
+def _check_runtime_invariants(manifest_path: Path, profile_home: Path, profile: str) -> list[dict[str, str]]:
+    """Compare declared profile invariants without exposing configuration values."""
+    import yaml
+    data = yaml.safe_load(manifest_path.read_bytes())
+    config = yaml.safe_load((profile_home / "config.yaml").read_bytes())
+    if not isinstance(data, dict) or not isinstance(config, dict) or data.get("profile", profile) != profile:
+        raise ValueError("manifest or profile configuration is invalid")
+    runtime = data.get("runtime", {})
+    invariants = runtime.get("config_invariants", {}) if isinstance(runtime, dict) else None
+    if not isinstance(invariants, dict):
+        raise ValueError("config_invariants must be a mapping")
+    report = []
+    for path, expected in invariants.items():
+        if not isinstance(path, str) or not path or any(not part for part in path.split(".")):
+            raise ValueError("invalid configuration invariant path")
+        missing = object()
+        value = config
+        for part in path.split("."):
+            if not isinstance(value, dict) or part not in value:
+                value = missing
+                break
+            value = value[part]
+        matched = value is not missing and type(value) is type(expected) and value == expected
+        report.append({"path": path, "status": "matched" if matched else "mismatch"})
+    return report
+
+
 def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     version, identity = _git_identity()
     profile_home = _profile_home(args)
@@ -576,15 +606,32 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         blockers.append("profile_config_missing")
     if not (hermes_root / "plugins" / "platforms" / "feishu" / "adapter.py").is_file():
         blockers.append("hermes_source_missing")
+    invariant_report = []
+    if runtime_manifest is not None and runtime_manifest.is_file() and (profile_home / "config.yaml").is_file():
+        try:
+            invariant_report = _check_runtime_invariants(runtime_manifest, profile_home, args.profile)
+            if any(row["status"] != "matched" for row in invariant_report):
+                blockers.append("runtime_invariants_mismatch")
+        except Exception:
+            blockers.append("runtime_invariants_unreadable")
     external_plugins = _external_plugin_sources(args)
     if not _plugin_names(args):
         blockers.append("no_managed_plugins")
     legacy = _legacy_patch_state(hermes_root)
-    candidate_marker = root / "hermes" / (CANDIDATE_TAG + "-" + CANDIDATE_COMMIT[:12]) / "adapter-is-clean"
-    if any(item["in_place"] for item in legacy) and not candidate_marker.is_file():
-        # Installing over a live modified checkout would leave two card
-        # producers. Require the independently built clean candidate first.
+    # The released CardKit patch includes retry and delivery UUID support.
+    # A separate staged candidate is no evidence about the requested host:
+    # identify the actual target adapter before permitting activation.
+    card_current = next((item["in_place"] for item in legacy if item["id"] == "card-replies"), False)
+    obsolete_renderer = next((item["in_place"] for item in legacy if item["id"] == "card-native-markdown"), False)
+    adapter = hermes_root / "plugins/platforms/feishu/adapter.py"
+    try:
+        card_marker = "_build_reply_card" in adapter.read_text(encoding="utf-8")
+    except OSError:
+        card_marker = False  # hermes_source_missing already blocks this plan
+    if obsolete_renderer or (not card_current and (card_marker or any(item["in_place"] for item in legacy))):
         blockers.append("legacy_card_patches_require_clean_candidate")
+    if card_current and not _patch_state(hermes_root, ("apply_feishu_card_lifecycle.py", "card-lifecycle"))["in_place"]:
+        blockers.append("card_lifecycle_not_verified")
     return {
         "schema_version": 1,
         "action": "superagent-managed-install",
@@ -595,10 +642,12 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "profile_home": str(profile_home),
         "hermes_root": str(hermes_root),
         "runtime_manifest": str(runtime_manifest) if runtime_manifest is not None else None,
+        "config_invariants": invariant_report,
         "plugins": _plugin_names(args),
         "memory_providers": ["localvec"] if (REPO / "plugins/localvec/__init__.py").is_file() else [],
         "external_plugins": [str(path) for path in external_plugins],
         "legacy_card_patches": legacy,
+        "card_implementation": "release-cardkit" if card_current and not obsolete_renderer else "unverified",
         "preserved_host_patches": _keep_patch_state(hermes_root),
         "blockers": blockers,
         "layout": {
@@ -715,10 +764,15 @@ def _disable_plugins(profile_home: Path, names: list[str]) -> None:
     managed = set(names)
     out: list[str] = []
     in_enabled = False
+    in_plugins = False
     item_indent: int | None = None
     for line in lines:
         stripped = line.strip()
         indent = len(line) - len(line.lstrip(" "))
+        if indent == 0 and stripped and not stripped.startswith("#"):
+            in_plugins = stripped == "plugins:"
+            in_enabled = False
+            item_indent = None
         if in_enabled and stripped and not stripped.startswith("#"):
             if stripped.startswith("- "):
                 if item_indent is None:
@@ -729,7 +783,7 @@ def _disable_plugins(profile_home: Path, names: list[str]) -> None:
             elif item_indent is not None and indent <= item_indent - 2:
                 in_enabled = False
         out.append(line)
-        if indent == 2 and stripped == "enabled:":
+        if in_plugins and indent == 2 and stripped == "enabled:":
             in_enabled = True
             item_indent = None
     updated = "".join(out)
@@ -737,12 +791,27 @@ def _disable_plugins(profile_home: Path, names: list[str]) -> None:
         _write_text_atomic(config, updated)
 
 
+def _disable_legacy_card_producer(profile_home: Path) -> None:
+    """Keep the current native card implementation as the sole producer."""
+    import yaml
+    names = {"hermes-feishu-card", "hfc-runtime-dependency"}
+    _disable_plugins(profile_home, list(names))
+    config = yaml.safe_load((profile_home / "config.yaml").read_text(encoding="utf-8"))
+    plugins = config.get("plugins", {}) if isinstance(config, dict) else None
+    enabled = plugins.get("enabled") if isinstance(plugins, dict) else None
+    if not isinstance(enabled, list) or names.intersection(enabled):
+        raise ValueError("legacy card producer could not be disabled safely")
+
+
 def _purge_legacy_plugins(profile_home: Path) -> None:
-    """Purge obsolete plugins and leftover state directories."""
+    """Disable the retired producer while retaining its state for rollback."""
     _disable_plugins(profile_home, ["task-progress"])
-    stale_data = profile_home / "plugin-data" / "agent-plugin-task-progress-b1e89459"
-    if stale_data.is_dir():
-        shutil.rmtree(stale_data, ignore_errors=True)
+    import yaml
+    config = yaml.safe_load((profile_home / "config.yaml").read_text(encoding="utf-8"))
+    plugins = config.get("plugins", {}) if isinstance(config, dict) else None
+    enabled = plugins.get("enabled") if isinstance(plugins, dict) else None
+    if not isinstance(enabled, list) or "task-progress" in enabled:
+        raise ValueError("retired progress producer could not be disabled safely")
 
 
 def _apply_runtime_drop_ins(profile: str, *, manifest_path: Path | None = None) -> dict[str, Any]:
@@ -803,6 +872,51 @@ def _apply_runtime_drop_ins(profile: str, *, manifest_path: Path | None = None) 
             "service": gateway_service, "files": sorted(contents)}
 
 
+def _migrate_owned_path_scalars(original: str, mapping: dict[str, str]) -> str:
+    """Rewrite direct path values only; preserve YAML comments and credentials."""
+    import re
+    import yaml
+    from yaml.nodes import MappingNode, ScalarNode, SequenceNode
+
+    root = yaml.compose(original, Loader=yaml.SafeLoader)
+    if not isinstance(root, MappingNode):
+        raise ValueError("profile configuration must be a YAML mapping")
+    protected = re.compile(r"(?:secret|password|token|credential|authorization|api[_-]?key|private[_-]?key|access[_-]?key)", re.I)
+    occurrences = []
+    protected_nodes = set()
+
+    def visit(node, keys=()):
+        if isinstance(node, MappingNode):
+            for key, value in node.value:
+                visit(value, (*keys, key.value if isinstance(key, ScalarNode) else ""))
+        elif isinstance(node, SequenceNode):
+            for child in node.value:
+                visit(child, keys)
+        elif isinstance(node, ScalarNode) and node.tag == "tag:yaml.org,2002:str":
+            if any(protected.search(str(key)) for key in keys):
+                protected_nodes.add(id(node))
+            else:
+                occurrences.append(node)
+
+    visit(root)
+    edits = {}
+    for node in occurrences:
+        if id(node) in protected_nodes or node.style in ("|", ">"):
+            continue
+        for old, new in mapping.items():
+            if node.value == old or node.value.startswith(old + "/"):
+                start, end = node.start_mark.index, node.end_mark.index
+                raw = original[start:end]
+                if raw.count(old) != 1:
+                    raise ValueError("owned path cannot be safely migrated")
+                edits[(start, end)] = raw.replace(old, new, 1)
+                break
+    updated = original
+    for (start, end), value in sorted(edits.items(), reverse=True):
+        updated = updated[:start] + value + updated[end:]
+    return updated
+
+
 def migrate_config(args: argparse.Namespace, plan: dict[str, Any], *, quiet: bool = False) -> int:
     config = Path(plan["profile_home"]) / "config.yaml"
     original = config.read_text(encoding="utf-8")
@@ -815,23 +929,13 @@ def migrate_config(args: argparse.Namespace, plan: dict[str, Any], *, quiet: boo
         "/home/caixuf/.local/state/agentcore/liveness.db": managed["liveness_db"],
         "/home/caixuf/.local/state/agentcore/colleague-team/registry.sqlite": managed["colleague_registry"],
     }
-    updated = original
-    for old, new in mapping.items():
-        updated = updated.replace(old, new)
+    updated = _migrate_owned_path_scalars(original, mapping)
     if updated != original:
         _write_text_atomic(config, updated)
 
-    # 自动化对齐 Super Agent 2.0 核心基线配置，杜绝实例间配置漂移
-    try:
-        from agentcore.baseline_config import enforce_baseline_config
-        enforced, changes = enforce_baseline_config(config, backup=False)
-        if enforced and not quiet:
-            print(f"[INFO] Super Agent 基线配置已自动对齐 ({len(changes)} 处修复):", file=sys.stderr)
-            for ch in changes:
-                print(f"       -> {ch}", file=sys.stderr)
-    except Exception as exc:
-        if not quiet:
-            print(f"[WARN] 基线配置审计跳过: {exc}", file=sys.stderr)
+    # Profile choices (model, platform and plugin settings) belong to the
+    # operator. Baseline enforcement is an explicit separate operation; an
+    # upgrade must not silently rewrite them or reserialize unrelated YAML.
     if not quiet:
         print(json.dumps({"status": "migrated" if updated != original else "unchanged",
                           "config": str(config)}, indent=2))
@@ -911,6 +1015,8 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     migrate_config(args, plan, quiet=True)
     _enable_plugins(profile_home, plugins)
     _purge_legacy_plugins(profile_home)
+    if plan.get("card_implementation") == "release-cardkit":
+        _disable_legacy_card_producer(profile_home)
     runtime_configuration = _apply_runtime_drop_ins(
         getattr(args, "profile", ""), manifest_path=getattr(args, "runtime_manifest", None))
     overlay_summary = None
@@ -1150,13 +1256,143 @@ def switch_gateway_source(args: argparse.Namespace) -> int:
     return 0
 
 
+def _update_config_snapshot(args: argparse.Namespace, profile_home: Path, root: Path) -> tuple[dict[Path, tuple[bytes, int] | None], str]:
+    """Capture files the update can rewrite before stopping any service."""
+    import re
+    import yaml
+    paths = [profile_home / "config.yaml", root / "install-manifest.json"]
+    service = f"hermes-gateway-{args.profile}.service"
+    manifest_path = getattr(args, "runtime_manifest", None) or REPO / "identity" / "manifests" / f"{args.profile}.manifest.yaml"
+    if manifest_path.is_file():
+        try:
+            data = yaml.safe_load(manifest_path.read_bytes())
+        except yaml.YAMLError as exc:
+            raise ValueError("invalid runtime manifest YAML") from exc
+        if not isinstance(data, dict) or data.get("profile", args.profile) != args.profile:
+            raise ValueError("invalid runtime manifest profile")
+        runtime = data.get("runtime", {})
+        drop_ins = runtime.get("drop_ins", {}) if isinstance(runtime, dict) else None
+        service = data.get("gateway_service") or f"hermes-gateway-{args.profile}.service"
+        if not isinstance(drop_ins, dict) or not isinstance(service, str) or not re.fullmatch(r"[A-Za-z0-9_@.-]+\.service", service):
+            raise ValueError("invalid runtime manifest drop-ins")
+        for name in drop_ins:
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+\.conf", name):
+                raise ValueError("invalid runtime drop-in filename")
+            paths.append(Path.home() / ".config/systemd/user" / f"{service}.d" / name)
+    saved = {}
+    for path in paths:
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ValueError("rollback target must be a regular file")
+        saved[path] = (path.read_bytes(), path.stat().st_mode & 0o777) if path.is_file() else None
+    return saved, service
+
+
+def _restore_update_config(saved: dict[Path, tuple[bytes, int] | None]) -> None:
+    for path, prior in saved.items():
+        if prior is None:
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+            elif path.exists():
+                raise ValueError("rollback target changed type")
+            continue
+        content, mode = prior
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix=".superagent-rollback-", dir=path.parent)
+        try:
+            os.fchmod(fd, mode)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, path)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+
+
+def _plugin_link_snapshot(profile_home: Path) -> dict[str, tuple[str, str | None]]:
+    directory = profile_home / "plugins"
+    if not directory.is_dir():
+        return {}
+    result = {}
+    for path in directory.iterdir():
+        if path.is_symlink():
+            result[path.name] = ("link", os.readlink(path))
+        elif path.is_dir():
+            result[path.name] = ("directory", None)
+        else:
+            result[path.name] = ("other", None)
+    return result
+
+
+def _restore_managed_plugin_links(profile_home: Path, root: Path, saved: dict[str, tuple[str, str | None]]) -> None:
+    """Restore links only when their current target belongs to this managed release root."""
+    directory = profile_home / "plugins"
+    current = _plugin_link_snapshot(profile_home)
+    for name in sorted(set(saved) | set(current)):
+        old = saved.get(name)
+        now = current.get(name)
+        if old == now:
+            continue
+        path = directory / name
+        if now is not None:
+            if now[0] != "link":
+                continue
+            try:
+                path.resolve(strict=False).relative_to((root / "releases").resolve())
+            except ValueError:
+                continue
+        if old is None:
+            if path.is_symlink():
+                path.unlink()
+        elif old[0] == "link":
+            directory.mkdir(parents=True, exist_ok=True)
+            temporary = directory / (".superagent-restore-" + name)
+            if temporary.exists() or temporary.is_symlink():
+                raise ValueError("rollback temporary plugin path already exists")
+            try:
+                temporary.symlink_to(old[1], target_is_directory=True)
+                os.replace(temporary, path)
+            finally:
+                if temporary.is_symlink():
+                    temporary.unlink()
+        # Hand-installed directories were moved to the managed backup directory;
+        # leave them intact and report incomplete until they can be identified.
+
+
+def _assert_service_quiescent(name: str, *, cgroup_root: Path = Path("/sys/fs/cgroup")) -> None:
+    """Require proof that systemd's service control group contains no processes."""
+    result = _run(["systemctl", "--user", "show", name, "--property=ControlGroup", "--value"])
+    if result.returncode != 0:
+        raise RuntimeError("service control group unavailable")
+    group = result.stdout.strip()
+    if not group:
+        return
+    relative = Path(group)
+    if not relative.is_absolute() or ".." in relative.parts:
+        raise RuntimeError("invalid service control group")
+    events = cgroup_root.joinpath(*relative.parts[1:]) / "cgroup.events"
+    try:
+        fields = dict(line.split(None, 1) for line in events.read_text().splitlines())
+    except (OSError, ValueError):
+        raise RuntimeError("service control group state unavailable") from None
+    if fields.get("populated") != "0":
+        raise RuntimeError("service control group is not empty")
+
+
 def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     root = _managed_root(args)
     current = root / "current"
     previous = current.resolve() if current.is_symlink() else None
     profile_home = Path(plan["profile_home"])
+    try:
+        saved_config, gateway_service = _update_config_snapshot(args, profile_home, root)
+        saved_links = _plugin_link_snapshot(profile_home)
+    except (OSError, ValueError) as exc:
+        print(json.dumps({"status": "blocked", "reason": "rollback_snapshot_failed", "error": type(exc).__name__}))
+        return 1
     services = {
-        "gateway": f"hermes-gateway-{args.profile}.service",
+        "gateway": gateway_service,
         "worker": f"superagent-worker-{args.profile}.service",
         "memory": f"superagent-memory-{args.profile}.service",
     }
@@ -1164,10 +1400,34 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         label: _run(["systemctl", "--user", "is-active", "--quiet", name]).returncode == 0
         for label, name in services.items()
     }
+    # A failed or inactive unit can still own uninterruptible processes.
+    # Refuse to touch code before proving their cgroups are empty.
+    try:
+        for label, name in services.items():
+            if not was_active[label]:
+                _assert_service_quiescent(name)
+    except RuntimeError as exc:
+        print(json.dumps({"status": "blocked", "reason": "service_stop_unproven",
+                          "service": name, "error": str(exc)}))
+        return 1
+    stopped = []
     try:
         for label, name in services.items():
             if was_active[label]:
                 _run(["systemctl", "--user", "stop", name], check=True)
+                _assert_service_quiescent(name)
+                stopped.append(name)
+    except Exception as exc:
+        restart_errors = []
+        for stopped_name in reversed(stopped):
+            if _run(["systemctl", "--user", "start", stopped_name]).returncode:
+                restart_errors.append(stopped_name)
+        print(json.dumps({"status": "blocked", "reason": "service_stop_unproven",
+                          "service": name, "error": type(exc).__name__,
+                          "restart_errors": restart_errors}))
+        return 1
+    started_during_update = []
+    try:
         status = install(args, plan)
         if status != 0:
             raise RuntimeError("install failed")
@@ -1180,16 +1440,53 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         _run(["systemctl", "--user", "daemon-reload"], check=True)
         for label, name in services.items():
             if was_active[label]:
+                # A failed start may still have launched a process; record it
+                # before calling systemd so recovery must stop it as well.
+                started_during_update.append((label, name))
                 _run(["systemctl", "--user", "start", name], check=True)
         return 0
     except Exception as exc:
+        rollback_errors = []
+        for label, name in reversed(started_during_update):
+            try:
+                _run(["systemctl", "--user", "stop", name], check=True)
+                _assert_service_quiescent(name)
+            except Exception:
+                rollback_errors.append(f"stop-{label}")
+        if rollback_errors:
+            # Never swap code or configuration underneath an unproven stop.
+            print(json.dumps({"status": "rollback-incomplete", "rollback_errors": rollback_errors,
+                              "error": str(exc), "release": str(current.resolve()) if current.is_symlink() else None}, indent=2))
+            return 1
+        # Overlay assets can span skills, identity and memories. Their rollback
+        # needs its own receipt; do not report full recovery without one.
+        if (REPO / "overlay").is_dir() and not getattr(args, "skip_overlay", False):
+            rollback_errors.append("overlay-unverified")
         if previous is not None:
-            activate_release(argparse.Namespace(**{**vars(args), "release": previous}))
-        _run(["systemctl", "--user", "daemon-reload"])
+            try:
+                if activate_release(argparse.Namespace(**{**vars(args), "release": previous})) != 0:
+                    rollback_errors.append("release")
+            except Exception:
+                rollback_errors.append("release")
+        try:
+            _restore_update_config(saved_config)
+        except (OSError, ValueError):
+            rollback_errors.append("configuration")
+        try:
+            _restore_managed_plugin_links(profile_home, root, saved_links)
+            if _plugin_link_snapshot(profile_home) != saved_links:
+                rollback_errors.append("plugin-links")
+            if previous is None and current.is_symlink():
+                rollback_errors.append("release")
+        except OSError:
+            rollback_errors.append("plugin-links")
+        if _run(["systemctl", "--user", "daemon-reload"]).returncode:
+            rollback_errors.append("daemon-reload")
         for label, name in services.items():
-            if was_active[label]:
-                _run(["systemctl", "--user", "start", name])
-        print(json.dumps({"status": "rolled-back", "error": str(exc),
+            if was_active[label] and _run(["systemctl", "--user", "start", name]).returncode:
+                rollback_errors.append(f"restart-{label}")
+        print(json.dumps({"status": "rollback-incomplete" if rollback_errors else "rolled-back",
+                          "rollback_errors": rollback_errors, "error": str(exc),
                           "release": str(previous) if previous else None}, indent=2))
         return 1
 

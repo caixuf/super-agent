@@ -593,6 +593,9 @@ def test_slash_commands_answer_from_the_ledger_without_a_model_turn(tmp_path, mo
         "sess-1" if key == "HERMES_SESSION_ID" else "route-1" if key == "HERMES_SESSION_KEY" else default)
     monkeypatch.setitem(sys.modules, "gateway", gateway)
     monkeypatch.setitem(sys.modules, "gateway.session_context", session_context)
+    # This scenario exercises the resolver-unavailable branch even when another
+    # test has imported the real Hermes command registry into the same process.
+    monkeypatch.setitem(sys.modules, "hermes_cli.commands", None)
 
     class CommandCtx(Ctx):
         def __init__(self, *args, **kwargs):

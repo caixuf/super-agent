@@ -222,3 +222,25 @@ def test_active_snapshot_drift_during_judgment_does_not_publish_stale_verdict(
         active = [row for row in statuses() if row['status'] == 'active']
         assert old['fact_id'] in [row['fact_id'] for row in active]
         assert not any(row['statement'] == '今后回答尽可能详细。' for row in active)
+
+
+def test_exact_identifier_fast_path_preserves_shared_and_private_scopes(tmp_path, configured, monkeypatch):
+    with configured(tmp_path):
+        shared = memory_store.write_fact(
+            "Shared diagnostic marker CASE_731_SHARED.", user_id="u", agent_id="a", subject="team decision", source="manual")
+        private = memory_store.write_fact(
+            "Private diagnostic marker CASE_731_SHARED.", user_id="u", agent_id="a", subject="personal note",
+            source="manual", tags={"source_trust": "completed_user_turn", "profile": "p"})
+        memory_store.flush_background(timeout=30)
+        def forbidden_embedding(*args, **kwargs):
+            raise AssertionError("exact identifier unexpectedly invoked vector lookup")
+        monkeypatch.setattr(memory_store, "_knn_rowids", forbidden_embedding)
+        owner = memory_store.recall_facts("CASE_731_SHARED", user_id="u", agent_id="a", profile="p", shared_legacy=True)
+        other = memory_store.recall_facts("CASE_731_SHARED", user_id="u", agent_id="b", profile="q", shared_legacy=True)
+        # No exact hit correctly falls through to semantic search; provide an
+        # empty synthetic vector result while testing cross-team isolation.
+        monkeypatch.setattr(memory_store, "_knn_rowids", lambda *a, **k: [])
+        outsider = memory_store.recall_facts("CASE_731_SHARED", user_id="other-team", agent_id="b", profile="q", shared_legacy=True)
+        assert {shared["fact_id"], private["fact_id"]}.issubset({x["fact_id"] for x in owner["results"]})
+        assert [x["fact_id"] for x in other["results"]] == [shared["fact_id"]]
+        assert not outsider.get("results")

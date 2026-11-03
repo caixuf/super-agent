@@ -75,7 +75,7 @@ def _plugin_list(text: str, key: str) -> list[str] | None:
 # --------------------------------------------------------------------------- #
 # 落位（既有契约）
 # --------------------------------------------------------------------------- #
-def test_dry_run_plans_plugins_and_both_patch_scripts(tmp_path):
+def test_dry_run_plans_plugins_and_current_card_patch_sequence(tmp_path):
     home = tmp_path / "home"
     proc = _run(home, "--dry-run")
     assert proc.returncode == 0, proc.stderr
@@ -92,8 +92,8 @@ def test_dry_run_plans_plugins_and_both_patch_scripts(tmp_path):
     assert "apply_feishu_card_replies.py --check" in out
     assert "patch_card_finalize.py --check" in out
     assert "patch_card_finalize.py --apply" in out
-    assert "patch_card_markdown_native.py --check" in out
-    assert "patch_card_markdown_native.py --apply" in out
+    assert "CardKit 2.0 原生富文本由版本化补丁提供" in out
+    assert "patch_card_markdown_native.py --apply" not in out
     assert "patch_feishu_delivery_uuid.py --hermes-root" in out
 
     # dry-run 只打印，不建目录、不写文件。
@@ -499,7 +499,9 @@ def test_full_patch_install_configures_fenced_delivery_from_real_host_copy(tmp_p
     import yaml
     host = Path.home() / ".hermes/hermes-agent"
     files = ["gateway/stream_consumer.py", "gateway/stream_consumer_transport.py",
-             "plugins/platforms/feishu/adapter.py"]
+             "gateway/stream_consumer_fallback.py", "gateway/run.py", "gateway/run_turn.py",
+             "gateway/run_turn_progress.py", "gateway/run_busy.py", "gateway/platforms/base.py",
+             "gateway/session_identity.py", "plugins/platforms/feishu/adapter.py"]
     if not all((host / path).is_file() for path in files):
         pytest.skip("Hermes source tree unavailable")
     scratch = tmp_path / "hermes"
@@ -510,7 +512,14 @@ def test_full_patch_install_configures_fenced_delivery_from_real_host_copy(tmp_p
     source = tmp_path / "source"
     source.mkdir()
     home = tmp_path / "profile"
-    result = _run(home, "--analysis-root", str(source), "--skip-worker",
+    # The test uses a copied host tree and never starts a gateway. Supply a
+    # controlled CLI stub instead of depending on an unrelated shell PATH.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    hermes = bindir / "hermes"
+    hermes.write_text("#!/bin/sh\nexit 0\n")
+    hermes.chmod(0o755)
+    result = _run(home, "--analysis-root", str(source), "--skip-worker", path_prefix=bindir,
                   env_extra={"HERMES_AGENT_DIR": str(scratch), "PLUGIN_ENABLE_MODE": "merge"})
     assert result.returncode == 0, result.stderr
     settings = yaml.safe_load((home / "config.yaml").read_text())["plugins"]["entries"]["durable-dispatch"]["settings"]
@@ -553,7 +562,9 @@ def test_fresh_profile_is_created_and_gateway_started(tmp_path):
     import pytest
     host = Path.home() / ".hermes/hermes-agent"
     files = ["gateway/stream_consumer.py", "gateway/stream_consumer_transport.py",
-             "plugins/platforms/feishu/adapter.py"]
+             "gateway/stream_consumer_fallback.py", "gateway/run.py", "gateway/run_turn.py",
+             "gateway/run_turn_progress.py", "gateway/run_busy.py", "gateway/platforms/base.py",
+             "gateway/session_identity.py", "plugins/platforms/feishu/adapter.py"]
     if not all((host / rel).is_file() for rel in files):
         pytest.skip("Hermes source tree unavailable")
     copy = tmp_path / "hermes-source"

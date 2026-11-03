@@ -26,6 +26,10 @@ if PM_VENV.is_dir() and str(PM_VENV) not in sys.path:
 
 
 def test_reproduce_real_authority_validation(tmp_path, monkeypatch):
+    # This legacy HFC integration is optional and requires its installed
+    # package, not merely a directory that happens to be a Python venv.
+    pytest.importorskip("hermes_feishu_card.admission_completion", reason="installed HFC package unavailable")
+    pytest.importorskip("hermes_feishu_card.hook_runtime", reason="installed HFC package unavailable")
     async def _test():
         home_path = tmp_path / ".hermes" / "profiles" / "caixuf"
         home_path.mkdir(parents=True, exist_ok=True)

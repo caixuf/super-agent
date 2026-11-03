@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import logging
 from pathlib import Path
 import re
 import sys
@@ -41,7 +42,21 @@ def _engine(ctx):
 def register(ctx):
     if ctx.get_config('enabled', False) is not True:
         return
-    engine = _engine(ctx)
+    if ctx.get_config('gateway_dispatch.enabled', False) is True:
+        # The host bootstrap requires the canonical Registry class. Loading a
+        # second file-based copy here creates a distinct Python type and makes
+        # the real dispatcher reject otherwise valid registry instances.
+        root = ctx.get_config('engine_root', '')
+        if not isinstance(root, str) or not Path(root).is_absolute():
+            raise ValueError('absolute engine_root required')
+        expected = (Path(root).resolve(strict=True) / 'agentcore/colleague_registry.py').resolve(strict=True)
+        if str(Path(root).resolve()) not in sys.path:
+            sys.path.insert(0, str(Path(root).resolve()))
+        engine = importlib.import_module('agentcore.colleague_registry')
+        if Path(engine.__file__).resolve(strict=True) != expected:
+            raise RuntimeError('colleague_registry_origin_mismatch')
+    else:
+        engine = _engine(ctx)
     team_id = ctx.get_config('team_id')
     primary_id = ctx.get_config('primary_id')
     registry_path = ctx.get_config('registry_path')
@@ -140,6 +155,75 @@ def register(ctx):
         from agentcore import colleague_gateway_service as gateway_service
 
         gateway_service.configure_session_env(get_session_env)
+
+        if ctx.get_config('gateway_dispatch.tool_backend.enabled', False) is True:
+            entries = ctx.get_config('gateway_dispatch.tool_backend.members', None)
+            state_dir = ctx.get_config('gateway_dispatch.tool_backend.state_dir', None)
+            if not isinstance(state_dir, str):
+                raise ValueError('trusted_dispatch_state_dir_required')
+            host_path = Path(__file__).resolve().with_name('host_runtime.py')
+            spec = importlib.util.spec_from_file_location('_colleague_host_runtime_' + str(id(ctx)), host_path)
+            if spec is None or spec.loader is None:
+                raise ImportError('colleague_host_runtime_unavailable')
+            host_runtime = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(host_runtime)
+            bootstrap = host_runtime.install_tool_dispatcher(
+                service_profile_name=ctx.profile_name, registry=registry,
+                supervisor=engine.Supervisor(team_id), entries=entries, state_dir=state_dir)
+            try:
+                ctx.on_unload(bootstrap.close)
+                for entry in entries:
+                    try:
+                        bootstrap.provisioner.provision(entry['member_id'], entry['generation'])
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning(
+                            "colleague provision failed for %s: %s",
+                            entry['member_id'], type(exc).__name__)
+                        try:
+                            registry.observe_runtime(supervisor=engine.Supervisor(team_id),
+                                                     member_id=entry['member_id'],
+                                                     generation=entry['generation'], state='unknown')
+                        except Exception:
+                            logging.getLogger(__name__).warning("colleague runtime status update failed")
+            except BaseException:
+                bootstrap.close()
+                raise
+        elif ctx.get_config('gateway_dispatch.safe_backend.enabled', False) is True:
+            # The mapping is a host-owned configuration, never model input.
+            # Bootstrap owns its connections and is disposed with the plugin.
+            entries = ctx.get_config('gateway_dispatch.safe_backend.members', None)
+            state_dir = ctx.get_config('gateway_dispatch.safe_backend.state_dir', None)
+            if not isinstance(state_dir, str):
+                raise ValueError('trusted_dispatch_state_dir_required')
+            host_path = Path(__file__).resolve().with_name('host_runtime.py')
+            spec = importlib.util.spec_from_file_location('_colleague_host_runtime_' + str(id(ctx)), host_path)
+            if spec is None or spec.loader is None:
+                raise ImportError('colleague_host_runtime_unavailable')
+            host_runtime = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(host_runtime)
+            bootstrap = host_runtime.install_safe_dispatcher(
+                service_profile_name=ctx.profile_name, registry=registry,
+                supervisor=engine.Supervisor(team_id), entries=entries, state_dir=state_dir)
+            try:
+                ctx.on_unload(bootstrap.close)
+                for entry in entries:
+                    try:
+                        bootstrap.provisioner.provision(entry['member_id'], entry['generation'])
+                    except Exception as exc:
+                        # One unavailable member must not prevent other members or
+                        # the team tools from loading. Keep its status truthful.
+                        logging.getLogger(__name__).warning(
+                            "colleague provision failed for %s: %s",
+                            entry['member_id'], type(exc).__name__)
+                        try:
+                            registry.observe_runtime(supervisor=engine.Supervisor(team_id),
+                                                     member_id=entry['member_id'],
+                                                     generation=entry['generation'], state='unknown')
+                        except Exception:
+                            logging.getLogger(__name__).warning("colleague runtime status update failed")
+            except BaseException:
+                bootstrap.close()
+                raise
 
         def dispatch_context(session_id):
             if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 512:

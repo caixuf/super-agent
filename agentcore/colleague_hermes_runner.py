@@ -143,7 +143,8 @@ class HermesGatewaySessionCreator:
     """
 
     def __init__(self, connection_for_profile: Callable, *, cwd_for_profile: Callable,
-                 store_factory: Callable | None = None):
+                 store_factory: Callable | None = None, toolsets: tuple[str, ...] | None = None,
+                 session_options_for_profile: Callable | None = None):
         """``store_factory(connection)`` builds the host's session store.
 
         The store belongs to the host runtime; this package only drives the
@@ -156,6 +157,12 @@ class HermesGatewaySessionCreator:
         self.connection_for_profile = connection_for_profile
         self.cwd_for_profile = cwd_for_profile
         self.store_factory = store_factory
+        if toolsets is not None and (not isinstance(toolsets, tuple) or any(not isinstance(x, str) or not x for x in toolsets)):
+            raise ValueError("trusted_toolsets_required")
+        self.toolsets = toolsets
+        if session_options_for_profile is not None and not callable(session_options_for_profile):
+            raise ValueError("trusted_session_options_provider_required")
+        self.session_options_for_profile = session_options_for_profile
 
     def create(self, profile: str, request_id: str) -> str:
         if self.store_factory is None:
@@ -168,8 +175,20 @@ class HermesGatewaySessionCreator:
         # Stable parameters on every retry; no title lookup, ambient route, or client
         # environment is sent. request_id is consumed by gateway.session_controls,
         # whose durable local receipt maps it back to the exact session ID.
-        snapshot = store.call("session.create", request_id=request_id, source="cli",
-                             cwd=cwd, row_cwd="")
+        params = {"request_id": request_id, "source": "cli", "cwd": cwd, "row_cwd": ""}
+        if self.toolsets is not None:
+            params["toolsets"] = list(self.toolsets)
+        if self.session_options_for_profile is not None:
+            options = self.session_options_for_profile(profile)
+            allowed = {"safe_mode", "model", "provider", "base_url", "api_key"}
+            if not isinstance(options, dict) or set(options) - allowed:
+                raise ValueError("invalid_trusted_session_options")
+            if "safe_mode" in options and type(options["safe_mode"]) is not bool:
+                raise ValueError("invalid_trusted_session_options")
+            if any(not isinstance(value, str) or not value.strip() for key, value in options.items() if key != "safe_mode"):
+                raise ValueError("invalid_trusted_session_options")
+            params.update(options)
+        snapshot = store.call("session.create", **params)
         if not isinstance(snapshot, dict):
             raise RuntimeError("invalid_hermes_session_create_result")
         session_id = snapshot.get("stored_session_id") or snapshot.get("session_id")

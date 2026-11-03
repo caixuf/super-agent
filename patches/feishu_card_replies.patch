@@ -1,8 +1,15 @@
 diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adapter.py
-index 46fbeae062..703e5a7d41 100644
 --- a/plugins/platforms/feishu/adapter.py
 +++ b/plugins/platforms/feishu/adapter.py
-@@ -69,6 +69,9 @@ _LARK_SDK_IMPORTS = (
+@@ -35,6 +35,7 @@
+ import threading
+ import time
+ import uuid
++import weakref
+ from collections import OrderedDict
+ from dataclasses import dataclass, field
+ from datetime import datetime
+@@ -69,6 +70,9 @@
          "DeleteMessageRequest", "GetMessageResourceRequest", "P2ImMessageMessageReadV1",
          "ReplyMessageRequest", "ReplyMessageRequestBody",
          "UpdateMessageRequest", "UpdateMessageRequestBody",
@@ -12,7 +19,59 @@ index 46fbeae062..703e5a7d41 100644
      )),
      ("lark_oapi.core", ("AccessTokenType", "HttpMethod")),
      ("lark_oapi.core.const", ("FEISHU_DOMAIN", "LARK_DOMAIN")),
-@@ -322,6 +325,12 @@ class FeishuAdapterSettings:
+@@ -104,6 +108,51 @@
+ 
+ 
+ logger = logging.getLogger(__name__)
++
++
++#: 卡片/文本原地更新失败后是否值得重试。
++#:
++#: 与新消息发送路径（``_feishu_send_with_retry``）不同，这里先判断可恢复性：
++#: 一次 DNS 抖动重试就能过，而 4xx 语义错误重试只会拖长降级时间。
++_FEISHU_UPDATE_ATTEMPTS = 3
++_FEISHU_UPDATE_RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
++
++
++def _feishu_update_retryable(exc: BaseException) -> bool:
++    """这个异常重试一次有没有可能成功。"""
++    import requests as _requests  # 局部导入：adapter 顶层不依赖 requests 必定可用
++
++    if isinstance(exc, (_requests.ConnectionError, _requests.Timeout)):
++        return True
++    if isinstance(exc, _requests.HTTPError):
++        response = getattr(exc, "response", None)
++        status = getattr(response, "status_code", None)
++        return status in _FEISHU_UPDATE_RETRYABLE_STATUS
++    # 传输层原始异常（DNS、连接重置）不带 requests 包装时也按可恢复处理。
++    return isinstance(exc, (ConnectionError, TimeoutError))
++
++
++async def _feishu_update_with_retry(call, *, what: str, attempts: int = _FEISHU_UPDATE_ATTEMPTS):
++    """执行一次原地更新调用，可恢复故障按指数退避重试。
++
++    ``call`` 是无参可调用对象，每次重试重新发一次请求。失败到第 ``attempts`` 次
++    才把最后一个异常抛出去 —— 调用方原有的降级路径因此保持不变，只是多争取了几次。
++    """
++    last: BaseException | None = None
++    for attempt in range(attempts):
++        try:
++            return await call()
++        except Exception as exc:  # noqa: BLE001 — 分类交给 _feishu_update_retryable
++            last = exc
++            if not _feishu_update_retryable(exc) or attempt >= attempts - 1:
++                raise
++            wait_seconds = 2 ** attempt
++            logger.warning(
++                "[Feishu] %s attempt %d/%d failed; retrying in %ds: %s",
++                what, attempt + 1, attempts, wait_seconds, exc,
++            )
++            await asyncio.sleep(wait_seconds)
++    raise last if last is not None else RuntimeError("unreachable")
+ 
+ # --- Regex patterns ---
+ _MARKDOWN_HINT_RE = re.compile(
+@@ -322,6 +371,12 @@
      allow_bots: str = "none"  # "none" | "mentions" | "all"
      require_mention: bool = True
      allow_all_dm: bool = False  # resolved per-profile so multiplexed adapters honor their own .env
@@ -25,17 +84,18 @@ index 46fbeae062..703e5a7d41 100644
  
  
  @dataclass
-@@ -1329,6 +1338,9 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -1329,6 +1384,10 @@
          self._pending_drain_scheduled = False
          self._pending_inbound_max_depth = 1000  # cap queue; drop oldest beyond
          self._chat_locks: collections.OrderedDict[str, asyncio.Lock] = collections.OrderedDict()  # chat_id → lock (per-chat serial processing, LRU-bounded)
 +        # 卡片回复：message_id → 首帧时间戳（用于长任务显示运行时长）；LRU 限长防泄漏。
 +        self._card_message_ids: collections.OrderedDict[str, float] = collections.OrderedDict()
-+        self._active_live_card_per_chat: dict[str, dict[str, Any]] = {}
++        self._active_live_card_per_chat: dict[tuple[str, str], dict[str, Any]] = {}
++        self._live_card_start_locks = weakref.WeakValueDictionary()
          self._chat_info_cache: dict[str, dict[str, Any]] = {}
          self._message_text_cache: OrderedDict[str, Optional[str]] = OrderedDict()
          self._app_lock_identity: Optional[str] = None
-@@ -1418,6 +1430,8 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -1418,6 +1477,8 @@
              default_group_policy=str(extra.get("default_group_policy", "")).strip().lower(),
              group_rules=group_rules, allow_bots=allow_bots, allow_all_dm=allow_all_dm,
              require_mention=_to_boolean(extra.get("require_mention", _get_scoped_secret("FEISHU_REQUIRE_MENTION", "true"))),
@@ -44,35 +104,54 @@ index 46fbeae062..703e5a7d41 100644
          )
  
      def _apply_settings(self, settings: FeishuAdapterSettings) -> None:
-@@ -1668,6 +1682,51 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -1427,6 +1488,8 @@
+         self._allowed_group_users = set(settings.allowed_group_users)
+         self._admins = set(settings.admins)
+         self._default_group_policy = settings.default_group_policy or settings.group_policy
++        self.REQUIRES_EDIT_FINALIZE = bool(self._card_replies)
++        self.PERSISTENT_STREAM_MESSAGE = bool(self._card_replies)
+ 
+     def _build_event_handler(self) -> Any:
+         if EventDispatcherHandler is None:
+@@ -1668,6 +1731,61 @@
          prefer_post = bool(_MARKDOWN_HINT_RE.search(formatted))
          last_response = None
  
-+        # 优先收口正在流式等待的首卡（单卡片原地更新核心）
-+        if getattr(self, "_card_replies", False) and chat_id in self._active_live_card_per_chat:
-+            live_info = self._active_live_card_per_chat.pop(chat_id, None)
++        # A topic in a group is a separate conversation even when chat_id is shared.
++        live_key = (chat_id, str((metadata or {}).get("thread_id") or ""))
++        if getattr(self, "_card_replies", False) and live_key in self._active_live_card_per_chat:
++            live_info = self._active_live_card_per_chat[live_key]
++            if (metadata or {}).get("expect_edits") and not (metadata or {}).get("notify"):
++                live_info["content"] = formatted
++                return await self.edit_message(chat_id, live_info["message_id"], formatted)
 +            if live_info:
 +                live_info["stop_event"].set()
 +                hb_task = live_info.get("task")
-+                if hb_task and not hb_task.done():
-+                    hb_task.cancel()
-+                    with contextlib.suppress(Exception):
++                if hb_task:
++                    try:
 +                        await hb_task
++                    except asyncio.CancelledError:
++                        if asyncio.current_task().cancelling():
++                            raise
 +                cid = live_info["message_id"]
 +                final_card = self._build_reply_card(formatted, finalize=True, started_at=live_info["started_at"])
 +                body = self._build_patch_message_body(content=json.dumps(final_card, ensure_ascii=False))
 +                req = self._build_patch_message_request(message_id=cid, request_body=body)
 +                try:
-+                    resp = await self._run_blocking(self._client.im.v1.message.patch, req)
++                    resp = await _feishu_update_with_retry(
++                        lambda: self._run_blocking(self._client.im.v1.message.patch, req),
++                        what="Final card patch",
++                    )
 +                    res = self._finalize_send_result(resp, "update failed")
 +                    if res.success:
 +                        res.message_id = cid
 +                        self._card_message_ids.pop(cid, None)
-+                        return res
-+                    logger.warning("[Feishu] Final card update failed (%s); falling through", res.error)
++                        if self._active_live_card_per_chat.get(live_key) is live_info:
++                            self._active_live_card_per_chat.pop(live_key, None)
++                    return res
 +                except Exception as exc:
-+                    logger.warning("[Feishu] Final card update raised (%s); falling through", exc)
-+                self._card_message_ids.pop(cid, None)
++                    logger.warning("[Feishu] Final card update raised (%s)", exc)
++                    return SendResult(success=False, error="Card update failed")
 +
 +        # 卡片回复（本地增强）：当 card_replies 开启时生效
 +        if getattr(self, "_card_replies", False):
@@ -96,10 +175,11 @@ index 46fbeae062..703e5a7d41 100644
          async def _send_plain(chunk: str) -> Any:
              return await self._feishu_send_with_retry(
                  chat_id=chat_id,
-@@ -1703,6 +1762,159 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -1703,17 +1821,214 @@
              logger.error("[Feishu] Send error: %s", exc, exc_info=True)
              return SendResult(success=False, error=str(exc))
  
+-    async def edit_message(self, chat_id: str, message_id: str, content: str, *, finalize: bool = False) -> SendResult:
 +    # --- 卡片回复（本地增强，card_replies 开启时生效）---
 +    _CARD_ID_MAX = 500
 +
@@ -117,25 +197,24 @@ index 46fbeae062..703e5a7d41 100644
 +
 +    @staticmethod
 +    def _extract_stages_and_clean_text(text: str) -> tuple[str, str]:
++        # Remove private reasoning before extracting visible stage lines, so a
++        # stage-like line inside a reasoning block cannot escape the filter.
++        public = re.sub(r"<think>.*?(?:</think>|\Z)", "", text or "", flags=re.DOTALL)
 +        stages = []
 +        lines = []
-+        for line in (text or "").splitlines():
++        for line in public.splitlines():
 +            if line.startswith("##STAGE:"):
 +                stages.append(line.replace("##STAGE:", "").strip())
 +            else:
 +                lines.append(line)
 +        clean = "\n".join(lines).strip()
-+        m_think = re.search(r"<think>(.*?)</think>", clean, flags=re.DOTALL)
-+        if m_think:
-+            stages.append(m_think.group(1).strip())
-+            clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL).strip()
-+        return "\n\n".join(s for s in stages if s).strip(), clean or text
++        return "\n\n".join(s for s in stages if s).strip(), clean
 +
 +    def _build_reply_card(self, content: str, *, finalize: bool = False,
 +                          is_failed: bool = False, started_at: Optional[float] = None) -> dict[str, Any]:
 +        """CardKit 2.0 企业级工业卡片规范：与灌灌 100% 字节级对齐。"""
 +        import re
-+        name = (str(getattr(self, "_bot_name", "") or "caixuf高手")).strip() or "caixuf高手"
++        name = (str(getattr(self, "_bot_name", "") or "智能助手")).strip() or "智能助手"
 +        elapsed = max(0.0, time.time() - started_at) if started_at is not None else None
 +        extracted_stage, clean_text = self._extract_stages_and_clean_text(content)
 +
@@ -203,7 +282,6 @@ index 46fbeae062..703e5a7d41 100644
 +        footer_items: list[str] = []
 +        if elapsed is not None and elapsed > 0:
 +            footer_items.append(f"耗时: {elapsed:.1f}s")
-+        footer_items.append("执行节点: emily / imfl")
 +
 +        elements.append({
 +            "tag": "column_set",
@@ -227,7 +305,7 @@ index 46fbeae062..703e5a7d41 100644
 +            },
 +            "header": {
 +                "title": {"tag": "plain_text", "content": header_title},
-+                "subtitle": {"tag": "plain_text", "content": "智己 Devcar / MFF 仿真助手"},
++                "subtitle": {"tag": "plain_text", "content": "智能助手"},
 +                "template": header_template,
 +                "icon": {
 +                    "tag": "standard_icon",
@@ -253,36 +331,68 @@ index 46fbeae062..703e5a7d41 100644
 +            self._remember_card_message(result.message_id or "")
 +        return result
 +
-     async def edit_message(self, chat_id: str, message_id: str, content: str, *, finalize: bool = False) -> SendResult:
++    async def edit_message(self, chat_id: str, message_id: str, content: str, *, finalize: bool = False,
++                           metadata: Optional[dict[str, Any]] = None) -> SendResult:
          """Edit a previously sent Feishu text/post message."""
          if not self._client:
-@@ -1710,6 +1922,25 @@ class FeishuAdapter(BasePlatformAdapter):
+             return SendResult(success=False, error="Not connected")
  
          content = self.format_message(content)
  
++        turn_final = bool(finalize and (metadata or {}).get("is_turn_final", True))
 +        # 卡片消息：原地更新卡片内容（流式预览不重排；finalize 帧转绿并摘掉运行时长）。
 +        if getattr(self, "_card_replies", False) and self._is_card_message(message_id):
++            live_key = next((key for key, info in self._active_live_card_per_chat.items()
++                             if key[0] == chat_id and info.get("message_id") == message_id), None)
++            live_info = self._active_live_card_per_chat.get(live_key)
++            if live_info:
++                live_info["content"] = content
++                if turn_final:
++                    live_info["stop_event"].set()
++                    hb_task = live_info.get("task")
++                    if hb_task:
++                        try:
++                            await hb_task
++                        except asyncio.CancelledError:
++                            if asyncio.current_task().cancelling():
++                                raise
 +            card = self._build_reply_card(
-+                content, finalize=finalize, started_at=self._card_message_ids.get(message_id))
++                content, finalize=turn_final, started_at=self._card_message_ids.get(message_id))
 +            body = self._build_patch_message_body(content=json.dumps(card, ensure_ascii=False))
 +            request = self._build_patch_message_request(message_id=message_id, request_body=body)
 +            try:
-+                response = await self._run_blocking(self._client.im.v1.message.patch, request)
++                # 一次 DNS 抖动不该让整条回复永久失去卡片形态：先退避重试，重试耗尽才降级。
++                response = await _feishu_update_with_retry(
++                    lambda: self._run_blocking(self._client.im.v1.message.patch, request),
++                    what="Card patch",
++                )
 +                result = self._finalize_send_result(response, "update failed")
 +                if result.success:
 +                    result.message_id = message_id
-+                    if finalize:
++                    if turn_final:
 +                        self._card_message_ids.pop(message_id, None)
++                        if live_info and live_info.get("message_id") == message_id:
++                            self._active_live_card_per_chat.pop(live_key, None)
 +                    return result
-+                logger.warning("[Feishu] Card update failed (%s); falling back to text edit", result.error)
++                logger.warning("[Feishu] Card update failed (%s)", result.error)
++                return result
 +            except Exception as exc:
-+                logger.warning("[Feishu] Card update raised (%s); falling back to text edit", exc)
-+            self._card_message_ids.pop(message_id, None)
++                logger.warning("[Feishu] Card update raised (%s)", exc)
++                return SendResult(success=False, error="Card update failed")
 +
          async def _update(msg_type: str, payload: str) -> SendResult:
              body = self._build_update_message_body(msg_type=msg_type, content=payload)
              request = self._build_update_message_request(message_id=message_id, request_body=body)
-@@ -1778,6 +2009,23 @@ class FeishuAdapter(BasePlatformAdapter):
+-            response = await self._run_blocking(self._client.im.v1.message.update, request)
++            # 同卡片帧：原地更新也吃网络抖动，重试耗尽才把失败交给调用方降级。
++            response = await _feishu_update_with_retry(
++                lambda: self._run_blocking(self._client.im.v1.message.update, request),
++                what="Message update",
++            )
+             return self._finalize_send_result(response, "update failed")
+ 
+         try:
+@@ -1778,6 +2093,23 @@
          route to ``resolve_gateway_approval()`` and unblock the waiting agent thread."""
          if not self._client:
              return SendResult(success=False, error="Not connected")
@@ -306,90 +416,152 @@ index 46fbeae062..703e5a7d41 100644
          try:
              approval_id = next(self._approval_counter)
              actions = [
-@@ -2562,6 +2810,55 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -2562,6 +2894,61 @@
  
      async def on_processing_start(self, event: MessageEvent) -> None:
          message_id = event.message_id
 +        chat_id = getattr(event.source, "chat_id", "") or ""
++        live_key = (chat_id, str(getattr(event.source, "thread_id", None) or ""))
 +
 +        # 首帧交互卡片（CardKit 2.0 原地流式更新规范）
 +        if getattr(self, "_card_replies", False) and chat_id:
 +            try:
-+                old_live = self._active_live_card_per_chat.pop(chat_id, None)
-+                if old_live:
-+                    old_live["stop_event"].set()
-+                    if old_live.get("task") and not old_live["task"].done():
-+                        old_live["task"].cancel()
++                lock = self._live_card_start_locks.setdefault(live_key, asyncio.Lock())
++                async with lock:
++                    if live_key in self._active_live_card_per_chat:
++                        return  # A follow-up belongs to the existing live card.
 +
-+                started_ts = time.time()
-+                card_res = await self._send_reply_card(
-+                    chat_id=chat_id, content="正在排查处理中...", reply_to=message_id,
-+                    metadata=event.metadata, finalize=False,
-+                )
-+                if card_res.success and card_res.message_id:
-+                    cid = card_res.message_id
-+                    stop_ev = asyncio.Event()
-+                    self._active_live_card_per_chat[chat_id] = {
-+                        "message_id": cid,
-+                        "started_at": started_ts,
-+                        "stop_event": stop_ev,
-+                    }
++                    started_ts = time.time()
++                    card_metadata = dict(event.metadata or {})
++                    if live_key[1]:
++                        card_metadata.setdefault("thread_id", live_key[1])
++                    card_res = await self._send_reply_card(
++                        chat_id=chat_id, content="正在排查处理中...", reply_to=message_id,
++                        metadata=card_metadata, finalize=False,
++                    )
++                    if card_res.success and card_res.message_id:
++                        cid = card_res.message_id
++                        stop_ev = asyncio.Event()
++                        self._active_live_card_per_chat[live_key] = {
++                            "message_id": cid,
++                            "started_at": started_ts,
++                            "stop_event": stop_ev,
++                        }
 +
-+                    async def _heartbeat_worker(c_id=cid, c_chat=chat_id, s_ts=started_ts, ev=stop_ev):
-+                        while not ev.is_set():
-+                            try:
-+                                await asyncio.wait_for(ev.wait(), timeout=2.0)
-+                                break
-+                            except asyncio.TimeoutError:
-+                                pass
-+                            if ev.is_set() or c_chat not in self._active_live_card_per_chat:
-+                                break
-+                            hb_card = self._build_reply_card("正在排查处理中...", finalize=False, started_at=s_ts)
-+                            req = self._build_patch_message_request(
-+                                message_id=c_id,
-+                                request_body=self._build_patch_message_body(content=json.dumps(hb_card, ensure_ascii=False)),
-+                            )
-+                            try:
-+                                await self._run_blocking(self._client.im.v1.message.patch, req)
-+                            except Exception:
-+                                pass
++                        async def _heartbeat_worker(c_id=cid, c_chat=live_key, s_ts=started_ts, ev=stop_ev):
++                            while not ev.is_set():
++                                try:
++                                    await asyncio.wait_for(ev.wait(), timeout=2.0)
++                                    break
++                                except asyncio.TimeoutError:
++                                    pass
++                                if ev.is_set() or c_chat not in self._active_live_card_per_chat:
++                                    break
++                                live = self._active_live_card_per_chat.get(c_chat)
++                                if not live or live.get("message_id") != c_id:
++                                    break
++                                hb_card = self._build_reply_card(live.get("content", "正在排查处理中..."), finalize=False, started_at=s_ts)
++                                req = self._build_patch_message_request(
++                                    message_id=c_id,
++                                    request_body=self._build_patch_message_body(content=json.dumps(hb_card, ensure_ascii=False)),
++                                )
++                                try:
++                                    await self._run_blocking(self._client.im.v1.message.patch, req)
++                                except Exception:
++                                    pass
 +
-+                    loop = asyncio.get_running_loop()
-+                    self._active_live_card_per_chat[chat_id]["task"] = loop.create_task(_heartbeat_worker())
++                        loop = asyncio.get_running_loop()
++                        self._active_live_card_per_chat[live_key]["task"] = loop.create_task(_heartbeat_worker())
 +            except Exception as exc:
 +                logger.warning("[Feishu] Failed to spawn initial live card: %s", exc)
 +
          if not self._reactions_enabled() or not message_id or message_id in self._pending_processing_reactions:
              return
          reaction_id = await self._add_reaction(message_id, _FEISHU_REACTION_IN_PROGRESS)
-@@ -2585,6 +2882,22 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -2574,13 +2961,39 @@
+ 
+     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
+         message_id = event.message_id
++        if outcome is ProcessingOutcome.FAILURE:
++            chat_id = getattr(event.source, "chat_id", "") or ""
++            live_key = (chat_id, str(getattr(event.source, "thread_id", None) or ""))
++            live_info = self._active_live_card_per_chat.get(live_key) if getattr(self, "_card_replies", False) else None
++            if live_info:
++                live_info["stop_event"].set()
++                hb_task = live_info.get("task")
++                if hb_task:
++                    try:
++                        await hb_task
++                    except asyncio.CancelledError:
++                        if asyncio.current_task().cancelling():
++                            raise
++                fail_card = self._build_reply_card("任务执行异常或超时，未能完成。", finalize=True, is_failed=True, started_at=live_info["started_at"])
++                req = self._build_patch_message_request(
++                    message_id=live_info["message_id"],
++                    request_body=self._build_patch_message_body(content=json.dumps(fail_card, ensure_ascii=False)),
++                )
++                try:
++                    response = await self._run_blocking(self._client.im.v1.message.patch, req)
++                    result = self._finalize_send_result(response, "failure card update failed")
++                    if result.success and self._active_live_card_per_chat.get(live_key) is live_info:
++                        self._active_live_card_per_chat.pop(live_key, None)
++                        self._card_message_ids.pop(live_info["message_id"], None)
++                    elif not result.success:
++                        logger.warning("[Feishu] Failed to mark card failed: %s", result.error)
++                except Exception as exc:
++                    logger.warning("[Feishu] Failed to mark card failed: %s", exc)
+         if not self._reactions_enabled() or not message_id:
+             return
+         start_reaction_id = self._pending_processing_reactions.get(message_id)
+         if start_reaction_id:
+             if not await self._remove_reaction(message_id, start_reaction_id):
+-                # Don't stack a second badge on a Typing we couldn't remove (UI would read as both
+-                # "working" and "done/failed"); keep the handle so LRU eventually evicts it.
+                 return
              self._pending_processing_reactions.pop(message_id, None)
          if outcome is ProcessingOutcome.FAILURE:
-             await self._add_reaction(message_id, _FEISHU_REACTION_FAILURE)
-+            chat_id = getattr(event.source, "chat_id", "") or ""
-+            if getattr(self, "_card_replies", False) and chat_id in self._active_live_card_per_chat:
-+                live_info = self._active_live_card_per_chat.pop(chat_id, None)
-+                if live_info:
-+                    live_info["stop_event"].set()
-+                    if live_info.get("task") and not live_info["task"].done():
-+                        live_info["task"].cancel()
-+                    fail_card = self._build_reply_card("任务执行异常或超时，未能完成。", finalize=True, is_failed=True, started_at=live_info["started_at"])
-+                    req = self._build_patch_message_request(
-+                        message_id=live_info["message_id"],
-+                        request_body=self._build_patch_message_body(content=json.dumps(fail_card, ensure_ascii=False)),
-+                    )
-+                    try:
-+                        await self._run_blocking(self._client.im.v1.message.patch, req)
-+                    except Exception as exc:
-+                        logger.warning("[Feishu] Failed to mark card failed: %s", exc)
+@@ -3743,6 +4156,8 @@
+             logger.debug("[Feishu] Failed to fetch last message in thread %s: %s", thread_id, exc)
+         return None
  
-     # --- Webhook server and security ---
-     def _record_webhook_anomaly(self, remote_ip: str, status: str) -> None:
-@@ -4014,6 +4327,14 @@ class FeishuAdapter(BasePlatformAdapter):
-     def _build_update_message_request(message_id: str, request_body: Any) -> Any:
++    DURABLE_DELIVERY_UUID = True
++
+     async def _send_raw_message(
+         self, *, chat_id: str, msg_type: str, payload: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]],
+     ) -> Any:
+@@ -3750,7 +4165,7 @@
+         effective_reply_to = reply_to or ((metadata or {}).get("reply_to_message_id") if thread_id else None)
+         if effective_reply_to:
+             body = self._build_reply_message_body(
+-                content=payload, msg_type=msg_type, reply_in_thread=bool(thread_id), uuid_value=str(uuid.uuid4()),
++                content=payload, msg_type=msg_type, reply_in_thread=bool(thread_id), uuid_value=str((metadata or {}).get("_delivery_uuid") or uuid.uuid4()),
+             )
+             request = self._build_reply_message_request(effective_reply_to, body)
+             return await self._run_blocking(self._client.im.v1.message.reply, request)
+@@ -3762,7 +4177,7 @@
+         else:
+             receive_id, receive_id_type = chat_id, "open_id" if chat_id.startswith("ou_") else "chat_id"
+         body = self._build_create_message_body(
+-            receive_id=receive_id, msg_type=msg_type, content=payload, uuid_value=str(uuid.uuid4()),
++            receive_id=receive_id, msg_type=msg_type, content=payload, uuid_value=str((metadata or {}).get("_delivery_uuid") or uuid.uuid4()),
+         )
+         request = self._build_create_message_request(receive_id_type, body)
+         return await self._run_blocking(self._client.im.v1.message.create, request)
+@@ -3926,6 +4341,10 @@
+     ) -> Any:
+         last_error: Optional[Exception] = None
+         active_reply_to = reply_to
++        # A retry must identify the same logical delivery, including after an
++        # ambiguous timeout. Preserve the durable caller's explicit identifier.
++        metadata = dict(metadata or {})
++        metadata.setdefault("_delivery_uuid", str(uuid.uuid4()))
+ 
+         async def _raw(reply_target: Optional[str]) -> Any:
+             return await self._send_raw_message(
+@@ -4015,6 +4434,14 @@
          return _sdk_build(UpdateMessageRequest, message_id=message_id, request_body=request_body)
  
-+    @staticmethod
+     @staticmethod
 +    def _build_patch_message_body(*, content: str) -> Any:
 +        return _sdk_build(PatchMessageRequestBody, content=content)
 +
@@ -397,6 +569,7 @@ index 46fbeae062..703e5a7d41 100644
 +    def _build_patch_message_request(message_id: str, request_body: Any) -> Any:
 +        return _sdk_build(PatchMessageRequest, message_id=message_id, request_body=request_body)
 +
-     @staticmethod
++    @staticmethod
      def _build_delete_message_request(message_id: str) -> Any:
          return _sdk_build(DeleteMessageRequest, message_id=message_id)
+ 

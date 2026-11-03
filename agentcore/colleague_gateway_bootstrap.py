@@ -46,7 +46,21 @@ class ColleagueGatewayBootstrap:
         owns_gateway_host: bool,
         all_work_quiescent: Callable | None = None,
         lock_timeout: float = 30,
+        session_toolsets: tuple[str, ...] | None = None,
+        session_options_for_profile: Callable | None = None,
     ):
+        from agentcore.colleague_safe_gateway_backend import SafeGatewayProfileBackend
+        if isinstance(backend, SafeGatewayProfileBackend):
+            # Readiness for this backend is valid only for its own tool-free
+            # safe-mode session policy; do not allow a different policy callback.
+            if (session_toolsets != () or getattr(session_options_for_profile, "__self__", None) is not backend
+                    or getattr(session_options_for_profile, "__func__", None) is not SafeGatewayProfileBackend.session_options
+                    or backend.host is not gateway_host):
+                raise ValueError("safe_backend_policy_mismatch")
+        from agentcore.colleague_tool_gateway_backend import ToolEnabledGatewayProfileBackend
+        if isinstance(backend, ToolEnabledGatewayProfileBackend):
+            if backend.host is not gateway_host:
+                raise ValueError("tool_backend_host_mismatch")
         self.service_profile_name = service_profile_name
         self.gateway_host = gateway_host
         self.owns_gateway_host = owns_gateway_host
@@ -87,6 +101,8 @@ class ColleagueGatewayBootstrap:
                 connection_for_profile=gateway_host.connection_for_profile,
                 cwd_for_profile=self.profile_workdirs.__getitem__,
                 store_factory=session_store_factory,
+                toolsets=session_toolsets,
+                session_options_for_profile=session_options_for_profile,
             )
             self.bindings = HermesSessionBindingStore(
                 registry=registry,

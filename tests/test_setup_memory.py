@@ -153,7 +153,9 @@ def test_installer_new_profile_configures_memory_by_default(tmp_path):
     import pytest
     host = Path.home() / ".hermes/hermes-agent"
     files = ["gateway/stream_consumer.py", "gateway/stream_consumer_transport.py",
-             "plugins/platforms/feishu/adapter.py"]
+             "gateway/stream_consumer_fallback.py", "gateway/run.py", "gateway/run_turn.py",
+             "gateway/run_turn_progress.py", "gateway/run_busy.py", "gateway/platforms/base.py",
+             "gateway/session_identity.py", "plugins/platforms/feishu/adapter.py"]
     if not all((host / rel).is_file() for rel in files):
         pytest.skip("Hermes source tree unavailable")
     class Handler(BaseHTTPRequestHandler):

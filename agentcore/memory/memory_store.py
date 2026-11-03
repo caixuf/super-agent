@@ -1273,6 +1273,23 @@ def recall_facts(
                     if len(candidates) == 1:
                         exact = candidates
                         lookup_mode = 'curated_phrase'
+            if not exact:
+                # Explicit IDs (diagnostic codes, issue keys, test markers) are
+                # address lookups. Resolve a bounded exact token before invoking
+                # an embedding service; keep the same identity/visibility WHERE
+                # clauses as the rest of recall, including shared-team policy.
+                token = (query or "").strip()
+                if re.fullmatch(r"[A-Z0-9_]{8,128}", token) and ("_" in token or any(c.isdigit() for c in token)):
+                    candidates = conn.execute(
+                        "SELECT f.* FROM working_fact f WHERE " + " AND ".join(where) +
+                        " AND (instr(f.statement, ?) > 0 OR instr(f.subject, ?) > 0) "
+                        "ORDER BY f.created_at DESC LIMIT 128",
+                        [*params, token, token],
+                    ).fetchall()
+                    boundary = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(token) + r"(?![A-Za-z0-9_])")
+                    exact = [row for row in candidates if boundary.search(row["statement"] or "") or boundary.search(row["subject"] or "")][:max(1, int(limit))]
+                    if exact:
+                        lookup_mode = "exact_identifier"
             if exact:
                 entries = []
                 for row in exact:

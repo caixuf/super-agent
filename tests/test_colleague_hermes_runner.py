@@ -475,3 +475,44 @@ def test_session_creator_without_a_host_store_factory_refuses_to_guess():
         cwd_for_profile=lambda profile: "/tmp")
     with pytest.raises(RuntimeError, match="session_store_factory_required"):
         creator.create("reviewer_profile", "req-1")
+
+
+def test_gateway_creator_passes_host_selected_empty_toolsets(tmp_path):
+    from agentcore.colleague_hermes_runner import HermesGatewaySessionCreator
+    calls = []
+    class Store:
+        def call(self, method, **kwargs):
+            calls.append((method, kwargs))
+            return {"session_id": ("local-" + "a" * 64)}
+    creator = HermesGatewaySessionCreator(lambda profile: object(), cwd_for_profile=lambda profile: str(tmp_path), store_factory=lambda connection: Store(), toolsets=())
+    assert creator.create("architect", "request") == ("local-" + "a" * 64)
+    assert calls[0][1]["toolsets"] == []
+
+
+def test_gateway_creator_rejects_untrusted_toolset_type():
+    from agentcore.colleague_hermes_runner import HermesGatewaySessionCreator
+    with pytest.raises(ValueError, match="trusted_toolsets_required"):
+        HermesGatewaySessionCreator(lambda profile: object(), cwd_for_profile=lambda profile: "/tmp", toolsets=["terminal"])
+
+
+def test_gateway_creator_accepts_only_trusted_model_options(tmp_path):
+    from agentcore.colleague_hermes_runner import HermesGatewaySessionCreator
+    observed = []
+    class Store:
+        def call(self, method, **kw):
+            observed.append(kw)
+            return {"session_id": "local-" + "a" * 64}
+    options = {"safe_mode": True, "model": "model", "provider": "custom", "base_url": "http://127.0.0.1:1234/v1", "api_key": "example"}
+    creator = HermesGatewaySessionCreator(lambda profile: object(), cwd_for_profile=lambda profile: str(tmp_path), store_factory=lambda connection: Store(), toolsets=(), session_options_for_profile=lambda profile: options)
+    creator.create("architect", "req")
+    assert observed[0]["safe_mode"] is True and observed[0]["toolsets"] == []
+    assert observed[0]["model"] == "model" and observed[0]["request_id"] == "req"
+
+
+def test_gateway_creator_rejects_host_options_that_override_identity(tmp_path):
+    from agentcore.colleague_hermes_runner import HermesGatewaySessionCreator
+    class Store:
+        def call(self, method, **kwargs): pytest.fail("unsafe options reached gateway")
+    creator = HermesGatewaySessionCreator(lambda profile: object(), cwd_for_profile=lambda profile: str(tmp_path), store_factory=lambda connection: Store(), session_options_for_profile=lambda profile: {"request_id": "attacker"})
+    with pytest.raises(ValueError, match="invalid_trusted_session_options"):
+        creator.create("architect", "request")

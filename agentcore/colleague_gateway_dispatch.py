@@ -163,6 +163,12 @@ class GatewayColleagueDispatcher:
                 member=self.registry.role_for_member(supervisor=self.supervisor,member_id=member_id,generation=generation)
                 if member["status"]!="active": raise PermissionError("member_not_accepting_work")
                 ready=self.provisioner.status(member_id,generation)
+                # A host startup may have found this member temporarily offline.
+                # Retry provisioning only before creating a new task intent; never
+                # replay an admitted task to recover a missing worker.
+                if (isinstance(ready,dict) and ready.get("ready") is not True
+                    and ready.get("membership_status")=="active" and ready.get("phase")=="starting"):
+                    ready=self.provisioner.provision(member_id,generation)
                 if not isinstance(ready,dict) or ready.get("ready") is not True: raise RuntimeError("member_not_ready")
             row=self._intent(owner,member_id,generation,request_id,prompt,work,input_id)
             if row["admission_id"]:

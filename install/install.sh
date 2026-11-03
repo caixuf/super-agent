@@ -528,6 +528,12 @@ else
     fail "未找到 hermes CLI；请先安装 Hermes，或明确使用 --skip-patch 仅安装资产"
   fi
 fi
+# Reject an incompatible card host before creating a profile or installing assets.
+if [ "$DRY_RUN" != "1" ] && [ "$DO_PATCH" = "1" ]; then
+  [ -d "$HERMES_AGENT_DIR" ] || fail "Hermes 安装树不存在，无法检查卡片补丁"
+  HERMES_AGENT_DIR="$HERMES_AGENT_DIR" python3 "$REPO_ROOT/patches/apply_feishu_card_replies.py" --preflight \
+    || fail "卡片补丁预检失败，目标 profile 和安装资产未修改"
+fi
 if [ -d "$TARGET_HOME" ]; then
   ok "目标 home 存在"
 else
@@ -553,7 +559,7 @@ step "② 检查本仓源资产"
 for need in identity/SOUL.generic.md identity/agents toolsets patches plugins \
             install/enable_plugins.py install/plugin_defaults.py \
             install/enable_plugins.py install/configure_defaults.py install/configure_delivery.py install/configure_gateway.py install/setup_worker.py install/setup_memory.py install/bootstrap_dependencies.py \
-            patches/feishu_card_replies.patch patches/apply_feishu_card_replies.py \
+            patches/feishu_card_replies.patch patches/apply_feishu_card_replies.py patches/feishu_card_lifecycle.patch patches/apply_feishu_card_lifecycle.py \
             patches/patch_card_finalize.py patches/patch_card_markdown_native.py \
             patches/patch_feishu_update_retry.py patches/patch_feishu_delivery_uuid.py skills; do
   if [ -e "$REPO_ROOT/$need" ]; then ok "$need"
@@ -736,8 +742,7 @@ if [ "$DO_PATCH" = "1" ]; then
     log "    [plan] HERMES_PROFILE_DIR=$TARGET_HOME python3 $APPLY --config"
     log "    [plan] python3 $FINALIZE --check --agent-dir $HERMES_AGENT_DIR"
     log "    [plan] python3 $FINALIZE --apply --agent-dir $HERMES_AGENT_DIR   （仅当 --check 不在位）"
-    log "    [plan] python3 $NATIVE --check --agent-dir $HERMES_AGENT_DIR"
-    log "    [plan] python3 $NATIVE --apply --agent-dir $HERMES_AGENT_DIR   （仅当 --check 不在位）"
+    log "    [plan] CardKit 2.0 原生富文本由版本化补丁提供，不叠加旧表格补丁"
     log "    [plan] python3 $UPDATE_RETRY --check --agent-dir $HERMES_AGENT_DIR"
     log "    [plan] python3 $UPDATE_RETRY --apply --agent-dir $HERMES_AGENT_DIR   （仅当 --check 不在位）"
     log "    [plan] python3 $DELIVERY_UUID --hermes-root $HERMES_AGENT_DIR [--apply]"
@@ -758,12 +763,13 @@ if [ "$DO_PATCH" = "1" ]; then
     else
       fail "卡片终态/同卡补丁重放失败（上游锚点可能已漂移，退出码 2）；人工核对后重跑"
     fi
-    if python3 "$NATIVE" --check --agent-dir "$HERMES_AGENT_DIR"; then
-      skip "卡片原生表格补丁已整块在位"
-    elif python3 "$NATIVE" --apply --agent-dir "$HERMES_AGENT_DIR"; then
-      ok "卡片原生表格补丁已重放（**需重启网关**才生效）"
+    # The pinned CardKit 2.0 renderer already emits markdown in schema 2.0.
+    # Applying the historical 1.0 renderer after it changes the same adapter
+    # and invalidates its release identity. New-card markdown supports tables.
+    if HERMES_AGENT_DIR="$HERMES_AGENT_DIR" python3 "$APPLY" --check; then
+      skip "CardKit 2.0 原生富文本已由版本化卡片补丁提供"
     else
-      fail "卡片原生表格补丁重放失败（上游锚点可能已漂移，退出码 2）；人工核对后重跑"
+      fail "卡片版本校验失败，不能叠加旧表格补丁"
     fi
     # 卡片一开，一条回复就是一串 PATCH 帧；这层补丁给这些原地更新加重试，
     # 否则一次 DNS 抖动就让整条回复降级成纯文本，同一条回复出现两份副本。
@@ -780,6 +786,11 @@ if [ "$DO_PATCH" = "1" ]; then
       ok "消息平台交付 UUID 补丁已应用（需在空闲窗口重启网关）"
     else
       fail "消息平台交付 UUID 补丁失败；请核对 Hermes 版本"
+    fi
+    if HERMES_AGENT_DIR="$HERMES_AGENT_DIR" python3 "$REPO_ROOT/patches/apply_feishu_card_lifecycle.py" --apply; then
+      ok "卡片生命周期补丁已验证或应用"
+    else
+      fail "卡片生命周期补丁不兼容，不能继续部署"
     fi
   fi
 else

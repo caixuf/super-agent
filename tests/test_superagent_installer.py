@@ -602,3 +602,442 @@ def test_install_same_identity_records_release_hash_and_rollback_capability(tmp_
     assert "release_history" in manifest
     doctor = json.loads(_run(tmp_path, "doctor", check=True).stdout)
     assert doctor["release_hash_valid"] is True
+
+
+def test_current_cardkit_is_not_misclassified_as_legacy(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    module = _load_installer()
+    _seed_profile(tmp_path)
+    monkeypatch.setattr(module, "_git_identity", lambda: ("candidate", "candidate"))
+    monkeypatch.setattr(module, "_plugin_names", lambda args: ["example"])
+    monkeypatch.setattr(module, "_external_plugin_sources", lambda args: [])
+    monkeypatch.setattr(module, "_keep_patch_state", lambda root: [])
+    entries = [dict(id=name, in_place=present, state="in-place" if present else "absent") for name, present in (("card-replies", True), ("card-finalize", True), ("card-native-markdown", False), ("card-update-retry", True), ("delivery-uuid", True))]
+    monkeypatch.setattr(module, "_legacy_patch_state", lambda root: entries)
+    monkeypatch.setattr(module, "_profile_home", lambda args: tmp_path / ".hermes/profiles/demo")
+    monkeypatch.setattr(module, "_managed_root", lambda args: tmp_path / ".hermes/superagent/demo")
+    args = SimpleNamespace(hermes_root=tmp_path / ".hermes/hermes-agent", runtime_manifest=None, profile="demo")
+    plan = module.build_plan(args)
+    assert plan["card_implementation"] == "release-cardkit"
+    assert "legacy_card_patches_require_clean_candidate" not in plan["blockers"]
+    entries[2]["in_place"] = True
+    plan = module.build_plan(args)
+    assert "legacy_card_patches_require_clean_candidate" in plan["blockers"]
+
+
+def test_retired_progress_state_is_preserved_for_rollback(tmp_path):
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    data = profile / "plugin-data/agent-plugin-task-progress-b1e89459"
+    data.mkdir(parents=True)
+    (data / "history.json").write_text("existing task history")
+    module._purge_legacy_plugins(profile)
+    assert (data / "history.json").read_text() == "existing task history"
+
+
+def test_failed_update_restores_configuration_and_declared_dropins(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    root = tmp_path / ".hermes/superagent/demo"
+    root.mkdir(parents=True)
+    prior_manifest = root / "install-manifest.json"
+    prior_manifest.write_text("prior manifest")
+    manifest = tmp_path / "runtime.yaml"
+    manifest.write_text("profile: demo\nruntime:\n  drop_ins:\n    10-card.conf:\n      TEST_FLAG: 1\n    20-new.conf:\n      OTHER_FLAG: 1\n")
+    drop = tmp_path / ".config/systemd/user/hermes-gateway-demo.service.d"
+    drop.mkdir(parents=True)
+    existing = drop / "10-card.conf"
+    existing.write_text("old runtime config")
+    original = (profile / "config.yaml").read_bytes()
+    monkeypatch.setattr(module.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(module, "_managed_root", lambda args: root)
+    monkeypatch.setattr(module, "_run", lambda command, **kw: subprocess.CompletedProcess(command, 1 if "is-active" in command else 0, "", ""))
+    def failed_install(args, plan):
+        (profile / "config.yaml").write_text("partially changed")
+        prior_manifest.write_text("partially changed")
+        existing.write_text("new runtime config")
+        (drop / "20-new.conf").write_text("new file")
+        raise RuntimeError("injected failure")
+    monkeypatch.setattr(module, "install", failed_install)
+    args = SimpleNamespace(profile="demo", runtime_manifest=manifest)
+    assert module.update(args, {"profile_home": str(profile)}) == 1
+    assert (profile / "config.yaml").read_bytes() == original
+    assert prior_manifest.read_text() == "prior manifest"
+    assert existing.read_text() == "old runtime config"
+    assert not (drop / "20-new.conf").exists()
+
+
+def test_update_reports_incomplete_rollback_when_plugin_links_drift(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    root = tmp_path / ".hermes/superagent/demo"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(module, "_managed_root", lambda args: root)
+    monkeypatch.setattr(module, "_run", lambda command, **kw: subprocess.CompletedProcess(command, 1 if "is-active" in command else 0, "", ""))
+    def failed_install(args, plan):
+        plugins = profile / "plugins"
+        plugins.mkdir(exist_ok=True)
+        (plugins / "new-plugin").symlink_to(tmp_path / "new-release")
+        raise RuntimeError("injected failure")
+    monkeypatch.setattr(module, "install", failed_install)
+    args = SimpleNamespace(profile="demo", runtime_manifest=None)
+    assert module.update(args, {"profile_home": str(profile)}) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "rollback-incomplete"
+    assert "plugin-links" in report["rollback_errors"]
+
+
+def test_update_controls_gateway_declared_in_runtime_manifest(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    root = tmp_path / ".hermes/superagent/demo"
+    root.mkdir(parents=True)
+    manifest = tmp_path / "runtime.yaml"
+    manifest.write_text("profile: demo\ngateway_service: custom-demo.service\nruntime:\n  drop_ins: {}\n")
+    monkeypatch.setattr(module.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(module, "_managed_root", lambda args: root)
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        active = "is-active" in command and "custom-demo.service" in command
+        return subprocess.CompletedProcess(command, 0 if active or "is-active" not in command else 1, "", "")
+    monkeypatch.setattr(module, "_run", run)
+    def fail(args, plan):
+        raise RuntimeError("injected")
+    monkeypatch.setattr(module, "install", fail)
+    args = SimpleNamespace(profile="demo", runtime_manifest=manifest)
+    assert module.update(args, {"profile_home": str(profile)}) == 1
+    assert any("stop" in cmd and "custom-demo.service" in cmd for cmd in calls)
+    assert any("start" in cmd and "custom-demo.service" in cmd for cmd in calls)
+    assert not any("hermes-gateway-demo.service" in cmd for cmd in calls)
+
+
+def test_failed_update_restores_managed_plugin_links(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    root = tmp_path / ".hermes/superagent/demo"
+    root.mkdir(parents=True)
+    plugins = profile / "plugins"
+    plugins.mkdir()
+    old_target = root / "releases/old/plugins/existing"
+    new_target = root / "releases/new/plugins/existing"
+    old_target.mkdir(parents=True)
+    new_target.mkdir(parents=True)
+    link = plugins / "existing"
+    link.symlink_to(old_target)
+    monkeypatch.setattr(module, "_managed_root", lambda args: root)
+    monkeypatch.setattr(module, "_run", lambda command, **kw: subprocess.CompletedProcess(command, 1 if "is-active" in command else 0, "", ""))
+    def failed_install(args, plan):
+        link.unlink()
+        link.symlink_to(new_target)
+        (plugins / "new").symlink_to(root / "releases/new/plugins/new")
+        raise RuntimeError("injected failure")
+    monkeypatch.setattr(module, "install", failed_install)
+    assert module.update(SimpleNamespace(profile="demo", runtime_manifest=None), {"profile_home": str(profile)}) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "rolled-back"
+    assert link.resolve() == old_target and not (plugins / "new").is_symlink()
+
+
+def test_update_stops_started_services_before_restoring_release(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    root = tmp_path / ".hermes/superagent/demo"
+    old, new = root / "releases/old", root / "releases/new"
+    old.mkdir(parents=True)
+    new.mkdir(parents=True)
+    (root / "current").symlink_to(old)
+    monkeypatch.setattr(module, "_managed_root", lambda args: root)
+    monkeypatch.setattr(module, "_release_valid", lambda release: True)
+    monkeypatch.setattr(module, "_manifest", lambda args: (root / "install-manifest.json", {"release": str(new)}))
+    calls = []
+    worker_failed = False
+    def run(command, **kwargs):
+        nonlocal worker_failed
+        calls.append(tuple(command))
+        if "is-active" in command:
+            return subprocess.CompletedProcess(command, 1 if "superagent-memory-demo.service" in command else 0, "", "")
+        if "start" in command and "superagent-worker-demo.service" in command and not worker_failed:
+            worker_failed = True
+            raise RuntimeError("injected startup failure")
+        return subprocess.CompletedProcess(command, 0, "", "")
+    monkeypatch.setattr(module, "_run", run)
+    def install(args, plan):
+        (root / "current").unlink()
+        (root / "current").symlink_to(new)
+        return 0
+    monkeypatch.setattr(module, "install", install)
+    def activate(args):
+        calls.append(("restore-release",))
+        (root / "current").unlink()
+        (root / "current").symlink_to(old)
+        return 0
+    monkeypatch.setattr(module, "activate_release", activate)
+    assert module.update(SimpleNamespace(profile="demo", runtime_manifest=None), {"profile_home": str(profile)}) == 1
+    rollback = calls.index(("restore-release",))
+    assert calls[:rollback].count(("systemctl", "--user", "stop", "hermes-gateway-demo.service")) == 2
+    assert calls[:rollback].count(("systemctl", "--user", "stop", "superagent-worker-demo.service")) == 2
+    assert (root / "current").resolve() == old
+    assert json.loads(capsys.readouterr().out)["status"] == "rolled-back"
+
+
+def test_update_refuses_release_rollback_if_new_gateway_cannot_stop(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    root = tmp_path / ".hermes/superagent/demo"
+    old, new = root / "releases/old", root / "releases/new"
+    old.mkdir(parents=True)
+    new.mkdir(parents=True)
+    (root / "current").symlink_to(old)
+    monkeypatch.setattr(module, "_managed_root", lambda args: root)
+    monkeypatch.setattr(module, "_release_valid", lambda release: True)
+    monkeypatch.setattr(module, "_manifest", lambda args: (root / "install-manifest.json", {"release": str(new)}))
+    count = {"stops": 0}
+    def run(command, **kwargs):
+        if "is-active" in command:
+            return subprocess.CompletedProcess(command, 0 if "hermes-gateway-demo.service" in command else 1, "", "")
+        if "stop" in command and "hermes-gateway-demo.service" in command:
+            count["stops"] += 1
+            if count["stops"] == 2:
+                raise RuntimeError("gateway stop not proven")
+        if "start" in command and "hermes-gateway-demo.service" in command:
+            raise RuntimeError("start failed")
+        return subprocess.CompletedProcess(command, 0, "", "")
+    monkeypatch.setattr(module, "_run", run)
+    def install(args, plan):
+        (root / "current").unlink()
+        (root / "current").symlink_to(new)
+        return 0
+    monkeypatch.setattr(module, "install", install)
+    monkeypatch.setattr(module, "activate_release", lambda args: pytest.fail("must not switch release while gateway may run"))
+    assert module.update(SimpleNamespace(profile="demo", runtime_manifest=None), {"profile_home": str(profile)}) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "rollback-incomplete" and "stop-gateway" in report["rollback_errors"]
+    assert (root / "current").resolve() == new
+
+
+def test_candidate_command_enforces_its_timeout(tmp_path, monkeypatch):
+    module = _load_installer()
+    observed = []
+    monkeypatch.setattr(module, "_candidate_bootstrap_command", lambda work: ["fake-hermes"])
+    monkeypatch.setattr(module, "_candidate_env", lambda work: {})
+    def timed_run(command, **kwargs):
+        observed.append(kwargs["timeout"])
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+    monkeypatch.setattr(module, "_run", timed_run)
+    with pytest.raises(RuntimeError, match="candidate_command_timeout"):
+        module._run_candidate(tmp_path, ["--version"], timeout=7)
+    assert observed == [7]
+
+
+def test_staged_clean_marker_cannot_authorize_different_patched_host(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    host = tmp_path / ".hermes/hermes-agent"
+    (host / "plugins/platforms/feishu/adapter.py").write_text("def _build_reply_card(): pass\n# old card implementation\n")
+    root = tmp_path / ".hermes/superagent/demo"
+    marker = root / "hermes" / (module.CANDIDATE_TAG + "-" + module.CANDIDATE_COMMIT[:12]) / "adapter-is-clean"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(module.CANDIDATE_COMMIT)
+    monkeypatch.setattr(module, "_git_identity", lambda: ("candidate", "candidate"))
+    monkeypatch.setattr(module, "_plugin_names", lambda args: ["example"])
+    monkeypatch.setattr(module, "_external_plugin_sources", lambda args: [])
+    monkeypatch.setattr(module, "_keep_patch_state", lambda root: [])
+    monkeypatch.setattr(module, "_legacy_patch_state", lambda root: [{"id": "card-replies", "in_place": False}])
+    monkeypatch.setattr(module, "_profile_home", lambda args: profile)
+    monkeypatch.setattr(module, "_managed_root", lambda args: root)
+    plan = module.build_plan(SimpleNamespace(hermes_root=host, runtime_manifest=None, profile="demo"))
+    assert "legacy_card_patches_require_clean_candidate" in plan["blockers"]
+
+
+def test_migration_preserves_profile_model_settings_and_comments(tmp_path):
+    profile = _seed_profile(tmp_path)
+    config = profile / "config.yaml"
+    original = ("# custom profile\nmodel:\n  default: custom-model  # keep provider choice\n"
+                "streaming:\n  enabled: false  # intentionally disabled\n"
+                "plugins:\n  entries:\n    task-status:\n      settings:\n"
+                "        engine_root: /home/caixuf/code/super-agent\n")
+    config.write_text(original)
+    proc = _run(tmp_path, "migrate-config", check=True)
+    migrated = config.read_text()
+    expected = original.replace("/home/caixuf/code/super-agent", str(tmp_path / ".hermes/superagent/demo/current"))
+    assert migrated == expected
+    assert json.loads(proc.stdout)["status"] == "migrated"
+
+
+def test_explicit_runtime_invariants_fail_closed_without_exposing_values(tmp_path):
+    profile = _seed_profile(tmp_path)
+    (profile / "config.yaml").write_text("model:\n  default: private-model-name\nplatforms:\n  feishu:\n    card_replies: 1\n")
+    manifest = tmp_path / "runtime.yaml"
+    manifest.write_text("profile: demo\nruntime:\n  config_invariants:\n    platforms.feishu.card_replies: true\n")
+    proc = _run(tmp_path, "plan", "--runtime-manifest", str(manifest))
+    assert proc.returncode != 0
+    report = json.loads(proc.stdout)
+    assert "runtime_invariants_mismatch" in report["blockers"]
+    assert report["config_invariants"] == [{"path": "platforms.feishu.card_replies", "status": "mismatch"}]
+    assert "private-model-name" not in proc.stdout + proc.stderr
+    (profile / "config.yaml").write_text("platforms:\n  feishu:\n    card_replies: true\n")
+    proc = _run(tmp_path, "plan", "--runtime-manifest", str(manifest))
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout)["config_invariants"][0]["status"] == "matched"
+
+
+def test_missing_invariant_does_not_match_expected_null(tmp_path):
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    manifest = tmp_path / "runtime.yaml"
+    manifest.write_text("profile: demo\nruntime:\n  config_invariants:\n    missing.path: null\n")
+    assert module._check_runtime_invariants(manifest, profile, "demo") == [{"path": "missing.path", "status": "mismatch"}]
+
+
+def test_native_card_disables_old_producer_but_keeps_its_data(tmp_path):
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    config = profile / "config.yaml"
+    config.write_text("plugins:\n  enabled:\n  - hermes-feishu-card\n  - hfc-runtime-dependency\n  - useful-plugin\n")
+    data = profile / "plugin-data/hfc/history"
+    data.parent.mkdir(parents=True)
+    data.write_text("preserve")
+    module._disable_legacy_card_producer(profile)
+    assert yaml.safe_load(config.read_text())["plugins"]["enabled"] == ["useful-plugin"]
+    assert data.read_text() == "preserve"
+
+
+def test_unhandled_legacy_plugin_config_fails_closed(tmp_path):
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    (profile / "config.yaml").write_text("plugins:\n  enabled: [hermes-feishu-card, useful-plugin]\n")
+    with pytest.raises(ValueError, match="legacy card producer"):
+        module._disable_legacy_card_producer(profile)
+
+
+def test_migration_does_not_rewrite_comments_or_secret_values(tmp_path):
+    profile = _seed_profile(tmp_path)
+    config = profile / "config.yaml"
+    old = "/home/caixuf/code/super-agent"
+    original = (f"# historical path {old}\nmodel:\n  api_key: '{old}/credential'\n"
+                f"plugins:\n  entries:\n    durable-dispatch:\n      settings:\n"
+                f"        engine_root: '{old}' # unchanged comment {old}\n"
+                f"        allowed_roots: ['{old}/src']\n"
+                f"        note: 'The source used to be {old}'\n")
+    config.write_text(original)
+    _run(tmp_path, "migrate-config", check=True)
+    got = config.read_text()
+    new = str(tmp_path / ".hermes/superagent/demo/current")
+    assert f"# historical path {old}" in got
+    assert f"api_key: '{old}/credential'" in got
+    assert f"engine_root: '{new}' # unchanged comment {old}" in got
+    assert f"allowed_roots: ['{new}/src']" in got
+    assert f"note: 'The source used to be {old}'" in got
+
+
+def test_disabling_retired_progress_does_not_modify_other_sections(tmp_path):
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    config = profile / "config.yaml"
+    config.write_text("other:\n  enabled:\n    - task-progress\nplugins:\n  enabled:\n    - task-progress\n    - retained\n")
+    module._purge_legacy_plugins(profile)
+    text = config.read_text()
+    assert "other:\n  enabled:\n    - task-progress\n" in text
+    import yaml
+    assert yaml.safe_load(text)["plugins"]["enabled"] == ["retained"]
+
+
+def test_retired_progress_inline_list_fails_closed(tmp_path):
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    config = profile / "config.yaml"
+    config.write_text("plugins:\n  enabled: [task-progress, retained]\n")
+    import pytest
+    with pytest.raises(ValueError, match="retired progress producer"):
+        module._purge_legacy_plugins(profile)
+    assert "task-progress" in config.read_text()
+
+
+def test_missing_plugin_allowlist_cannot_prove_retired_producers_disabled(tmp_path):
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    (profile / "config.yaml").write_text("plugins:\n  entries: {}\n")
+    import pytest
+    with pytest.raises(ValueError, match="retired progress producer"):
+        module._purge_legacy_plugins(profile)
+    with pytest.raises(ValueError, match="legacy card producer"):
+        module._disable_legacy_card_producer(profile)
+
+
+def test_service_quiescence_checks_populated_control_group(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import pytest
+    module = _load_installer()
+    monkeypatch.setattr(module, "_run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout="/user.slice/demo.service\n"))
+    group = tmp_path / "user.slice/demo.service"
+    group.mkdir(parents=True)
+    events = group / "cgroup.events"
+    events.write_text("populated 1\nfrozen 0\n")
+    with pytest.raises(RuntimeError, match="not empty"):
+        module._assert_service_quiescent("demo.service", cgroup_root=tmp_path)
+    events.write_text("populated 0\nfrozen 0\n")
+    module._assert_service_quiescent("demo.service", cgroup_root=tmp_path)
+    events.unlink()
+    with pytest.raises(RuntimeError, match="state unavailable"):
+        module._assert_service_quiescent("demo.service", cgroup_root=tmp_path)
+
+
+def test_update_refuses_inactive_service_with_unproven_stop(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    root = tmp_path / "managed"
+    monkeypatch.setattr(module, "_managed_root", lambda args: root)
+    monkeypatch.setattr(module, "_update_config_snapshot", lambda *a: ({}, "hermes-gateway-demo.service"))
+    monkeypatch.setattr(module, "_plugin_link_snapshot", lambda *a: {})
+    monkeypatch.setattr(module, "_run", lambda *a, **kw: SimpleNamespace(returncode=1, stdout=""))
+    def blocked(name):
+        raise RuntimeError("service control group is not empty")
+    monkeypatch.setattr(module, "_assert_service_quiescent", blocked)
+    monkeypatch.setattr(module, "install", lambda *a: pytest.fail("must not install"))
+    args = SimpleNamespace(profile="demo")
+    assert module.update(args, {"profile_home": str(profile)}) == 1
+    assert json.loads(capsys.readouterr().out)["reason"] == "service_stop_unproven"
+
+
+def test_rollback_refuses_switch_if_stopped_gateway_cgroup_remains_populated(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    root = tmp_path / "managed"
+    old, new = root / "releases/old", root / "releases/new"
+    old.mkdir(parents=True); new.mkdir(parents=True)
+    (root / "current").symlink_to(old)
+    monkeypatch.setattr(module, "_managed_root", lambda args: root)
+    monkeypatch.setattr(module, "_release_valid", lambda release: True)
+    monkeypatch.setattr(module, "_manifest", lambda args: (root / "install-manifest.json", {"release": str(new)}))
+    checks = {"gateway": 0}
+    def quiescent(name):
+        if name == "hermes-gateway-demo.service":
+            checks["gateway"] += 1
+            if checks["gateway"] == 2: raise RuntimeError("service control group is not empty")
+    monkeypatch.setattr(module, "_assert_service_quiescent", quiescent)
+    def run(command, **kwargs):
+        if "is-active" in command:
+            return subprocess.CompletedProcess(command, 0 if "hermes-gateway-demo.service" in command else 1, "", "")
+        if "start" in command and "hermes-gateway-demo.service" in command:
+            raise RuntimeError("start failed")
+        return subprocess.CompletedProcess(command, 0, "", "")
+    monkeypatch.setattr(module, "_run", run)
+    def install(args, plan):
+        (root / "current").unlink(); (root / "current").symlink_to(new)
+        return 0
+    monkeypatch.setattr(module, "install", install)
+    monkeypatch.setattr(module, "activate_release", lambda args: pytest.fail("must not switch under remaining process"))
+    assert module.update(SimpleNamespace(profile="demo", runtime_manifest=None), {"profile_home": str(profile)}) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "rollback-incomplete" and "stop-gateway" in report["rollback_errors"]
+    assert (root / "current").resolve() == new
