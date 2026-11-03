@@ -41,7 +41,9 @@ def test_check_tcp_port_available():
     assert "端口状态" in res.message
 
 
-def test_run_preflight_suite():
+def test_run_preflight_suite(tmp_path, monkeypatch):
+    # Isolate from the host Hermes profile so baseline drift cannot fail CI/dev.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "no-hermes"))
     with patch("socket.gethostbyname", return_value="1.2.3.4"):
         report = run_preflight_suite(probe_host="localhost", min_free_gb=0.1)
         assert report.all_passed is True

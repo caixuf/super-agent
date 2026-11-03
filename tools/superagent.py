@@ -752,12 +752,12 @@ def migrate_config(args: argparse.Namespace, plan: dict[str, Any], *, quiet: boo
         from agentcore.baseline_config import enforce_baseline_config
         enforced, changes = enforce_baseline_config(config, backup=False)
         if enforced and not quiet:
-            print(f"[INFO] Super Agent 基线配置已自动对齐 ({len(changes)} 处修复):")
+            print(f"[INFO] Super Agent 基线配置已自动对齐 ({len(changes)} 处修复):", file=sys.stderr)
             for ch in changes:
-                print(f"       -> {ch}")
+                print(f"       -> {ch}", file=sys.stderr)
     except Exception as exc:
         if not quiet:
-            print(f"[WARN] 基线配置审计跳过: {exc}")
+            print(f"[WARN] 基线配置审计跳过: {exc}", file=sys.stderr)
 
     if not quiet:
         print(json.dumps({"status": "migrated" if updated != original else "unchanged",

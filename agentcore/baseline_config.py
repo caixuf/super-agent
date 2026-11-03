@@ -75,6 +75,18 @@ def _deep_get(mapping: Mapping[str, Any], path: Sequence[str]) -> Tuple[bool, An
     return True, curr
 
 
+def _leading_comment_prefix(raw_text: str) -> str:
+    """Keep leading blank/comment lines so installer rewrites do not drop them."""
+    lines: List[str] = []
+    for line in raw_text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped == "" or stripped.startswith("#"):
+            lines.append(line)
+            continue
+        break
+    return "".join(lines)
+
+
 def _deep_set(target: Dict[str, Any], path: Sequence[str], value: Any) -> None:
     curr = target
     for step in path[:-1]:
@@ -175,8 +187,11 @@ def enforce_baseline_config(
         shutil.copy2(config_path, bak_file)
 
     temp_file = config_path.with_suffix(".tmp")
+    dumped = yaml.dump(modified, allow_unicode=True, sort_keys=False)
+    prefix = _leading_comment_prefix(raw_text)
     with temp_file.open("w", encoding="utf-8") as f:
-        yaml.dump(modified, f, allow_unicode=True, sort_keys=False)
+        f.write(prefix)
+        f.write(dumped)
     os.replace(temp_file, config_path)
 
     return True, changes
