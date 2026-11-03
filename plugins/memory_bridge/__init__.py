@@ -4,6 +4,8 @@ The gateway never imports the memory engine or invokes a model. Extraction is
 performed by the separately supervised runtime_service after a completed verdict.
 """
 import importlib.util
+import hashlib
+import json
 import logging
 from pathlib import Path
 
@@ -20,10 +22,45 @@ def register(ctx):
         '_agentcore_turn_spool', engine / 'agentcore/memory/turn_spool.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    spool = module.TurnSpool(ctx.get_config('spool_dir', ''),
-                            profile=ctx.profile_name,
-                            user_id=ctx.get_config('user_id', ''),
-                            agent_id=ctx.get_config('agent_id', ''))
+    missing = object()
+    router_file = ctx.get_config('identity_routes_file', missing)
+    router = None
+    router_enabled = router_file is not missing
+    if router_enabled:
+        try:
+            spec = importlib.util.spec_from_file_location(
+                '_superagent_memory_identity', engine / 'runtime/hermes_memory_identity.py')
+            identity = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(identity)
+            router = identity.IdentityRouter(router_file, profile=ctx.profile_name)
+        except Exception:
+            log.warning('memory identity routing unavailable; legacy fallback refused')
+    spool = None if router_enabled else module.TurnSpool(
+        ctx.get_config('spool_dir', ''), profile=ctx.profile_name,
+        user_id=ctx.get_config('user_id', ''), agent_id=ctx.get_config('agent_id', ''))
+
+    def scoped_spool(session_id):
+        if not router_enabled:
+            return spool
+        route = router.resolve(session_id) if router is not None else None
+        if route is None:
+            raise ValueError('memory identity required')
+        # Include the policy revision in the adapter's turn id. A remapping
+        # between capture and verdict cannot authorize the previously captured
+        # turn, even when the new principal uses the same session/turn strings.
+        return module.TurnSpool(route['spool_dir'], profile=route['profile'],
+                                user_id=route['user_id'], agent_id=route['agent_id']), route['cache_scope']
+
+    def capture_target(kwargs):
+        target = scoped_spool(kwargs.get('session_id'))
+        turn = kwargs.get('turn_id') or kwargs.get('task_id')
+        if router_enabled:
+            target, revision = target
+            if not isinstance(turn, str) or not turn.strip():
+                raise ValueError('turn id required')
+            automated = ':cron:' if ':cron:' in turn else ''
+            turn = automated + hashlib.sha256(json.dumps([revision, turn]).encode()).hexdigest()
+        return target, turn
     resolver = None
     resolver_file = ctx.get_config('input_resolver', '')
     if resolver_file:
@@ -44,14 +81,15 @@ def register(ctx):
 
     def capture(**kwargs):
         try:
+            target, turn = capture_target(kwargs)
             user = text(kwargs.get('user_message'))
             if resolver is not None:
                 user = resolver(kwargs.get('session_id'), user)
                 if user is None:
                     log.warning('memory capture skipped: original input unavailable')
                     return
-            spool.capture(session_id=kwargs.get('session_id'),
-                          turn_id=kwargs.get('turn_id') or kwargs.get('task_id'),
+            target.capture(session_id=kwargs.get('session_id'),
+                          turn_id=turn,
                           user_message=user,
                           assistant_reply=text(kwargs.get('assistant_response')))
         except Exception as exc:
@@ -59,8 +97,9 @@ def register(ctx):
 
     def verdict(**kwargs):
         try:
-            spool.finalize(session_id=kwargs.get('session_id'),
-                           turn_id=kwargs.get('turn_id') or kwargs.get('task_id'),
+            target, turn = capture_target(kwargs)
+            target.finalize(session_id=kwargs.get('session_id'),
+                           turn_id=turn,
                            completed=kwargs.get('completed') is True,
                            failed=kwargs.get('failed', False),
                            interrupted=kwargs.get('interrupted', False))
@@ -69,9 +108,10 @@ def register(ctx):
 
     ctx.register_hook('post_llm_call', capture)
     ctx.register_hook('on_session_end', verdict)
+    _register_progressive_tools(ctx, engine, router=router, router_enabled=router_enabled)
 
 
-def _register_progressive_tools(ctx, engine: Path) -> None:
+def _register_progressive_tools(ctx, engine: Path, *, router=None, router_enabled=False) -> None:
     """Expose scoped L1/L2/L3 operations without importing engine modules into Hermes."""
     import json
     import subprocess
@@ -83,15 +123,13 @@ def _register_progressive_tools(ctx, engine: Path) -> None:
     profile = getattr(ctx, "profile_name", "")
     endpoint = ctx.get_config("embed_url", "")
     script = engine / "tools/memory_progressive.py"
-    if (not isinstance(data, str) or not Path(data).is_absolute()
+    if (not router_enabled and (not isinstance(data, str) or not Path(data).is_absolute()
             or not all(isinstance(x, str) and x.strip() for x in (user, agent, profile))
-            or not isinstance(endpoint, str) or not script.is_file()):
+            or not isinstance(endpoint, str) or not script.is_file())):
         log.warning("progressive tools unavailable: scoped memory settings missing")
         return
     private_python = engine / ".superagent-venv/bin/python"
     python = str(private_python) if private_python.is_file() else sys.executable
-    command = [python, str(script), "--data-dir", data, "--user", user, "--agent", agent,
-               "--profile", profile, "--embed-url", endpoint]
     definitions = (
         ("memory_search_l1", "search", "Search scoped memory index without returning full bodies.",
          {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, ["query"]),
@@ -106,9 +144,21 @@ def _register_progressive_tools(ctx, engine: Path) -> None:
         def call(args=None, *, session_id=None, **kwargs):
             if not isinstance(session_id, str) or not session_id.strip():
                 return json.dumps({"ok": False, "error": "memory_session_required"})
+            route = None
+            if router_enabled:
+                try:
+                    route = router.resolve(session_id) if router is not None else None
+                except Exception:
+                    pass
+                if route is None:
+                    return json.dumps({"ok": False, "error": "memory_identity_required"})
             if not isinstance(args, dict):
                 return json.dumps({"ok": False, "error": "invalid_arguments"})
             try:
+                scope = route or dict(data_dir=data, user_id=user, agent_id=agent, profile=profile)
+                command = [python, str(script), "--data-dir", scope['data_dir'],
+                           "--user", scope['user_id'], "--agent", scope['agent_id'],
+                           "--profile", scope['profile'], "--embed-url", endpoint]
                 request = json.dumps({"operation": operation, "arguments": args}, ensure_ascii=False)
                 if len(request.encode("utf-8")) > 32768:
                     raise ValueError("request too large")
@@ -118,6 +168,8 @@ def _register_progressive_tools(ctx, engine: Path) -> None:
                 result = json.loads(proc.stdout)
                 if not isinstance(result, dict):
                     raise ValueError("invalid memory result")
+                if router_enabled and router.resolve(session_id) != route:
+                    return json.dumps({"ok": False, "error": "memory_identity_required"})
                 return json.dumps(result, ensure_ascii=False)
             except Exception:
                 return json.dumps({"ok": False, "error": "memory_operation_unavailable"})
@@ -129,16 +181,3 @@ def _register_progressive_tools(ctx, engine: Path) -> None:
             "additionalProperties": False}}
         ctx.register_tool(name=name, toolset="memory_bridge", description=description,
                           schema=schema, handler=handler(operation))
-
-
-# Patch register() to also expose progressive tools when enabled.
-_orig_register = register
-
-
-def register(ctx):
-    _orig_register(ctx)
-    if ctx.get_config("enabled", False) is not True:
-        return
-    engine = Path(ctx.get_config("engine_root", ""))
-    if engine.is_absolute():
-        _register_progressive_tools(ctx, engine)

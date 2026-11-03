@@ -2,6 +2,8 @@
 """Prepare a single-principal memory worker and matching localvec recall configuration."""
 from __future__ import annotations
 import argparse
+import hashlib
+import importlib.util
 import os
 from pathlib import Path
 import re
@@ -16,13 +18,13 @@ from configure_defaults import add_missing, ensure_toolset, load
 from setup_worker import quote_systemd, preflight_model
 
 
-def make_plan(home, engine, profile, user, agent, embed_url, python, unit_dir):
+def make_plan(home, engine, profile, user, agent, embed_url, python, unit_dir, *, identity_routes_file=None):
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", profile):
         raise ValueError("invalid profile")
     for value in (user, agent):
         if not value or len(value) > 512 or any(c in value for c in "\r\n\0"):
             raise ValueError("invalid memory principal")
-    if not python.is_absolute() or not python.is_file():
+    if not python.is_absolute() or not python.is_file() or not os.access(python, os.X_OK):
         raise ValueError("absolute Python interpreter required")
     for relative in ("runtime/memory_bootstrap.py", "tools/recall_memory.py", "agentcore/memory/bge_sidecar.py"):
         if not (engine / relative).is_file():
@@ -32,6 +34,16 @@ def make_plan(home, engine, profile, user, agent, embed_url, python, unit_dir):
     from agentcore.memory.bge_sidecar import checked_url
     checked_url(embed_url)
     state = home / "state" / "superagent-memory"
+    suffix = profile
+    if identity_routes_file is not None:
+        spec = importlib.util.spec_from_file_location(
+            '_memory_identity_setup', engine / 'runtime/hermes_memory_identity.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        route = module.IdentityRouter(str(identity_routes_file), profile=profile).runtime(
+            home=home, user_id=user, agent_id=agent)
+        state = Path(route['data_dir']).parent
+        suffix += '-' + hashlib.sha256((user + '\0' + agent).encode()).hexdigest()[:16]
     data, spool, queue = state / "data", state / "spool", state / "events.db"
     for path in (state, data, spool):
         if path.is_symlink() or (path.exists() and
@@ -54,11 +66,24 @@ def make_plan(home, engine, profile, user, agent, embed_url, python, unit_dir):
     recall = [str(python), str(engine / "tools/recall_memory.py"), "--query-text={query}",
               "--data-dir", str(data), "--user", user, "--agent", agent,
               "--profile", profile, "--embed-url", embed_url, "--limit", "{limit}"]
-    if "recall_cmd" in localvec and localvec["recall_cmd"] != recall:
+    routed = identity_routes_file is not None
+    if not routed and ('identity_routes_file' in localvec):
+        raise ValueError("routed memory requires an explicit identity policy")
+    if not routed and "recall_cmd" in localvec and localvec["recall_cmd"] != recall:
         raise ValueError("existing recall command differs; migration required")
     settings = (((plugins.get("entries") or {}).get("memory-bridge") or {}).get("settings") or {})
     expected = {"enabled": True, "engine_root": str(engine), "spool_dir": str(spool),
                 "data_dir": str(data), "embed_url": embed_url, "user_id": user, "agent_id": agent}
+    if routed:
+        # Changing an existing single-owner profile is a migration, not an
+        # innocuous install default. Never attach its old store to all users.
+        if (any(k in settings for k in ('spool_dir', 'data_dir', 'user_id', 'agent_id'))
+                or any(k in localvec for k in ('recall_cmd', 'sqlite_db', 'user_id', 'agent_id', 'profile'))):
+            raise ValueError("existing single-principal memory requires explicit migration")
+        expected = {"enabled": True, "engine_root": str(engine), "embed_url": embed_url,
+                    "identity_routes_file": str(identity_routes_file)}
+    elif 'identity_routes_file' in settings:
+        raise ValueError("routed memory requires an explicit identity policy")
     for key, value in expected.items():
         if key in settings and settings[key] != value:
             raise ValueError("existing memory bridge setting conflicts: " + key)
@@ -70,6 +95,9 @@ def make_plan(home, engine, profile, user, agent, embed_url, python, unit_dir):
     fallback = {"recall_cmd": recall, "limit": 5, "timeout_s": 15,
                 "sqlite_db": str(data / "coding_memory_cv.db"),
                 "user_id": user, "agent_id": agent, "profile": profile}
+    if routed:
+        fallback = {"identity_routes_file": str(identity_routes_file), "engine_root": str(engine),
+                    "embed_url": embed_url, "limit": 5, "timeout_s": 15}
     for key, value in fallback.items():
         if key in localvec and localvec[key] != value:
             raise ValueError("existing localvec setting conflicts: " + key)
@@ -89,7 +117,7 @@ def make_plan(home, engine, profile, user, agent, embed_url, python, unit_dir):
             "\nRestart=on-failure\nRestartSec=5\nKillMode=control-group\nTimeoutStopSec=45\n"
             "\n[Install]\nWantedBy=default.target\n")
     return {"config": config_path, "original": original, "updated": updated,
-            "unit_path": unit_dir / ("superagent-memory-" + profile + ".service"),
+            "unit_path": unit_dir / ("superagent-memory-" + suffix + ".service"),
             "unit": unit, "state": state, "data": data, "spool": spool,
             "env": environment}
 
@@ -102,7 +130,9 @@ def main():
     p.add_argument("--user", required=True)
     p.add_argument("--agent", required=True)
     p.add_argument("--embed-url", required=True)
-    p.add_argument("--python", type=Path, default=Path("/usr/bin/python3"))
+    p.add_argument("--identity-routes-file", type=Path,
+                   help="Explicit admin-owned IM identity policy; creates one worker for this principal")
+    p.add_argument("--python", type=Path, default=Path(sys.executable))
     p.add_argument("--unit-dir", type=Path, default=Path.home() / ".config/systemd/user")
     p.add_argument("--apply", action="store_true")
     p.add_argument("--activate", action="store_true")
@@ -111,8 +141,11 @@ def main():
         p.error("--activate requires --apply")
     if args.activate and args.unit_dir.resolve() != (Path.home() / ".config/systemd/user").resolve():
         p.error("--activate requires the standard user systemd unit directory")
+    # Keep a virtualenv's entry point instead of resolving it to the base Python.
+    python = args.python.absolute()
     plan = make_plan(args.profile_home.resolve(), args.engine_root.resolve(), args.profile,
-                     args.user, args.agent, args.embed_url, args.python.resolve(), args.unit_dir.resolve())
+                     args.user, args.agent, args.embed_url, python, args.unit_dir.resolve(),
+                     identity_routes_file=args.identity_routes_file)
     unit = plan["unit_path"]
     if unit.is_symlink() or (unit.exists() and (not unit.is_file() or unit.read_text(encoding="utf-8") != plan["unit"])):
         raise ValueError("existing memory unit differs")
@@ -129,7 +162,7 @@ def main():
         code = ("from runtime.memory_bootstrap import bootstrap; bootstrap(); "
                 "from agentcore.memory.memory_store import _connect; c=_connect(); c.close()")
         env = dict(os.environ, **plan["env"])
-        init = subprocess.run([str(args.python.resolve()), "-c", code], env=env,
+        init = subprocess.run([str(python), "-c", code], env=env,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if init.returncode:
             raise RuntimeError("memory store initialization failed")
@@ -151,7 +184,7 @@ def main():
             if os.path.exists(temporary):
                 os.unlink(temporary)
     if args.activate:
-        service = "superagent-memory-" + args.profile + ".service"
+        service = unit.name
         status = subprocess.run(["systemctl", "--user", "is-active", "--quiet", service])
         if status.returncode != 0:
             # Never consume an existing backlog implicitly.
@@ -163,12 +196,12 @@ def main():
                     pending = db.execute("SELECT count(*) FROM turn_events WHERE state NOT IN ('done','failed')").fetchone()[0]
                 if pending:
                     raise ValueError("memory queue contains pending turns; review before activation")
-            preflight_model(args.profile_home.resolve(), args.engine_root.resolve(), args.python.resolve())
+            preflight_model(args.profile_home.resolve(), args.engine_root.resolve(), python)
             environment = dict(os.environ, PYTHONPATH=str(args.engine_root.resolve()))
             probe_code = ("from agentcore.memory.bge_sidecar import make_embedder; "
                           "import sys; rows=make_embedder(sys.argv[1])(['synthetic readiness probe']); "
                           "raise SystemExit(0 if rows and len(rows[0]) == 1024 else 1)")
-            probe = subprocess.run([str(args.python.resolve()), "-c", probe_code, args.embed_url],
+            probe = subprocess.run([str(python), "-c", probe_code, args.embed_url],
                                    env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45)
             if probe.returncode:
                 raise RuntimeError("embedding backend unavailable or wrong dimension")

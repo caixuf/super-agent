@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import venv
 
 import yaml
 
@@ -13,12 +14,41 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "install/setup_memory.py"
 
 
-def setup(home, units, *extra):
+def setup(home, units, *extra, python=sys.executable):
     return subprocess.run([sys.executable, str(SCRIPT), "--profile-home", str(home),
                            "--engine-root", str(REPO), "--profile", "p1", "--user", "u1",
                            "--agent", "a1", "--embed-url", "http://127.0.0.1:8910",
-                           "--python", sys.executable, "--unit-dir", str(units), *extra],
+                           *(["--python", python] if python is not None else []),
+                           "--unit-dir", str(units), *extra],
                           capture_output=True, text=True, timeout=30)
+
+
+def test_memory_default_uses_invoking_interpreter(tmp_path):
+    home = tmp_path / "profile"
+    home.mkdir()
+    (home / "config.yaml").write_text("plugins:\n  enabled: [memory-bridge]\n")
+    units = tmp_path / "units"
+    result = setup(home, units, "--apply", python=None)
+    assert result.returncode == 0, result.stderr
+    cfg = yaml.safe_load((home / "config.yaml").read_text())
+    assert cfg["memory"]["localvec"]["recall_cmd"][0] == str(Path(sys.executable).absolute())
+    assert str(Path(sys.executable).absolute()) in (units / "superagent-memory-p1.service").read_text()
+
+
+def test_memory_keeps_explicit_interpreter_symlink(tmp_path):
+    home = tmp_path / "profile"
+    home.mkdir()
+    (home / "config.yaml").write_text("plugins:\n  enabled: [memory-bridge]\n")
+    python = tmp_path / "runtime/bin/python"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(python.parents[1])
+    units = tmp_path / "units"
+    result = setup(home, units, "--apply", python=str(python))
+    assert result.returncode == 0, result.stderr
+    cfg = yaml.safe_load((home / "config.yaml").read_text())
+    assert cfg["memory"]["localvec"]["recall_cmd"][0] == str(python)
+    assert str(python) in (units / "superagent-memory-p1.service").read_text()
+    prefix = subprocess.check_output([str(python), "-c", "import sys; print(sys.prefix)"], text=True)
+    assert prefix.strip() == str(python.parents[1])
 
 
 def test_prepares_one_identity_store_and_is_idempotent(tmp_path):
@@ -43,9 +73,12 @@ def test_prepares_one_identity_store_and_is_idempotent(tmp_path):
     unit = units / "superagent-memory-p1.service"
     assert unit.is_file()
     if shutil.which("systemd-analyze"):
-        check = subprocess.run(["systemd-analyze", "--user", "verify", str(unit)], capture_output=True, text=True)
-        if "Failed to connect to" not in check.stderr:
-            assert check.returncode == 0, check.stderr
+        runtime = tmp_path / "user-runtime"
+        runtime.mkdir(mode=0o700)
+        check = subprocess.run(["systemd-analyze", "--user", "verify", str(unit)],
+                               env=dict(os.environ, XDG_RUNTIME_DIR=str(runtime)),
+                               capture_output=True, text=True)
+        assert check.returncode == 0, check.stderr
     second = setup(home, units, "--apply")
     assert second.returncode == 0, second.stderr
     assert config.read_text() == text

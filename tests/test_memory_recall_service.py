@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import socket
 import sqlite3
 import time
 import threading
@@ -10,6 +11,18 @@ from agentcore.memory import change_journal as journal,memory_store as store
 from agentcore.memory.read_view import MemoryReadView,ViewInvalid
 from agentcore.memory.recovery_checkpoint import RecoveryCheckpoint
 from agentcore.memory.recall_service import ServingMemory,validate_request,private_lock,serve,request,RecallUnavailable
+
+
+def wait_ready(path,thread):
+    """A bound socket path can exist before listen; require a health handshake."""
+    deadline=time.monotonic()+3
+    last_error=None
+    while thread.is_alive() and time.monotonic()<deadline:
+        try:
+            if request(path,{'op':'health'},timeout=.2)['ready']:return
+        except (OSError,RecallUnavailable) as exc:last_error=type(exc).__name__
+        time.sleep(.01)
+    pytest.fail('recall service not ready: '+str(last_error))
 
 
 def seed(engine):
@@ -152,9 +165,7 @@ def test_health_remains_responsive_and_overload_is_bounded_during_slow_recall(tm
             return {'results':[]}
     engine=SlowEngine();path=tmp_path/'socket'
     server=threading.Thread(target=serve,args=(engine,path,stop),daemon=True);server.start()
-    for _ in range(100):
-        if path.exists():break
-        time.sleep(.01)
+    wait_ready(path,server)
     payload={'op':'recall','query':'test','identity':engine.identity,'build_sha256':engine.build}
     errors=[]
     def run():
@@ -193,9 +204,7 @@ def test_socket_service_uses_real_memory_on_its_owning_thread(engine,tmp_path):
     thread=threading.Thread(target=run);thread.start()
     try:
         assert started.wait(10) and not errors
-        for _ in range(100):
-            if path.exists():break
-            time.sleep(.01)
+        wait_ready(path,thread)
         result=request(path,{'op':'recall','query':'服务预算',
             'identity':info['identity'],'build_sha256':info['build']},timeout=5)
         assert result['results']
@@ -204,7 +213,13 @@ def test_socket_service_uses_real_memory_on_its_owning_thread(engine,tmp_path):
     assert not thread.is_alive() and not errors
 
 
-def test_expired_queued_recall_is_not_executed(tmp_path):
+@pytest.mark.parametrize('listen_delay',[0,.08])
+def test_expired_queued_recall_is_not_executed(tmp_path,monkeypatch,listen_delay):
+    original_listen=socket.socket.listen
+    def delayed_listen(sock,*args,**kwargs):
+        if sock.family==socket.AF_UNIX:time.sleep(listen_delay)
+        return original_listen(sock,*args,**kwargs)
+    monkeypatch.setattr(socket.socket,'listen',delayed_listen)
     entered=threading.Event();release=threading.Event();stop=threading.Event();calls=[]
     class SlowEngine:
         identity={'user_id':'owner','agent_id':'agent','database_sha256':'hash'}
@@ -215,9 +230,7 @@ def test_expired_queued_recall_is_not_executed(tmp_path):
             calls.append(payload['query']);entered.set();release.wait(4);return {'results':[]}
     engine=SlowEngine();path=tmp_path/'socket'
     server=threading.Thread(target=serve,args=(engine,path,stop),daemon=True);server.start()
-    for _ in range(100):
-        if path.exists():break
-        time.sleep(.01)
+    wait_ready(path,server)
     def submit(query,timeout):
         try:request(path,{'op':'recall','query':query,'identity':engine.identity,
                           'build_sha256':engine.build},timeout=timeout)
