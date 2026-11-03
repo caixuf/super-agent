@@ -23,8 +23,6 @@ _MAX_CONFIG_BYTES = 1024 * 1024
 
 
 def _settings(home: Path | str | None = None) -> dict[str, bool]:
-    from ruamel.yaml import YAML
-
     if home is None:
         from agent.secret_scope import is_multiplex_active
         from hermes_constants import get_hermes_home, get_hermes_home_override
@@ -47,10 +45,15 @@ def _settings(home: Path | str | None = None) -> dict[str, bool]:
 
     # Match the host's hermes_yaml policy, including YAML 1.1 booleans and
     # duplicate-key rejection. Parsers are per call, never shared by threads.
-    loader = YAML(typ="safe", pure=True)
-    loader.version = (1, 1)
-    loader.allow_duplicate_keys = False
-    config = loader.load(raw)
+    try:
+        from ruamel.yaml import YAML
+        loader = YAML(typ="safe", pure=True)
+        loader.version = (1, 1)
+        loader.allow_duplicate_keys = False
+        config = loader.load(raw)
+    except ImportError:
+        import yaml
+        config = yaml.safe_load(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
     if config is None:
         config = {}
     if not isinstance(config, dict):

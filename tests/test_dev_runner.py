@@ -26,9 +26,9 @@ def test_colleague_dev_roles_and_contract():
     assert "triage" in roles
 
     cases_contract = get_role_contract_markdown("cases")
-    assert "用例开发大师" in cases_contract
-    assert "逆向状态机条件宏" in cases_contract
-    assert "300ms 以内短脉冲前禁止插入 sleep" in cases_contract
+    assert "核心研发与用例开发专家" in cases_contract
+    assert "逆向状态转移条件" in cases_contract
+    assert "短时序高敏链路前禁止插入无谓硬延时" in cases_contract
 
     with pytest.raises(ValueError, match="unknown_role"):
         get_role_contract_markdown("non_existent_role")

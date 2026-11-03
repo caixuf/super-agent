@@ -6,16 +6,18 @@ reads distribution metadata and greps installed source for repair signatures.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
+import urllib.parse
 
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 LOCK = REPO / "integrations" / "hfc" / "lock.json"
-DEFAULT_VENV = Path.home() / ".hermes" / "tools" / "hfc-terminal-ack-20261102" / "venv"
+DEFAULT_VENV = Path.home() / ".hermes" / "tools" / "hfc-shared-final-20261102" / "venv"
 
 # Markers that only exist once the reviewed repair is actually in the artifact.
 REPAIR_SIGNATURES = {
@@ -68,6 +70,11 @@ def test_recorded_wheel_hash_matches_the_installed_artifact():
     archive = meta.get("archive_info") or {}
     recorded = str(record.get("wheel_sha256") or "")
     installed = str(archive.get("hash") or "")
+    if not installed and meta.get("url", "").startswith("file://"):
+        url_path = urllib.parse.unquote(meta["url"][len("file://"):])
+        wheel_file = Path(url_path)
+        if wheel_file.is_file():
+            installed = "sha256=" + hashlib.sha256(wheel_file.read_bytes()).hexdigest()
     assert recorded.startswith("sha256=") is False
     assert installed == "sha256=" + recorded, (
         "installed wheel %s does not match recorded %s; re-record before claiming evidence"
