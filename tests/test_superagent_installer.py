@@ -1388,3 +1388,25 @@ def test_update_rolls_back_post_migration_invariant_drift_before_start(tmp_path,
     assert result["error"] == "runtime_invariants_changed_after_install"
     assert config.read_bytes() == original
     assert not any("start" in call for call in calls)
+
+
+def test_install_blocks_predicted_invariant_drift_before_any_mutation(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    config = profile / "config.yaml"
+    old = "/home/caixuf/.local/state/agentcore/analysis-queue"
+    config.write_text("custom:\n  data_path: " + old + "\n")
+    before = config.read_bytes()
+    runtime = tmp_path / "runtime.yaml"
+    runtime.write_text("profile: demo\nruntime:\n  config_invariants:\n    custom.data_path: " + old + "\n")
+    root = tmp_path / ".hermes/superagent/demo"
+    managed = {"engine_root": str(root / "current"), "queue_root": str(root / "state/queue"),
+               "memory_spool": str(root / "state/memory"), "markdown_outbox": str(root / "state/outbox"),
+               "liveness_db": str(root / "state/liveness.db"), "colleague_registry": str(root / "state/registry.db")}
+    monkeypatch.setattr(module, "_snapshot_external_plugins", lambda args: pytest.fail("mutation before preview"))
+    args = SimpleNamespace(profile="demo", runtime_manifest=runtime, legacy_engine_root=())
+    plan = {"profile_home": str(profile), "managed_root": str(root), "managed_paths": managed}
+    assert module.install(args, plan) == 1
+    assert json.loads(capsys.readouterr().out)["reason"] == "migration_would_change_runtime_invariants"
+    assert config.read_bytes() == before and not root.exists()

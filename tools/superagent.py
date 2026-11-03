@@ -565,11 +565,12 @@ def install_hermes_candidate(args: argparse.Namespace, plan: dict[str, Any]) -> 
                      ensure_ascii=False, indent=2))
     return 0
 
-def _check_runtime_invariants(manifest_path: Path, profile_home: Path, profile: str) -> list[dict[str, str]]:
+def _check_runtime_invariants(manifest_path: Path, profile_home: Path, profile: str, *,
+                              config_text: str | None = None) -> list[dict[str, str]]:
     """Compare declared profile invariants without exposing configuration values."""
     import yaml
     data = yaml.safe_load(manifest_path.read_bytes())
-    config = yaml.safe_load((profile_home / "config.yaml").read_bytes())
+    config = yaml.safe_load((profile_home / "config.yaml").read_bytes() if config_text is None else config_text)
     if not isinstance(data, dict) or not isinstance(config, dict) or data.get("profile", profile) != profile:
         raise ValueError("manifest or profile configuration is invalid")
     runtime = data.get("runtime", {})
@@ -985,10 +986,8 @@ def _migrate_plugin_engine_roots(original: str, legacy_roots: Sequence[str], man
     return original
 
 
-def migrate_config(args: argparse.Namespace, plan: dict[str, Any], *, quiet: bool = False) -> int:
-    config = Path(plan["profile_home"]) / "config.yaml"
-    original = config.read_text(encoding="utf-8")
-    managed = plan["managed_paths"]
+def _migrated_config_text(original: str, args: argparse.Namespace, managed: dict[str, str]) -> str:
+    """Compute the exact migration without touching the profile."""
     mapping = {
         "/home/caixuf/.local/state/agentcore/analysis-queue": managed["queue_root"],
         "/home/caixuf/.local/state/agentcore/memory-spool": managed["memory_spool"],
@@ -1001,7 +1000,13 @@ def migrate_config(args: argparse.Namespace, plan: dict[str, Any], *, quiet: boo
     # Move only explicit plugin engine roots; replacing every checkout-prefixed
     # path would silently redirect unrelated data into an incomplete release.
     legacy_engines = ("/home/caixuf/code/super-agent", *getattr(args, "legacy_engine_root", ()))
-    updated = _migrate_plugin_engine_roots(updated, legacy_engines, managed["engine_root"])
+    return _migrate_plugin_engine_roots(updated, legacy_engines, managed["engine_root"])
+
+
+def migrate_config(args: argparse.Namespace, plan: dict[str, Any], *, quiet: bool = False) -> int:
+    config = Path(plan["profile_home"]) / "config.yaml"
+    original = config.read_text(encoding="utf-8")
+    updated = _migrated_config_text(original, args, plan["managed_paths"])
     if updated != original:
         _write_text_atomic(config, updated)
 
@@ -1118,6 +1123,21 @@ def _stage_release(plan: dict[str, Any]) -> Path:
 
 
 def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
+    # First installs and same-version repairs do not have update's rollback
+    # wrapper. Refuse a predicted migration mismatch before any mutation.
+    runtime_manifest = getattr(args, "runtime_manifest", None)
+    if runtime_manifest is not None:
+        try:
+            home = Path(plan["profile_home"])
+            original = (home / "config.yaml").read_text(encoding="utf-8")
+            predicted = _migrated_config_text(original, args, plan["managed_paths"])
+            rows = _check_runtime_invariants(Path(runtime_manifest), home, args.profile, config_text=predicted)
+            if any(row["status"] != "matched" for row in rows):
+                print(json.dumps({"status": "blocked", "reason": "migration_would_change_runtime_invariants"}))
+                return 1
+        except Exception:
+            print(json.dumps({"status": "blocked", "reason": "migration_preview_unavailable"}))
+            return 1
     root = Path(plan["managed_root"])
     current = root / "current"
     previous = current.resolve() if current.is_symlink() else None
