@@ -1263,3 +1263,25 @@ def test_doctor_recall_observation_refuses_foreign_profile_home(tmp_path):
         "enabled": True, "tool_backend": {"members": [{"profile": "imfl-test", "home": str(tmp_path / "elsewhere" / "imfl-test")}]}}}}}}}
     (main / "config.yaml").write_text(yaml.safe_dump(config))
     assert module._recall_diagnostics_observation(main)["status"] == "unknown"
+
+
+def test_doctor_distinguishes_disk_binding_from_recall_health(tmp_path):
+    module = _load_installer()
+    home = tmp_path / "profiles" / "imfl"
+    home.mkdir(parents=True)
+    release = tmp_path / "releases" / "v1"
+    plugin = release / "plugins" / "localvec"
+    plugin.mkdir(parents=True)
+    (home / "plugins").mkdir()
+    (home / "plugins" / "localvec").symlink_to(plugin)
+    current = tmp_path / "current"
+    current.symlink_to(release)
+    config = {"memory": {"localvec": {"recall_cmd": ["/usr/bin/env", f"AGENTCORE_ROOT={current}", "python3"]}}}
+    (home / "config.yaml").write_text(yaml.safe_dump(config))
+    obs = module._recall_diagnostics_observation(home, current)
+    assert obs["sources"]["imfl"]["status"] == "unknown"
+    assert obs["disk_bindings"]["imfl"] == {"plugin": "matched", "engine": "matched"}
+    assert obs["binding_scope"] == "configured_files_only"
+    config["memory"]["localvec"]["recall_cmd"][1] = "AGENTCORE_ROOT=/old/release"
+    (home / "config.yaml").write_text(yaml.safe_dump(config))
+    assert module._recall_diagnostics_observation(home, current)["disk_bindings"]["imfl"]["engine"] == "mismatched"

@@ -1375,7 +1375,7 @@ def _legacy_colleague_settlement_observation(profile_home: Path) -> dict[str, An
         return report
 
 
-def _recall_diagnostics_observation(profile_home: Path) -> dict[str, Any]:
+def _recall_diagnostics_observation(profile_home: Path, managed_current: Path | None = None) -> dict[str, Any]:
     """Observe configured recall reports; missing or old reports stay unknown."""
     import importlib.util
     import re
@@ -1406,10 +1406,31 @@ def _recall_diagnostics_observation(profile_home: Path) -> dict[str, Any]:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         observations = {}
+        bindings = {}
         for name, home in homes.items():
             try:
                 data = config if home == profile_home else yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
                 command = data.get("memory", {}).get("localvec", {}).get("recall_cmd", [])
+                binding = {"plugin": "unknown", "engine": "unknown"}
+                if managed_current is not None:
+                    release = managed_current.resolve(strict=True)
+                    plugin = home / "plugins" / "localvec"
+                    if plugin.is_symlink() and plugin.exists():
+                        binding["plugin"] = "matched" if plugin.resolve().is_relative_to(release) else "mismatched"
+                    elif plugin.exists():
+                        binding["plugin"] = "unmanaged"
+                    else:
+                        binding["plugin"] = "missing"
+                    if isinstance(command, list):
+                        roots = [x.split("=", 1)[1] for x in command if isinstance(x, str) and x.startswith("AGENTCORE_ROOT=")]
+                        direct = [x for x in command if isinstance(x, str) and x.endswith("/tools/recall_entity.py")]
+                        candidates = roots + direct
+                        if len(candidates) == 1 and Path(candidates[0]).is_absolute():
+                            resolved = Path(candidates[0]).resolve()
+                            binding["engine"] = "matched" if resolved == release or resolved.is_relative_to(release) else "mismatched"
+                        elif candidates:
+                            binding["engine"] = "ambiguous"
+                bindings[name] = binding
                 if not isinstance(command, list) or command.count("--diagnostic-file") != 1:
                     observations[name] = {"status": "unknown", "reason": "diagnostic_unconfigured"}
                     continue
@@ -1420,7 +1441,9 @@ def _recall_diagnostics_observation(profile_home: Path) -> dict[str, Any]:
                 observations[name] = module.inspect(path, now=time.time(), max_age=3600)
             except (OSError, ValueError, TypeError, AttributeError, IndexError, yaml.YAMLError):
                 observations[name] = {"status": "unknown", "reason": "configuration_unavailable"}
-        return {"sources": observations, "scope": "last_recall_observation_only"}
+                bindings.setdefault(name, {"plugin": "unknown", "engine": "unknown"})
+        return {"sources": observations, "scope": "last_recall_observation_only",
+                "disk_bindings": bindings, "binding_scope": "configured_files_only"}
     except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
         return {"status": "unknown", "reason": "configuration_unavailable"}
 
@@ -1450,7 +1473,7 @@ def doctor(args: argparse.Namespace) -> int:
                           args.profile, manifest.get("hermes_root")),
                       "worker_observation": _worker_runtime_observation(args.profile, current),
                       "colleague_settlement_observation": _legacy_colleague_settlement_observation(profile_home),
-                      "recall_diagnostics_observation": _recall_diagnostics_observation(profile_home),
+                      "recall_diagnostics_observation": _recall_diagnostics_observation(profile_home, current),
                       "manifest": manifest}, indent=2))
     return 0 if ok else 1
 
