@@ -133,6 +133,9 @@ def register(ctx):
     # Dispatch is a separate opt-in capability. The plugin never constructs a
     # Provisioner, Gateway connection, owner identity or session binding itself.
     if ctx.get_config('gateway_dispatch.enabled', False) is True:
+        root = ctx.get_config('engine_root', '')
+        if root and str(root) not in sys.path:
+            sys.path.insert(0, str(root))
         from gateway.session_context import get_session_env
         from agentcore import colleague_gateway_service as gateway_service
 
