@@ -222,3 +222,41 @@ def test_model_preflight_refuses_missing_credentials_without_leaking_output(tmp_
     with patch.dict(os.environ, {"PATH": str(tmp_path), "HOME": str(tmp_path)}):
         with pytest.raises(ValueError, match="credentials, endpoint or flash/main routes unavailable"):
             module.preflight_model(home, REPO, Path(sys.executable))
+
+
+def test_worker_plan_explicit_flowcoro_binds_exact_interpreter_and_directory(tmp_path, monkeypatch):
+    import importlib.util
+    import types
+    spec = importlib.util.spec_from_file_location("setup_worker_flowcoro_test", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    home = tmp_path / "profile"
+    home.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    (home / "config.yaml").write_text(yaml.safe_dump({"plugins": {"enabled": ["durable-dispatch"],
+        "entries": {"durable-dispatch": {"settings": {"enabled": True,
+        "queue_root": str(tmp_path / "queue"), "allowed_roots": [str(source)]}}}}}))
+    native = tmp_path / "native"
+    native.mkdir()
+    (native / "flowcoro_py.so").write_bytes(b"test placeholder")
+    calls = []
+    def checked(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return types.SimpleNamespace(returncode=0)
+    monkeypatch.setattr(module.subprocess, "run", checked)
+    unitdir = tmp_path / "units"
+    files = module.plan(home, REPO, unitdir, "p", Path(sys.executable),
+                        backend="flowcoro", flowcoro_dir=native)
+    unit = files[unitdir / "superagent-worker-p.service"]
+    assert '"--backend" "flowcoro"' in unit
+    assert 'PYTHONPATH=' + str(REPO) + ':' + str(native) in unit
+    assert calls[0][0][0] == sys.executable and calls[0][0][1] == "-I"
+    assert calls[0][0][-2:] == [str(native), str(native / "flowcoro_py.so")]
+    with pytest.raises(ValueError, match="FlowCoro directory requires"):
+        module.plan(home, REPO, unitdir, "p", Path(sys.executable),
+                    backend="stdlib", flowcoro_dir=native)
+    (native / "flowcoro_py.so").unlink()
+    with pytest.raises(ValueError, match="binding missing"):
+        module.plan(home, REPO, unitdir, "p", Path(sys.executable),
+                    backend="flowcoro", flowcoro_dir=native)

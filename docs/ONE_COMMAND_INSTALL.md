@@ -55,6 +55,10 @@ python3 tools/superagent.py rollback --profile <profile>
 安装账本的 `runtime_configuration` 记录清单摘要和处理状态；`not_configured`
 表示没有应用服务设置。这些状态不证明运行中的进程已加载环境，仍须在重启后核对。
 
+## 后台 worker 的 FlowCoro 后端
+
+`install/setup_worker.py` 默认生成 stdlib worker。使用原生后端时，先为目标 Python 和宿主架构准备、校验独立的 `flowcoro_py.so`，再显式传入 `--backend flowcoro --flowcoro-dir <绑定目录>`。安装器会用目标解释器验证它确实加载该目录中的模块，并将受管 `current` 放在 `PYTHONPATH` 首位。缺失或不兼容时拒绝生成；已有不同文件仍拒绝覆盖。原生二进制不随源码包分发，更新和回退时应保留其版本和摘要记录。
+
 ## 干净 Hermes 候选
 
 内部迁移先构建独立候选树，不在现役 Hermes 上逐块抠补丁：

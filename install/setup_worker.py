@@ -26,7 +26,8 @@ def quote_systemd(value: str) -> str:
     return '"' + value.replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def plan(home: Path, engine: Path, unit_dir: Path, profile: str, python: Path):
+def plan(home: Path, engine: Path, unit_dir: Path, profile: str, python: Path, *,
+         backend: str = "stdlib", flowcoro_dir: Path | None = None):
     if not re.fullmatch(r"[A-Za-z0-9_-]+", profile):
         raise ValueError("profile name must contain only letters, numbers, underscore or hyphen")
     config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")) or {}
@@ -59,6 +60,29 @@ def plan(home: Path, engine: Path, unit_dir: Path, profile: str, python: Path):
         raise ValueError("engine lacks analysis_runner.py")
     if not python.is_absolute() or not python.is_file() or not os.access(python, os.X_OK):
         raise ValueError("python must be an existing absolute executable")
+    if backend not in ("stdlib", "flowcoro"):
+        raise ValueError("invalid worker backend")
+    python_path = str(engine)
+    if backend == "flowcoro":
+        if flowcoro_dir is None or not flowcoro_dir.is_absolute() or flowcoro_dir.is_symlink():
+            raise ValueError("absolute FlowCoro directory required")
+        binding = flowcoro_dir / "flowcoro_py.so"
+        if binding.is_symlink() or not binding.is_file():
+            raise ValueError("FlowCoro binding missing")
+        # Validate the requested interpreter and exact module, not the caller's
+        # own Python or whatever happens to be first on its import path.
+        code = ("import sys,pathlib; sys.path.insert(0,sys.argv[1]); import flowcoro_py; "
+                "sys.exit(0 if pathlib.Path(flowcoro_py.__file__).resolve()==pathlib.Path(sys.argv[2]).resolve() else 1)")
+        try:
+            check = subprocess.run([str(python), "-I", "-c", code, str(flowcoro_dir), str(binding)],
+                                   capture_output=True, timeout=10, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError("FlowCoro binding unavailable for worker Python") from exc
+        if check.returncode:
+            raise ValueError("FlowCoro binding unavailable for worker Python")
+        python_path += os.pathsep + str(flowcoro_dir)
+    elif flowcoro_dir is not None:
+        raise ValueError("FlowCoro directory requires flowcoro backend")
     directory = home / "worker"
     policy = directory / "analysis-policy.json"
     runner = directory / "runner.json"
@@ -68,10 +92,10 @@ def plan(home: Path, engine: Path, unit_dir: Path, profile: str, python: Path):
     runner_data = [str(python), str(engine / "agentcore" / "analysis_runner.py"),
                    "--policy", str(policy), "--model-adapter", "agentcore.ccp_analysis_model:model"]
     argv = [str(python), "-m", "agentcore.pool", "--root", root, "worker",
-            "--runner-config", str(runner), "--workers", "1", "--backend", "stdlib"]
+            "--runner-config", str(runner), "--workers", "1", "--backend", backend]
     unit = ("[Unit]\nDescription=Super Agent durable worker for " + profile +
             "\nAfter=network-online.target\n\n[Service]\nType=simple\nUMask=0077\n"
-            + "Environment=" + quote_systemd("PYTHONPATH=" + str(engine)) + "\n"
+            + "Environment=" + quote_systemd("PYTHONPATH=" + python_path) + "\n"
             + "Environment=" + quote_systemd("HERMES_HOME=" + str(home)) + "\n"
             + "ExecStart=" + " ".join(map(quote_systemd, argv)) +
             "\nRestart=on-failure\nRestartSec=5\nKillMode=control-group\nTimeoutStopSec=30\n"
@@ -119,6 +143,8 @@ def main():
     p.add_argument("--profile", required=True)
     p.add_argument("--unit-dir", type=Path, default=Path.home() / ".config/systemd/user")
     p.add_argument("--python", type=Path, default=Path(sys.executable))
+    p.add_argument("--backend", choices=("stdlib", "flowcoro"), default="stdlib")
+    p.add_argument("--flowcoro-dir", type=Path, help="directory containing the pinned flowcoro_py.so")
     p.add_argument("--apply", action="store_true")
     p.add_argument("--activate", action="store_true", help="activate generated user service after checking queued work")
     args = p.parse_args()
@@ -130,7 +156,7 @@ def main():
     # interpreter and loses the private runtime prepared by the installer.
     python = args.python.absolute()
     files = plan(args.profile_home.resolve(), args.engine_root.resolve(), args.unit_dir.resolve(),
-                 args.profile, python)
+                 args.profile, python, backend=args.backend, flowcoro_dir=args.flowcoro_dir)
     for path, content in files.items():
         if path.exists() and (not path.is_file() or path.read_text(encoding="utf-8") != content):
             raise ValueError("refusing to replace existing different file: " + str(path))
