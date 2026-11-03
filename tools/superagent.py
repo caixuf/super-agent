@@ -763,8 +763,6 @@ def migrate_config(args: argparse.Namespace, plan: dict[str, Any], *, quiet: boo
         print(json.dumps({"status": "migrated" if updated != original else "unchanged",
                           "config": str(config)}, indent=2))
     return 0
-                          "config": str(config)}, indent=2))
-    return 0
 
 
 def _stage_release(plan: dict[str, Any]) -> Path:
