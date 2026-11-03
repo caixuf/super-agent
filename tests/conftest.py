@@ -21,6 +21,28 @@ import pytest
 from agentcore.memory.config import MemoryConfig, configure, reset_config
 
 
+@pytest.fixture
+def supervise_without_finish(monkeypatch):
+    """Run a real owned supervisor but lose only the SQLite finish callback."""
+    import sys
+    import time
+
+    def run(pool, claimed, *, lease_age=120):
+        original = pool.finish
+        with monkeypatch.context() as patch:
+            patch.setattr(pool, "finish", lambda *args, **kwargs: False)
+            assert pool.run_claimed(claimed, [sys.executable, "-c", "print('{\"ok\":true}')"])
+        assert pool.finish == original
+        with pool.db() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (claimed[0]["id"],)).fetchone()
+            assert pool._attempt_stopped(row)
+            db.execute("UPDATE jobs SET heartbeat=? WHERE id=?",
+                       (time.time() - lease_age, claimed[0]["id"]))
+        return claimed[0]["attempt"]
+
+    return run
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _isolate_agentcore_state(tmp_path_factory):
     """Point every implicit ``agentcore`` state path at a session tmp dir.

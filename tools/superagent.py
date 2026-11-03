@@ -22,7 +22,7 @@ import datetime as dt
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
 import sys
@@ -37,7 +37,7 @@ PLUGIN_SOURCES = tuple(sorted(p for p in (REPO / "plugins").glob("*/")))
 # Installed upstream plugins are pinned dependencies, not vendored source. They
 # stay outside the repo but are copied into the managed release so a release is
 # self-contained and rollback never depends on a profile-local directory.
-_EXTERNAL_PLUGIN_NAMES = frozenset({"advanced-delegation", "langfuse", "localvec", "mcp-serve"})
+_EXTERNAL_PLUGIN_NAMES = frozenset({"advanced-delegation", "langfuse", "mcp-serve"})
 CARD_PATCH_TOOLS = (
     ("apply_feishu_card_replies.py", "card-replies", "legacy"),
     ("patch_card_finalize.py", "card-finalize", "legacy"),
@@ -51,9 +51,13 @@ KEEP_HOST_PATCH_TOOLS = (
     ("patch_memory_prefetch_observation.py", "memory-prefetch-observation"),
     ("patch_memory_conservation.py", "memory-conservation"),
     ("patch_durable_dispatch_visibility.py", "durable-dispatch-visibility"),
+    ("patch_frontdesk_boundary.py", "frontdesk-boundary"),
 )
 CANDIDATE_TAG = "v0.22.5"
 CANDIDATE_COMMIT = "bf0203a794a07aac3ff764972ab9087baa4e4f4e"
+# Source bundles may be tested or built in place. None of these top-level
+# generated directories are installer payload inputs; source paths remain exact.
+_SOURCE_BUILD_DIRS = frozenset({".venv", ".pytest_cache", "build", "agentcore.egg-info"})
 
 
 def _run(
@@ -70,6 +74,40 @@ def _run(
 
 
 def _git_identity(root: Path = REPO) -> tuple[str, str]:
+    descriptor = root / "release.json"
+    if descriptor.is_file() and not (root / ".git").exists():
+        release = json.loads(descriptor.read_text(encoding="utf-8"))
+        if (release.get("package_type") != "superagent-source-bundle"
+                or release.get("schema_version") != 1
+                or not isinstance(release.get("version"), str)
+                or not isinstance(release.get("identity"), str)
+                or not release["version"] or not release["identity"]):
+            raise ValueError("release bundle integrity check failed")
+        files = release.get("files")
+        if not isinstance(files, dict) or not files:
+            raise ValueError("release bundle integrity manifest missing")
+        digest = hashlib.sha256()
+        for name, entry in sorted(files.items(), key=lambda item: PurePosixPath(item[0])):
+            relative = PurePosixPath(name)
+            if (relative.is_absolute() or ".." in relative.parts or "\\" in name
+                    or relative.as_posix() != name or not relative.parts
+                    or name == "release.json" or relative.parts[0] in _SOURCE_BUILD_DIRS
+                    or not isinstance(entry, dict) or entry.get("mode") not in (0o644, 0o755)):
+                raise ValueError("release bundle integrity manifest invalid")
+            path = root / name
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("release bundle integrity file check failed")
+            content = path.read_bytes()
+            if (hashlib.sha256(content).hexdigest() != entry.get("sha256")
+                    or (path.stat().st_mode & 0o777) != entry["mode"]):
+                raise ValueError("release bundle integrity file check failed")
+            digest.update(name.encode())
+            digest.update(b"\0")
+            digest.update(content)
+        if (digest.hexdigest() != release.get("tree_sha256")
+                or _release_files(root, ignored_roots=_SOURCE_BUILD_DIRS) != files):
+            raise ValueError("release bundle integrity check failed")
+        return release["version"], release["identity"]
     short = _run(["git", "rev-parse", "--short", "HEAD"], cwd=root).stdout.strip() or "unknown"
     dirty = bool(_run(["git", "status", "--porcelain"], cwd=root).stdout.strip())
     describe = _run(["git", "describe", "--tags", "--always", "--dirty"], cwd=root).stdout.strip()
@@ -185,6 +223,29 @@ def _release_tree_hash(release: Path) -> str:
     return digest.hexdigest()
 
 
+def _release_files(
+    release: Path, *, ignored_roots: frozenset[str] = frozenset(),
+) -> dict[str, dict[str, Any]]:
+    """Describe payload bytes and modes; never accept links as release files."""
+    files = {}
+    for path in sorted(release.rglob("*")):
+        relative = path.relative_to(release)
+        if (relative.parts[0] in ignored_roots
+                or "__pycache__" in relative.parts or path.suffix == ".pyc"):
+            continue
+        if path.is_symlink():
+            raise ValueError("release contains a symlink")
+        if path.is_dir() or relative.as_posix() == "release.json":
+            continue
+        if not path.is_file():
+            raise ValueError("release contains an unsupported file type")
+        files[relative.as_posix()] = {
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "mode": path.stat().st_mode & 0o777,
+        }
+    return files
+
+
 def _copy_tree(src: Path, dst: Path) -> None:
     for source in sorted(src.rglob("*")):
         if not source.is_file() or "__pycache__" in source.parts or source.suffix == ".pyc":
@@ -241,6 +302,8 @@ def _patch_state(hermes_root: Path, spec: tuple[str, str, str]) -> dict[str, Any
         command = [sys.executable, str(script), "--check"]
     elif script_name == "patch_feishu_delivery_uuid.py":
         command = [sys.executable, str(script), "--hermes-root", str(hermes_root)]
+    elif script_name in {"patch_memory_prefetch_observation.py", "patch_memory_conservation.py"}:
+        command = [sys.executable, str(script), "--hermes-root", str(hermes_root)]
     else:
         command = [sys.executable, str(script), "--check", "--agent-dir", str(hermes_root)]
     proc = _run(command, env=env)
@@ -261,8 +324,7 @@ def _apply_keep_patches(hermes_root: Path) -> list[dict[str, Any]]:
     for script_name, patch_id in KEEP_HOST_PATCH_TOOLS:
         script = REPO / "patches" / script_name
         if not script.is_file():
-            results.append({"id": patch_id, "state": "missing-tool"})
-            continue
+            raise RuntimeError(f"required preserved patch missing: {patch_id}")
         if script_name in {"patch_memory_prefetch_observation.py", "patch_memory_conservation.py"}:
             probe = [sys.executable, str(script), "--hermes-root", str(hermes_root)]
             apply = [*probe, "--apply"]
@@ -523,6 +585,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "profile_home": str(profile_home),
         "hermes_root": str(hermes_root),
         "plugins": _plugin_names(args),
+        "memory_providers": ["localvec"] if (REPO / "plugins/localvec/__init__.py").is_file() else [],
         "external_plugins": [str(path) for path in external_plugins],
         "legacy_card_patches": legacy,
         "preserved_host_patches": _keep_patch_state(hermes_root),
@@ -546,13 +609,31 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _release_valid(release: Path) -> bool:
-    return (
-        release.is_dir()
+    if not (
+        not release.is_symlink()
+        and release.is_dir()
         and (release / "agentcore" / "liveness.py").is_file()
         and (release / "plugins").is_dir()
         and (release / "skills").is_dir()
         and (release / "release.json").is_file()
-    )
+        and not (release / "release.json").is_symlink()
+    ):
+        return False
+    try:
+        descriptor = json.loads((release / "release.json").read_text(encoding="utf-8"))
+        files = _release_files(release)
+        return (
+            isinstance(descriptor, dict)
+            and descriptor.get("schema_version") == 1
+            and isinstance(descriptor.get("version"), str)
+            and bool(descriptor["version"])
+            and descriptor.get("tree_sha256") == _release_tree_hash(release)
+            # Older managed releases recorded only the content hash. Preserve
+            # rollback to those, but validate file modes on all new releases.
+            and ("files" not in descriptor or descriptor["files"] == files)
+        )
+    except (OSError, ValueError):
+        return False
 
 
 def _switch_current(root: Path, release: Path) -> None:
@@ -563,14 +644,26 @@ def _switch_current(root: Path, release: Path) -> None:
     os.replace(temp, root / "current")
 
 
-def _relink_plugins(profile_home: Path, release: Path, names: list[str], external_plugins: list[str] | None = None) -> None:
+def _relink_plugins(profile_home: Path, release: Path, names: list[str], external_plugins: list[str] | None = None,
+                    memory_providers: list[str] | None = None) -> None:
     destination = profile_home / "plugins"
     destination.mkdir(parents=True, exist_ok=True)
     source_roots = [*PLUGIN_SOURCES, *(Path(p) for p in (external_plugins or []))]
+    repo_names = {p.name for p in PLUGIN_SOURCES}
+    source_roots = [p for p in source_roots if p in PLUGIN_SOURCES or p.name not in repo_names]
+    resolved = []
     for source in source_roots:
         name = _plugin_name(source)
-        if name is None or name not in names:
+        if name is None and source.name in (memory_providers or []):
+            name = source.name
+        if name not in [*names, *(memory_providers or [])]:
             continue
+        if not (release / "plugins" / source.name / "__init__.py").is_file():
+            raise ValueError("release plugin or provider missing")
+        resolved.append((source, name))
+    # Validate every target before replacing any link. A sealed but incomplete
+    # release must not leave half the profile pointing at a different version.
+    for source, name in resolved:
         link = destination / name
         temp = link.with_name(link.name + ".next")
         if temp.is_symlink() or temp.is_file():
@@ -658,24 +751,49 @@ def migrate_config(args: argparse.Namespace, plan: dict[str, Any], *, quiet: boo
 
 def _stage_release(plan: dict[str, Any]) -> Path:
     release = Path(plan["release"])
-    if release.exists():
-        shutil.rmtree(release)
-    release.mkdir(parents=True, exist_ok=False)
-    for name in ("agentcore", "skills", "toolsets", "tools", "runtime", "patches"):
-        if (REPO / name).is_dir():
-            _copy_tree(REPO / name, release / name)
-    managed_sources = [*PLUGIN_SOURCES, *(Path(p) for p in plan.get("external_plugins", []))]
-    for source in managed_sources:
-        _copy_tree(source, release / "plugins" / source.name)
-    tree_hash = _release_tree_hash(release)
-    _write_json_atomic(release / "release.json", {
-        "schema_version": 1,
-        "version": plan["version"],
-        "identity": plan["identity"],
-        "tree_sha256": tree_hash,
-    })
-    if not _release_valid(release):
-        raise RuntimeError("staged release is incomplete")
+    release.parent.mkdir(parents=True, exist_ok=True)
+    # Build away from the live version. Failure must leave both `current` and
+    # every previously published release intact.
+    with tempfile.TemporaryDirectory(prefix=".staging-", dir=release.parent) as work:
+        staged = Path(work) / "release"
+        staged.mkdir()
+        for name in ("agentcore", "skills", "toolsets", "tools", "runtime", "patches"):
+            if (REPO / name).is_dir():
+                _copy_tree(REPO / name, staged / name)
+        managed_sources = [*PLUGIN_SOURCES, *(Path(p) for p in plan.get("external_plugins", []))]
+        repo_names = {p.name for p in PLUGIN_SOURCES}
+        for source in managed_sources:
+            if source not in PLUGIN_SOURCES and source.name in repo_names:
+                continue  # Repo-owned adapters must not be replaced by stale snapshots.
+            _copy_tree(source, staged / "plugins" / source.name)
+        descriptor = {
+            "schema_version": 1,
+            "version": plan["version"],
+            "identity": plan["identity"],
+            "tree_sha256": _release_tree_hash(staged),
+            "files": _release_files(staged),
+        }
+        _write_json_atomic(staged / "release.json", descriptor)
+        if not _release_valid(staged):
+            raise RuntimeError("staged release is incomplete")
+        if release.exists() or release.is_symlink():
+            try:
+                existing = json.loads((release / "release.json").read_text(encoding="utf-8"))
+                matches = (
+                    not release.is_symlink()
+                    and _release_valid(release)
+                    and existing == descriptor
+                    and _release_tree_hash(release) == descriptor["tree_sha256"]
+                    and _release_files(release) == descriptor["files"]
+                )
+            except (OSError, ValueError):
+                matches = False
+            if not matches:
+                raise RuntimeError("existing release differs; refusing in-place replacement")
+            return release
+        # A complete release is nonempty, so rename cannot overwrite a release
+        # concurrently published by another installer. Never remove it to retry.
+        staged.rename(release)
     return release
 
 
@@ -700,7 +818,7 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     release = _stage_release(plan)
     plugins = plan["plugins"]
     _switch_current(root, release)
-    _relink_plugins(profile_home, release, plugins, plan.get("external_plugins", []))
+    _relink_plugins(profile_home, release, plugins, plan.get("external_plugins", []), plan.get("memory_providers", []))
     migrate_config(args, plan, quiet=True)
     _enable_plugins(profile_home, plugins)
     release_history = list(previous_history)
@@ -712,7 +830,8 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         "tree_sha256": _release_tree_hash(release),
         "release_history": release_history,
         "backup": str(backup),
-        "plugin_links": {name: str(profile_home / "plugins" / name) for name in plugins},
+        "plugin_links": {name: str(profile_home / "plugins" / name)
+                         for name in [*plugins, *plan.get("memory_providers", [])]},
         "config_plugin_entries": plugins,
         "legacy_card_patches_at_install": plan.get("legacy_card_patches", []),
     }
@@ -737,7 +856,7 @@ def activate_release(args: argparse.Namespace) -> int:
     path, manifest = found
     root = _managed_root(args)
     release = args.release.expanduser().resolve()
-    if root not in release.parents or not _release_valid(release):
+    if release.parent != root / "releases" or not _release_valid(release):
         print(json.dumps({"status": "refused", "reason": "invalid_release"}))
         return 1
     current = root / "current"
@@ -747,7 +866,8 @@ def activate_release(args: argparse.Namespace) -> int:
         return 0
     if previous is not None:
         manifest["release_history"] = [*manifest.get("release_history", []), str(previous)][-10:]
-    _relink_plugins(Path(manifest["profile_home"]), release, manifest.get("plugins", []), manifest.get("external_plugins", []))
+    _relink_plugins(Path(manifest["profile_home"]), release, manifest.get("plugins", []), manifest.get("external_plugins", []),
+                    manifest.get("memory_providers", []))
     _switch_current(root, release)
     manifest["release"] = str(release)
     manifest["tree_sha256"] = _release_tree_hash(release)
@@ -767,12 +887,13 @@ def rollback(args: argparse.Namespace) -> int:
         print(json.dumps({"status": "refused", "reason": "no_previous_release"}))
         return 1
     release = Path(history.pop()).resolve()
-    if not _release_valid(release):
+    if release.parent != _managed_root(args) / "releases" or not _release_valid(release):
         print(json.dumps({"status": "refused", "reason": "previous_release_incomplete"}))
         return 1
     current = _managed_root(args) / "current"
     previous = current.resolve() if current.is_symlink() else None
-    _relink_plugins(Path(manifest["profile_home"]), release, manifest.get("plugins", []), manifest.get("external_plugins", []))
+    _relink_plugins(Path(manifest["profile_home"]), release, manifest.get("plugins", []), manifest.get("external_plugins", []),
+                    manifest.get("memory_providers", []))
     _switch_current(_managed_root(args), release)
     manifest["release"] = str(release)
     manifest["release_history"] = history
@@ -792,7 +913,12 @@ def doctor(args: argparse.Namespace) -> int:
     current = root / "current"
     release_ok = current.is_symlink() and _release_valid(current.resolve())
     profile_home = Path(manifest["profile_home"])
-    links_ok = all((profile_home / "plugins" / name).is_symlink() for name in manifest.get("plugins", []))
+    links_ok = all(
+        (link := profile_home / "plugins" / name).is_symlink()
+        and link.exists()
+        and current.resolve() in link.resolve().parents
+        for name in [*manifest.get("plugins", []), *manifest.get("memory_providers", [])]
+    )
     hash_ok = release_ok and manifest.get("tree_sha256") == _release_tree_hash(current.resolve())
     ok = release_ok and links_ok and hash_ok
     print(json.dumps({"status": "ready" if ok else "broken",
@@ -811,7 +937,7 @@ def uninstall(args: argparse.Namespace) -> int:
     profile_home = Path(manifest["profile_home"])
     names = list(manifest.get("config_plugin_entries") or [])
     _disable_plugins(profile_home, names)
-    for name in names:
+    for name in [*names, *manifest.get("memory_providers", [])]:
         link = profile_home / "plugins" / name
         if link.is_symlink():
             try:

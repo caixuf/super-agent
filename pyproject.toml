@@ -28,7 +28,9 @@ dependencies = []
 # 那一组 colleague/dev 用例会走到 bridge 的 yaml rubric：缺 yaml 时评分静默降级
 # 到 75 分 → 红队驳回 → 用例假红。系统级 python 通常自带 yaml，所以本机不易发现，
 # 干净室（CI）会暴露。实测：装 pyyaml 后 test_colleague_dev_execute_in_worktree 通过。
-test = ["pytest>=7.0", "markdown>=3.4", "pyyaml>=6.0"]
+# ruamel.yaml matches the candidate Hermes pin for host-only frontdesk policy tests;
+# it is not a dependency of the zero-dependency agentcore package.
+test = ["pytest>=7.0", "markdown>=3.4", "pyyaml>=6.0", "ruamel.yaml==0.18.16"]
 documents = ["markdown>=3.4", "Pygments>=2.15", "Pillow>=10", "websocket-client>=1.6"]
 
 [project.urls]

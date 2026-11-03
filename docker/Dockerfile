@@ -19,16 +19,22 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HOME=/root
 
-RUN apt-get update && apt-get install -y --no-install-recommends git \
+RUN apt-get update && apt-get install -y --no-install-recommends git chromium \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/super-agent
 COPY . /opt/super-agent
 
-# 本仓运行时零第三方依赖；测试与打包只需要这些。
-# markdown 必须装：它是文档渲染链（tools/arch_doc.py）的唯一可选依赖，缺它时那组测试只能整体
-# skip —— 干净室就变成「没验证过渲染链却报全绿」，那是最坏的一种假绿。
-RUN python3 -m pip install "pytest>=7.0" setuptools wheel "markdown>=3.4" "pyyaml>=6.0"
+# 与 CI 共用 test extra；不手写依赖副本，也不提前安装本仓来掩盖包安装检查。
+# 核心仍零第三方依赖，文档/宿主策略测试依赖只在验证环境安装。
+RUN python3 -c 'import subprocess, sys, tomllib; extras = tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]; subprocess.check_call([sys.executable, "-m", "pip", "install", "setuptools", "wheel", *extras["test"], *extras["documents"]])'
+
+# 安装器仍在空 HOME 创建自己的私有 venv，不使用 --skip-deps。仅在构建时
+# 预取其真实依赖；运行阶段断网也能完整安装，并由系统 Chromium 作启动探测。
+# 直接读取安装器的依赖声明，避免测试镜像维护第二份易漂移的列表。
+RUN python3 -c 'import runpy, subprocess, sys; deps = runpy.run_path("install/bootstrap_dependencies.py")["REQUIREMENTS"]; subprocess.check_call([sys.executable, "-m", "pip", "download", "--only-binary=:all:", "--dest", "/opt/superagent-wheels", *deps])'
+ENV PIP_NO_INDEX=1 \
+    PIP_FIND_LINKS=/opt/superagent-wheels
 
 # 默认动作：干净室自检（仓自检 → 包安装 → 安装器 → 幂等 → 合成身份 → 引擎端到端）
 CMD ["bash", "docker/clean_room_check.sh"]

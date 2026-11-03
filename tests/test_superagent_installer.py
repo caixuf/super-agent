@@ -7,14 +7,33 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 TOOL = REPO / "tools/superagent.py"
+
+
+def _load_installer():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("superagent_installer_test", TOOL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _seal_test_release(release, version):
+    module = _load_installer()
+    (release / "release.json").write_text(json.dumps({
+        "schema_version": 1, "version": version, "identity": version,
+        "tree_sha256": module._release_tree_hash(release),
+        "files": module._release_files(release),
+    }))
 
 
 def _run(home: Path, *args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -47,6 +66,17 @@ def _seed_profile(home: Path) -> Path:
     return profile
 
 
+def test_external_snapshot_cannot_override_repo_owned_memory_provider(tmp_path, monkeypatch):
+    module = _load_installer()
+    stale = tmp_path / 'external/localvec'
+    stale.mkdir(parents=True)
+    (stale / '__init__.py').write_text('# stale unguarded provider\n')
+    plan = {'release': str(tmp_path / 'releases/test'), 'version': 'test', 'identity': 'test',
+            'external_plugins': [str(stale)]}
+    release = module._stage_release(plan)
+    assert (release / 'plugins/localvec/__init__.py').read_bytes() == (REPO / 'plugins/localvec/__init__.py').read_bytes()
+
+
 def test_plan_is_read_only_and_identifies_managed_layout(tmp_path):
     profile = _seed_profile(tmp_path)
     before = (profile / "config.yaml").read_bytes()
@@ -70,14 +100,154 @@ def test_install_uses_one_root_and_idempotent_plugin_links(tmp_path):
     assert (release / "agentcore" / "liveness.py").is_file()
     assert (release / "plugins" / "task_status" / "__init__.py").is_file()
     assert (release / "skills" / "im-card-markdown" / "SKILL.md").is_file()
+    assert (release / "patches/patch_frontdesk_boundary.py").is_file()
+    assert (release / "runtime/hermes_frontdesk_policy.py").is_file()
+    assert (release / "runtime/hermes_frontdesk_turn.py").is_file()
     plugins = yaml.safe_load((profile / "config.yaml").read_text())["plugins"]["enabled"]
     assert "task-status" in plugins
     assert (profile / "plugins/task-status").is_symlink()
+    assert "localvec" not in plugins
+    assert manifest['memory_providers'] == ['localvec']
+    assert (profile / 'plugins/localvec').resolve() == release / 'plugins/localvec'
+    assert (release / 'runtime/hermes_memory_identity.py').is_file()
 
     before = (profile / "config.yaml").read_bytes()
     second = _run(tmp_path, "install", check=True)
     assert json.loads(second.stdout)["tree_sha256"] == manifest["tree_sha256"]
     assert (profile / "config.yaml").read_bytes() == before
+
+
+def test_doctor_detects_missing_managed_memory_provider(tmp_path):
+    profile = _seed_profile(tmp_path)
+    _run(tmp_path, 'install', check=True)
+    (profile / 'plugins/localvec').unlink()
+    result = _run(tmp_path, 'doctor')
+    assert result.returncode != 0
+    assert json.loads(result.stdout)['plugin_links_valid'] is False
+
+
+def test_uninstall_unlinks_memory_provider_without_enabling_it(tmp_path):
+    profile = _seed_profile(tmp_path)
+    manifest = json.loads(_run(tmp_path, 'install', check=True).stdout)
+    result = _run(tmp_path, 'uninstall', '--keep-data', check=True)
+    assert not (profile / 'plugins/localvec').is_symlink()
+    assert Path(manifest['managed_root']).is_dir()
+    assert 'localvec' not in (yaml.safe_load((profile / 'config.yaml').read_text())['plugins'].get('enabled') or [])
+
+
+def test_reinstall_does_not_delete_or_repair_active_release_in_place(tmp_path):
+    _seed_profile(tmp_path)
+    manifest = json.loads(_run(tmp_path, "install", check=True).stdout)
+    release = Path(manifest["release"])
+    engine = release / "agentcore/liveness.py"
+    engine.write_text("# drift must be preserved for recovery\n", encoding="utf-8")
+    before = engine.read_bytes()
+    proc = _run(tmp_path, "install")
+    assert proc.returncode != 0
+    assert engine.read_bytes() == before
+    assert (Path(manifest["managed_root"]) / "current").resolve() == release.resolve()
+
+
+@pytest.fixture
+def staged_installer(tmp_path, monkeypatch):
+    module = _load_installer()
+    source = tmp_path / "source"
+    for name in ("agentcore/liveness.py", "plugins/demo/plugin.yaml",
+                 "skills/demo/SKILL.md", "tools/demo.py"):
+        target = source / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# synthetic payload\n")
+    monkeypatch.setattr(module, "REPO", source)
+    monkeypatch.setattr(module, "PLUGIN_SOURCES", (source / "plugins/demo",))
+    plan = {"release": str(tmp_path / "managed/releases/test"),
+            "version": "test", "identity": "test", "external_plugins": []}
+    return module, plan, source
+
+
+def test_staging_identical_release_reuses_files_without_rewriting(staged_installer):
+    module, plan, _ = staged_installer
+    release = module._stage_release(plan)
+    payload = release / "agentcore/liveness.py"
+    before = payload.stat()
+    assert module._stage_release(plan) == release
+    assert payload.stat().st_ino == before.st_ino
+    assert payload.stat().st_mtime_ns == before.st_mtime_ns
+
+
+@pytest.mark.parametrize("drift", ("source", "mode", "extra_file", "descriptor"))
+def test_staging_rejects_same_version_drift_without_replacing_files(staged_installer, drift):
+    module, plan, source = staged_installer
+    release = module._stage_release(plan)
+    payload = release / "agentcore/liveness.py"
+    if drift == "source":
+        (source / "agentcore/liveness.py").write_text("# new version required\n")
+    elif drift == "mode":
+        payload.chmod(0o755)
+    elif drift == "extra_file":
+        (release / "extra.py").write_text("# unexplained file\n")
+    else:
+        (release / "release.json").write_text("{}\n")
+    before = {p.relative_to(release): (p.read_bytes(), p.stat().st_mode)
+              for p in release.rglob("*") if p.is_file()}
+    with pytest.raises(RuntimeError, match="refusing in-place"):
+        module._stage_release(plan)
+    after = {p.relative_to(release): (p.read_bytes(), p.stat().st_mode)
+             for p in release.rglob("*") if p.is_file()}
+    assert after == before
+    assert not list(release.parent.glob(".staging-*"))
+
+
+def test_failed_staging_leaves_active_release_and_no_partial_version(staged_installer, monkeypatch):
+    module, plan, _ = staged_installer
+    old = module._stage_release(plan)
+    current = old.parents[1] / "current"
+    current.symlink_to(old)
+    next_release = old.with_name("next")
+    next_plan = {**plan, "release": str(next_release), "version": "next", "identity": "next"}
+    original_copy = module._copy_tree
+
+    def broken_copy(src, dst):
+        original_copy(src, dst)
+        raise OSError("synthetic interrupted copy")
+
+    monkeypatch.setattr(module, "_copy_tree", broken_copy)
+    with pytest.raises(OSError, match="interrupted copy"):
+        module._stage_release(next_plan)
+    assert current.resolve() == old
+    assert (old / "agentcore/liveness.py").is_file()
+    assert not next_release.exists()
+    assert not list(old.parent.glob(".staging-*"))
+
+
+def test_staging_refuses_existing_release_symlink(staged_installer):
+    module, plan, _ = staged_installer
+    release = module._stage_release(plan)
+    link = release.with_name("linked")
+    link.symlink_to(release)
+    with pytest.raises(RuntimeError, match="refusing in-place"):
+        module._stage_release({**plan, "release": str(link)})
+    assert link.is_symlink()
+    assert (release / "agentcore/liveness.py").is_file()
+
+
+@pytest.mark.parametrize("drift", ("bytes", "mode", "missing_file", "extra_file", "symlink"))
+def test_managed_release_validation_rejects_drift(staged_installer, drift):
+    module, plan, _ = staged_installer
+    release = module._stage_release(plan)
+    payload = release / "agentcore/liveness.py"
+    assert module._release_valid(release)
+    if drift == "bytes":
+        payload.write_text("# drift\n")
+    elif drift == "mode":
+        payload.chmod(0o755)
+    elif drift == "missing_file":
+        payload.unlink()
+    elif drift == "extra_file":
+        (release / "extra.py").write_text("# drift\n")
+    else:
+        payload.unlink()
+        payload.symlink_to(REPO / "agentcore/liveness.py")
+    assert not module._release_valid(release)
 
 
 def test_install_manifest_is_the_uninstall_source_of_truth(tmp_path):
@@ -110,6 +280,17 @@ def test_doctor_reports_broken_managed_current(tmp_path):
     assert json.loads(doctor.stdout)["status"] == "broken"
 
 
+def test_doctor_reports_plugin_link_to_wrong_release(tmp_path):
+    profile = _seed_profile(tmp_path)
+    _run(tmp_path, "install", check=True)
+    link = profile / "plugins/task-status"
+    link.unlink()
+    link.symlink_to(REPO / "plugins/task_status")
+    proc = _run(tmp_path, "doctor")
+    assert proc.returncode == 1
+    assert json.loads(proc.stdout)["plugin_links_valid"] is False
+
+
 def test_upgrade_keeps_previous_release_and_rollback_switches_current(tmp_path):
     _seed_profile(tmp_path)
     first = json.loads(_run(tmp_path, "install", check=True).stdout)
@@ -120,9 +301,9 @@ def test_upgrade_keeps_previous_release_and_rollback_switches_current(tmp_path):
     next_release.mkdir(parents=True)
     (next_release / "agentcore").mkdir()
     (next_release / "agentcore" / "liveness.py").write_text("# next\n")
-    (next_release / "plugins").mkdir()
+    shutil.copytree(old_release / "plugins", next_release / "plugins")
     (next_release / "skills").mkdir()
-    (next_release / "release.json").write_text('{"schema_version":1,"version":"next-test"}\n')
+    _seal_test_release(next_release, "next-test")
     result = _run(tmp_path, "activate-release", "--release", str(next_release))
     assert result.returncode == 0, result.stdout + result.stderr
     assert (root / "current").resolve() == next_release.resolve()
@@ -130,6 +311,39 @@ def test_upgrade_keeps_previous_release_and_rollback_switches_current(tmp_path):
     rollback = _run(tmp_path, "rollback")
     assert rollback.returncode == 0, rollback.stdout + rollback.stderr
     assert (root / "current").resolve() == old_release.resolve()
+
+
+def test_rollback_refuses_corrupted_previous_release_without_switching(tmp_path):
+    _seed_profile(tmp_path)
+    first = json.loads(_run(tmp_path, "install", check=True).stdout)
+    root = Path(first["managed_root"])
+    old_release = Path(first["release"])
+    next_release = root / "releases/next-test"
+    (next_release / "agentcore").mkdir(parents=True)
+    (next_release / "agentcore/liveness.py").write_text("# next\n")
+    shutil.copytree(old_release / "plugins", next_release / "plugins")
+    (next_release / "skills").mkdir()
+    _seal_test_release(next_release, "next-test")
+    _run(tmp_path, "activate-release", "--release", str(next_release), check=True)
+    (old_release / "agentcore/liveness.py").write_text("# corrupted old release\n")
+    result = _run(tmp_path, "rollback")
+    assert result.returncode != 0
+    assert (root / "current").resolve() == next_release.resolve()
+
+
+def test_activate_sealed_release_missing_memory_provider_preserves_all_links(tmp_path):
+    profile = _seed_profile(tmp_path)
+    first = json.loads(_run(tmp_path, 'install', check=True).stdout)
+    root, old = Path(first['managed_root']), Path(first['release'])
+    candidate = root / 'releases/no-provider'
+    shutil.copytree(old, candidate)
+    shutil.rmtree(candidate / 'plugins/localvec')
+    _seal_test_release(candidate, 'no-provider')
+    before = {link.name: link.resolve() for link in (profile / 'plugins').iterdir() if link.is_symlink()}
+    result = _run(tmp_path, 'activate-release', '--release', str(candidate))
+    assert result.returncode != 0
+    assert (root / 'current').resolve() == old
+    assert {link.name: link.resolve() for link in (profile / 'plugins').iterdir() if link.is_symlink()} == before
 
 
 def test_upgrade_refuses_incomplete_release_before_switching(tmp_path):
@@ -279,6 +493,21 @@ def test_candidate_patch_probe_targets_the_candidate_not_live_hermes(tmp_path):
         module._patch_state(candidate, module.CARD_PATCH_TOOLS[0])
     assert observed
     assert observed[-1][1] == str(candidate)
+
+
+def test_candidate_cannot_silently_omit_required_frontdesk_patch(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    module = _load_installer()
+    selection = tuple(item for item in module.KEEP_HOST_PATCH_TOOLS if item[1] == "frontdesk-boundary")
+    assert len(selection) == 1
+    monkeypatch.setattr(module, "KEEP_HOST_PATCH_TOOLS", selection)
+    monkeypatch.setattr(module, "REPO", tmp_path / "incomplete-bundle")
+    run = Mock()
+    monkeypatch.setattr(module, "_run", run)
+    with pytest.raises(RuntimeError, match="required preserved patch missing: frontdesk-boundary"):
+        module._apply_keep_patches(tmp_path / "candidate")
+    run.assert_not_called()
 
 
 def test_candidate_smoke_requires_version_and_committed_pm_environment(tmp_path):

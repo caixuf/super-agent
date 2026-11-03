@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import subprocess
 import sys
+import venv
 
 import yaml
 import pytest
@@ -33,14 +34,19 @@ def test_worker_setup_derives_policy_and_refuses_overwrite(tmp_path):
     applied = subprocess.run(command + ["--apply"], capture_output=True, text=True)
     assert applied.returncode == 0, applied.stderr
     policy = json.loads((home / "worker/analysis-policy.json").read_text())
+    runner = json.loads((home / "worker/runner.json").read_text())
+    assert runner[0] == str(Path(sys.executable).absolute())
     assert policy["allowed_roots"] == [str(source)]
     assert policy["denied_globs"] == ["*.secret"]
     unit = (units / "superagent-worker-canary.service").read_text()
     assert str(queue) in unit and str(home) in unit
     if shutil.which("systemd-analyze"):
-        result = subprocess.run(["systemd-analyze", "--user", "verify", str(units / "superagent-worker-canary.service")], capture_output=True, text=True)
-        if "Failed to connect to" not in result.stderr:
-            assert result.returncode == 0, result.stderr
+        runtime = tmp_path / "user-runtime"
+        runtime.mkdir(mode=0o700)
+        result = subprocess.run(
+            ["systemd-analyze", "--user", "verify", str(units / "superagent-worker-canary.service")],
+            env=dict(os.environ, XDG_RUNTIME_DIR=str(runtime)), capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
     assert (home / "worker/runner.json").stat().st_mode & 0o077 == 0
     assert subprocess.run(command + ["--apply"], capture_output=True).returncode == 0
     (home / "worker/analysis-policy.json").write_text("custom")
@@ -58,6 +64,29 @@ def test_worker_setup_refuses_missing_authorized_roots(tmp_path):
                              "--unit-dir", str(tmp_path / "units")], capture_output=True)
     assert result.returncode != 0
     assert not (home / "worker").exists()
+
+
+def test_worker_keeps_explicit_interpreter_symlink(tmp_path):
+    home = tmp_path / "profile"
+    home.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    config = {"plugins": {"enabled": ["durable-dispatch"], "entries": {
+        "durable-dispatch": {"settings": {"enabled": True, "queue_root": str(tmp_path / "queue"),
+                                           "allowed_roots": [str(source)]}}}}}
+    (home / "config.yaml").write_text(yaml.safe_dump(config))
+    python = tmp_path / "runtime/bin/python"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(python.parents[1])
+    result = subprocess.run([
+        sys.executable, str(SCRIPT), "--profile-home", str(home), "--engine-root", str(REPO),
+        "--profile", "p", "--python", str(python), "--unit-dir", str(tmp_path / "units"), "--apply",
+    ], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    runner = json.loads((home / "worker/runner.json").read_text())
+    assert runner[0] == str(python), "resolving a virtualenv symlink loses its environment"
+    assert str(python) in (tmp_path / "units/superagent-worker-p.service").read_text()
+    prefix = subprocess.check_output([runner[0], "-c", "import sys; print(sys.prefix)"], text=True)
+    assert prefix.strip() == str(python.parents[1])
 
 
 def test_activation_refuses_pending_queue_without_starting_service(tmp_path):

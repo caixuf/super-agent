@@ -54,7 +54,7 @@ def plan(home: Path, engine: Path, unit_dir: Path, profile: str, python: Path):
         engine = Path(configured_engine).resolve()
     if not (engine / "agentcore" / "analysis_runner.py").is_file():
         raise ValueError("engine lacks analysis_runner.py")
-    if not python.is_absolute() or not python.is_file():
+    if not python.is_absolute() or not python.is_file() or not os.access(python, os.X_OK):
         raise ValueError("python must be an existing absolute executable")
     directory = home / "worker"
     policy = directory / "analysis-policy.json"
@@ -115,7 +115,7 @@ def main():
     p.add_argument("--engine-root", type=Path, required=True)
     p.add_argument("--profile", required=True)
     p.add_argument("--unit-dir", type=Path, default=Path.home() / ".config/systemd/user")
-    p.add_argument("--python", type=Path, default=Path("/usr/bin/python3"))
+    p.add_argument("--python", type=Path, default=Path(sys.executable))
     p.add_argument("--apply", action="store_true")
     p.add_argument("--activate", action="store_true", help="activate generated user service after checking queued work")
     args = p.parse_args()
@@ -123,8 +123,11 @@ def main():
         p.error("--activate requires --apply")
     if args.activate and args.unit_dir.resolve() != (Path.home() / ".config/systemd/user").resolve():
         p.error("--activate requires the standard user systemd unit directory")
+    # A virtualenv Python is commonly a symlink. Resolving it selects the base
+    # interpreter and loses the private runtime prepared by the installer.
+    python = args.python.absolute()
     files = plan(args.profile_home.resolve(), args.engine_root.resolve(), args.unit_dir.resolve(),
-                 args.profile, args.python.resolve())
+                 args.profile, python)
     for path, content in files.items():
         if path.exists() and (not path.is_file() or path.read_text(encoding="utf-8") != content):
             raise ValueError("refusing to replace existing different file: " + str(path))
@@ -145,7 +148,7 @@ def main():
             if active:
                 raise ValueError("queue contains nonterminal work; inspect it before starting a new worker")
         engine_arg = config["plugins"]["entries"]["durable-dispatch"]["settings"].get("engine_root") or str(args.engine_root.resolve())
-        preflight_model(args.profile_home.resolve(), Path(engine_arg).resolve(), args.python.resolve())
+        preflight_model(args.profile_home.resolve(), Path(engine_arg).resolve(), python)
         name = "superagent-worker-" + args.profile + ".service"
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
         subprocess.run(["systemctl", "--user", "enable", "--now", name], check=True)

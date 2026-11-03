@@ -11,12 +11,13 @@
 #
 # 退出码：0 = 全部通过；非 0 = 失败。
 
-set -u
+set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REF="${1:-HEAD}"
 cd "$REPO_ROOT"
 
-SHA="$(git rev-parse --short "$REF")"
+COMMIT="$(git rev-parse --verify --end-of-options "$REF^{commit}")"
+SHA="$(git rev-parse --short "$COMMIT")"
 if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
   printf '[warn] 工作区有未提交改动；本次验证只针对提交 %s 里已入库的内容\n' "$SHA"
 fi
@@ -24,7 +25,7 @@ fi
 CTX="$(mktemp -d "${TMPDIR:-/tmp}/super-agent-ctx.XXXXXX")"
 trap 'rm -rf "$CTX"' EXIT
 
-git archive --format=tar "$REF" | tar -x -C "$CTX"
+git archive --format=tar "$COMMIT" | tar -x -C "$CTX"
 printf '== 干净检出 %s → %s（%s 个文件）\n' "$REF" "$CTX" "$(find "$CTX" -type f | wc -l)"
 
 # 业务字面量门禁由**仓内那个测试**负责：容器里的 `pytest tests` 会跑
@@ -37,7 +38,7 @@ docker build -f "$CTX/docker/Dockerfile" -t "$IMG" "$CTX" || { printf '❌ 镜�
 
 printf '\n== 运行干净室自检\n'
 rc=0
-docker run --rm "$IMG" || rc=$?
+docker run --rm --network none "$IMG" || rc=$?
 
 printf '\n== 退出码 %d %s\n' "$rc" "$([ "$rc" -eq 0 ] && echo '（干净室部署通过）' || echo '（有失败项）')"
 exit "$rc"

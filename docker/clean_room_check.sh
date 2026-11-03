@@ -35,12 +35,12 @@ indent() { sed 's/^/     /'; }
 
 # --------------------------------------------------------------------------- #
 step "① 仓自检（业务无关门禁 + 引擎单测）"
-if out="$(cd "$REPO" && python3 -m pytest tests -q 2>&1)"; then
+if out="$(cd "$REPO" && python3 -m pytest tests -q --tb=short 2>&1)"; then
   printf '%s\n' "$out" | tail -2 | indent
   n="$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | head -1)"
   if [ -n "$n" ]; then pass "单测通过（$n）"; else bad "没解析到 passed 计数"; fi
 else
-  printf '%s\n' "$out" | tail -20 | indent
+  printf '%s\n' "$out" | indent
   bad "仓自检失败"
 fi
 
@@ -154,9 +154,10 @@ fi
 
 if bash "$REPO/install/install.sh" --profile "$PROFILE" > "$LOG.missing" 2>&1; then
   bad "缺少 Hermes 补丁目标却返回成功"
-elif grep -q "Hermes 安装树不存在" "$LOG.missing"; then
-  pass "缺少 Hermes 补丁目标时明确失败"
+elif grep -qE 'Hermes 安装树不存在|未找到 hermes CLI' "$LOG.missing"; then
+  pass "缺少 Hermes CLI 或补丁目标时明确失败"
 else
+  tail -20 "$LOG.missing" | indent
   bad "缺少 Hermes 时没有明确的补丁失败"
 fi
 
@@ -173,6 +174,42 @@ else
 fi
 printf '  --- ⑩ 段节选（本脚本只打印、不执行）\n'
 sed -n '/需要人工执行的步骤/,$p' "$LOG" | head -12 | indent
+
+# --------------------------------------------------------------------------- #
+step "④b 安装后的私有运行时真实渲染（离线 Chromium）"
+if out="$(cd /tmp && "$P/agentcore/.superagent-venv/bin/python" - "$P/agentcore" <<'PY'
+import json
+from pathlib import Path
+import sys
+import tempfile
+
+from PIL import Image
+import yaml, markdown, pygments, websocket
+
+engine = Path(sys.argv[1])
+assert Path(sys.prefix) == engine / '.superagent-venv', 'private interpreter was lost'
+sys.path.insert(0, str(engine / 'tools'))
+import arch_doc
+
+with tempfile.TemporaryDirectory(prefix='installed-document-') as directory:
+    html, png = (Path(directory) / name for name in ('check.html', 'check.png'))
+    body, toc = arch_doc.md_to_html_with_toc(
+        '# Deployment check\n\n## Pipeline\n\n```mermaid\nflowchart LR\n A[Submit] --> B[Worker]\n```\n')
+    arch_doc.render(html, 'Deployment check', body, toc=toc, footer='Offline rendering check')
+    manifest = arch_doc.screenshot(html, png, 900, 900)
+    assert manifest['pages'] and png.stat().st_size > 5000
+    with Image.open(png) as image:
+        image.verify()
+    print(json.dumps({'private_runtime': True, 'png_bytes': png.stat().st_size,
+                      'pages': len(manifest['pages']), 'rendered': True}))
+PY
+)"; then
+  printf '%s\n' "$out" | indent
+  pass "私有 Python 保持虚拟环境身份，真实浏览器生成含图 PNG"
+else
+  printf '%s\n' "$out" | tail -20 | indent
+  bad "安装后的文档渲染失败"
+fi
 
 # --------------------------------------------------------------------------- #
 step "⑤ 幂等：同一目标重跑一遍"
