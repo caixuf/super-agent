@@ -729,6 +729,45 @@ def _disable_plugins(profile_home: Path, names: list[str]) -> None:
         _write_text_atomic(config, updated)
 
 
+def _purge_legacy_plugins(profile_home: Path) -> None:
+    """Purge obsolete plugins and leftover state directories."""
+    _disable_plugins(profile_home, ["task-progress"])
+    stale_data = profile_home / "plugin-data" / "agent-plugin-task-progress-b1e89459"
+    if stale_data.is_dir():
+        shutil.rmtree(stale_data, ignore_errors=True)
+
+
+def _apply_runtime_drop_ins(profile: str) -> None:
+    """Synchronize service runtime drop-in configurations declared in manifests."""
+    manifest_yaml = REPO / "identity" / "manifests" / f"{profile}.manifest.yaml"
+    if not manifest_yaml.is_file():
+        return
+    try:
+        import yaml
+        data = yaml.safe_load(manifest_yaml.read_text(encoding="utf-8")) or {}
+        runtime = data.get("runtime") or {}
+        drop_ins = runtime.get("drop_ins") or {}
+        gateway_service = data.get("gateway_service") or f"hermes-gateway-{profile}.service"
+        if not drop_ins:
+            return
+        drop_in_dir = Path.home() / ".config" / "systemd" / "user" / f"{gateway_service}.d"
+        drop_in_dir.mkdir(parents=True, exist_ok=True)
+        changed = False
+        for conf_name, env_vars in drop_ins.items():
+            conf_path = drop_in_dir / conf_name
+            lines = ["[Service]"]
+            for k, v in env_vars.items():
+                lines.append(f'Environment="{k}={v}"')
+            content = "\n".join(lines) + "\n"
+            if not conf_path.is_file() or conf_path.read_text(encoding="utf-8") != content:
+                _write_text_atomic(conf_path, content)
+                changed = True
+        if changed:
+            _run(["systemctl", "--user", "daemon-reload"])
+    except Exception:
+        pass
+
+
 def migrate_config(args: argparse.Namespace, plan: dict[str, Any], *, quiet: bool = False) -> int:
     config = Path(plan["profile_home"]) / "config.yaml"
     original = config.read_text(encoding="utf-8")
@@ -824,6 +863,8 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     _relink_plugins(profile_home, release, plugins, plan.get("external_plugins", []), plan.get("memory_providers", []))
     migrate_config(args, plan, quiet=True)
     _enable_plugins(profile_home, plugins)
+    _purge_legacy_plugins(profile_home)
+    _apply_runtime_drop_ins(getattr(args, "profile", ""))
     overlay_summary = None
     if (release / "overlay").is_dir():
         overlay_summary = apply_profile_overlay(
