@@ -1,5 +1,5 @@
 diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adapter.py
-index 46fbeae062..a019db234d 100644
+index 46fbeae062..2d5434126d 100644
 --- a/plugins/platforms/feishu/adapter.py
 +++ b/plugins/platforms/feishu/adapter.py
 @@ -69,6 +69,9 @@ _LARK_SDK_IMPORTS = (
@@ -70,7 +70,7 @@ index 46fbeae062..a019db234d 100644
          async def _send_plain(chunk: str) -> Any:
              return await self._feishu_send_with_retry(
                  chat_id=chat_id,
-@@ -1703,6 +1736,54 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -1703,6 +1736,89 @@ class FeishuAdapter(BasePlatformAdapter):
              logger.error("[Feishu] Send error: %s", exc, exc_info=True)
              return SendResult(success=False, error=str(exc))
  
@@ -91,23 +91,58 @@ index 46fbeae062..a019db234d 100644
 +
 +    def _build_reply_card(self, content: str, *, finalize: bool = False,
 +                          started_at: Optional[float] = None) -> dict[str, Any]:
-+        """宽卡片：头部=机器人名，主体=markdown，运行中额外挂一行运行时长。
-+
-+        长任务适配：底部提示按首帧时间戳滚动累加，一眼能看出「还在跑、跑了多久」；
-+        完成帧摘掉提示并把头部转为绿色。
-+        """
-+        name = (str(getattr(self, "_bot_name", "") or "Hermes")).strip() or "Hermes"
-+        elements: list[dict[str, Any]] = [{"tag": "markdown", "content": content or " "}]
-+        if not finalize:
-+            elapsed = max(0, int(time.time() - (started_at or time.time())))
-+            mins, secs = divmod(elapsed, 60)
-+            tip = f"⏳ 运行中 {mins}分{secs:02d}秒" if mins else f"⏳ 运行中 {secs}秒"
-+            elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": tip}]})
++        """CardKit 2.0 宽卡片：单条消息原地流式更新，专业工程工业质感。"""
++        import re
++        name = (str(getattr(self, "_bot_name", "") or "Super Agent")).strip() or "Super Agent"
++        elapsed = max(0.0, time.time() - (started_at or time.time()))
++        elapsed_str = f"{elapsed:.1f}s"
++        safe_content = re.sub(r"<at\s+([^>]+)>", r"＜at \1＞", content or " ")
++        header_template = "indigo" if finalize else "wathet"
++        title_suffix = " · 处理完成" if finalize else " · 处理中"
++        header_title = f"{name}{title_suffix}"
++        elements: list[dict[str, Any]] = [
++            {
++                "tag": "column_set",
++                "flex_mode": "none",
++                "background_style": "blue-50" if finalize else "turquoise-50",
++                "columns": [{
++                    "tag": "column",
++                    "width": "weighted",
++                    "weight": 1,
++                    "elements": [{"tag": "markdown", "content": safe_content}],
++                }],
++            },
++            {
++                "tag": "column_set",
++                "flex_mode": "none",
++                "background_style": "grey-50",
++                "columns": [{
++                    "tag": "column",
++                    "width": "weighted",
++                    "weight": 1,
++                    "elements": [{"tag": "markdown", "content": f"耗时: {elapsed_str}  |  状态: {'已完成' if finalize else '运行中'}"}],
++                }],
++            },
++        ]
 +        return {
-+            "config": {"wide_screen_mode": True},
-+            "header": {"title": {"tag": "plain_text", "content": name},
-+                       "template": "green" if finalize else "blue"},
-+            "elements": elements,
++            "schema": "2.0",
++            "config": {
++                "wide_screen_mode": True,
++                "update_multi": True,
++            },
++            "header": {
++                "title": {"tag": "plain_text", "content": header_title},
++                "template": header_template,
++                "icon": {
++                    "tag": "standard_icon",
++                    "token": "myai_colorful",
++                },
++            },
++            "body": {
++                "direction": "vertical",
++                "padding": "12px 12px 12px 12px",
++                "elements": elements,
++            },
 +        }
 +
 +    async def _send_reply_card(self, *, chat_id: str, content: str, reply_to: Optional[str],
@@ -125,7 +160,7 @@ index 46fbeae062..a019db234d 100644
      async def edit_message(self, chat_id: str, message_id: str, content: str, *, finalize: bool = False) -> SendResult:
          """Edit a previously sent Feishu text/post message."""
          if not self._client:
-@@ -1710,6 +1791,25 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -1710,6 +1826,25 @@ class FeishuAdapter(BasePlatformAdapter):
  
          content = self.format_message(content)
  
@@ -151,7 +186,7 @@ index 46fbeae062..a019db234d 100644
          async def _update(msg_type: str, payload: str) -> SendResult:
              body = self._build_update_message_body(msg_type=msg_type, content=payload)
              request = self._build_update_message_request(message_id=message_id, request_body=body)
-@@ -1778,6 +1878,23 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -1778,6 +1913,23 @@ class FeishuAdapter(BasePlatformAdapter):
          route to ``resolve_gateway_approval()`` and unblock the waiting agent thread."""
          if not self._client:
              return SendResult(success=False, error="Not connected")
@@ -175,7 +210,7 @@ index 46fbeae062..a019db234d 100644
          try:
              approval_id = next(self._approval_counter)
              actions = [
-@@ -4014,6 +4131,14 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -4014,6 +4166,14 @@ class FeishuAdapter(BasePlatformAdapter):
      def _build_update_message_request(message_id: str, request_body: Any) -> Any:
          return _sdk_build(UpdateMessageRequest, message_id=message_id, request_body=request_body)
  
