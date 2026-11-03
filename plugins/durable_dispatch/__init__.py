@@ -474,13 +474,21 @@ class DispatchService:
                     'request_accepted': False, 'cancellation_requested': bool(before['cancel']),
                     'status': before['status']}
         self.pool.cancel(job)
+        after = self.pool.status(job)
         ledger = self._resolve_liveness()
         if ledger is not None:
             try:
-                ledger.finish(job, 'cancelled', detail='cancelled by user')
+                # Cancellation admission is not proof that the worker stopped.
+                # Only project the authoritative queue's confirmed outcome,
+                # including a completion that raced this cancellation request.
+                if after['status'] in ('completed', 'failed', 'cancelled'):
+                    terminal = 'done' if after['status'] == 'completed' else after['status']
+                    ledger.finish(job, terminal, detail='pool status: ' + after['status'])
+                else:
+                    ledger.observe(job, state=after['status'],
+                                   detail='cancellation requested; awaiting queue confirmation')
             except Exception:
                 pass
-        after = self.pool.status(job)
         return {'ok': True, 'task_id': job,
                 'request_accepted': not bool(before['cancel']) and bool(after['cancel']),
                 'already_terminal': not bool(after['cancel']) and after['status'] in ('completed', 'failed', 'cancelled'),
@@ -696,7 +704,7 @@ def register(ctx):
     ctx.register_system_prompt_section(
         'durable-dispatch-routing',
         """Capability routing for bounded read-only evidence analysis:
-Use durable_submit for bounded read-only analysis of approved files, including named colleague roles. Choose by the work and source bounds, not by keywords. When the user explicitly names a colleague or says to continue with one, use the matching role from the allowed roles; if the name is ambiguous or the previous assignment is not settled, ask instead of guessing. Choose an available role, submit one task, return its ID and role, then finish the turn without waiting or polling. NEVER submit interactive colleague work through terminal/execute_code or raw pool CLI: that loses the submitting conversation and cannot promise automatic delivery. Use durable_status/cancel with the returned role and task ID. Use delegate_task for independent reasoning requiring separate agent context. Never provide an owner, queue path, shell command, runner, or model adapter.""",
+Use durable_submit for bounded read-only analysis of approved files, including named colleague roles. Choose by the work and source bounds, not by keywords. When the user names a colleague or says to continue with one, select its allowed role; if ambiguous or unsettled, ask. Submit one task, return its ID and role, then finish the turn without waiting or polling. NEVER submit interactive colleague work through terminal/execute_code or raw pool CLI: that loses the submitting conversation and cannot promise automatic delivery. Use durable_status/cancel with the returned role and task ID. An IM frontdesk only interacts, dispatches and reports; it must not execute or delegate work itself. Unsupported work must be reported as unavailable, never silently rerouted. Never provide an owner, queue path, shell command, runner, or model adapter.""",
         position='after_memory', max_chars=1000,
     )
     pool_type, delivery = _engine(ctx.get_config('engine_root'))
