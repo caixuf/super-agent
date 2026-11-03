@@ -1230,3 +1230,36 @@ def test_declared_services_restart_in_reverse_stop_order(tmp_path, monkeypatch):
     assert module.update(SimpleNamespace(profile="demo", runtime_manifest=manifest), {"profile_home": str(profile)}) == 0
     assert [c[-1] for c in calls if "stop" in c] == ["monitor.service", "alert.service"]
     assert [c[-1] for c in calls if "start" in c] == ["alert.service", "monitor.service"]
+
+
+def test_doctor_recall_observation_reports_missing_and_healthy_without_query(tmp_path):
+    import time
+    module = _load_installer()
+    profiles = tmp_path / "profiles"
+    main = profiles / "imfl"
+    member = profiles / "imfl-architect"
+    main.mkdir(parents=True)
+    member.mkdir()
+    report = tmp_path / "recall.json"
+    report.write_text(json.dumps({"at": time.time(), "code": "hit", "count": 2, "query": "private text"}))
+    report.chmod(0o600)
+    main_config = {"memory": {"localvec": {"recall_cmd": ["x", "--diagnostic-file", str(report)]}},
+                   "plugins": {"entries": {"colleague-team": {"settings": {"gateway_dispatch": {
+                       "enabled": True, "tool_backend": {"members": [{"profile": "imfl-architect", "home": str(member)}]}}}}}}}
+    (main / "config.yaml").write_text(yaml.safe_dump(main_config))
+    (member / "config.yaml").write_text(yaml.safe_dump({"memory": {"localvec": {
+        "recall_cmd": ["x", "--diagnostic-file", str(tmp_path / "missing.json")]}}}))
+    result = module._recall_diagnostics_observation(main)
+    assert result["sources"]["imfl"]["status"] == "healthy"
+    assert result["sources"]["imfl-architect"] == {"status": "unknown", "reason": "not_observed"}
+    assert "private text" not in repr(result)
+
+
+def test_doctor_recall_observation_refuses_foreign_profile_home(tmp_path):
+    module = _load_installer()
+    main = tmp_path / "profiles" / "imfl"
+    main.mkdir(parents=True)
+    config = {"plugins": {"entries": {"colleague-team": {"settings": {"gateway_dispatch": {
+        "enabled": True, "tool_backend": {"members": [{"profile": "imfl-test", "home": str(tmp_path / "elsewhere" / "imfl-test")}]}}}}}}}
+    (main / "config.yaml").write_text(yaml.safe_dump(config))
+    assert module._recall_diagnostics_observation(main)["status"] == "unknown"

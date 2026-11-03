@@ -1375,6 +1375,56 @@ def _legacy_colleague_settlement_observation(profile_home: Path) -> dict[str, An
         return report
 
 
+def _recall_diagnostics_observation(profile_home: Path) -> dict[str, Any]:
+    """Observe configured recall reports; missing or old reports stay unknown."""
+    import importlib.util
+    import re
+    import yaml
+
+    try:
+        config = yaml.safe_load((profile_home / "config.yaml").read_text(encoding="utf-8")) or {}
+        if not isinstance(config, dict):
+            raise ValueError("invalid configuration")
+        entries = config.get("plugins", {}).get("entries", {})
+        settings = entries.get("colleague-team", {}).get("settings", {})
+        dispatch = settings.get("gateway_dispatch", {})
+        members = dispatch.get("tool_backend", {}).get("members", []) if dispatch.get("enabled") is True else []
+        if not isinstance(members, list) or len(members) > 64:
+            raise ValueError("invalid member list")
+        homes = {profile_home.name: profile_home}
+        for member in members:
+            name, raw = member.get("profile"), member.get("home")
+            if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name):
+                raise ValueError("invalid member profile")
+            path = Path(raw) if isinstance(raw, str) else Path("")
+            if not path.is_absolute() or path.name != name or path.resolve().parent != profile_home.resolve().parent:
+                raise ValueError("invalid member home")
+            if name in homes:
+                raise ValueError("duplicate member profile")
+            homes[name] = path
+        spec = importlib.util.spec_from_file_location("_superagent_recall_diagnostics", REPO / "tools/inspect_recall_diagnostics.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        observations = {}
+        for name, home in homes.items():
+            try:
+                data = config if home == profile_home else yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+                command = data.get("memory", {}).get("localvec", {}).get("recall_cmd", [])
+                if not isinstance(command, list) or command.count("--diagnostic-file") != 1:
+                    observations[name] = {"status": "unknown", "reason": "diagnostic_unconfigured"}
+                    continue
+                index = command.index("--diagnostic-file")
+                path = Path(command[index + 1])
+                if not path.is_absolute():
+                    raise ValueError("nonabsolute diagnostic")
+                observations[name] = module.inspect(path, now=time.time(), max_age=3600)
+            except (OSError, ValueError, TypeError, AttributeError, IndexError, yaml.YAMLError):
+                observations[name] = {"status": "unknown", "reason": "configuration_unavailable"}
+        return {"sources": observations, "scope": "last_recall_observation_only"}
+    except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
+        return {"status": "unknown", "reason": "configuration_unavailable"}
+
+
 def doctor(args: argparse.Namespace) -> int:
     found = _manifest(args)
     if found is None:
@@ -1400,6 +1450,7 @@ def doctor(args: argparse.Namespace) -> int:
                           args.profile, manifest.get("hermes_root")),
                       "worker_observation": _worker_runtime_observation(args.profile, current),
                       "colleague_settlement_observation": _legacy_colleague_settlement_observation(profile_home),
+                      "recall_diagnostics_observation": _recall_diagnostics_observation(profile_home),
                       "manifest": manifest}, indent=2))
     return 0 if ok else 1
 
