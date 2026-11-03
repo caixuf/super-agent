@@ -126,3 +126,4 @@ def run_preflight_suite(
 
     all_passed = all(item.passed for item in results)
     return PreflightReport(all_passed=all_passed, items=results)
+

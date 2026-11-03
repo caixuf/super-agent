@@ -48,3 +48,4 @@ def test_run_preflight_suite():
         summary_text = report.summary()
         assert "[OK]" in summary_text
         assert "PASS" in summary_text
+

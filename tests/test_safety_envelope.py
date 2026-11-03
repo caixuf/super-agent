@@ -70,3 +70,4 @@ def test_upstream_error_budget_guard():
     assert "[FAIL]" in mrm_resp
     assert "安全降级熔断 (MRM)" in mrm_resp
     assert "耗时: 4.2s" in mrm_resp
+
