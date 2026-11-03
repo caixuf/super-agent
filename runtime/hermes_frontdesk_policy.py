@@ -49,9 +49,11 @@ def _settings(home: Path | str | None = None) -> dict[str, bool]:
     try:
         from ruamel.yaml import YAML
     except ImportError:
-        host_sp = Path.home() / ".hermes/hermes-agent/venv/lib/python3.12/site-packages"
-        if host_sp.is_dir() and str(host_sp) not in sys.path:
-            sys.path.append(str(host_sp))
+        venv_lib = Path.home() / ".hermes/hermes-agent/venv/lib"
+        if venv_lib.is_dir():
+            for sp in venv_lib.glob("python*/site-packages"):
+                if sp.is_dir() and str(sp) not in sys.path:
+                    sys.path.append(str(sp))
         try:
             from ruamel.yaml import YAML
         except ImportError:
