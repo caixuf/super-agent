@@ -1,14 +1,11 @@
 """Tests for Profile Overlay packaging and application."""
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 import sys
 import tarfile
-
-_REPO_ROOT = str(Path(__file__).resolve().parents[1])
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
 
 import pytest
 
@@ -18,7 +15,13 @@ from agentcore.profile_overlay import (
     merge_mcp_into_profile_config,
     resolve_profile_dir,
 )
-from tools.package_superagent import build_package
+
+REPO = Path(__file__).resolve().parents[1]
+_pkg_tool_path = REPO / "tools" / "package_superagent.py"
+_pkg_spec = importlib.util.spec_from_file_location("package_superagent", _pkg_tool_path)
+package_superagent = importlib.util.module_from_spec(_pkg_spec)
+_pkg_spec.loader.exec_module(package_superagent)
+build_package = package_superagent.build_package
 
 
 def test_collect_and_apply_profile_overlay(tmp_path: Path):
