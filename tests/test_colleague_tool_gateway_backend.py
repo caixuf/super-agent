@@ -62,7 +62,7 @@ def test_env(tmp_path):
     return home, workspace
 
 
-def test_tool_backend_enables_tools_and_validates_isolation(test_env):
+def test_tool_backend_reports_availability_without_claiming_isolation(test_env):
     home, workspace = test_env
     conn = MockConnection("cases", home)
     host = MockHost(["cases"], {"cases": conn})
@@ -80,37 +80,28 @@ def test_tool_backend_enables_tools_and_validates_isolation(test_env):
     assert options["model"] == "flash"
 
     spec = InstanceSpec("caixuf", "cases", 1, "cases", "Cases", "DUTY", ())
-    assert backend.inspect(spec) == {"state": "ready", "isolated": True, "private_memory": True, "no_channels": True}
-    assert backend.idle(spec) is True
+    assert backend.inspect(spec) == {"state": "available", "memory_directory": "owner_only",
+                                     "no_channels": True, "execution_isolation": "unverified"}
+    assert backend.idle(spec) is False
+    with pytest.raises(RuntimeError, match="authoritative_quiescence_required"):
+        backend.park(spec)
 
 
-def test_quiescence_verifier_attestation_and_rejection(test_env):
+def test_quiescence_verifier_refuses_terminal_without_attempt_containment(test_env):
     home, workspace = test_env
     conn = MockConnection("cases", home, receipt_status="terminal")
     host = MockHost(["cases"], {"cases": conn})
-
     verifier = make_quiescence_verifier(host, {"cases": workspace})
 
-    # Terminal + not running -> True
+    # A terminal receipt, idle session and empty workspace do not prove that
+    # detached or inaccessible descendants are gone.
     evidence = verifier("cases", 1, "cases", "session-1", "admission-1")
-    assert evidence["all_owned_processes_terminal"] is True
-    assert evidence["evidence_id"].startswith("quiescence-admission-1-1-")
-    assert evidence["member_id"] == "cases"
-    assert evidence["admission_id"] == "admission-1"
-
-    # If receipt status is still started -> False
-    conn.receipt_status = "started"
-    not_done = verifier("cases", 1, "cases", "session-1", "admission-1")
-    assert not_done["all_owned_processes_terminal"] is False
-
-    # If session is still running -> False
-    conn.receipt_status = "terminal"
-    conn.resume_snap = {"running": True, "prompts": ["queued"]}
-    still_running = verifier("cases", 1, "cases", "session-1", "admission-1")
-    assert still_running["all_owned_processes_terminal"] is False
+    assert evidence["all_owned_processes_terminal"] is False
+    assert evidence["reason"] == "attempt_bound_containment_unavailable"
+    assert "evidence_id" not in evidence
 
 
-def test_install_tool_dispatcher_boots_and_settles(test_env, tmp_path, monkeypatch):
+def test_install_tool_dispatcher_exposes_live_native_profile(test_env, tmp_path, monkeypatch):
     from agentcore.colleague_registry import Registry, Supervisor, Actor
     from plugins.colleague_team.host_runtime import install_tool_dispatcher
 
@@ -140,8 +131,10 @@ def test_install_tool_dispatcher_boots_and_settles(test_env, tmp_path, monkeypat
 
     monkeypatch.setattr("plugins.colleague_team.host_runtime.connect_profile", mock_connect_profile)
     monkeypatch.setattr("plugins.colleague_team.host_runtime.session_store", lambda c: MockStore(c))
+    monkeypatch.setattr("plugins.colleague_team.host_runtime.profile_is_unserved", lambda *_: False)
 
-    entries = [{"member_id": "cases", "generation": 1, "profile": "cases", "home": str(home), "workdir": str(workspace)}]
+    entries = [{"member_id": "cases", "generation": 1, "profile": "cases", "home": str(home),
+                "workdir": str(workspace), "model_policy": "profile"}]
     bootstrap = install_tool_dispatcher(
         service_profile_name="caixuf",
         registry=registry,
@@ -150,18 +143,39 @@ def test_install_tool_dispatcher_boots_and_settles(test_env, tmp_path, monkeypat
         state_dir=str(state_dir),
     )
     try:
-        ready = bootstrap.provisioner.provision("cases", 1)
-        assert ready["ready"] is True
-
-        # Submit task
-        owner = {"profile": "caixuf", "session": "main-1"}
-        sub = bootstrap.dispatcher.submit(owner=owner, member_id="cases", generation=1, request_id="req-1", prompt="generate test")
-        assert sub["state"] == "terminal"
-        # Inspect to trigger quiescence settlement
-        ins = bootstrap.dispatcher.inspect(owner=owner, request_id="req-1")
-        assert ins["state"] == "terminal"
-        assert ins["reservation"] == "closed"
-        assert ins["result"]["final_response"] == "done"
+        status = bootstrap.provisioner.provision("cases", 1)
+        assert bootstrap.provisioner.backend.session_options("cases") == {"safe_mode": False}
+        assert status["ready"] is True
+        assert status["execution_isolation"] == "unverified"
     finally:
         bootstrap.close()
 
+
+
+def test_profile_park_requires_host_idle_authority_and_uses_host_lifecycle(test_env):
+    home, workspace = test_env
+    conn = MockConnection("cases", home)
+    host = MockHost(["cases"], {"cases": conn})
+    spec = InstanceSpec("caixuf", "cases", 1, "cases", "Cases", "DUTY", ())
+    stopped = []
+    backend = ToolEnabledGatewayProfileBackend(
+        gateway_host=host, member_profiles={("cases", 1): "cases"}, profile_homes={"cases": home},
+        model_options={"cases": {"model": "flash", "provider": "custom", "base_url": "http://127.0.0.1:4000/v1", "api_key": "secret"}},
+        profile_workdirs={"cases": workspace}, idle_authority=lambda _: True,
+        stop_profile=lambda name, path: stopped.append((name, path)),
+        parked_profile=lambda name, path: bool(stopped))
+    backend.park(spec)
+    assert stopped == [("cases", home)]
+    assert backend.inspect(spec) == {"state": "parked"}
+
+
+def test_native_profile_policy_does_not_require_or_override_credentials(test_env):
+    home, workspace = test_env
+    (home / "config.yaml").write_text("model:\n  default: native-model\n  provider: native\n")
+    conn = MockConnection("cases", home)
+    backend = ToolEnabledGatewayProfileBackend(
+        gateway_host=MockHost(["cases"], {"cases": conn}),
+        member_profiles={("cases", 1): "cases"}, profile_homes={"cases": home},
+        model_options={"cases": {}}, profile_workdirs={"cases": workspace})
+    assert backend.session_options("cases") == {"safe_mode": False}
+    assert backend.inspect(InstanceSpec("caixuf", "cases", 1, "cases", "Cases", "DUTY", ()))["state"] == "available"

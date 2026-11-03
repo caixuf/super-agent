@@ -51,10 +51,33 @@ def session_store(connection):
     return GatewaySessionStore(connection=connection)
 
 
+def completion_sink_for_profile(ctx):
+    """Use the already-configured direct-delivery queue for this host profile."""
+    if ctx.get_config("gateway_dispatch.deliver_completions", False) is not True:
+        return None
+    import os
+    import stat
+    from pathlib import Path
+    from hermes_cli.config import load_config_readonly
+    from agentcore.pool import Pool
+    config = load_config_readonly() or {}
+    settings = (((config.get("plugins") or {}).get("entries") or {}).get("durable-dispatch") or {}).get("settings") or {}
+    if (settings.get("enabled") is not True or settings.get("deliver_completions") is not True
+            or settings.get("direct_delivery_enabled") is not True):
+        raise ValueError("direct_completion_delivery_not_enabled")
+    root = Path(settings.get("queue_root", ""))
+    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+        raise ValueError("private_completion_queue_required")
+    info = root.stat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise ValueError("private_completion_queue_required")
+    return Pool(root)
+
+
 def install_dispatcher(*, service_profile_name, registry, supervisor,
                        member_profiles, profile_homes, profile_workdirs, state_dir,
                        backend=None, backend_factory=None, session_toolsets=None,
-                       session_options_for_profile=None, all_work_quiescent=None):
+                       session_options_for_profile=None, all_work_quiescent=None, completion_sink=None):
     """Install the dispatcher using host-owned identities and a real backend.
 
     Call only from the host lifecycle. Member mapping, execution policy and
@@ -86,14 +109,149 @@ def install_dispatcher(*, service_profile_name, registry, supervisor,
             gateway_host=host, session_store_factory=session_store, state_dir=state_dir,
             owns_gateway_host=True, session_toolsets=session_toolsets,
             session_options_for_profile=session_options_for_profile,
-            all_work_quiescent=all_work_quiescent,
+            all_work_quiescent=all_work_quiescent, completion_sink=completion_sink,
         )
     except BaseException:
         host.close()
         raise
 
 
-def install_safe_dispatcher(*, service_profile_name, registry, supervisor, entries, state_dir):
+
+
+
+def profile_is_unserved(profile, home):
+    """Observe a parked profile using its marker and the live multiplexer's identity."""
+    import os
+    import stat
+    from pathlib import Path
+    from hermes_cli.gateway_runtime_discovery import query_identify
+    from hermes_cli.profiles import parked_marker_path, profile_is_standalone
+    try:
+        home = Path(home)
+        if (not home.is_absolute() or home.is_symlink() or home.name != profile
+                or home.parent.name != "profiles" or profile_is_standalone(home)):
+            return False
+        home = home.resolve(strict=True)
+        info = parked_marker_path(home).lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            return False
+        payload = query_identify(home.parent.parent, timeout=2.0)
+        entries = payload.get("served_profiles") if isinstance(payload, dict) else None
+        if not isinstance(entries, list) or any(not isinstance(item, dict) or not isinstance(item.get("home"), str) for item in entries):
+            return False
+        return all(Path(item["home"]).resolve() != home for item in entries)
+    except (OSError, ValueError, TypeError, RuntimeError):
+        return False
+
+
+
+def serve_profile(profile, home):
+    """Unpark one named profile and require a live host acknowledgement."""
+    import os
+    import stat
+    from pathlib import Path
+    from gateway.control_socket import request_serve_profile_hot
+    from hermes_cli.gateway_runtime_discovery import query_identify
+    from hermes_cli.profiles import parked_marker_path, profile_is_standalone
+
+    home = Path(home)
+    if (not home.is_absolute() or home.is_symlink() or home.name != profile
+            or home.parent.name != "profiles" or profile_is_standalone(home)):
+        raise ValueError("multiplexed_profile_home_required")
+    home = home.resolve(strict=True)
+    marker = parked_marker_path(home)
+    info = marker.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        raise ValueError("unsafe_profile_park_marker")
+    marker.unlink()
+    try:
+        answer = request_serve_profile_hot(home.parent.parent, profile)
+        if not isinstance(answer, dict) or answer.get("served") != profile or answer.get("error"):
+            raise RuntimeError("profile_serve_unconfirmed")
+        payload = query_identify(home.parent.parent, timeout=2.0)
+        entries = payload.get("served_profiles") if isinstance(payload, dict) else None
+        if not isinstance(entries, list) or sum(
+                isinstance(item, dict) and isinstance(item.get("home"), str)
+                and Path(item["home"]).resolve() == home for item in entries) != 1:
+            raise RuntimeError("profile_serve_identity_unconfirmed")
+    except BaseException:
+        # Persist the previous parked intent on ambiguous host responses.
+        try:
+            fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            os.close(fd)
+        except FileExistsError:
+            pass
+        raise
+
+
+def unserve_profile(profile, home):
+    """Park one multiplexed profile and require the host's live acknowledgement.
+
+    This only stops profile routing. The caller must establish whole-work
+    quiescence before calling; this function does not prove descendant exit.
+    """
+    import os
+    import stat
+    from pathlib import Path
+    from gateway.control_socket import request_unserve_profile
+    from hermes_cli.gateway_runtime_discovery import query_identify
+    from hermes_cli.profiles import parked_marker_path, profile_is_standalone
+
+    home = Path(home)
+    if (not home.is_absolute() or home.is_symlink() or home.name != profile
+            or home.parent.name != "profiles" or profile_is_standalone(home)):
+        raise ValueError("multiplexed_profile_home_required")
+    home = home.resolve(strict=True)
+    host_home = home.parent.parent
+    def served():
+        payload = query_identify(host_home, timeout=2.0)
+        entries = payload.get("served_profiles") if isinstance(payload, dict) else None
+        if not isinstance(entries, list) or any(not isinstance(item, dict) or not isinstance(item.get("home"), str) for item in entries):
+            raise RuntimeError("host_profile_state_unknown")
+        return any(Path(item["home"]).resolve() == home for item in entries)
+    marker = parked_marker_path(home)
+    if marker.exists() or marker.is_symlink():
+        info = marker.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError("unsafe_profile_park_marker")
+        if not served():
+            return
+    else:
+        if not served():
+            raise RuntimeError("profile_ownership_unconfirmed")
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        os.close(fd)
+    answer = request_unserve_profile(host_home, profile)
+    if not isinstance(answer, dict) or answer.get("unserved") != profile or answer.get("error"):
+        raise RuntimeError("profile_unserve_unconfirmed")
+    if served():
+        raise RuntimeError("profile_still_served")
+
+
+def start_receipt_refresh(dispatcher, *, interval=15.0):
+    """Refresh existing admissions until host unload; never submit or replay."""
+    import logging
+    import threading
+    if not isinstance(interval, (int, float)) or isinstance(interval, bool) or not 5 <= interval <= 300:
+        raise ValueError("invalid_receipt_refresh_interval")
+    stop = threading.Event()
+    def loop():
+        while not stop.is_set():
+            try:
+                dispatcher.refresh_pending(should_stop=stop.is_set)
+            except Exception as exc:
+                logging.getLogger(__name__).warning("colleague receipt refresh failed: %s", type(exc).__name__)
+            if stop.wait(interval):
+                break
+    thread = threading.Thread(target=loop, name="colleague-receipts", daemon=True)
+    thread.start()
+    def close():
+        stop.set()
+        thread.join(timeout=2.0)
+    return close
+
+
+def install_safe_dispatcher(*, service_profile_name, registry, supervisor, entries, state_dir, completion_sink=None):
     """Attach explicitly configured, tool-free profiles to the live dispatcher.
 
     This does not provision profiles or grant tool-bearing work. Profile paths
@@ -147,65 +305,27 @@ def install_safe_dispatcher(*, service_profile_name, registry, supervisor, entri
     return install_dispatcher(service_profile_name=service_profile_name, registry=registry,
                               supervisor=supervisor, backend_factory=backend_factory,
                               member_profiles=member_profiles, profile_homes=homes,
-                              profile_workdirs=workdirs, state_dir=state)
+                              profile_workdirs=workdirs, state_dir=state, completion_sink=completion_sink)
 
 
 def make_quiescence_verifier(gateway_host, profile_workdirs):
-    """Authoritative quiescence verification that checks Gateway receipt status,
-    session liveness and verifies no orphaned processes remain in the worker's private workspace.
+    """Do not infer whole-attempt termination from session state or process cwd.
+
+    Gateway-owned tool descendants may change directory or outlive the worker.
+    An attempt-bound containment authority must be wired before reservations can
+    be settled. Until then, keep their state unknown instead of issuing evidence.
     """
-    import time
-    import os
-    from pathlib import Path
-
     def all_work_quiescent(member_id, generation, hermes_profile, hermes_session_id, admission_id):
-        try:
-            connection = gateway_host.connection_for_profile(hermes_profile)
-            receipt = connection.call("prompt.receipt", session_id=hermes_session_id, admission_id=admission_id, include_result=True)
-            if not isinstance(receipt, dict) or receipt.get("status") != "terminal":
-                return {"all_owned_processes_terminal": False}
-
-            snap = connection.call("session.resume", session_id=hermes_session_id)
-            if not isinstance(snap, dict) or snap.get("running") is not False or snap.get("prompts") or snap.get("pending"):
-                return {"all_owned_processes_terminal": False}
-
-            workdir = profile_workdirs.get(hermes_profile)
-            if workdir:
-                workdir_path = Path(workdir).resolve()
-                proc_dir = Path("/proc")
-                if proc_dir.is_dir():
-                    for entry in proc_dir.iterdir():
-                        if not entry.name.isdigit():
-                            continue
-                        pid = int(entry.name)
-                        if pid == os.getpid():
-                            continue
-                        try:
-                            proc_cwd = Path(f"/proc/{pid}/cwd").resolve()
-                            if proc_cwd == workdir_path:
-                                with open(f"/proc/{pid}/status", "r") as f:
-                                    status = f.read()
-                                if "State:\tZ" not in status:
-                                    return {"all_owned_processes_terminal": False}
-                        except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
-                            continue
-
-            evidence_id = f"quiescence-{admission_id}-{generation}-{int(time.time() * 1000)}"
-            return {"all_owned_processes_terminal": True, "evidence_id": evidence_id,
-                    "member_id": member_id, "generation": generation,
-                    "hermes_profile": hermes_profile, "hermes_session_id": hermes_session_id,
-                    "admission_id": admission_id}
-        except Exception:
-            return {"all_owned_processes_terminal": False}
-
+        return {"all_owned_processes_terminal": False,
+                "reason": "attempt_bound_containment_unavailable"}
     return all_work_quiescent
 
 
-def install_tool_dispatcher(*, service_profile_name, registry, supervisor, entries, state_dir, session_toolsets=None):
+def install_tool_dispatcher(*, service_profile_name, registry, supervisor, entries, state_dir, session_toolsets=None, completion_sink=None):
     """Attach explicitly configured, tool-enabled profiles to the live dispatcher.
 
-    Profiles execute with full tools, skills, isolated workspaces, and
-    verifiable quiescence attestation upon terminal completion.
+    Profile directories are private, but execution isolation and whole-attempt
+    quiescence are not established by the current Gateway integration.
     """
     from pathlib import Path
     import os
@@ -236,12 +356,20 @@ def install_tool_dispatcher(*, service_profile_name, registry, supervisor, entri
         config = load_yaml(home / "config.yaml")
         if not isinstance(config, dict) or not isinstance(config.get("model"), dict):
             raise ValueError("worker_model_configuration_missing")
-        model = config["model"]; provider_name = model.get("provider")
-        provider = (config.get("providers") or {}).get(provider_name)
-        if not isinstance(provider, dict):
-            raise ValueError("explicit_worker_provider_required")
-        options[profile] = {"model": model.get("default"), "provider": "custom",
-                            "base_url": provider.get("base_url"), "api_key": provider.get("api_key")}
+        policy = entry.get("model_policy", "explicit")
+        if policy == "profile":
+            # Hermes resolves the model, provider, and credentials in the
+            # member's own profile, including native OAuth and env-based keys.
+            options[profile] = {}
+        elif policy == "explicit":
+            model = config["model"]; provider_name = model.get("provider")
+            provider = (config.get("providers") or {}).get(provider_name)
+            if not isinstance(provider, dict):
+                raise ValueError("explicit_worker_provider_required")
+            options[profile] = {"model": model.get("default"), "provider": "custom",
+                                "base_url": provider.get("base_url"), "api_key": provider.get("api_key")}
+        else:
+            raise ValueError("invalid_worker_model_policy")
         member_profiles[key] = profile
         homes[profile] = home
         workdirs[profile] = workdir
@@ -257,7 +385,8 @@ def install_tool_dispatcher(*, service_profile_name, registry, supervisor, entri
     try:
         backend = ToolEnabledGatewayProfileBackend(gateway_host=host, member_profiles=member_profiles,
                                                    profile_homes=homes, model_options=options,
-                                                   profile_workdirs=workdirs)
+                                                   profile_workdirs=workdirs, stop_profile=unserve_profile,
+                                                   parked_profile=profile_is_unserved, start_profile=serve_profile)
         quiescence_verifier = make_quiescence_verifier(host, workdirs)
         return ColleagueGatewayBootstrap(
             service_profile_name=service_profile_name, registry=registry, supervisor=supervisor,
@@ -265,7 +394,7 @@ def install_tool_dispatcher(*, service_profile_name, registry, supervisor, entri
             gateway_host=host, session_store_factory=session_store, state_dir=state,
             owns_gateway_host=True, session_toolsets=session_toolsets,
             session_options_for_profile=backend.session_options,
-            all_work_quiescent=quiescence_verifier,
+            all_work_quiescent=quiescence_verifier, completion_sink=completion_sink,
         )
     except BaseException:
         host.close()

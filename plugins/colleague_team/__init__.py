@@ -155,6 +155,7 @@ def register(ctx):
         from agentcore import colleague_gateway_service as gateway_service
 
         gateway_service.configure_session_env(get_session_env)
+        bootstrap = None
 
         if ctx.get_config('gateway_dispatch.tool_backend.enabled', False) is True:
             entries = ctx.get_config('gateway_dispatch.tool_backend.members', None)
@@ -169,7 +170,8 @@ def register(ctx):
             spec.loader.exec_module(host_runtime)
             bootstrap = host_runtime.install_tool_dispatcher(
                 service_profile_name=ctx.profile_name, registry=registry,
-                supervisor=engine.Supervisor(team_id), entries=entries, state_dir=state_dir)
+                supervisor=engine.Supervisor(team_id), entries=entries, state_dir=state_dir,
+                completion_sink=host_runtime.completion_sink_for_profile(ctx))
             try:
                 ctx.on_unload(bootstrap.close)
                 for entry in entries:
@@ -203,7 +205,8 @@ def register(ctx):
             spec.loader.exec_module(host_runtime)
             bootstrap = host_runtime.install_safe_dispatcher(
                 service_profile_name=ctx.profile_name, registry=registry,
-                supervisor=engine.Supervisor(team_id), entries=entries, state_dir=state_dir)
+                supervisor=engine.Supervisor(team_id), entries=entries, state_dir=state_dir,
+                completion_sink=host_runtime.completion_sink_for_profile(ctx))
             try:
                 ctx.on_unload(bootstrap.close)
                 for entry in entries:
@@ -222,6 +225,15 @@ def register(ctx):
                         except Exception:
                             logging.getLogger(__name__).warning("colleague runtime status update failed")
             except BaseException:
+                bootstrap.close()
+                raise
+
+        if bootstrap is not None:
+            stop_refresh = host_runtime.start_receipt_refresh(bootstrap.dispatcher)
+            try:
+                ctx.on_unload(stop_refresh)
+            except BaseException:
+                stop_refresh()
                 bootstrap.close()
                 raise
 

@@ -705,7 +705,7 @@ def _switch_current(root: Path, release: Path) -> None:
 
 
 def _relink_plugins(profile_home: Path, release: Path, names: list[str], external_plugins: list[str] | None = None,
-                    memory_providers: list[str] | None = None) -> None:
+                    memory_providers: list[str] | None = None, rollback_backup: Path | None = None) -> None:
     destination = profile_home / "plugins"
     destination.mkdir(parents=True, exist_ok=True)
     source_roots = [*PLUGIN_SOURCES, *(Path(p) for p in (external_plugins or []))]
@@ -736,11 +736,12 @@ def _relink_plugins(profile_home: Path, release: Path, names: list[str], externa
             # cache. Move them under the managed backup root before replacing
             # the path with the release-owned link.
             managed_root = release.parents[1]
-            backup_parent = managed_root / "backups" / "replaced-plugin-dirs"
-            backup_parent.mkdir(parents=True, exist_ok=True)
-            backup_target = backup_parent / f"{name}-{dt.datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
-            if backup_target.exists():
-                shutil.rmtree(backup_target)
+            backup_parent = rollback_backup or managed_root / "backups" / "replaced-plugin-dirs"
+            backup_parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            backup_target = (backup_parent / name if rollback_backup is not None else
+                             backup_parent / f"{name}-{dt.datetime.now().strftime('%Y%m%d-%H%M%S-%f')}")
+            if backup_target.exists() or backup_target.is_symlink():
+                raise FileExistsError("plugin rollback target already exists")
             os.replace(link, backup_target)
         elif link.exists() or link.is_symlink():
             link.unlink()
@@ -885,13 +886,17 @@ def _migrate_owned_path_scalars(original: str, mapping: dict[str, str]) -> str:
     occurrences = []
     protected_nodes = set()
 
-    def visit(node, keys=()):
+    def visit(node, keys=(), ancestors=frozenset()):
+        if isinstance(node, (MappingNode, SequenceNode)):
+            if id(node) in ancestors:
+                raise ValueError("recursive YAML aliases require manual reconciliation")
+            ancestors = ancestors | {id(node)}
         if isinstance(node, MappingNode):
             for key, value in node.value:
-                visit(value, (*keys, key.value if isinstance(key, ScalarNode) else ""))
+                visit(value, (*keys, key.value if isinstance(key, ScalarNode) else ""), ancestors)
         elif isinstance(node, SequenceNode):
             for child in node.value:
-                visit(child, keys)
+                visit(child, keys, ancestors)
         elif isinstance(node, ScalarNode) and node.tag == "tag:yaml.org,2002:str":
             if any(protected.search(str(key)) for key in keys):
                 protected_nodes.add(id(node))
@@ -917,6 +922,69 @@ def _migrate_owned_path_scalars(original: str, mapping: dict[str, str]) -> str:
     return updated
 
 
+
+def _migrate_plugin_engine_roots(original: str, legacy_roots: Sequence[str], managed_root: str) -> str:
+    """Rewrite explicitly nominated plugin engine roots, leaving business paths untouched."""
+    import yaml
+    from yaml.nodes import MappingNode, ScalarNode
+
+    roots = set()
+    for raw in legacy_roots:
+        path = Path(raw)
+        if not path.is_absolute() or str(path) in ("/", ".") or ".." in path.parts:
+            raise ValueError("legacy engine root must be an absolute non-root path")
+        roots.add(str(path))
+    root = yaml.compose(original, Loader=yaml.SafeLoader)
+    if not isinstance(root, MappingNode):
+        raise ValueError("profile configuration must be a YAML mapping")
+    edits = {}
+    # Aliases can make one scalar serve both an engine setting and a business
+    # or credential field. Refuse shared nodes rather than mutating both.
+    occurrences = {}
+    from yaml.nodes import SequenceNode
+    def count_nodes(node):
+        occurrences[id(node)] = occurrences.get(id(node), 0) + 1
+        if occurrences[id(node)] > 1:
+            return
+        if isinstance(node, MappingNode):
+            for key, value in node.value:
+                count_nodes(key)
+                count_nodes(value)
+        elif isinstance(node, SequenceNode):
+            for child in node.value:
+                count_nodes(child)
+    count_nodes(root)
+
+    def visit(node, keys=(), shared=False, ancestors=frozenset()):
+        if not isinstance(node, MappingNode):
+            return
+        if id(node) in ancestors:
+            raise ValueError("recursive YAML aliases require manual reconciliation")
+        ancestors = ancestors | {id(node)}
+        shared = shared or occurrences[id(node)] > 1
+        for key, value in node.value:
+            if not isinstance(key, ScalarNode):
+                continue
+            path = (*keys, key.value)
+            if (len(path) == 5 and path[:2] == ("plugins", "entries")
+                    and path[3:] == ("settings", "engine_root")
+                    and isinstance(value, ScalarNode)
+                    and value.tag == "tag:yaml.org,2002:str"
+                    and value.style not in ("|", ">") and value.value in roots):
+                if shared or occurrences[id(value)] != 1:
+                    raise ValueError("aliased engine path requires explicit manual reconciliation")
+                raw = original[value.start_mark.index:value.end_mark.index]
+                if raw.count(value.value) != 1:
+                    raise ValueError("owned engine path cannot be safely migrated")
+                edits[(value.start_mark.index, value.end_mark.index)] = raw.replace(value.value, managed_root, 1)
+            else:
+                visit(value, path, shared, ancestors)
+    visit(root)
+    for (start, end), value in sorted(edits.items(), reverse=True):
+        original = original[:start] + value + original[end:]
+    return original
+
+
 def migrate_config(args: argparse.Namespace, plan: dict[str, Any], *, quiet: bool = False) -> int:
     config = Path(plan["profile_home"]) / "config.yaml"
     original = config.read_text(encoding="utf-8")
@@ -930,6 +998,7 @@ def migrate_config(args: argparse.Namespace, plan: dict[str, Any], *, quiet: boo
         "/home/caixuf/.local/state/agentcore/colleague-team/registry.sqlite": managed["colleague_registry"],
     }
     updated = _migrate_owned_path_scalars(original, mapping)
+    updated = _migrate_plugin_engine_roots(updated, getattr(args, "legacy_engine_root", ()), managed["engine_root"])
     if updated != original:
         _write_text_atomic(config, updated)
 
@@ -940,6 +1009,56 @@ def migrate_config(args: argparse.Namespace, plan: dict[str, Any], *, quiet: boo
         print(json.dumps({"status": "migrated" if updated != original else "unchanged",
                           "config": str(config)}, indent=2))
     return 0
+
+
+
+def _planned_worker_pythonpath(profile: str, managed_current: Path, legacy_roots: Sequence[str]) -> dict[str, Any]:
+    """Prepare an explicit worker import-path migration without modifying its unit."""
+    import shlex
+    service = f"superagent-worker-{profile}.service"
+    roots = {str(Path(value)) for value in legacy_roots}
+    if not roots or any(not Path(value).is_absolute() or value == "/" or ".." in Path(value).parts for value in roots):
+        raise ValueError("explicit absolute legacy engine roots required")
+    show = _run(["systemctl", "--user", "show", service, "--property=LoadState",
+                 "--property=ExecStart", "--property=Environment"])
+    if show.returncode != 0:
+        raise RuntimeError("worker_configuration_unavailable")
+    fields = dict(line.split("=", 1) for line in show.stdout.splitlines() if "=" in line)
+    if fields.get("LoadState") != "loaded" or "agentcore.pool" not in fields.get("ExecStart", ""):
+        raise ValueError("worker_unit_not_recognized")
+    env = dict(item.split("=", 1) for item in shlex.split(fields.get("Environment", "")) if "=" in item)
+    value = env.get("PYTHONPATH")
+    if not value:
+        raise ValueError("worker_pythonpath_not_explicit")
+    paths = value.split(os.pathsep)
+    desired = str(managed_current)
+    if not any(path in roots or path == desired for path in paths):
+        raise ValueError("worker_legacy_root_not_present")
+    paths = [desired if path in roots else path for path in paths]
+    # Stable order and all non-engine components are preserved.
+    if paths.count(desired) > 1:
+        first = paths.index(desired)
+        paths = [path for index, path in enumerate(paths) if path != desired or index == first]
+    if any("\n" in path or "\r" in path or "\x00" in path for path in paths):
+        raise ValueError("invalid_worker_pythonpath")
+    return {"service": service, "pythonpath": os.pathsep.join(paths)}
+
+
+
+def _apply_worker_pythonpath(profile: str, managed_current: Path, legacy_roots: Sequence[str]) -> dict[str, Any]:
+    """Install a managed override after validating the current worker's import path."""
+    prepared = _planned_worker_pythonpath(profile, managed_current, legacy_roots)
+    value = prepared["pythonpath"].replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
+    target = Path.home() / ".config/systemd/user" / (prepared["service"] + ".d") / "99-superagent-engine.conf"
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise ValueError("worker_override_not_regular")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _write_text_atomic(target, '[Service]\nEnvironment="PYTHONPATH=' + value + '"\n')
+    _run(["systemctl", "--user", "daemon-reload"], check=True)
+    observed = _worker_runtime_observation(profile, managed_current)
+    if observed["configured_pythonpath_matches"] is not True:
+        raise RuntimeError("worker_override_not_effective")
+    return {"service": prepared["service"], "override": str(target), "configured": True}
 
 
 def _stage_release(plan: dict[str, Any]) -> Path:
@@ -1011,7 +1130,8 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     release = _stage_release(plan)
     plugins = plan["plugins"]
     _switch_current(root, release)
-    _relink_plugins(profile_home, release, plugins, plan.get("external_plugins", []), plan.get("memory_providers", []))
+    _relink_plugins(profile_home, release, plugins, plan.get("external_plugins", []), plan.get("memory_providers", []),
+                    rollback_backup=getattr(args, "_plugin_rollback_dir", None))
     migrate_config(args, plan, quiet=True)
     _enable_plugins(profile_home, plugins)
     _purge_legacy_plugins(profile_home)
@@ -1019,6 +1139,9 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         _disable_legacy_card_producer(profile_home)
     runtime_configuration = _apply_runtime_drop_ins(
         getattr(args, "profile", ""), manifest_path=getattr(args, "runtime_manifest", None))
+    worker_configuration = None
+    if getattr(args, "command", None) == "update" and getattr(args, "legacy_engine_root", None):
+        worker_configuration = _apply_worker_pythonpath(args.profile, root / "current", args.legacy_engine_root)
     overlay_summary = None
     if (release / "overlay").is_dir():
         overlay_summary = apply_profile_overlay(
@@ -1035,12 +1158,14 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         "tree_sha256": _release_tree_hash(release),
         "release_history": release_history,
         "backup": str(backup),
+        "plugin_directory_backup": str(args._plugin_rollback_dir) if getattr(args, "_plugin_rollback_dir", None) else None,
         "plugin_links": {name: str(profile_home / "plugins" / name)
                          for name in [*plugins, *plan.get("memory_providers", [])]},
         "config_plugin_entries": plugins,
         "legacy_card_patches_at_install": plan.get("legacy_card_patches", []),
         "overlay_applied": overlay_summary,
         "runtime_configuration": runtime_configuration,
+        "worker_configuration": worker_configuration,
     }
     _write_json_atomic(root / "install-manifest.json", manifest)
     print(json.dumps({"status": "installed", **manifest}, ensure_ascii=False, indent=2))
@@ -1111,6 +1236,140 @@ def rollback(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def _gateway_runtime_observation(profile: str, expected_hermes_root: str | None) -> dict[str, Any]:
+    """Report observable launch state without claiming functional readiness."""
+    service = f"hermes-gateway-{profile}.service"
+    result = {"service": service, "service_state": "unknown", "main_pid": None,
+              "configured_launcher_matches": None, "process_command_matches": None,
+              "functional_probe": "not_run"}
+    try:
+        show = _run(["systemctl", "--user", "show", service,
+                     "--property=ActiveState", "--property=MainPID", "--property=ExecStart"])
+        if show.returncode != 0:
+            return result
+        fields = dict(line.split("=", 1) for line in show.stdout.splitlines() if "=" in line)
+        result["service_state"] = fields.get("ActiveState") or "unknown"
+        pid = int(fields.get("MainPID", "0"))
+        result["main_pid"] = pid if pid > 0 else None
+        if not isinstance(expected_hermes_root, str) or not Path(expected_hermes_root).is_absolute():
+            return result
+        launcher = str(Path(expected_hermes_root) / ".hermes/bin/hermes")
+        result["configured_launcher_matches"] = launcher in fields.get("ExecStart", "")
+        if pid > 0:
+            try:
+                cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+            except OSError:
+                pass
+            else:
+                # A command-line match is a launch hint, never proof of loaded
+                # modules, plugin activation, or correct end-to-end behavior.
+                result["process_command_matches"] = expected_hermes_root.encode() in cmdline
+        return result
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return result
+
+
+
+
+def _first_engine_path_matches(pythonpath: str, managed_current: Path) -> bool | None:
+    """Use Python's import machinery to detect any earlier engine shadowing."""
+    from importlib.machinery import PathFinder
+    try:
+        expected = (managed_current.resolve(strict=True) / "agentcore" / "__init__.py").resolve(strict=True)
+        for component in pythonpath.split(os.pathsep):
+            # Relative or empty paths depend on the process cwd and cannot be
+            # proved from PYTHONPATH alone.
+            if not component or not Path(component).is_absolute():
+                return None
+            spec = PathFinder.find_spec("agentcore", [component])
+            if spec is None:
+                continue
+            # Namespace packages can be combined with later paths, and custom
+            # importers or archive entries may not have a real file origin.
+            if not spec.origin or spec.origin in {"namespace", "built-in", "frozen"}:
+                return None
+            try:
+                return Path(spec.origin).resolve(strict=True) == expected
+            except OSError:
+                # A ZIP module still shadows the managed package even though
+                # its pseudo-path cannot be resolved as a filesystem file.
+                return False
+        return None
+    except (OSError, ValueError, ImportError):
+        return None
+
+
+def _worker_runtime_observation(profile: str, managed_current: Path) -> dict[str, Any]:
+    """Observe worker import paths without exposing other environment values."""
+    import shlex
+    service = f"superagent-worker-{profile}.service"
+    result = {"service": service, "service_state": "unknown", "main_pid": None,
+              "configured_pythonpath_matches": None, "process_pythonpath_matches": None}
+    try:
+        show = _run(["systemctl", "--user", "show", service, "--property=ActiveState",
+                     "--property=MainPID", "--property=Environment", "--property=ExecStart"])
+        if show.returncode != 0:
+            return result
+        fields = dict(line.split("=", 1) for line in show.stdout.splitlines() if "=" in line)
+        result["service_state"] = fields.get("ActiveState") or "unknown"
+        pid = int(fields.get("MainPID", "0"))
+        result["main_pid"] = pid if pid > 0 else None
+        env = dict(item.split("=", 1) for item in shlex.split(fields.get("Environment", "")) if "=" in item)
+        expected = str(managed_current)
+        if "PYTHONPATH" in env:
+            result["configured_pythonpath_matches"] = _first_engine_path_matches(env["PYTHONPATH"], managed_current)
+        if pid > 0:
+            try:
+                data = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+                item = next((entry for entry in data if entry.startswith(b"PYTHONPATH=")), None)
+                if item is not None:
+                    path_value = os.fsdecode(item.split(b"=", 1)[1])
+                    # Python -m searches its working directory before PYTHONPATH.
+                    # An unknown command shape or inaccessible cwd is not proof.
+                    if "agentcore.pool" in fields.get("ExecStart", ""):
+                        cwd = Path(f"/proc/{pid}/cwd").resolve(strict=True)
+                        # Python searches cwd before PYTHONPATH for -m, and
+                        # a module file shadows a package just as a directory does.
+                        from importlib.machinery import PathFinder
+                        if PathFinder.find_spec("agentcore", [str(cwd)]) is not None:
+                            result["process_pythonpath_matches"] = _first_engine_path_matches(str(cwd), managed_current)
+                        else:
+                            result["process_pythonpath_matches"] = _first_engine_path_matches(path_value, managed_current)
+            except OSError:
+                pass
+        return result
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return result
+
+
+
+def _legacy_colleague_settlement_observation(profile_home: Path) -> dict[str, Any]:
+    """Count known weak historical settlement receipts without opening task contents."""
+    import sqlite3
+    import yaml
+    report = {"state": "unknown", "legacy_settled": None, "legacy_pending": None}
+    try:
+        config = yaml.safe_load((profile_home / "config.yaml").read_text(encoding="utf-8")) or {}
+        settings = (((config.get("plugins") or {}).get("entries") or {}).get("colleague-team") or {}).get("settings") or {}
+        dispatch = settings.get("gateway_dispatch") or {}
+        backend = dispatch.get("tool_backend") or dispatch.get("safe_backend") or {}
+        root = backend.get("state_dir")
+        if not isinstance(root, str) or not Path(root).is_absolute():
+            report["state"] = "not_configured"
+            return report
+        database = Path(root) / "colleague_gateway_tasks.sqlite"
+        if not database.is_file() or database.is_symlink():
+            return report
+        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=2) as db:
+            rows = dict(db.execute("SELECT settlement_state, COUNT(*) FROM tasks "
+                                   "WHERE quiescence_evidence_id LIKE 'quiescence-%' GROUP BY settlement_state"))
+        report.update(state="observed", legacy_settled=rows.get("settled", 0), legacy_pending=rows.get("pending", 0))
+        return report
+    except (OSError, ValueError, TypeError, AttributeError, sqlite3.Error, yaml.YAMLError):
+        return report
+
+
 def doctor(args: argparse.Namespace) -> int:
     found = _manifest(args)
     if found is None:
@@ -1131,6 +1390,11 @@ def doctor(args: argparse.Namespace) -> int:
     print(json.dumps({"status": "ready" if ok else "broken",
                       "release_valid": release_ok, "plugin_links_valid": links_ok,
                       "release_hash_valid": hash_ok,
+                      "status_scope": "managed_release_files_only",
+                      "runtime_observation": _gateway_runtime_observation(
+                          args.profile, manifest.get("hermes_root")),
+                      "worker_observation": _worker_runtime_observation(args.profile, current),
+                      "colleague_settlement_observation": _legacy_colleague_settlement_observation(profile_home),
                       "manifest": manifest}, indent=2))
     return 0 if ok else 1
 
@@ -1230,6 +1494,38 @@ def switch_gateway_source(args: argparse.Namespace) -> int:
     if not systemd_unit.is_file():
         print(json.dumps({"status": "blocked", "reason": "gateway_unit_missing", "unit": str(systemd_unit)}))
         return 1
+    # A later systemd drop-in can override the unit's ExecStart. Refuse the
+    # switch before mutation when systemd cannot describe its loaded drop-ins
+    # or any of them declares ExecStart; an operator must first reconcile it.
+    import re
+    import shlex
+    query = _run(["systemctl", "--user", "show", systemd_unit.name,
+                  "--property=DropInPaths", "--value"])
+    if query.returncode != 0:
+        print(json.dumps({"status": "blocked", "reason": "gateway_dropins_unavailable"}))
+        return 1
+    try:
+        dropins = set(shlex.split(query.stdout.strip()))
+        # Include newly written user drop-ins that systemd has not reloaded yet.
+        user_dropins = Path.home() / ".config" / "systemd" / "user" / (systemd_unit.name + ".d")
+        if user_dropins.is_dir():
+            dropins.update(str(path) for path in user_dropins.glob("*.conf"))
+        conflicts = []
+        for item in sorted(dropins):
+            path = Path(item)
+            if not path.is_absolute() or not path.is_file():
+                raise ValueError("unreadable_dropin")
+            content = path.read_text(encoding="utf-8")
+            if any(re.match(r"^\s*ExecStart\s*=", line) for line in content.splitlines()
+                   if not line.lstrip().startswith(("#", ";"))):
+                conflicts.append(str(path))
+    except (OSError, ValueError):
+        print(json.dumps({"status": "blocked", "reason": "gateway_dropins_unreadable"}))
+        return 1
+    if conflicts:
+        print(json.dumps({"status": "blocked", "reason": "gateway_execstart_dropin_conflict",
+                          "dropins": conflicts}))
+        return 1
     backup = systemd_unit.with_name(systemd_unit.name + ".superagent-before")
     if not backup.exists():
         shutil.copy2(systemd_unit, backup)
@@ -1261,6 +1557,8 @@ def _update_config_snapshot(args: argparse.Namespace, profile_home: Path, root: 
     import re
     import yaml
     paths = [profile_home / "config.yaml", root / "install-manifest.json"]
+    if getattr(args, "legacy_engine_root", None):
+        paths.append(Path.home() / ".config/systemd/user" / f"superagent-worker-{args.profile}.service.d" / "99-superagent-engine.conf")
     service = f"hermes-gateway-{args.profile}.service"
     manifest_path = getattr(args, "runtime_manifest", None) or REPO / "identity" / "manifests" / f"{args.profile}.manifest.yaml"
     if manifest_path.is_file():
@@ -1325,7 +1623,8 @@ def _plugin_link_snapshot(profile_home: Path) -> dict[str, tuple[str, str | None
     return result
 
 
-def _restore_managed_plugin_links(profile_home: Path, root: Path, saved: dict[str, tuple[str, str | None]]) -> None:
+def _restore_managed_plugin_links(profile_home: Path, root: Path, saved: dict[str, tuple[str, str | None]],
+                                  rollback_backup: Path | None = None) -> None:
     """Restore links only when their current target belongs to this managed release root."""
     directory = profile_home / "plugins"
     current = _plugin_link_snapshot(profile_home)
@@ -1356,8 +1655,15 @@ def _restore_managed_plugin_links(profile_home: Path, root: Path, saved: dict[st
             finally:
                 if temporary.is_symlink():
                     temporary.unlink()
-        # Hand-installed directories were moved to the managed backup directory;
-        # leave them intact and report incomplete until they can be identified.
+        elif old[0] == "directory" and rollback_backup is not None:
+            backup = rollback_backup / name
+            if backup.is_symlink() or not backup.is_dir():
+                continue
+            if path.is_symlink():
+                path.unlink()
+            elif path.exists():
+                continue
+            os.replace(backup, path)
 
 
 def _assert_service_quiescent(name: str, *, cgroup_root: Path = Path("/sys/fs/cgroup")) -> None:
@@ -1428,6 +1734,9 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         return 1
     started_during_update = []
     try:
+        backup_parent = root / "backups"
+        backup_parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        args._plugin_rollback_dir = Path(tempfile.mkdtemp(prefix="update-plugins-", dir=backup_parent))
         status = install(args, plan)
         if status != 0:
             raise RuntimeError("install failed")
@@ -1444,6 +1753,10 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
                 # before calling systemd so recovery must stop it as well.
                 started_during_update.append((label, name))
                 _run(["systemctl", "--user", "start", name], check=True)
+        if was_active["worker"] and getattr(args, "legacy_engine_root", None):
+            observed = _worker_runtime_observation(args.profile, root / "current")
+            if observed.get("process_pythonpath_matches") is not True:
+                raise RuntimeError("worker_process_import_path_unproven")
         return 0
     except Exception as exc:
         rollback_errors = []
@@ -1473,11 +1786,15 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         except (OSError, ValueError):
             rollback_errors.append("configuration")
         try:
-            _restore_managed_plugin_links(profile_home, root, saved_links)
+            _restore_managed_plugin_links(profile_home, root, saved_links, getattr(args, "_plugin_rollback_dir", None))
             if _plugin_link_snapshot(profile_home) != saved_links:
                 rollback_errors.append("plugin-links")
             if previous is None and current.is_symlink():
-                rollback_errors.append("release")
+                expected = plan.get("release")
+                if expected and current.resolve(strict=True) == Path(expected).resolve(strict=True):
+                    current.unlink()
+                else:
+                    rollback_errors.append("release")
         except OSError:
             rollback_errors.append("plugin-links")
         if _run(["systemctl", "--user", "daemon-reload"]).returncode:
@@ -1497,6 +1814,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--profile-home", type=Path)
     parser.add_argument("--hermes-root", type=Path, default=DEFAULT_HERMES)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--legacy-engine-root", action="append", default=[],
+                        help="Explicit prior plugin engine root; repeat for each trusted path")
     parser.add_argument("--runtime-manifest", type=Path,
                         help="Explicit host runtime manifest; missing files fail deployment")
     parser.add_argument("--skip-overlay", action="store_true",
@@ -1514,7 +1833,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if (command_index := next((i for i, value in enumerate(raw) if value in known), None)) is not None:
         before, command, after = raw[:command_index], raw[command_index], raw[command_index + 1:]
         global_opts, command_opts = [], []
-        takes_value = {"--profile", "--profile-home", "--hermes-root", "--root", "--runtime-manifest"}
+        takes_value = {"--profile", "--profile-home", "--hermes-root", "--root", "--runtime-manifest", "--legacy-engine-root"}
         index = 0
         while index < len(after):
             token = after[index]

@@ -202,6 +202,52 @@ class Pool:
             row = db.execute('SELECT origin FROM jobs WHERE id=?', (job,)).fetchone()
         return json.loads(row['origin']) if row is not None and row['origin'] else None
 
+    def record_colleague_completion(self, *, source_id, origin, created, status, summary, member):
+        """Record a host-verified colleague result in the existing delivery outbox.
+
+        This method does not submit executable work or infer a destination. The
+        caller must prove terminal settlement and result/session binding first.
+        """
+        import math
+        if not isinstance(source_id, str) or not re.fullmatch(r"[0-9a-f]{32}", source_id):
+            raise ValueError("invalid_colleague_source")
+        address = normalize_origin(origin)
+        if address is None or not isinstance(origin.get("route"), str) or not origin["route"].strip():
+            raise ValueError("bound_delivery_route_required")
+        if (isinstance(created, bool) or not isinstance(created, (int, float)) or
+                not math.isfinite(created) or created < 0):
+            raise ValueError("invalid_colleague_creation_time")
+        if status not in {"completed", "failed", "cancelled"}:
+            raise ValueError("invalid_colleague_completion_status")
+        if not isinstance(summary, str) or not summary.strip() or len(summary) > 12000:
+            raise ValueError("invalid_colleague_completion_summary")
+        if not isinstance(member, dict) or set(member) != {"role_id", "display_name", "role_label"}:
+            raise ValueError("invalid_colleague_identity")
+        if any(not isinstance(value, str) or not value.strip() or len(value) > 80 for value in member.values()):
+            raise ValueError("invalid_colleague_identity")
+        key = "colleague-completion:" + source_id
+        job = hashlib.sha256(key.encode("ascii")).hexdigest()[:32]
+        payload = json.dumps({"_colleague_role": member["role_id"], "_colleague_name": member["display_name"],
+                              "_colleague_label": member["role_label"], "_source": key}, sort_keys=True)
+        result = json.dumps({"summary": summary}, sort_keys=True)
+        receipt = json.dumps({"job": job, "status": status, "result": {"summary": summary}})
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute("SELECT * FROM jobs WHERE id=? OR dedupe=?", (job, key)).fetchall()
+            if existing:
+                if (len(existing) != 1 or existing[0]["id"] != job or existing[0]["dedupe"] != key
+                        or existing[0]["payload"] != payload or existing[0]["origin"] != address
+                        or existing[0]["status"] != status or existing[0]["result"] != result
+                        or existing[0]["created"] != created):
+                    raise ValueError("colleague_completion_conflict")
+                if db.execute("SELECT 1 FROM outbox WHERE job=?", (job,)).fetchone() is None:
+                    raise RuntimeError("colleague_completion_receipt_missing")
+                return job
+            db.execute("INSERT INTO jobs(id,dedupe,payload,status,max_tries,replay_safe,created,result,origin,execution_state) "
+                       "VALUES(?,?,?,?,1,0,?,?,?,'finished')", (job, key, payload, status, created, result, address))
+            db.execute("INSERT INTO outbox(job,receipt) VALUES(?,?)", (job, receipt))
+        return job
+
     def attach_origin(self, job, *, origin, expected_payload_sha256, proof_id, proof_sha256):
         """Administrative recovery of one proven, terminal unaddressed result.
 

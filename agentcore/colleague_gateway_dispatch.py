@@ -30,7 +30,7 @@ def _identity(owner, member, generation, request, prompt):
 class GatewayColleagueDispatcher:
     """Persist identity/admission and submit through a trusted profile-bound Gateway."""
     def __init__(self, *, registry, supervisor:Supervisor, provisioner, bindings,
-                 connection_for_profile, all_work_quiescent=None, state_dir, lock_timeout=30):
+                 connection_for_profile, all_work_quiescent=None, completion_sink=None, state_dir, lock_timeout=30):
         if type(supervisor) is not Supervisor or supervisor.profile_id!=registry.profile_id:
             raise PermissionError("trusted_supervisor_required")
         if not callable(getattr(bindings,"resolve",None)): raise ValueError("persistent_session_binding_store_required")
@@ -46,10 +46,14 @@ class GatewayColleagueDispatcher:
             raise ValueError("invalid_lock_timeout")
         self.registry,self.supervisor,self.provisioner=registry,supervisor,provisioner
         self.bindings,self.connection_for_profile=bindings,connection_for_profile
+        if completion_sink is not None and not callable(getattr(completion_sink, "record_colleague_completion", None)):
+            raise ValueError("trusted_completion_sink_required")
+        self.completion_sink = completion_sink
         self.all_work_quiescent,self.state_dir,self.lock_timeout=all_work_quiescent,root,float(lock_timeout)
         self.db_path=root/"colleague_gateway_tasks.sqlite"
         if self.db_path.is_symlink(): raise ValueError("private_task_database_required")
         with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
             db.execute("""CREATE TABLE IF NOT EXISTS tasks(
                 owner_profile TEXT NOT NULL,owner_session TEXT NOT NULL,request_id TEXT NOT NULL,
                 member_id TEXT NOT NULL,generation INTEGER NOT NULL,prompt_sha256 TEXT NOT NULL,
@@ -59,6 +63,11 @@ class GatewayColleagueDispatcher:
                 quiescence_evidence_id TEXT,settlement_state TEXT,
                 created_at REAL NOT NULL,updated_at REAL NOT NULL,
                 PRIMARY KEY(owner_profile,owner_session,request_id))""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
+            if "owner_origin" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN owner_origin TEXT")
+            if "delivery_job_id" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN delivery_job_id TEXT")
             os.chmod(self.db_path,0o600,follow_symlinks=False)
 
     @contextmanager
@@ -74,7 +83,7 @@ class GatewayColleagueDispatcher:
         return digest[:32],"colleague-"+digest
 
     @contextmanager
-    def _member_lock(self,member,generation):
+    def _member_lock(self,member,generation,*,timeout=None):
         name=hashlib.sha256(json.dumps([self.registry.profile_id,member,generation],
                                        separators=(",",":")).encode()).hexdigest()
         fd=os.open(self.state_dir/(name+".gateway-member.lock"),
@@ -83,7 +92,7 @@ class GatewayColleagueDispatcher:
             i=os.fstat(fd)
             if not stat.S_ISREG(i.st_mode) or i.st_mode&0o077 or i.st_nlink!=1 or (hasattr(os,"getuid") and i.st_uid!=os.getuid()):
                 raise ValueError("private_member_lock_required")
-            end=time.monotonic()+self.lock_timeout
+            end=time.monotonic()+(self.lock_timeout if timeout is None else min(self.lock_timeout, timeout))
             while True:
                 try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB); break
                 except BlockingIOError:
@@ -113,24 +122,47 @@ class GatewayColleagueDispatcher:
                     raise ValueError("request_id_conflict")
                 return row
             db.execute("""INSERT INTO tasks(owner_profile,owner_session,request_id,member_id,generation,
-                prompt_sha256,work_id,input_id,state,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?, 'binding_pending',?,?)""",
-                (owner["profile"],owner["session"],request,member,generation,digest,work,input_id,now,now))
+                prompt_sha256,work_id,input_id,state,created_at,updated_at,owner_origin)
+                VALUES(?,?,?,?,?,?,?,?, 'binding_pending',?,?,?)""",
+                (owner["profile"],owner["session"],request,member,generation,digest,work,input_id,now,now,
+                 normalize_origin(owner)))
         return self._load(owner,request)
 
     def _update(self,owner,request,**values):
         allowed={"hermes_profile","hermes_session_id","admission_id","gateway_generation",
-                 "gateway_principal_id","gateway_profile_id","state","terminal_outcome","quiescence_evidence_id","settlement_state"}
+                 "gateway_principal_id","gateway_profile_id","state","terminal_outcome","quiescence_evidence_id","settlement_state","delivery_job_id"}
         if not values or set(values)-allowed: raise ValueError("invalid_task_update")
+        # Preserve a completed settlement even if a concurrent status reader
+        # loaded the task before another reader finished settlement.
+        assignments = []
+        for key in values:
+            if key == "state":
+                assignments.append("state=CASE WHEN state='settled' AND settlement_state='settled' THEN state "
+                                   "WHEN state='terminal' AND ? NOT IN ('terminal','settled') "
+                                   "THEN state ELSE ? END")
+            elif key == "terminal_outcome":
+                assignments.append("terminal_outcome=CASE WHEN state IN ('terminal','settled') "
+                                   "AND terminal_outcome IS NOT NULL THEN terminal_outcome ELSE ? END")
+            elif key == "settlement_state":
+                assignments.append("settlement_state=CASE WHEN settlement_state='settled' THEN settlement_state ELSE ? END")
+            elif key in {"quiescence_evidence_id", "delivery_job_id"}:
+                assignments.append(key + "=COALESCE(" + key + ", ?)")
+            else:
+                assignments.append(key + "=?")
+        parameters = []
+        for key, value in values.items():
+            parameters.extend((value, value) if key == "state" else (value,))
         with self._db() as db:
-            db.execute("UPDATE tasks SET "+",".join(k+"=?" for k in values)+
+            db.execute("UPDATE tasks SET "+",".join(assignments)+
                        ",updated_at=? WHERE owner_profile=? AND owner_session=? AND request_id=?",
-                       (*values.values(),time.time(),owner["profile"],owner["session"],request))
+                       (*parameters,time.time(),owner["profile"],owner["session"],request))
 
     def _reserve(self,member,generation,work):
         result=self.registry.reserve_work_exclusive(
             supervisor=self.supervisor,member_id=member,generation=generation,work_id=work)
         if result.get("reserved") is not True: raise RuntimeError("work_reservation_failed")
+        status=self.registry.work_status(supervisor=self.supervisor, member_id=member, generation=generation)
+        return max(0, status["tracked_open"]-1)
 
     def _connection(self,owner,member,generation):
         binding=self.bindings.resolve(member,generation,owner["profile"],owner["session"],allow_draining=True)
@@ -176,7 +208,7 @@ class GatewayColleagueDispatcher:
             ready=self.provisioner.status(member_id,generation)
             if not isinstance(ready,dict) or ready.get("ready") is not True:
                 raise RuntimeError("member_not_ready")
-            self._reserve(member_id,generation,work)
+            prior_unconfirmed=self._reserve(member_id,generation,work)
             binding,conn=self._connection(owner,member_id,generation)
             saved=(row["hermes_profile"],row["hermes_session_id"],row["gateway_profile_id"],row["gateway_principal_id"])
             current=(binding.hermes_profile,binding.hermes_session_id,conn.gateway_profile_id,conn.principal_id)
@@ -192,8 +224,11 @@ class GatewayColleagueDispatcher:
                 receipt=conn.call("prompt.submit",session_id=binding.hermes_session_id,input_id=input_id,text=text)
             except Exception:
                 return {"request_id":request_id,"member":self._member_display(member_id,generation),
-                        "state":"unknown","admission_id":row["admission_id"],"retry_input_id":input_id}
-            return self._record(owner,request_id,receipt)
+                        "state":"unknown","admission_id":row["admission_id"],"retry_input_id":input_id,
+                        "prior_background_unconfirmed":prior_unconfirmed}
+            result=self._record(owner,request_id,receipt)
+            result["prior_background_unconfirmed"]=prior_unconfirmed
+            return result
 
     def _record(self,owner,request,receipt):
         row=self._load(owner,request)
@@ -216,6 +251,49 @@ class GatewayColleagueDispatcher:
                 "state":state,"admission_id":receipt["admission_id"],
                 "execution_generation":receipt.get("execution_generation"),"outcome":receipt.get("outcome")}
 
+
+    def refresh_pending(self, *, limit=32, should_stop=None):
+        """Refresh durable admissions from their bound Gateway; never submit work."""
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise ValueError("invalid_refresh_limit")
+        if should_stop is not None and not callable(should_stop):
+            raise ValueError("invalid_refresh_stop_signal")
+        delivery_clause = (" OR (state='settled' AND owner_origin IS NOT NULL AND delivery_job_id IS NULL "
+                           "AND instr(owner_origin, '\"route\"') > 0 "
+                           "AND quiescence_evidence_id NOT LIKE 'quiescence-%')") if self.completion_sink is not None else ""
+        with self._db() as db:
+            rows = db.execute(
+                "SELECT owner_profile,owner_session,request_id,member_id,generation "
+                "FROM tasks WHERE admission_id IS NOT NULL AND "
+                "((state IN ('queued','started','unknown','terminal') AND COALESCE(settlement_state,'') != 'settled')"
+                + delivery_clause + ") ORDER BY updated_at LIMIT ?", (limit,)
+            ).fetchall()
+        refreshed = failed = 0
+        examined = 0
+        for row in rows:
+            if should_stop is not None and should_stop():
+                break
+            examined += 1
+            owner = {"profile": row["owner_profile"], "session": row["owner_session"]}
+            try:
+                with self._member_lock(row["member_id"], row["generation"], timeout=1.0):
+                    observation = self.inspect(owner=owner, request_id=row["request_id"])
+                if isinstance(observation, dict) and observation.get("state") in {"queued", "started", "terminal"}:
+                    refreshed += 1
+                else:
+                    # Unknown is a valid result, but not a successful refresh.
+                    failed += 1
+            except Exception:
+                # An inaccessible Gateway is not evidence of failure or
+                # permission to replay the task.
+                failed += 1
+            finally:
+                # Also rotate when inspect returns an unknown observation
+                # without writing, so a dead profile cannot starve the rest.
+                with self._db() as db:
+                    db.execute("UPDATE tasks SET updated_at=? WHERE owner_profile=? AND owner_session=? AND request_id=?",
+                               (time.time(), owner["profile"], owner["session"], row["request_id"]))
+        return {"examined": examined, "refreshed": refreshed, "failed": failed}
 
     @staticmethod
     def _public_result(receipt, bound_session_id, response_offset=0, response_revision=None):
@@ -278,7 +356,16 @@ class GatewayColleagueDispatcher:
             row["gateway_generation"] is not None and generation!=row["gateway_generation"]):
             return {"request_id":request_id,"member":member,"state":"unknown","admission_id":row["admission_id"],"outcome":"unknown"}
         state=receipt["status"]
-        updates={"state":state,"terminal_outcome":receipt.get("outcome")}
+        if (row["state"] in {"terminal", "settled"} and
+                (state != "terminal" or (row["terminal_outcome"] is not None and
+                                         receipt.get("outcome") != row["terminal_outcome"]))):
+            return {"request_id":request_id,"member":member,"state":"unknown",
+                    "admission_id":row["admission_id"],"outcome":"unknown"}
+        # A later status read must not move a settled task back to terminal.
+        # The external receipt describes execution, while settlement is a
+        # durable local transition and remains authoritative once complete.
+        persisted_state = "settled" if row["settlement_state"] == "settled" else state
+        updates={"state":persisted_state,"terminal_outcome":receipt.get("outcome")}
         if generation is not None and row["gateway_generation"] is None:
             updates["gateway_generation"]=generation
             row=dict(row); row["gateway_generation"]=generation
@@ -289,7 +376,12 @@ class GatewayColleagueDispatcher:
             # crashes on either side of settle_work, the same evidence_id is replayed
             # idempotently; no new process inference or Gateway task replay occurs.
             row=self._load(owner,request_id)
-            if row["settlement_state"]=="pending" and row["quiescence_evidence_id"]:
+            if (row["settlement_state"]=="pending" and row["quiescence_evidence_id"]
+                    and row["quiescence_evidence_id"].startswith("quiescence-")):
+                # eaa466e generated these IDs from a cwd scan, which was not
+                # whole-attempt evidence. Do not replay the pending settlement.
+                reservation="legacy_quiescence_evidence_unverified"
+            elif row["settlement_state"]=="pending" and row["quiescence_evidence_id"]:
                 self.registry.settle_work(supervisor=self.supervisor,member_id=row["member_id"],
                                           generation=row["generation"],work_id=row["work_id"])
                 self._update(owner,request_id,state="settled",settlement_state="settled")
@@ -313,6 +405,54 @@ class GatewayColleagueDispatcher:
                     reservation="closed"
                 else: reservation="awaiting_quiescence_evidence"
         public_result,result_visibility=self._public_result(receipt,row["hermes_session_id"],response_offset,response_revision)
+        # A native Hermes turn may finish while a delegated business task keeps
+        # running. Release the conversational slot only; keep colleague_work
+        # open, so retirement and whole-work settlement remain fenced.
+        if (state == "terminal" and receipt.get("outcome") == "completed" and
+                reservation == "awaiting_quiescence_evidence" and row["owner_origin"] is not None and
+                type(row["gateway_generation"]) is int and result_visibility == "verified" and
+                isinstance(public_result, dict) and public_result.get("completed") is True and
+                public_result.get("failed") is False and public_result.get("interrupted") is False):
+            self.registry.release_gateway_turn(supervisor=self.supervisor, member_id=row["member_id"],
+                generation=row["generation"], work_id=row["work_id"], admission_id=row["admission_id"],
+                execution_generation=row["gateway_generation"])
+            reservation = "turn_released_background_unconfirmed"
+        if self.completion_sink is not None and state=="terminal" and response_offset==0:
+            outcome=receipt.get("outcome")
+            delivery_status=None
+            text=None
+            if (outcome=="completed" and result_visibility=="verified" and isinstance(public_result,dict)
+                    and public_result.get("completed") is True and public_result.get("failed") is False
+                    and public_result.get("interrupted") is False):
+                text=public_result.get("final_response")
+                if isinstance(text,str) and text.strip():
+                    delivery_status="completed"
+                    if public_result.get("response_truncated") is True:
+                        text=text[:11850]+"\n（内容较长，请查询同事任务获取完整答复。）"
+                    # Stable across settlement races and retries; this describes
+                    # the turn without claiming external work has stopped.
+                    text=text[:11900]+"\n（本轮回复已完成；后台工作状态请查询同事任务。）"
+            elif outcome=="failed":
+                delivery_status,text="failed","同事本轮执行失败；后台工作状态请查询同事任务。"
+            elif outcome in {"interrupted","cancelled"} and reservation=="closed":
+                delivery_status,text="cancelled","同事任务已中断，请查询任务状态。"
+            current=self._load(owner,request_id)
+            evidence=current["quiescence_evidence_id"]
+            verified_settlement = isinstance(evidence,str) and bool(evidence) and not evidence.startswith("quiescence-")
+            deliverable = ((delivery_status in {"completed", "failed"} and reservation != "closed") or
+                           (reservation == "closed" and verified_settlement))
+            if (delivery_status and deliverable and current["owner_origin"] and current["delivery_job_id"] is None):
+                try:
+                    origin=json.loads(current["owner_origin"])
+                    if isinstance(origin,dict) and isinstance(origin.get("route"),str):
+                        job=self.completion_sink.record_colleague_completion(
+                            source_id=current["work_id"],origin=origin,created=current["created_at"],
+                            status=delivery_status,summary=text,
+                            member={"role_id":member["role_id"],"display_name":member["display_name"],"role_label":member["role_label"]})
+                        self._update(owner,request_id,delivery_job_id=job)
+                except (ValueError,TypeError,RuntimeError,sqlite3.Error):
+                    # Leave the handoff pending; retry uses a deterministic ID.
+                    pass
         return {"request_id":request_id,"member":member,"state":state,"admission_id":row["admission_id"],
                 "execution_generation":row["gateway_generation"],"outcome":receipt.get("outcome"),
                 "result":public_result,"result_visibility":result_visibility,"reservation":reservation}

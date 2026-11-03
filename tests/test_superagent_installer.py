@@ -1041,3 +1041,101 @@ def test_rollback_refuses_switch_if_stopped_gateway_cgroup_remains_populated(tmp
     report = json.loads(capsys.readouterr().out)
     assert report["status"] == "rollback-incomplete" and "stop-gateway" in report["rollback_errors"]
     assert (root / "current").resolve() == new
+
+
+def test_explicit_legacy_engine_migration_preserves_business_paths():
+    module = _load_installer()
+    original = ("plugins:\n  entries:\n    worker:\n      settings:\n"
+                "        engine_root: /home/emily/code/agentcore\n"
+                "        allowed_roots:\n        - /home/emily/code/agentcore\n"
+                "        queue_root: /home/emily/.local/state/agentcore/analysis-queue\n"
+                "business:\n  source: /home/emily/code/agentcore\n")
+    result = module._migrate_plugin_engine_roots(original, ["/home/emily/code/agentcore"], "/managed/current")
+    assert "engine_root: /managed/current" in result
+    assert "- /home/emily/code/agentcore" in result
+    assert "source: /home/emily/code/agentcore" in result
+    assert "/home/emily/.local/state/agentcore/analysis-queue" in result
+
+
+def test_explicit_legacy_engine_migration_rejects_shared_yaml_alias():
+    module = _load_installer()
+    original = ("business_path: &engine /home/emily/code/agentcore\n"
+                "plugins:\n  entries:\n    worker:\n      settings:\n        engine_root: *engine\n")
+    with pytest.raises(ValueError, match="aliased engine path"):
+        module._migrate_plugin_engine_roots(original, ["/home/emily/code/agentcore"], "/managed/current")
+
+
+def test_worker_engine_migration_preserves_business_pythonpath_and_is_idempotent(tmp_path, monkeypatch):
+    module = _load_installer()
+    old = "/home/emily/code/agentcore"
+    desired = tmp_path / "managed" / "current"
+    business = "/opt/imfl/business"
+    environment = [f"PYTHONPATH={old}:{business}"]
+
+    def run(command, **kwargs):
+        assert command[:4] == ["systemctl", "--user", "show", "superagent-worker-imfl.service"]
+        output = "LoadState=loaded\nExecStart=python -m agentcore.pool\nEnvironment=" + environment[0] + "\n"
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(module, "_run", run)
+    first = module._planned_worker_pythonpath("imfl", desired, [old])
+    assert first["pythonpath"] == f"{desired}:{business}"
+    environment[0] = f"PYTHONPATH={first['pythonpath']}"
+    assert module._planned_worker_pythonpath("imfl", desired, [old]) == first
+
+
+def test_worker_engine_migration_rejects_unrelated_worker(tmp_path, monkeypatch):
+    module = _load_installer()
+    def run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0,
+            "LoadState=loaded\nExecStart=python -m other.service\nEnvironment=PYTHONPATH=/old\n", "")
+    monkeypatch.setattr(module, "_run", run)
+    with pytest.raises(ValueError, match="worker_unit_not_recognized"):
+        module._planned_worker_pythonpath("imfl", tmp_path / "current", ["/old"])
+
+
+def test_worker_engine_detection_rejects_python_module_and_zip_shadow(tmp_path):
+    import zipfile
+    module = _load_installer()
+    managed = tmp_path / "managed"
+    (managed / "agentcore").mkdir(parents=True)
+    (managed / "agentcore" / "__init__.py").write_text("")
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    (shadow / "agentcore.py").write_text("")
+    assert module._first_engine_path_matches(f"{shadow}:{managed}", managed) is False
+    archive = tmp_path / "old.zip"
+    with zipfile.ZipFile(archive, "w") as zip_file:
+        zip_file.writestr("agentcore/__init__.py", "")
+    assert module._first_engine_path_matches(f"{archive}:{managed}", managed) is False
+    assert module._first_engine_path_matches(str(managed), managed) is True
+
+
+def test_first_update_failure_restores_old_plugin_directory_and_clears_current(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    root = tmp_path / ".hermes/superagent/demo"
+    release = root / "releases/new"
+    new_plugin = release / "plugins/business"
+    new_plugin.mkdir(parents=True)
+    plugins = profile / "plugins"
+    plugins.mkdir()
+    old = plugins / "business"
+    old.mkdir()
+    (old / "business_data").write_text("original")
+    monkeypatch.setattr(module, "_managed_root", lambda args: root)
+    monkeypatch.setattr(module, "_run", lambda command, **kw: subprocess.CompletedProcess(command, 1 if "is-active" in command else 0, "", ""))
+    def failed_install(args, plan):
+        old.rename(args._plugin_rollback_dir / "business")
+        old.symlink_to(new_plugin)
+        (root / "current").symlink_to(release)
+        raise RuntimeError("injected failure")
+    monkeypatch.setattr(module, "install", failed_install)
+    result = module.update(SimpleNamespace(profile="demo", runtime_manifest=None),
+                           {"profile_home": str(profile), "release": str(release)})
+    assert result == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "rolled-back"
+    assert old.is_dir() and not old.is_symlink()
+    assert (old / "business_data").read_text() == "original"
+    assert not (root / "current").exists() and not (root / "current").is_symlink()

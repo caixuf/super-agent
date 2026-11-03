@@ -45,6 +45,7 @@ class ColleagueGatewayBootstrap:
         state_dir: str | Path,
         owns_gateway_host: bool,
         all_work_quiescent: Callable | None = None,
+        completion_sink=None,
         lock_timeout: float = 30,
         session_toolsets: tuple[str, ...] | None = None,
         session_options_for_profile: Callable | None = None,
@@ -119,6 +120,7 @@ class ColleagueGatewayBootstrap:
                 bindings=self.bindings,
                 connection_for_profile=gateway_host.connection_for_profile,
                 all_work_quiescent=all_work_quiescent,
+                completion_sink=completion_sink,
                 state_dir=self.state_dir,
                 lock_timeout=lock_timeout,
             )

@@ -174,8 +174,17 @@ class Provisioner:
 
     def _inspection(self, spec):
         result = self.backend.inspect(spec)
-        if not isinstance(result, dict) or result.get('state') not in {'absent', 'starting', 'ready', 'parked', 'unknown'}:
+        if not isinstance(result, dict) or result.get('state') not in {'absent', 'starting', 'ready', 'available', 'parked', 'unknown'}:
             raise ValueError('invalid_backend_observation')
+        if result['state'] == 'available':
+            # Native Hermes reachability is an operational observation, not an
+            # isolation attestation. Only the explicitly bound backend may use it.
+            from agentcore.colleague_tool_gateway_backend import ToolEnabledGatewayProfileBackend
+            if (type(self.backend) is not ToolEnabledGatewayProfileBackend or
+                    result.get('memory_directory') != 'owner_only' or result.get('no_channels') is not True or
+                    result.get('execution_isolation') != 'unverified'):
+                raise ValueError('unsafe_backend_observation')
+            return 'ready'
         if result['state'] == 'ready' and any(result.get(k) is not True for k in ('isolated', 'private_memory', 'no_channels')):
             raise ValueError('unsafe_backend_observation')
         return result['state']
@@ -216,9 +225,13 @@ class Provisioner:
         # Read membership after potentially slow backend inspection. This is a
         # snapshot only; actual admission must use registry.reserve_work.
         _, membership = self._spec(spec.member_id, spec.generation)
-        return {'member_id': spec.member_id, 'generation': spec.generation,
-                'membership_status': membership, 'phase': phase, 'runtime_state': state,
-                'ready': membership == 'active' and phase == 'ready' and state == 'ready'}
+        status = {'member_id': spec.member_id, 'generation': spec.generation,
+                  'membership_status': membership, 'phase': phase, 'runtime_state': state,
+                  'ready': membership == 'active' and phase == 'ready' and state == 'ready'}
+        from agentcore.colleague_tool_gateway_backend import ToolEnabledGatewayProfileBackend
+        if type(self.backend) is ToolEnabledGatewayProfileBackend:
+            status['execution_isolation'] = 'unverified'
+        return status
 
     def deactivate(self, *, actor, member_id, request_id):
         # Freeze immediately, even if a backend operation currently holds the guard.
