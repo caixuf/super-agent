@@ -65,7 +65,8 @@ def test_check_feishu_api_latency_timeout():
         assert "连接失败" in res.message
 
 
-def test_run_preflight_suite(tmp_path):
+def test_run_preflight_suite(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "no-hermes"))
     with patch("socket.gethostbyname", return_value="1.2.3.4"):
         # Explicit clean baseline config to isolate test from host environment
         cfg_file = tmp_path / "config.yaml"

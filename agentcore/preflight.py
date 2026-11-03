@@ -132,12 +132,13 @@ def check_config_baseline(config_path: Path | str | None = None) -> CheckItemRes
     path = Path(config_path).resolve()
     dur_ms = (time.monotonic() - t0) * 1000.0
     if not path.is_file():
+        # Hermes profile is optional for generic preflight (CI / fresh hosts).
         return CheckItemResult(
             name="配置基线对齐",
-            passed=False,
+            passed=True,
             latency_ms=dur_ms,
-            message=f"配置文件不存在: {path}",
-            detail="请确保目标 Profile 包含有效的 config.yaml",
+            message=f"配置文件不存在，跳过基线检查: {path}",
+            detail="未检测到 Hermes config.yaml；部署到目标 Profile 后再执行基线对齐",
         )
 
     try:

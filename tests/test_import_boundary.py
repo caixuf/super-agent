@@ -48,10 +48,32 @@ def _iter_sources():
         yield path
 
 
+def _iter_module_level_stmts(nodes):
+    """Yield module-level statements, descending into module-level If/Try/With only."""
+    for node in nodes:
+        yield node
+        if isinstance(node, ast.If):
+            yield from _iter_module_level_stmts(node.body)
+            yield from _iter_module_level_stmts(node.orelse)
+        elif isinstance(node, ast.Try):
+            yield from _iter_module_level_stmts(node.body)
+            for handler in node.handlers:
+                yield from _iter_module_level_stmts(handler.body)
+            yield from _iter_module_level_stmts(node.orelse)
+            yield from _iter_module_level_stmts(node.finalbody)
+        elif isinstance(node, ast.With):
+            yield from _iter_module_level_stmts(node.body)
+
+
 def _top_level_imports(tree: ast.AST):
-    """产出 (行号, 顶层模块名 或 None(相对导入), 原文)。"""
-    body = getattr(tree, "body", []) if isinstance(tree, ast.Module) else ast.iter_child_nodes(tree)
-    for node in body:
+    """产出 (行号, 顶层模块名 或 None(相对导入), 原文)。
+
+    Only module-level imports count. Lazy imports inside functions/classes are
+    allowed so optional third-party deps (e.g. PyYAML) stay off the import graph
+    until a call site needs them.
+    """
+    body = getattr(tree, "body", [])
+    for node in _iter_module_level_stmts(body):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 yield node.lineno, alias.name.split(".")[0], f"import {alias.name}"
