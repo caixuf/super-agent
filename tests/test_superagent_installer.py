@@ -1189,3 +1189,44 @@ def test_consolidated_worker_does_not_create_an_override(tmp_path, monkeypatch):
     result = module._apply_worker_pythonpath("demo", tmp_path / "current", ["/legacy"])
     assert result["configured"] is True and result["override"] is None
     assert not (tmp_path / ".config/systemd/user/superagent-worker-demo.service.d/99-superagent-engine.conf").exists()
+
+
+def test_declared_script_services_require_owned_service_and_absolute_path(tmp_path):
+    from types import SimpleNamespace
+    module = _load_installer()
+    manifest = tmp_path / "runtime.yaml"
+    manifest.write_text("profile: demo\nruntime:\n  managed_services: [alert.service]\n  managed_script_services:\n    alert.service: /opt/business/alert.py\n")
+    args = SimpleNamespace(profile="demo", runtime_manifest=manifest)
+    assert module._declared_runtime_scripts(args, ["alert.service"]) == {"alert.service": "/opt/business/alert.py"}
+    with pytest.raises(ValueError, match="invalid_runtime_scripts"):
+        module._declared_runtime_scripts(args, [])
+    manifest.write_text("profile: demo\nruntime:\n  managed_services: [alert.service]\n  managed_script_services:\n    alert.service: ../alert.py\n")
+    with pytest.raises(ValueError, match="invalid_runtime_scripts"):
+        module._declared_runtime_scripts(args, ["alert.service"])
+
+
+def test_declared_services_restart_in_reverse_stop_order(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    module = _load_installer()
+    profile = _seed_profile(tmp_path)
+    root = tmp_path / ".hermes/superagent/demo"
+    release = root / "releases/new"
+    release.mkdir(parents=True)
+    manifest = tmp_path / "runtime.yaml"
+    manifest.write_text("profile: demo\nruntime:\n  drop_ins: {}\n  managed_services: [monitor.service, alert.service]\n")
+    monkeypatch.setattr(module.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(module, "_managed_root", lambda args: root)
+    monkeypatch.setattr(module, "_assert_service_quiescent", lambda _: None)
+    monkeypatch.setattr(module, "_release_valid", lambda _: True)
+    monkeypatch.setattr(module, "_manifest", lambda args: (root / "manifest.json", {"release": str(release)}))
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        active = "is-active" in command and command[-1] in {"monitor.service", "alert.service"}
+        return subprocess.CompletedProcess(command, 0 if active or "is-active" not in command else 1, "", "")
+    monkeypatch.setattr(module, "_run", run)
+    monkeypatch.setattr(module, "install", lambda args, plan: 0)
+    monkeypatch.setattr(module, "_managed_service_import_observation", lambda *_args, **_kwargs: True)
+    assert module.update(SimpleNamespace(profile="demo", runtime_manifest=manifest), {"profile_home": str(profile)}) == 0
+    assert [c[-1] for c in calls if "stop" in c] == ["monitor.service", "alert.service"]
+    assert [c[-1] for c in calls if "start" in c] == ["alert.service", "monitor.service"]

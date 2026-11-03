@@ -1712,7 +1712,25 @@ def _declared_runtime_services(args: argparse.Namespace) -> list[str]:
     return names
 
 
-def _managed_service_import_observation(service: str, managed_current: Path) -> bool | None:
+def _declared_runtime_scripts(args: argparse.Namespace, services: list[str]) -> dict[str, str]:
+    """Bind declared script-form services to exact host-owned script paths."""
+    import yaml
+    manifest = getattr(args, "runtime_manifest", None)
+    if manifest is None:
+        return {}
+    data = yaml.safe_load(Path(manifest).read_text(encoding="utf-8")) or {}
+    runtime = data.get("runtime") or {}
+    scripts = runtime.get("managed_script_services", {})
+    if not isinstance(scripts, dict):
+        raise ValueError("invalid_runtime_scripts")
+    for name, script in scripts.items():
+        if (name not in services or not isinstance(script, str) or not Path(script).is_absolute()
+                or ".." in Path(script).parts or not script.endswith(".py")):
+            raise ValueError("invalid_runtime_scripts")
+    return scripts
+
+
+def _managed_service_import_observation(service: str, managed_current: Path, *, script: str | None = None) -> bool | None:
     """Observe Python's current import search path for a declared agentcore service."""
     import importlib.machinery
     try:
@@ -1725,13 +1743,22 @@ def _managed_service_import_observation(service: str, managed_current: Path) -> 
             return None
         proc = Path("/proc") / str(pid)
         args = [os.fsdecode(part) for part in proc.joinpath("cmdline").read_bytes().split(b"\0") if part]
-        if not any(args[i] == "-m" and args[i + 1].startswith("agentcore.") for i in range(len(args) - 1)):
-            return None
+        cwd = proc.joinpath("cwd").resolve(strict=True)
+        if any(part in {"-I", "-E"} for part in args[1:]):
+            return None  # Python ignores PYTHONPATH in isolated/environment-ignoring modes.
+        if script is None:
+            if not any(args[i] == "-m" and args[i + 1].startswith("agentcore.") for i in range(len(args) - 1)):
+                return None
+        else:
+            expected_script = Path(script).resolve(strict=True)
+            candidates = [Path(part) if Path(part).is_absolute() else cwd / part
+                          for part in args[1:] if part.endswith(".py")]
+            if not any(candidate.resolve(strict=True) == expected_script for candidate in candidates):
+                return None
         env = proc.joinpath("environ").read_bytes().split(b"\0")
         value = next((os.fsdecode(x.split(b"=", 1)[1]) for x in env if x.startswith(b"PYTHONPATH=")), None)
         if value is None:
             return None
-        cwd = proc.joinpath("cwd").resolve(strict=True)
         if importlib.machinery.PathFinder.find_spec("agentcore", [str(cwd)]) is not None:
             return _first_engine_path_matches(str(cwd), managed_current)
         return _first_engine_path_matches(value, managed_current)
@@ -1748,6 +1775,7 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         saved_config, gateway_service = _update_config_snapshot(args, profile_home, root)
         saved_links = _plugin_link_snapshot(profile_home)
         extra_services = _declared_runtime_services(args)
+        extra_scripts = _declared_runtime_scripts(args, extra_services)
     except (OSError, ValueError) as exc:
         print(json.dumps({"status": "blocked", "reason": "rollback_snapshot_failed", "error": type(exc).__name__}))
         return 1
@@ -1760,6 +1788,9 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         print(json.dumps({"status": "blocked", "reason": "duplicate_runtime_service"}))
         return 1
     services.update({f"managed-{index}": name for index, name in enumerate(extra_services)})
+    # Declared services are listed in stop order; reverse them on start so
+    # dependencies such as alert consumers come up before their monitors.
+    start_order = list(services.items())[:3] + list(reversed(list(services.items())[3:]))
     was_active = {
         label: _run(["systemctl", "--user", "is-active", "--quiet", name]).returncode == 0
         for label, name in services.items()
@@ -1805,7 +1836,7 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         if not _release_valid(Path(manifest["release"])):
             raise RuntimeError("release validation failed")
         _run(["systemctl", "--user", "daemon-reload"], check=True)
-        for label, name in services.items():
+        for label, name in start_order:
             if was_active[label]:
                 # A failed start may still have launched a process; record it
                 # before calling systemd so recovery must stop it as well.
@@ -1819,7 +1850,8 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
             if not was_active[f"managed-{index}"]:
                 continue
             deadline = time.monotonic() + 10
-            while _managed_service_import_observation(name, root / "current") is not True:
+            options = {"script": extra_scripts[name]} if name in extra_scripts else {}
+            while _managed_service_import_observation(name, root / "current", **options) is not True:
                 if time.monotonic() >= deadline:
                     raise RuntimeError("managed_service_import_path_unproven:" + name)
                 time.sleep(0.2)
@@ -1865,7 +1897,7 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
             rollback_errors.append("plugin-links")
         if _run(["systemctl", "--user", "daemon-reload"]).returncode:
             rollback_errors.append("daemon-reload")
-        for label, name in services.items():
+        for label, name in start_order:
             if was_active[label] and _run(["systemctl", "--user", "start", name]).returncode:
                 rollback_errors.append(f"restart-{label}")
         print(json.dumps({"status": "rollback-incomplete" if rollback_errors else "rolled-back",
