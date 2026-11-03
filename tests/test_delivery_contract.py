@@ -30,6 +30,7 @@ class Context:
 def _context(tmp_path):
     context = Context(
         enabled=True,
+        enforce_delivery=True,
         engine_root=str(REPO),
         audit_path=str(tmp_path / 'delivery_guard.jsonl'),
     )

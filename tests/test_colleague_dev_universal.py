@@ -55,3 +55,4 @@ def test_business_domain_override_mechanism():
 def test_override_unknown_role_rejected():
     with pytest.raises(ValueError, match="cannot_override_unknown_role"):
         register_role_override("non_existent_role", {"duty": "invalid"})
+

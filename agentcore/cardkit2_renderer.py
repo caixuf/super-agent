@@ -78,20 +78,22 @@ def build_cardkit2_payload(
     is_terminal: bool = False,
     is_failed: bool = False,
     title: str = "Super Agent",
-    subtitle: str = "Autonomous Engineering Assistant",
+    subtitle: str = "",
     stage_text: str = "",
     elapsed: Optional[float] = None,
     service_label: str = "",
-    icon_token: str = "myai_colorful",
+    icon_token: str = "",
+    clean_layout: bool = False,
 ) -> Dict[str, Any]:
-    """Assemble a standard Feishu CardKit 2.0 JSON payload.
+    """Assemble a standard messaging card payload conforming to clean UX & Schema 2.0.
 
-    Applies enterprise color palette:
-      - Processing (in-progress): header 'wathet', main content 'turquoise-50'
-      - Completed (terminal success): header 'indigo', main content 'blue-50'
-      - Failed (terminal error): header 'carmine', main content 'red-50'
-      - Inspection trace / stages: 'grey-50' in native collapsible panel
-      - Footer metadata: 'grey-50'
+    When clean_layout=True (default, aligned with caixuf-grade comfortable UX):
+      - In-progress: header 'wathet', clean borderless markdown body, single-line note timer.
+      - Terminal success: header 'green' (turn-green contract), clean markdown body, lightweight note footer.
+      - Terminal failure: header 'carmine', clean markdown body.
+      - Collapsible trace: native collapsible panel when stages exist (collapsed on terminal).
+    When clean_layout=False (legacy compatibility):
+      - Applies tinted background column_set blocks (turquoise-50 / blue-50 / red-50).
     """
     extracted_stage, clean_text = extract_stages_and_clean_text(text)
     explicit_stages, explicit_stage_text = extract_stages_and_clean_text(stage_text)
@@ -99,99 +101,160 @@ def build_cardkit2_payload(
         s for s in [explicit_stages, explicit_stage_text, extracted_stage] if s
     ).strip()
 
-    if is_failed:
-        header_template = "carmine"
-        header_title = f"{title} · 未能完成"
-        main_bg = "red-50"
-    elif is_terminal:
-        header_template = "indigo"
-        header_title = f"{title} · 处理完成"
-        main_bg = "blue-50"
+    if clean_layout:
+        if is_failed:
+            header_template = "carmine"
+            header_title = f"{title} · 未能完成"
+        elif is_terminal:
+            header_template = "green"
+            header_title = title
+        else:
+            header_template = "wathet"
+            header_title = title
     else:
-        header_template = "wathet"
-        header_title = f"{title} · 处理中"
-        main_bg = "turquoise-50"
+        if is_failed:
+            header_template = "carmine"
+            header_title = f"{title} · 未能完成"
+            main_bg = "red-50"
+        elif is_terminal:
+            header_template = "indigo"
+            header_title = f"{title} · 处理完成"
+            main_bg = "blue-50"
+        else:
+            header_template = "wathet"
+            header_title = f"{title} · 处理中"
+            main_bg = "turquoise-50"
 
     elements: List[Dict[str, Any]] = []
 
     # 1. Collapsible inspection & reasoning panel
     if combined_stage:
         panel_state = "已折叠" if is_terminal else "进行中"
-        elements.append({
-            "tag": "collapsible_panel",
-            "expanded": not is_terminal,
-            "header": {
-                "tag": "markdown",
-                "content": f"**排查分析链路 [{panel_state}]**",
-            },
-            "elements": [
-                {
-                    "tag": "column_set",
-                    "flex_mode": "none",
-                    "background_style": "grey-50",
-                    "columns": [
-                        {
-                            "tag": "column",
-                            "width": "weighted",
-                            "weight": 1,
-                            "background_style": "grey-50",
-                            "elements": [{"tag": "markdown", "content": combined_stage}],
-                        }
-                    ],
-                }
-            ],
-        })
-
-    # 2. Main content block
-    elements.append({
-        "tag": "column_set",
-        "flex_mode": "none",
-        "background_style": main_bg,
-        "columns": [
-            {
-                "tag": "column",
-                "width": "weighted",
-                "weight": 1,
-                "vertical_align": "top",
-                "background_style": main_bg,
+        if clean_layout:
+            elements.append({
+                "tag": "collapsible_panel",
+                "expanded": not is_terminal,
+                "header": {
+                    "tag": "markdown",
+                    "content": f"**排查分析链路 [{panel_state}]**",
+                },
+                "elements": [
+                    {"tag": "markdown", "content": combined_stage}
+                ],
+            })
+        else:
+            elements.append({
+                "tag": "collapsible_panel",
+                "expanded": not is_terminal,
+                "header": {
+                    "tag": "markdown",
+                    "content": f"**排查分析链路 [{panel_state}]**",
+                },
                 "elements": [
                     {
-                        "tag": "markdown",
-                        "content": clean_text or " ",
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "background_style": "grey-50",
+                        "columns": [
+                            {
+                                "tag": "column",
+                                "width": "weighted",
+                                "weight": 1,
+                                "background_style": "grey-50",
+                                "elements": [{"tag": "markdown", "content": combined_stage}],
+                            }
+                        ],
                     }
                 ],
-            }
-        ],
-    })
+            })
 
-    # 3. Footer metadata block
-    footer_items: List[str] = []
-    if elapsed is not None and elapsed > 0:
-        footer_items.append(f"耗时: {elapsed:.1f}s")
-    if service_label:
-        footer_items.append(f"执行节点: {service_label}")
-
-    if footer_items:
+    # 2. Main content block
+    if clean_layout:
+        elements.append({
+            "tag": "markdown",
+            "content": clean_text or " ",
+        })
+    else:
         elements.append({
             "tag": "column_set",
             "flex_mode": "none",
-            "background_style": "grey-50",
+            "background_style": main_bg,
             "columns": [
                 {
                     "tag": "column",
                     "width": "weighted",
                     "weight": 1,
                     "vertical_align": "top",
-                    "background_style": "grey-50",
+                    "background_style": main_bg,
                     "elements": [
                         {
                             "tag": "markdown",
-                            "content": "  |  ".join(footer_items),
+                            "content": clean_text or " ",
                         }
                     ],
                 }
             ],
         })
+
+    # 3. Footer / Note indicators
+    if clean_layout:
+        if not is_terminal and not is_failed:
+            elapsed_val = int(elapsed) if elapsed is not None else 0
+            mins, secs = divmod(elapsed_val, 60)
+            tip = f"⏳ 运行中 {mins}分{secs:02d}秒" if mins else f"⏳ 运行中 {secs}秒"
+            if service_label:
+                tip += f" · 节点: {service_label}"
+            elements.append({
+                "tag": "note",
+                "elements": [{"tag": "plain_text", "content": tip}],
+            })
+        elif is_terminal:
+            footer_items: List[str] = []
+            if elapsed is not None and elapsed > 0:
+                footer_items.append(f"耗时: {elapsed:.1f}s")
+            if service_label:
+                footer_items.append(f"节点: {service_label}")
+            if footer_items:
+                elements.append({
+                    "tag": "note",
+                    "elements": [{"tag": "plain_text", "content": " · ".join(footer_items)}],
+                })
+    else:
+        footer_items: List[str] = []
+        if elapsed is not None and elapsed > 0:
+            footer_items.append(f"耗时: {elapsed:.1f}s")
+        if service_label:
+            footer_items.append(f"执行节点: {service_label}")
+        if footer_items:
+            elements.append({
+                "tag": "column_set",
+                "flex_mode": "none",
+                "background_style": "grey-50",
+                "columns": [
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 1,
+                        "vertical_align": "top",
+                        "background_style": "grey-50",
+                        "elements": [
+                            {
+                                "tag": "markdown",
+                                "content": "  |  ".join(footer_items),
+                            }
+                        ],
+                    }
+                ],
+            })
+
+    header_block: Dict[str, Any] = {
+        "title": {"tag": "plain_text", "content": header_title},
+        "template": header_template,
+    }
+    if subtitle:
+        header_block["subtitle"] = {"tag": "plain_text", "content": subtitle}
+    if icon_token:
+        header_block["icon"] = {"tag": "standard_icon", "token": icon_token}
 
     payload: Dict[str, Any] = {
         "schema": "2.0",
@@ -199,11 +262,7 @@ def build_cardkit2_payload(
             "wide_screen_mode": True,
             "update_multi": True,
         },
-        "header": {
-            "title": {"tag": "plain_text", "content": header_title},
-            "subtitle": {"tag": "plain_text", "content": subtitle},
-            "template": header_template,
-        },
+        "header": header_block,
         "body": {
             "direction": "vertical",
             "padding": "12px 12px 12px 12px",

@@ -121,12 +121,13 @@ class _DeliveryGuard:
     """Advice, enforcement, and a small per-turn audit record."""
 
     def __init__(self, advise_delivery, delivery_context, location_hint, *,
-                 include_delegated=False, audit_path=None):
+                 include_delegated=False, audit_path=None, enforce_delivery=False):
         self._advise_delivery = advise_delivery
         self._delivery_context = delivery_context
         self._location_hint = location_hint
         self._include_delegated = include_delegated
         self._audit_path = audit_path
+        self._enforce_delivery = enforce_delivery
         self._pending = {}
         self._lock = threading.Lock()
 
@@ -171,6 +172,8 @@ class _DeliveryGuard:
         return {'context': self._delivery_context(advice) + self._location_hint}
 
     def transform(self, *, response_text='', session_id='', **_kwargs):
+        if not self._enforce_delivery:
+            return None
         entry = self._entry(session_id)
         if not entry:
             return None
@@ -228,6 +231,7 @@ def register(ctx):
         _location_hint(ctx),
         include_delegated=ctx.get_config('include_delegated', False) is True,
         audit_path=_audit_path(ctx),
+        enforce_delivery=ctx.get_config('enforce_delivery', False) is True,
     )
     ctx.register_hook('pre_llm_call', guard.before)
     # post_llm_call is observer-only in Hermes; the enforceable seam is the

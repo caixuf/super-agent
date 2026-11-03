@@ -18,6 +18,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List
 
 
@@ -114,14 +115,75 @@ def check_tcp_port_available(port: int, host: str = "127.0.0.1") -> CheckItemRes
         sock.close()
 
 
+def check_config_baseline(config_path: Path | str | None = None) -> CheckItemResult:
+    """探测 Profile 配置是否满足 Super Agent 核心基线契约。"""
+    t0 = time.monotonic()
+    if config_path is None:
+        home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+        cand = Path(home) / "config.yaml"
+        if not cand.is_file():
+            # 尝试从 active_profile 读取
+            active = Path(home) / "active_profile"
+            if active.is_file():
+                p_name = active.read_text(encoding="utf-8").strip()
+                cand = Path(home) / "profiles" / p_name / "config.yaml"
+        config_path = cand
+
+    path = Path(config_path).resolve()
+    dur_ms = (time.monotonic() - t0) * 1000.0
+    if not path.is_file():
+        return CheckItemResult(
+            name="配置基线对齐",
+            passed=False,
+            latency_ms=dur_ms,
+            message=f"配置文件不存在: {path}",
+            detail="请确保目标 Profile 包含有效的 config.yaml",
+        )
+
+    try:
+        import yaml
+        from agentcore.baseline_config import audit_config_dict
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        deviations = audit_config_dict(loaded)
+        passed = (len(deviations) == 0)
+        dur_ms = (time.monotonic() - t0) * 1000.0
+        if passed:
+            return CheckItemResult(
+                name="配置基线对齐",
+                passed=True,
+                latency_ms=dur_ms,
+                message=f"核心基线完全合规 ({path.name})",
+            )
+        else:
+            diffs = [f"{d.key_path} (期望 {d.expected!r}, 实际 {d.actual!r})" for d in deviations[:3]]
+            return CheckItemResult(
+                name="配置基线对齐",
+                passed=False,
+                latency_ms=dur_ms,
+                message=f"发现 {len(deviations)} 处配置漂移: {'; '.join(diffs)}",
+                detail="可执行 python3 -m agentcore.baseline_config 进行一键自愈对齐",
+            )
+    except Exception as exc:
+        dur_ms = (time.monotonic() - t0) * 1000.0
+        return CheckItemResult(
+            name="配置基线对齐",
+            passed=False,
+            latency_ms=dur_ms,
+            message=f"检查失败: {exc}",
+            detail="检查 PyYAML 或配置文件语法格式",
+        )
+
+
 def run_preflight_suite(
     probe_host: str = "open.feishu.cn",
     min_free_gb: float = 5.0,
+    config_path: Path | str | None = None,
 ) -> PreflightReport:
     """执行完整的启动与部署预检套件。"""
     results: List[CheckItemResult] = [
         check_dns_latency(target_host=probe_host),
         check_disk_space(min_free_gb=min_free_gb),
+        check_config_baseline(config_path=config_path),
     ]
 
     all_passed = all(item.passed for item in results)
