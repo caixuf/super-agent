@@ -43,6 +43,18 @@ python3 tools/superagent.py rollback --profile <profile>
 
 `install` / `update` / `uninstall` 不带 `--apply` 时只打印计划，不写系统。
 
+主机的 `identity/manifests/` 属于被 Git 忽略的现场配置，不会随干净 clone
+或发布包自动出现。部署需要其中的服务环境设置时，显式提供同一份清单：
+
+```bash
+./install/superagent.sh update --profile <profile> --runtime-manifest /path/to/host-runtime.yaml --apply
+```
+
+显式清单不存在时，安装在修改前阻断。清单中的 `profile`（如有）必须与目标一致。
+服务 drop-in 写入或 systemd reload 失败会报错；重试会再次 reload。
+安装账本的 `runtime_configuration` 记录清单摘要和处理状态；`not_configured`
+表示没有应用服务设置。这些状态不证明运行中的进程已加载环境，仍须在重启后核对。
+
 ## 干净 Hermes 候选
 
 内部迁移先构建独立候选树，不在现役 Hermes 上逐块抠补丁：

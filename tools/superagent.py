@@ -269,8 +269,12 @@ def _write_text_atomic(path: Path, text: str) -> None:
     import tempfile
     fd, temporary = tempfile.mkstemp(prefix=".superagent-", dir=path.parent)
     try:
-        os.fchmod(fd, path.stat().st_mode & 0o777)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            try:
+                mode = path.stat().st_mode & 0o777
+            except FileNotFoundError:
+                mode = 0o600
+            os.fchmod(stream.fileno(), mode)
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
@@ -565,6 +569,9 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     root = _managed_root(args)
     release = _release_dir(root, version)
     blockers = []
+    runtime_manifest = getattr(args, "runtime_manifest", None)
+    if runtime_manifest is not None and not runtime_manifest.is_file():
+        blockers.append("runtime_manifest_missing")
     if not (profile_home / "config.yaml").is_file():
         blockers.append("profile_config_missing")
     if not (hermes_root / "plugins" / "platforms" / "feishu" / "adapter.py").is_file():
@@ -587,6 +594,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "release": str(release),
         "profile_home": str(profile_home),
         "hermes_root": str(hermes_root),
+        "runtime_manifest": str(runtime_manifest) if runtime_manifest is not None else None,
         "plugins": _plugin_names(args),
         "memory_providers": ["localvec"] if (REPO / "plugins/localvec/__init__.py").is_file() else [],
         "external_plugins": [str(path) for path in external_plugins],
@@ -737,35 +745,62 @@ def _purge_legacy_plugins(profile_home: Path) -> None:
         shutil.rmtree(stale_data, ignore_errors=True)
 
 
-def _apply_runtime_drop_ins(profile: str) -> None:
-    """Synchronize service runtime drop-in configurations declared in manifests."""
-    manifest_yaml = REPO / "identity" / "manifests" / f"{profile}.manifest.yaml"
+def _apply_runtime_drop_ins(profile: str, *, manifest_path: Path | None = None) -> dict[str, Any]:
+    """Synchronize declared service settings; never hide a failed deployment."""
+    manifest_yaml = manifest_path or REPO / "identity" / "manifests" / f"{profile}.manifest.yaml"
     if not manifest_yaml.is_file():
-        return
-    try:
-        import yaml
-        data = yaml.safe_load(manifest_yaml.read_text(encoding="utf-8")) or {}
-        runtime = data.get("runtime") or {}
-        drop_ins = runtime.get("drop_ins") or {}
-        gateway_service = data.get("gateway_service") or f"hermes-gateway-{profile}.service"
-        if not drop_ins:
-            return
-        drop_in_dir = Path.home() / ".config" / "systemd" / "user" / f"{gateway_service}.d"
-        drop_in_dir.mkdir(parents=True, exist_ok=True)
-        changed = False
-        for conf_name, env_vars in drop_ins.items():
-            conf_path = drop_in_dir / conf_name
-            lines = ["[Service]"]
-            for k, v in env_vars.items():
-                lines.append(f'Environment="{k}={v}"')
-            content = "\n".join(lines) + "\n"
-            if not conf_path.is_file() or conf_path.read_text(encoding="utf-8") != content:
-                _write_text_atomic(conf_path, content)
-                changed = True
-        if changed:
-            _run(["systemctl", "--user", "daemon-reload"])
-    except Exception:
-        pass
+        if manifest_path is not None:
+            raise FileNotFoundError("explicit runtime manifest is missing")
+        return {"status": "not_configured"}
+    import re
+    import yaml
+    manifest_content = manifest_yaml.read_bytes()
+    data = yaml.safe_load(manifest_content)
+    if not isinstance(data, dict):
+        raise ValueError("runtime manifest must be a mapping")
+    if data.get("profile", profile) != profile:
+        raise ValueError("runtime manifest belongs to a different profile")
+    runtime = data.get("runtime", {})
+    if not isinstance(runtime, dict):
+        raise ValueError("runtime manifest runtime must be a mapping")
+    drop_ins = runtime.get("drop_ins", {})
+    if not isinstance(drop_ins, dict):
+        raise ValueError("runtime drop_ins must be a mapping")
+    if not drop_ins:
+        return {"status": "not_configured", "manifest_sha256": hashlib.sha256(manifest_content).hexdigest()}
+    gateway_service = data.get("gateway_service") or f"hermes-gateway-{profile}.service"
+    if not isinstance(gateway_service, str) or not re.fullmatch(r"[A-Za-z0-9_@.-]+\.service", gateway_service):
+        raise ValueError("invalid gateway service name")
+    # Validate every entry before changing any unit file.
+    contents = {}
+    for conf_name, env_vars in drop_ins.items():
+        if not isinstance(conf_name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+\.conf", conf_name):
+            raise ValueError("invalid runtime drop-in filename")
+        if not isinstance(env_vars, dict):
+            raise ValueError("runtime drop-in environment must be a mapping")
+        lines = ["[Service]"]
+        for key, value in env_vars.items():
+            if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                raise ValueError("invalid runtime environment name")
+            if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+                raise ValueError("invalid runtime environment value")
+            setting = f"{key}={value}"
+            if any(c in setting for c in "\r\n\0"):
+                raise ValueError("invalid runtime environment value")
+            escaped = setting.replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'Environment="{escaped}"')
+        contents[conf_name] = "\n".join(lines) + "\n"
+    drop_in_dir = Path.home() / ".config" / "systemd" / "user" / f"{gateway_service}.d"
+    drop_in_dir.mkdir(parents=True, exist_ok=True)
+    for conf_name, content in contents.items():
+        conf_path = drop_in_dir / conf_name
+        if not conf_path.is_file() or conf_path.read_text(encoding="utf-8") != content:
+            _write_text_atomic(conf_path, content)
+    # Always reload, including retries after a prior reload failed. File equality
+    # alone cannot establish that systemd has loaded the desired settings.
+    _run(["systemctl", "--user", "daemon-reload"], check=True)
+    return {"status": "applied", "manifest_sha256": hashlib.sha256(manifest_content).hexdigest(),
+            "service": gateway_service, "files": sorted(contents)}
 
 
 def migrate_config(args: argparse.Namespace, plan: dict[str, Any], *, quiet: bool = False) -> int:
@@ -864,7 +899,8 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     migrate_config(args, plan, quiet=True)
     _enable_plugins(profile_home, plugins)
     _purge_legacy_plugins(profile_home)
-    _apply_runtime_drop_ins(getattr(args, "profile", ""))
+    runtime_configuration = _apply_runtime_drop_ins(
+        getattr(args, "profile", ""), manifest_path=getattr(args, "runtime_manifest", None))
     overlay_summary = None
     if (release / "overlay").is_dir():
         overlay_summary = apply_profile_overlay(
@@ -886,6 +922,7 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         "config_plugin_entries": plugins,
         "legacy_card_patches_at_install": plan.get("legacy_card_patches", []),
         "overlay_applied": overlay_summary,
+        "runtime_configuration": runtime_configuration,
     }
     _write_json_atomic(root / "install-manifest.json", manifest)
     print(json.dumps({"status": "installed", **manifest}, ensure_ascii=False, indent=2))
@@ -1151,6 +1188,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--profile-home", type=Path)
     parser.add_argument("--hermes-root", type=Path, default=DEFAULT_HERMES)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--runtime-manifest", type=Path,
+                        help="Explicit host runtime manifest; missing files fail deployment")
     parser.add_argument("--skip-overlay", action="store_true",
                         help="Skip applying profile overlay even if present in release archive")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1166,7 +1205,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if (command_index := next((i for i, value in enumerate(raw) if value in known), None)) is not None:
         before, command, after = raw[:command_index], raw[command_index], raw[command_index + 1:]
         global_opts, command_opts = [], []
-        takes_value = {"--profile", "--profile-home", "--hermes-root", "--root"}
+        takes_value = {"--profile", "--profile-home", "--hermes-root", "--root", "--runtime-manifest"}
         index = 0
         while index < len(after):
             token = after[index]
