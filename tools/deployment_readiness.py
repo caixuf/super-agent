@@ -199,33 +199,55 @@ def inspect(home: Path, profile: str):
 
     durable = ((entries.get("durable-dispatch") or {}).get("settings") or {})
     active = _service_active('superagent-worker-' + profile + '.service') is True
-    policy_path = home / "worker" / "analysis-policy.json"
-    runner_path = home / "worker" / "runner.json"
     unit_path = Path.home() / ".config/systemd/user" / ("superagent-worker-" + profile + ".service")
     aligned = False
+    detail = "service not verified active"
     if active:
+        detail = "service active but actual queue, runner, or policy alignment is not verified"
         try:
-            policy = json.loads(policy_path.read_text(encoding="utf-8"))
-            runner = json.loads(runner_path.read_text(encoding="utf-8"))
             unit = unit_path.read_text(encoding="utf-8")
-            configured_engine = Path(durable.get("engine_root", ""))
             command = next(line[len("ExecStart="):] for line in unit.splitlines() if line.startswith("ExecStart="))
             argv = shlex.split(command)
-            root_index = argv.index("--root")
-            service_queue = argv[root_index + 1].replace("%%", "%")
-            aligned = (policy.get("allowed_roots") == durable.get("allowed_roots")
-                       and policy.get("denied_globs", []) == durable.get("denied_globs", [])
-                       and isinstance(runner, list) and len(runner) >= 2
-                       and configured_engine.is_absolute()
-                       and runner[1] == str(configured_engine.resolve() / "agentcore/analysis_runner.py")
-                       and isinstance(durable.get("queue_root"), str)
-                       and Path(durable["queue_root"]).is_absolute()
-                       and service_queue == durable["queue_root"])
-        except (OSError, ValueError, TypeError, StopIteration, IndexError):
+            service_queue = argv[argv.index("--root") + 1].replace("%%", "%")
+            runner_path = Path(argv[argv.index("--runner-config") + 1].replace("%%", "%"))
+            if not runner_path.is_absolute():
+                raise ValueError("runner path is not absolute")
+            runner = json.loads(runner_path.read_text(encoding="utf-8"))
+            if not isinstance(runner, list) or not all(isinstance(v, str) for v in runner):
+                raise ValueError("invalid runner")
+            policy_path = Path(runner[runner.index("--policy") + 1])
+            if not policy_path.is_absolute():
+                raise ValueError("policy path is not absolute")
+            policy = json.loads(policy_path.read_text(encoding="utf-8"))
+            configured_engine = Path(durable.get("engine_root", ""))
+            module_runner = len(runner) >= 3 and runner[1:3] == ["-m", "agentcore.analysis_runner"]
+            file_runner = len(runner) >= 2 and Path(runner[1]).resolve() == (configured_engine.resolve() / "agentcore/analysis_runner.py")
+            # Unit contents alone cannot establish which Python module is loaded.
+            # Leave module-mode ownership unverified until process state is checked.
+            runner_verified = file_runner and not module_runner
+            queue_matches = (isinstance(durable.get("queue_root"), str)
+                             and Path(durable["queue_root"]).is_absolute()
+                             and service_queue == durable["queue_root"])
+            def canonical_roots(value):
+                if not isinstance(value, list) or not value or any(
+                        not isinstance(item, str) or not Path(item).is_absolute() for item in value):
+                    raise ValueError("invalid allowed roots")
+                return {str(Path(item).resolve(strict=True)) for item in value}
+            roots_match = canonical_roots(policy.get("allowed_roots")) == canonical_roots(durable.get("allowed_roots"))
+            denied_match = policy.get("denied_globs", []) == durable.get("denied_globs", [])
+            aligned = (configured_engine.is_absolute() and queue_matches and roots_match
+                       and denied_match and runner_verified)
+            if not roots_match or not denied_match:
+                detail = "actual worker policy differs from gateway allowed roots or denied patterns"
+            elif not queue_matches:
+                detail = "actual worker queue differs from gateway queue"
+            elif module_runner:
+                detail = "module runner configured; loaded module ownership not verified"
+            elif aligned:
+                detail = "active; actual saved queue, runner and policy match; process state not checked"
+        except (OSError, ValueError, TypeError, StopIteration, IndexError, AttributeError):
             pass
-    add("durable-worker", active and aligned,
-        "active; saved queue and policy match; process state not checked" if active and aligned else
-        ("service active but queue/policy alignment is not verified" if active else "service not verified active"))
+    add("durable-worker", aligned, detail)
     if routed:
         results.extend(_routed_memory(home, profile, bridge, localvec)
                       if memory.get('provider') == 'localvec' else

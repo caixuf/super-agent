@@ -52,20 +52,39 @@ def test_worker_readiness_detects_policy_drift(tmp_path, monkeypatch):
     worker.mkdir()
     engine = tmp_path / "engine"
     queue = tmp_path / "queue"
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(approved, target_is_directory=True)
     config = {"plugins": {"entries": {"durable-dispatch": {"settings": {
-        "engine_root": str(engine), "queue_root": str(queue), "allowed_roots": ["/approved"],
+        "engine_root": str(engine), "queue_root": str(queue), "allowed_roots": [str(alias)],
         "denied_globs": ["*.secret"]}}}}}
     (home / "config.yaml").write_text(yaml.safe_dump(config))
-    (worker / "analysis-policy.json").write_text(json.dumps({"allowed_roots": ["/approved"], "denied_globs": ["*.secret"]}))
-    (worker / "runner.json").write_text(json.dumps(["python", str(engine / "agentcore/analysis_runner.py")]))
+    (worker / "analysis-policy.json").write_text(json.dumps({"allowed_roots": [str(approved)], "denied_globs": ["*.secret"]}))
+    (worker / "runner.json").write_text(json.dumps(["python", str(engine / "agentcore/analysis_runner.py"), "--policy", str(worker / "analysis-policy.json")]))
     units = tmp_path / ".config/systemd/user"
     units.mkdir(parents=True)
-    (units / "superagent-worker-p.service").write_text('[Service]\nExecStart="/usr/bin/python3" "-m" "agentcore.pool" "--root" "' + str(queue) + '" "worker"\n')
+    (units / "superagent-worker-p.service").write_text('[Service]\nExecStart="/usr/bin/python3" "-m" "agentcore.pool" "--root" "' + str(queue) + '" "worker" "--runner-config" "' + str(worker / "runner.json") + '"\n')
     rows = {row[0]: row[1] for row in module.inspect(home, "p")}
     assert rows["durable-worker"] is True
     (worker / "analysis-policy.json").write_text(json.dumps({"allowed_roots": ["/stale"], "denied_globs": []}))
     rows = {row[0]: row[1] for row in module.inspect(home, "p")}
     assert rows["durable-worker"] is False
+    # The unit can point outside the profile: do not inspect a stale profile copy.
+    external = tmp_path / "actual"
+    external.mkdir()
+    policy = external / "policy.json"
+    additional = tmp_path / "additional"
+    additional.mkdir()
+    policy.write_text(json.dumps({"allowed_roots": [str(additional)], "denied_globs": ["*.secret"]}))
+    runner = external / "runner.json"
+    runner.write_text(json.dumps(["python", "-m", "agentcore.analysis_runner", "--policy", str(policy)]))
+    (units / "superagent-worker-p.service").write_text('[Service]\nExecStart=/usr/bin/python3 -m agentcore.pool --root "' + str(queue) + '" worker --runner-config "' + str(runner) + '"\n')
+    details = {row[0]: row[2] for row in module.inspect(home, "p")}
+    assert "actual worker policy differs" in details["durable-worker"]
+    policy.write_text(json.dumps({"allowed_roots": [str(approved)], "denied_globs": ["*.secret"]}))
+    details = {row[0]: row[2] for row in module.inspect(home, "p")}
+    assert "loaded module ownership not verified" in details["durable-worker"]
 
 
 @pytest.fixture
