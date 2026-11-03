@@ -21,11 +21,14 @@ from __future__ import annotations
 
 import enum
 import hashlib
+import inspect
 import logging
+import math
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import re
+import selectors
 import shlex
 import signal
 import subprocess
@@ -86,7 +89,7 @@ class VerificationCheck:
             raise ValueError(
                 f"command length ({len(raw_cmd)}) exceeds cap {MAX_VERIFICATION_COMMAND_CHARS}"
             )
-        if self.timeout_s <= 0 or self.timeout_s > MAX_VERIFICATION_TIMEOUT:
+        if not math.isfinite(self.timeout_s) or self.timeout_s <= 0 or self.timeout_s > MAX_VERIFICATION_TIMEOUT:
             raise ValueError(f"timeout_s must be in (0, {MAX_VERIFICATION_TIMEOUT}]")
         if self.scope not in VERIFICATION_SCOPES:
             raise ValueError(f"scope must be in {VERIFICATION_SCOPES}")
@@ -160,7 +163,13 @@ def default_process_executor(
     *,
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Execute a verification command in a subprocess with bounded time and output."""
+    """Bound local command output while reading, never by trimming after capture.
+
+    Group cleanup is best effort, not proof about detached/remote descendants.
+    The Pool's attempt supervisor remains responsible for local tree settlement.
+    """
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise ValueError("positive_finite_verification_timeout_required")
     t0 = time.monotonic()
     run_env = os.environ.copy()
     if env:
@@ -172,7 +181,6 @@ def default_process_executor(
             cwd=str(workdir),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
             env=run_env,
             start_new_session=True,
         )
@@ -183,46 +191,84 @@ def default_process_executor(
             "stdout": "",
             "stderr": f"SpawnError: {type(exc).__name__}: {exc}",
             "timed_out": False,
+            "execution_error": True,
             "duration_s": duration,
         }
 
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    timed_out, limited_stream, error = False, None, None
+    deadline = t0 + timeout_s
     try:
-        stdout_str, stderr_str = proc.communicate(timeout=timeout_s)
-        duration = time.monotonic() - t0
-        if len(stdout_str.encode("utf-8")) > MAX_OUTPUT_BYTES:
-            stdout_str = stdout_str[:MAX_OUTPUT_BYTES] + f"\n[TRUNCATED: output exceeded {MAX_OUTPUT_BYTES} bytes]"
-        if len(stderr_str.encode("utf-8")) > MAX_OUTPUT_BYTES:
-            stderr_str = stderr_str[:MAX_OUTPUT_BYTES] + f"\n[TRUNCATED: output exceeded {MAX_OUTPUT_BYTES} bytes]"
-        return {
-            "exit_code": proc.returncode,
-            "stdout": stdout_str,
-            "stderr": stderr_str,
-            "timed_out": False,
-            "duration_s": duration,
-        }
+        with selectors.DefaultSelector() as selector:
+            for name, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, name)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                for key, _ in selector.select(remaining):
+                    try:
+                        chunk = os.read(key.fd, 65536)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                        continue
+                    target = buffers[key.data]
+                    room = MAX_OUTPUT_BYTES - len(target)
+                    target.extend(chunk[:room])
+                    if len(chunk) > room:
+                        limited_stream = key.data
+                        break
+                if limited_stream:
+                    break
+        if not timed_out and not limited_stream:
+            # EOF does not mean the process has exited: a verifier can close
+            # both pipes and then keep running.
+            proc.wait(timeout=max(0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
-        duration = time.monotonic() - t0
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except OSError:
-            pass
-        proc.communicate()
-        return {
-            "exit_code": 124,
-            "stdout": "",
-            "stderr": f"Command timed out after {timeout_s}s",
-            "timed_out": True,
-            "duration_s": duration,
-        }
+        timed_out = True
     except Exception as exc:
-        duration = time.monotonic() - t0
-        return {
-            "exit_code": -1,
-            "stdout": "",
-            "stderr": f"ExecutionError: {type(exc).__name__}: {exc}",
-            "timed_out": False,
-            "duration_s": duration,
-        }
+        error = f"ExecutionError: {type(exc).__name__}: {exc}"
+    finally:
+        for stream in (proc.stdout, proc.stderr):
+            stream.close()
+        if proc.returncode is None:
+            # Do not poll/reap the leader before signalling: its unreaped PID
+            # anchors this process group even when the leader exited first.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                error = "ExecutionError: process_stop_unconfirmed"
+        # Never communicate() again: a detached child may hold a pipe forever.
+
+    output = {}
+    for name, data in buffers.items():
+        # Invalid UTF-8 must not erase a real exit status, or expand a bounded
+        # byte capture into an unbounded returned string.
+        text = data.decode("utf-8", errors="replace")
+        output[name] = text.encode("utf-8")[:MAX_OUTPUT_BYTES].decode("utf-8", errors="ignore")
+    if limited_stream:
+        output[limited_stream] += f"\n[TRUNCATED: output exceeded {MAX_OUTPUT_BYTES} bytes]"
+    if timed_out:
+        output["stderr"] += f"\nCommand timed out after {timeout_s}s"
+    if error:
+        output["stderr"] += "\n" + error
+    return {
+        "exit_code": 124 if timed_out else (-1 if error else proc.returncode),
+        **output,
+        "timed_out": timed_out,
+        "output_limited": limited_stream is not None,
+        "execution_error": error is not None,
+        "duration_s": time.monotonic() - t0,
+    }
 
 
 def evaluate_verification_checks(
@@ -239,8 +285,20 @@ def evaluate_verification_checks(
     if len(checks) > MAX_VERIFICATION_CHECKS:
         raise ValueError(f"number of checks ({len(checks)}) exceeds limit ({MAX_VERIFICATION_CHECKS})")
 
-    exec_fn = executor or default_process_executor
+    exec_fn = default_process_executor if executor is None else executor
     norm_checks = [normalize_verification_check(c) for c in checks]
+    # Negotiate the legacy three-argument shape without executing anything.
+    # A TypeError from inside an executor can follow real effects; retrying it
+    # without env both duplicates execution and silently changes the contract.
+    signature = inspect.signature(exec_fn)
+    try:
+        signature.bind((), DEFAULT_CHECK_TIMEOUT, target_dir, env={})
+        executor_accepts_env = True
+    except TypeError:
+        signature.bind((), DEFAULT_CHECK_TIMEOUT, target_dir)
+        executor_accepts_env = False
+        if any(check.env for check in norm_checks):
+            raise TypeError("verification_executor_env_required") from None
 
     results: list[dict[str, Any]] = []
     halted_on_critical = False
@@ -261,12 +319,13 @@ def evaluate_verification_checks(
             })
             continue
 
-        try:
+        if executor_accepts_env:
             raw_res = exec_fn(check.command, check.timeout_s, target_dir, env=dict(check.env))  # type: ignore
-        except TypeError:
+        else:
             raw_res = exec_fn(check.command, check.timeout_s, target_dir)
         exit_code = raw_res.get("exit_code")
         timed_out = bool(raw_res.get("timed_out"))
+        execution_error = bool(raw_res.get("execution_error") or raw_res.get("output_limited"))
         stdout = str(raw_res.get("stdout", ""))
         stderr = str(raw_res.get("stderr", ""))
         duration = float(raw_res.get("duration_s", 0.0))
@@ -278,6 +337,10 @@ def evaluate_verification_checks(
             status = "timed_out"
             passed = False
             any_timed_out = True
+            any_failed = True
+        elif execution_error:
+            status = "error"
+            passed = False
             any_failed = True
         elif exit_code == check.expected_exit_code:
             status = "passed"
@@ -295,6 +358,8 @@ def evaluate_verification_checks(
             "stdout_sha256": stdout_digest,
             "stderr_sha256": stderr_digest,
             "duration_s": round(duration, 3),
+            "output_limited": bool(raw_res.get("output_limited")),
+            "execution_error": execution_error,
         })
 
         if not passed and check.critical:

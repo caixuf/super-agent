@@ -142,9 +142,43 @@ def run_dev_job(
     output_dir: Optional[Path] = None,
     lock_root: Optional[Path] = None,
     runner_callable: Optional[Callable[[str, Any], dict[str, Any]]] = None,
+    verification_executor: Optional[Callable[..., dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Execute a development task for a colleague role in an isolated worktree."""
     goal = _goal(job)
+    from agentcore.verification_gate import (
+        MAX_VERIFICATION_CHECKS, evaluate_verification_checks, normalize_verification_check,
+    )
+    # The queued task is data, not permission to run additional host commands.
+    # Freeze administrator contracts before any model code or filesystem writes.
+    configured = policy.get("verification_checks", [])
+    fields = {"check_id", "command", "timeout_s", "scope", "safety_tier",
+              "expected_exit_code", "critical", "env"}
+    try:
+        if (not isinstance(configured, list) or len(configured) > MAX_VERIFICATION_CHECKS
+                or any(not isinstance(c, dict) or set(c) - fields for c in configured)):
+            raise ValueError
+        verification_checks = tuple(normalize_verification_check(c) for c in configured)
+        if len({c.check_id for c in verification_checks}) != len(verification_checks):
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("invalid_verification_policy") from None
+    requested = job["payload"].get("verification_checks", [])
+    try:
+        if (not isinstance(requested, list) or len(requested) > MAX_VERIFICATION_CHECKS
+                or any(not isinstance(c, dict) or set(c) - fields for c in requested)):
+            raise ValueError
+        if requested and tuple(normalize_verification_check(c) for c in requested) != verification_checks:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        raise PermissionError("verification_checks_not_authorized") from None
+    if verification_executor is not None and not callable(verification_executor):
+        raise ValueError("invalid_verification_executor")
+    if sandbox and verification_checks and verification_executor is None:
+        # The legacy model launcher does not contain this separate command path.
+        # Never silently run a sandboxed task's verification on the host.
+        raise RuntimeError("sandbox_verification_executor_required")
+
     # Financial Overdraft Guard: dev_runner is strictly for execution and tool calling.
     # Pro model tier is forbidden to prevent bankruptcy from heavy execution loops.
     clean_model = (model or "").strip()
@@ -165,6 +199,7 @@ def run_dev_job(
 
     agent_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
+    verification_receipt = None
     with worktree_lock(workdir, lock_root=lock_root):
         if runner_callable is not None:
             raw_result = runner_callable(prompt, {
@@ -174,6 +209,7 @@ def run_dev_job(
                 "provider": provider,
                 "tools": tools,
                 "timeout": timeout,
+                "sandbox": sandbox,
             })
             payload = raw_result if isinstance(raw_result, dict) else raw_result.to_dict()
         else:
@@ -227,17 +263,15 @@ def run_dev_job(
             pi_res = run_pi(prompt, **kwargs)
             payload = pi_res.to_dict()
 
-    ok = bool(payload.get("ok"))
+        ok = bool(payload.get("ok"))
+        if ok and verification_checks:
+            # Keep the same worktree locked through verification; checking a
+            # later task's files cannot certify this task's output.
+            verification_receipt = evaluate_verification_checks(
+                verification_checks, workdir, executor=verification_executor)
+            if not verification_receipt.get("all_passed"):
+                ok = False
     out = (output_dir or Path.cwd()).resolve()
-
-    # Optional verification checks gate
-    verification_checks = job["payload"].get("verification_checks")
-    verification_receipt = None
-    if ok and verification_checks:
-        from agentcore.verification_gate import evaluate_verification_checks
-        verification_receipt = evaluate_verification_checks(verification_checks, workdir)
-        if not verification_receipt.get("all_passed"):
-            ok = False
 
     failure_decision = None
     err = payload.get("error_message") or payload.get("error")
@@ -308,7 +342,8 @@ def run_dev_job(
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Development colleague runner for durable jobs")
+    parser = argparse.ArgumentParser(description="Development colleague runner for durable jobs",
+                                     allow_abbrev=False)
     parser.add_argument("--policy", required=True, help="Path to policy JSON with allowed_roots")
     parser.add_argument("--role-contract", required=True, help="Path to role contract markdown")
     parser.add_argument("--workdir", required=True, help="Isolated working directory")
@@ -320,7 +355,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--memory-file", default="")
     parser.add_argument("--sandbox", action="store_true")
     parser.add_argument("--output-dir", default="")
-    args, _unknown = parser.parse_known_args(argv)
+    parser.add_argument("--runner-adapter", default=None,
+                        help="Administrator-owned module:callable(prompt, options)")
+    parser.add_argument("--verification-adapter", default=None,
+                        help="Administrator-owned module:callable(argv, timeout_s, workdir, *, env)")
+    args = parser.parse_args(argv)
 
     # Financial Overdraft Guard: dev_runner CLI intercept
     if args.model and args.model.strip().lower() == "pro":
@@ -335,20 +374,75 @@ def main(argv: Optional[list[str]] = None) -> int:
         policy = _policy(args.policy)
         workdir = _workdir(args.workdir, policy)
         out_p = Path(args.output_dir) if args.output_dir else Path.cwd()
-        result = run_dev_job(
-            job,
-            policy,
-            _role(args.role_contract),
-            workdir,
-            Path(args.agent_dir).expanduser(),
-            model=args.model,
-            provider=args.provider,
-            tools=args.tools,
-            timeout=args.timeout,
-            memory_file=args.memory_file,
-            sandbox=args.sandbox,
-            output_dir=out_p,
-        )
+        role = _role(args.role_contract)
+        # Only trusted launch arguments select imports; queued payload is data.
+        # Python diagnostics must not corrupt the single JSON stdout receipt.
+        with contextlib.redirect_stdout(sys.stderr):
+            import importlib
+            import inspect
+
+            adapters = {}
+            for name, reference in (("runner_adapter", args.runner_adapter),
+                                    ("verification_adapter", args.verification_adapter)):
+                if reference is None:
+                    continue
+                try:
+                    module, symbol = reference.split(":")
+                    if not all(part.isascii() and part.isidentifier()
+                               for part in (*module.split("."), symbol)):
+                        raise ValueError
+                    adapter = getattr(importlib.import_module(module), symbol)
+                    if (not callable(adapter) or inspect.iscoroutinefunction(adapter)
+                            or inspect.iscoroutinefunction(getattr(adapter, "__call__", None))):
+                        raise ValueError
+                    probe = (("", {}), {}) if name == "runner_adapter" else (
+                        (("true",), 1.0, workdir), {"env": {}})
+                    inspect.signature(adapter).bind(*probe[0], **probe[1])
+                except Exception:
+                    raise RuntimeError(f"{name}_unavailable") from None
+                adapters[name] = adapter
+
+            runner = None
+            verifier = None
+            if "runner_adapter" in adapters:
+                def runner(prompt, options):
+                    try:
+                        value = adapters["runner_adapter"](prompt, options)
+                        value = value if isinstance(value, dict) else value.to_dict()
+                        if not isinstance(value, dict) or type(value.get("ok")) is not bool:
+                            raise ValueError
+                        return value
+                    except Exception:
+                        raise RuntimeError("runner_adapter_failed") from None
+            if "verification_adapter" in adapters:
+                def verifier(command, timeout_s, directory, *, env):
+                    try:
+                        value = adapters["verification_adapter"](
+                            command, timeout_s, directory, env=env)
+                        if (not isinstance(value, dict)
+                                or (value.get("exit_code") is not None
+                                    and type(value["exit_code"]) is not int)):
+                            raise ValueError
+                        return value
+                    except Exception:
+                        raise RuntimeError("verification_adapter_failed") from None
+
+            result = run_dev_job(
+                job,
+                policy,
+                role,
+                workdir,
+                Path(args.agent_dir).expanduser(),
+                model=args.model,
+                provider=args.provider,
+                tools=args.tools,
+                timeout=args.timeout,
+                memory_file=args.memory_file,
+                sandbox=args.sandbox,
+                output_dir=out_p,
+                runner_callable=runner,
+                verification_executor=verifier,
+            )
     except Exception as error:
         result = {"ok": False, "error": f"{type(error).__name__}: {error}"}
 

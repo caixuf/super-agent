@@ -79,6 +79,12 @@ def test_normalize_verification_check():
         normalize_verification_check(123)  # type: ignore
 
 
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), float("-inf")])
+def test_verification_timeout_must_be_finite(timeout):
+    with pytest.raises(ValueError, match="timeout_s"):
+        normalize_verification_check({"check_id": "bounded", "command": "true", "timeout_s": timeout})
+
+
 def test_evaluate_verification_checks_all_passed(tmp_path: Path):
     checks = [
         {"check_id": "c1", "command": "echo hello", "expected_exit_code": 0},
@@ -105,6 +111,56 @@ def test_evaluate_verification_checks_all_passed(tmp_path: Path):
     assert receipt["results"][0]["status"] == "passed"
     assert len(receipt["results"][0]["stdout_sha256"]) == 64
     assert validate_verification_receipt(receipt) == []
+
+
+def test_executor_internal_type_error_is_never_retried(tmp_path):
+    calls = []
+
+    def execute(argv, timeout_s, workdir, *, env=None):
+        calls.append(env)
+        with (workdir / "effects").open("a") as stream:
+            stream.write("started\n")
+        if env is not None:
+            raise TypeError("internal failure after starting the command")
+        return {"exit_code": 0}
+
+    with pytest.raises(TypeError, match="internal failure"):
+        evaluate_verification_checks(
+            [{"check_id": "once", "command": "test"}], tmp_path, executor=execute)
+    assert calls == [{}]
+    assert (tmp_path / "effects").read_text() == "started\n"
+
+
+def test_legacy_executor_cannot_silently_drop_required_environment(tmp_path):
+    calls = []
+
+    def execute(argv, timeout_s, workdir):
+        calls.append(argv)
+        return {"exit_code": 0}
+
+    with pytest.raises(TypeError, match="verification_executor_env_required"):
+        evaluate_verification_checks([
+            {"check_id": "first", "command": "first"},
+            {"check_id": "isolated", "command": "test", "env": {"ISOLATED": "1"}},
+        ], tmp_path, executor=execute)
+    assert not calls
+
+
+def test_falsey_executor_is_not_replaced_by_host_process_executor(tmp_path):
+    calls = []
+
+    class Executor:
+        def __bool__(self):
+            return False
+
+        def __call__(self, argv, timeout_s, workdir, *, env):
+            calls.append(argv)
+            return {"exit_code": 0}
+
+    result = evaluate_verification_checks(
+        [{"check_id": "isolated", "command": "not-a-host-program"}], tmp_path, executor=Executor())
+    assert calls == [("not-a-host-program",)]
+    assert result["all_passed"] is True
 
 
 def test_evaluate_verification_checks_critical_halts_remaining(tmp_path: Path):
@@ -225,6 +281,111 @@ def test_default_process_executor_real_process(tmp_path: Path):
     )
     assert "[TRUNCATED:" in res3["stdout"]
     assert len(res3["stdout"]) < 1_500_000
+
+
+@pytest.mark.parametrize("channel", [1, 2])
+def test_verifier_stops_at_output_budget_before_later_effects(tmp_path, monkeypatch, channel):
+    import sys
+    import agentcore.verification_gate as gate
+
+    monkeypatch.setattr(gate, "MAX_OUTPUT_BYTES", 4096)
+    result = gate.default_process_executor(
+        [sys.executable, "-c",
+         f"import os,time;os.write({channel},b'x'*16384);time.sleep(.4);open('late-effect','w').close()"],
+        3, tmp_path,
+    )
+    assert result.get("output_limited") is True
+    assert result["timed_out"] is False
+    assert result["exit_code"] != 0
+    assert not (tmp_path / "late-effect").exists()
+    for stream in ("stdout", "stderr"):
+        assert len(result[stream].encode("utf-8")) <= 4096 + 200
+
+
+def test_output_limited_executor_result_never_approves_expected_exit_code(tmp_path):
+    receipt = evaluate_verification_checks(
+        [{"check_id": "bounded", "command": "run", "expected_exit_code": -9}], tmp_path,
+        executor=lambda *args, **kwargs: {"exit_code": -9, "output_limited": True},
+    )
+    assert receipt["all_passed"] is False
+    assert receipt["results"][0]["status"] == "error"
+
+
+def test_spawn_error_does_not_pass_a_negative_expected_exit(tmp_path):
+    receipt = evaluate_verification_checks(
+        [{"check_id": "missing", "command": ["./not-installed"], "expected_exit_code": -1}],
+        tmp_path,
+    )
+    assert receipt["all_passed"] is False
+    assert receipt["results"][0]["status"] == "error"
+
+
+def test_verifier_decodes_non_utf8_output_without_losing_exit_status(tmp_path):
+    import sys
+    from agentcore.verification_gate import default_process_executor
+
+    result = default_process_executor(
+        [sys.executable, "-c", "import os;os.write(1,b'\\xffhello');os.write(2,b'\\xfewarn')"],
+        3, tmp_path,
+    )
+    assert result["exit_code"] == 0 and result["timed_out"] is False
+    assert "hello" in result["stdout"] and "warn" in result["stderr"]
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), 0, -1])
+def test_local_executor_rejects_invalid_timeout_before_spawn(tmp_path, timeout):
+    import sys
+    from agentcore.verification_gate import default_process_executor
+
+    with pytest.raises(ValueError, match="positive_finite"):
+        default_process_executor(
+            [sys.executable, "-c", "open('unexpected-effect','w').close()"], timeout, tmp_path)
+    assert not (tmp_path / "unexpected-effect").exists()
+
+
+def test_verifier_timeout_still_applies_after_both_output_pipes_close(tmp_path):
+    import sys
+    import time
+    from agentcore.verification_gate import default_process_executor
+
+    started = time.monotonic()
+    result = default_process_executor(
+        [sys.executable, "-c", "import os,time;os.close(1);os.close(2);time.sleep(5)"],
+        .1, tmp_path,
+    )
+    assert result["timed_out"] is True and result["exit_code"] == 124
+    assert time.monotonic() - started < 1.5
+
+
+def test_verifier_timeout_never_waits_for_detached_pipe_holder(tmp_path):
+    import os
+    import signal
+    import sys
+    import time
+    from agentcore.verification_gate import default_process_executor
+
+    marker = tmp_path / "pipe-holder"
+    code = (
+        "import subprocess,sys,time;from pathlib import Path;"
+        "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(3)'],start_new_session=True);"
+        "s=Path('/proc/%d/stat'%p.pid).read_text().rsplit(')',1)[1].split()[19];"
+        "Path('pipe-holder').write_text(str(p.pid)+':'+s);time.sleep(10)"
+    )
+    started = time.monotonic()
+    try:
+        result = default_process_executor([sys.executable, "-c", code], .2, tmp_path)
+        assert result["timed_out"] is True
+        assert time.monotonic() - started < 1.5
+        assert marker.is_file(), "detached pipe-holder premise must actually run"
+    finally:
+        if marker.exists():
+            pid, expected_start = marker.read_text().split(":")
+            try:
+                actual_start = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+                if actual_start == expected_start:
+                    os.kill(int(pid), signal.SIGKILL)
+            except (OSError, IndexError):
+                pass
 
 
 def test_evaluate_verification_checks_real_end_to_end(tmp_path: Path):
