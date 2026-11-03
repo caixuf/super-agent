@@ -56,14 +56,32 @@ HFC (`hermes-feishu-streaming-card`) owns Feishu streaming-card delivery through
 its upstream CLI, Hermes hooks, runtime dependency and sidecar. This repository
 does not vendor HFC code or take ownership of those files.
 
-`lock.json` pins the evaluated release and source commit. The checker also
-reads the CLI environment's installed distribution `direct_url.json` through
-the CLI's own Python interpreter, so matching a version string alone is not
-enough. This does not independently prove the Hermes PM runtime wheel's source
-revision. Install, upgrade,
-repair and rollback through HFC's own CLI using that exact source revision;
-never copy a wheel, hand-edit HFC-managed Hermes files, or run setup against a
-production HOME during isolated tests.
+`lock.json` certifies exactly one identity at a time through `identity.accepted`.
+Two shapes are legal:
+
+- `upstream_pin` — installed from a git checkout; the certified identity is the
+  pinned `commit`.
+- `deployed_wheel` — installed from a built wheel; the certified identity is that
+  wheel's `sha256` together with its version, recorded in `deployed_build`.
+
+The checker reads the CLI environment's installed `direct_url.json` through the
+CLI's own Python interpreter and matches it against the accepted shape, so
+matching a version string alone is not enough. A wheel has no commit: demanding
+one from a wheel install can only ever produce a permanent red, and a gate that
+is always red is a gate nobody reads.
+
+A repaired wheel does not silently inherit the upstream pin's delivery hold, and
+it does not silently discharge it either: `known_delivery_blockers` clears only
+when `deployed_build.blockers_resolved_on_this_build` and its recorded evidence
+cover every one of them, and only while the installed hash still matches the
+record. Replacing the wheel drops the clearance. This does not independently
+prove the Hermes PM runtime wheel's source revision.
+
+Neither shape satisfies interaction acceptance: `interaction_gate_passed` still
+requires observed turn samples and the manual client criteria below. Install,
+upgrade, repair and rollback through HFC's own CLI; never copy a wheel,
+hand-edit HFC-managed Hermes files, or run setup against a production HOME
+during isolated tests.
 
 ## Read-Only Check
 
@@ -77,10 +95,12 @@ python3 tools/hfc_acceptance.py \
   --hermes-home /path/to/hermes-home
 ```
 
-The checker invokes only `hermes-feishu-card doctor --support-report`. It does
-not install, repair, start, stop, restart, upload reports or send Feishu
-messages. Its JSON output contains check identifiers and states, not the source
-report, paths, credentials, endpoints or chat contents.
+The checker invokes only `hermes-feishu-card doctor --support-report`. When
+`--doctor-cli` names a command that is not on `PATH`, it falls back to the
+`deployed_build.venv` recorded in `lock.json`, so a single-tool install does not
+need the CLI exported globally. It does not install, repair, start, stop, restart,
+upload reports or send Feishu messages. Its JSON output contains check identifiers
+and states, not the source report, paths, credentials, endpoints or chat contents.
 
 The default gate also requires retained evidence of a started turn, first
 answer and completed turn. Use `--infrastructure-only` only to distinguish a

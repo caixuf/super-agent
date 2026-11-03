@@ -12,6 +12,15 @@ import sys
 
 REPO = Path(__file__).resolve().parents[1]
 LOCK = REPO / "integrations" / "hfc" / "lock.json"
+UPSTREAM_REPOSITORY = "https://github.com/baileyh8/hermes-feishu-streaming-card"
+_PROBE_DIRECT_URL = (
+    "from importlib.metadata import distribution; "
+    "print(distribution('hermes-feishu-streaming-card').read_text('direct_url.json') or '')"
+)
+_PROBE_VERSION = (
+    "from importlib.metadata import version; "
+    "print(version('hermes-feishu-streaming-card'))"
+)
 
 
 def _mapping(value):
@@ -22,7 +31,7 @@ def _positive(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
 
 
-def _installed_source_commit(executable):
+def _interpreter(executable):
     try:
         first = Path(executable).read_text(encoding="utf-8").splitlines()[0]
         if not first.startswith("#!"):
@@ -34,29 +43,95 @@ def _installed_source_commit(executable):
             if len(interpreter) < 2:
                 return None
             resolved = shutil.which(interpreter[1])
-            if resolved is None:
-                return None
-            interpreter = [resolved]
-        probe = (
-            "from importlib.metadata import distribution; "
-            "print(distribution('hermes-feishu-streaming-card').read_text('direct_url.json') or '')"
-        )
-        proc = subprocess.run(interpreter + ["-c", probe], text=True,
-                              capture_output=True, timeout=20)
-        if proc.returncode != 0:
-            return None
-        direct_url = json.loads(proc.stdout)
-        vcs = _mapping(direct_url.get("vcs_info"))
-        repository = str(direct_url.get("url", "")).removesuffix(".git")
-        if repository != "https://github.com/baileyh8/hermes-feishu-streaming-card":
-            return None
-        commit = vcs.get("commit_id")
-        return commit if isinstance(commit, str) else None
-    except (OSError, IndexError, ValueError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            return [resolved] if resolved else None
+        return interpreter
+    except (OSError, IndexError, UnicodeError):
         return None
 
 
-def evaluate_report(report, *, installed_commit=None, require_turn=True):
+def _probe(executable, code):
+    interpreter = _interpreter(executable)
+    if interpreter is None:
+        return None
+    try:
+        proc = subprocess.run(interpreter + ["-c", code], text=True,
+                              capture_output=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def installed_identity(executable):
+    """Resolve what is installed, not what the lock wishes were installed.
+
+    Two identities are legitimate: a git checkout of the upstream repository and
+    a built wheel carrying reviewed source repairs. A wheel has no commit, so
+    demanding one from a wheel install can only ever produce a permanent false red.
+    """
+    stdout = _probe(executable, _PROBE_DIRECT_URL)
+    if stdout is None:
+        return None
+    try:
+        direct_url = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    direct_url = _mapping(direct_url)
+    commit = _mapping(direct_url.get("vcs_info")).get("commit_id")
+    repository = str(direct_url.get("url", "")).removesuffix(".git")
+    if repository == UPSTREAM_REPOSITORY and isinstance(commit, str):
+        return {"kind": "upstream_pin", "commit": commit}
+    digest = str(_mapping(direct_url.get("archive_info")).get("hash") or "")
+    if digest.startswith("sha256="):
+        version = (_probe(executable, _PROBE_VERSION) or "").strip() or None
+        return {"kind": "deployed_wheel", "wheel_sha256": digest[len("sha256="):],
+                "version": version}
+    if isinstance(commit, str):
+        return {"kind": "upstream_pin", "commit": commit}
+    return None
+
+
+def accepted_identity(lock):
+    """The identity this repository is willing to certify."""
+    if _mapping(lock.get("identity")).get("accepted") == "deployed_wheel":
+        record = _mapping(lock.get("deployed_build"))
+        return {"kind": "deployed_wheel",
+                "wheel_sha256": str(record.get("wheel_sha256") or ""),
+                "version": str(record.get("version") or "")}
+    return {"kind": "upstream_pin", "commit": str(lock.get("commit") or "")}
+
+
+def _identity_matches(actual, expected):
+    if not isinstance(actual, dict) or actual.get("kind") != expected["kind"]:
+        return False
+    if expected["kind"] == "upstream_pin":
+        return bool(expected["commit"]) and actual.get("commit") == expected["commit"]
+    return (bool(expected["wheel_sha256"])
+            and actual.get("wheel_sha256") == expected["wheel_sha256"]
+            and actual.get("version") == expected["version"])
+
+
+def _delivery_safety(lock, known, identity_matched):
+    """Delivery safety is either upstream-reviewed, or repaired with recorded evidence."""
+    if not isinstance(known, list):
+        return False, ["delivery_safety_review_missing"]
+    if not known:
+        return True, []
+    record = _mapping(lock.get("deployed_build"))
+    evidence = _mapping(record.get("evidence"))
+    resolved = record.get("blockers_resolved_on_this_build")
+    covered = evidence.get("covers")
+    repaired = bool(
+        identity_matched
+        and isinstance(resolved, list) and isinstance(covered, list)
+        and not set(known) - set(resolved)
+        and not set(known) - set(covered)
+        and str(evidence.get("result") or "").strip()
+    )
+    return repaired, known
+
+
+def evaluate_report(report, *, installed_identity=None, installed_commit=None,
+                    require_turn=True):
     """Return only bounded check IDs; never forward the upstream report."""
     report = _mapping(report)
     lock = json.loads(LOCK.read_text(encoding="utf-8"))
@@ -69,9 +144,15 @@ def evaluate_report(report, *, installed_commit=None, require_turn=True):
     integrity = _mapping(runtime.get("integrity"))
     timing = _mapping(runtime.get("timing"))
 
+    expected = accepted_identity(lock)
+    reported = installed_identity if _mapping(installed_identity).get("kind") else None
+    identity_matched = _identity_matches(reported, expected)
+    identity_check = ("recorded_build_identity" if expected["kind"] == "deployed_wheel"
+                      else "pinned_cli_source_commit")
     checks = {
         "pinned_version": report.get("package_version") == lock["version"],
-        "pinned_cli_source_commit": installed_commit == lock["commit"],
+        "identity_resolvable": reported is not None,
+        identity_check: identity_matched,
         "doctor_ok": diagnostics.get("status") == "ok",
         "hermes_compatibility": hermes.get("compatibility") == "full",
         "install_state": install.get("status") == "installed",
@@ -82,8 +163,8 @@ def evaluate_report(report, *, installed_commit=None, require_turn=True):
         "generation_matches": readiness.get("generation_match") is True,
     }
     known_blockers = lock.get("known_delivery_blockers")
-    delivery_safety_reviewed = (
-        isinstance(known_blockers, list) and not known_blockers
+    delivery_safety_reviewed, known_report = _delivery_safety(
+        lock, known_blockers, identity_matched
     )
     if require_turn:
         checks.update({
@@ -105,15 +186,16 @@ def evaluate_report(report, *, installed_commit=None, require_turn=True):
         "component": lock["distribution"],
         "expected_version": lock["version"],
         "expected_cli_source_commit": lock["commit"],
-        "reported_cli_source_commit": installed_commit,
+        "reported_cli_source_commit": _mapping(reported).get("commit"),
+        "accepted_identity": expected,
+        "reported_identity": reported,
         "reported_version": report.get("package_version"),
         "status": "ready" if not blockers else "blocked",
         "mode": "interaction_sample" if require_turn else "infrastructure_only",
         "checks": checks,
         "blockers": blockers,
         "notices": warnings,
-        "known_delivery_blockers": known_blockers if isinstance(known_blockers, list)
-            else ["delivery_safety_review_missing"],
+        "known_delivery_blockers": known_report,
         # Automated checks only; the manual client criteria below remain required.
         "interaction_gate_passed": require_turn and not blockers and delivery_safety_reviewed,
         "manual_client_acceptance_required": [
@@ -125,8 +207,23 @@ def evaluate_report(report, *, installed_commit=None, require_turn=True):
     }
 
 
+def _recorded_cli():
+    """Fall back to the recorded install when the CLI is not on PATH."""
+    try:
+        lock = json.loads(Path(LOCK).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    venv = _mapping(lock.get("deployed_build")).get("venv")
+    if not isinstance(venv, str) or not venv:
+        return None
+    candidate = Path(venv).expanduser() / "bin" / "hermes-feishu-card"
+    return str(candidate) if candidate.is_file() else None
+
+
 def _doctor_command(args):
     executable = shutil.which(args.doctor_cli)
+    if executable is None and Path(args.doctor_cli).name == args.doctor_cli:
+        executable = _recorded_cli()
     if executable is None:
         return None
     command = [executable, "doctor", "--config", str(args.config),
@@ -164,7 +261,7 @@ def main(argv=None):
         print(json.dumps(result, sort_keys=True))
         return 1
 
-    result = evaluate_report(report, installed_commit=_installed_source_commit(command[0]),
+    result = evaluate_report(report, installed_identity=installed_identity(command[0]),
                              require_turn=not args.infrastructure_only)
     if proc.returncode != 0 and "doctor_command_failed" not in result["blockers"]:
         result["blockers"].append("doctor_command_failed")
