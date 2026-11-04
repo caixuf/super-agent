@@ -514,3 +514,60 @@ session slot 释放均由宿主 turn 结束路径完成；`final-send NOT suppre
 - 本机 app 缺少群消息读取权限（读历史返回 400），不影响收发；验证改用远端 app 回读群消息。
 - Card 2.0 卡片正文经消息列表 API 只返回降级占位（「请升级客户端」），真实内容以会话日志与
   `durable_roster` 调用记录为准，不以占位文案判断成败。
+
+## 15. 后台执行角色（dev）与群聊实测
+
+### 问题
+
+用户在群里让本机高手「看一下今晚的更改」，它连续两次都回「没有读文件、跑命令的口子」，
+即使用户说「你可以派工」，派出的任务也做不了这件事。
+
+定位后发现是**后台角色不够**，不是前台门禁本身：
+
+- 派单通道是通的（两次都成功 `queued`，随后 `completed`）；
+- 但唯一的 `analysis` 角色用只读分析 runner，只能读 `allowed_roots` 内的文件、做引用核查，
+  **不能执行命令**，产出是「只读观察…」而不是 `git log` 结果；
+- 同时 `durable_submit` 的 `sources` 全局必填，执行类任务没有源文件就根本提交不了。
+
+### 修复
+
+| 项 | 改动 |
+| :--- | :--- |
+| 执行角色 | 新增 `dev` 队列 + 独立 worker；runner 在工作目录内起一个受控回合，平台标为后端（`local`），带 `--max-turns`/预算上限 |
+| 源文件约束 | `sources` 仅对 `analysis` 必填；执行角色可省略 |
+| 默认角色 | 未显式指定时默认 `dev`（执行更通用），`analysis` 需显式点名 |
+| 兜底 | 若点名 `analysis` 但附带了分析根之外的源路径，自动改走 `dev`，不再整轮失败 |
+| 平台豁免 | `local`（管理员命令行入口）与 `api_server` 一并视为后端平台；消息类平台仍受限 |
+
+### 群聊实测（本机，通过）
+
+| 时间 | 事件 |
+| :--- | :--- |
+| 00:55:55 | 远端机器人在群里请求「用研发执行角色跑 git log」 |
+| 00:55:57 | 本机前台接单回执卡片 |
+| 00:56:01 | `durable_submit` 返回 `role: dev`、`task_id: 8b665fbb…` |
+| 00:56:07 | dev worker 实际执行 `git log`，输出 5 条提交（`ea86998` / `00bacd4` / `a34c5d9` …） |
+| 00:56:22 | **后台结果回投到群**（第二张完成卡片） |
+
+这证明「群消息 → 前台接单 → 后台执行 → 结果回群」整条链路可用，且不依赖前台开放执行工具。
+
+### 群内机器人互通的前置配置
+
+- 宿主 `allow_bots` 默认 `none`，机器人消息会被判 `bots_disabled` 丢弃；两机均配为 `mentions`。
+- 必须显式配置 `FEISHU_BOT_OPEN_ID`，否则 `self_ids` 为空，机器人消息会被判 `self_ids_unknown`。
+- 注意：本机某 profile 的 `.env` 与主 bot 共用同一个 app，用该凭据发消息属于 `self_echo`，
+  验证时需从**对端**用其自身凭据发送。
+
+### 远端部署状态
+
+`dev` 队列、runner、worker 服务、`colleagues.dev` 配置均已部署，插件注册出 4 个工具、
+15 个角色（含 `dev`）。但远端群聊派单仍报旧的 `source outside administrator roots`，
+**尚未通过**，需要继续定位它加载的插件版本或角色解析差异。
+
+### 记忆系统
+
+- 常驻召回服务 10:42 进入 `blocked`（`JournalError`），重启后恢复 `ready`，实测召回 `code: hit`、
+  `transport: resident_socket`。
+- 复读回归哨兵 timer 此前 `disabled`，已 `enable --now` 接回；能力地板守护 timer、
+  `superagent-proactive` 一直正常。
+- Cron 调度器在跑（8 个 profile，含目标 profile），00:01 有成功投递记录。
