@@ -242,7 +242,7 @@ python3 tools/superagent.py --root <managed-root> --profile <profile> \
    需改宿主树 3 处 helper/补丁并重启正在对话的 bot，属维护窗口动作，未擅自做。
 2. **白名单只读名册查询工具**：`colleague-catalog` 只在 `plugins.enabled` 列表，`plugins.entries` 无对应 `settings.enabled` 与 roles 名册，
    `register()` 首行即返回；硬加进白名单只会放行一个不存在的工具。需先由部署清单提供管理员名册数据。
-3. crowd 内 `--workers` 上限 16 为安全阀；真实并发收益受模型端点与 runner 只读策略限制，未做固定样本性能评测。
+3. 仓内 `--workers` 上限 16 为安全阀；真实并发收益受模型端点与 runner 只读策略限制，未做固定样本性能评测。
 
 回退点：config / unit 备份 `~/.hermes/superagent/caixuf/state/config-backups/` 下 `backup_20261104195133`（queue）与并发改动当次备份；
 受管 release 可用 `tools/superagent.py rollback`。
