@@ -93,7 +93,7 @@ p.register(ctx)
 assert set(manager._system_prompt_sections)=={'durable-dispatch-routing'}
 raw=get_tool_definitions(enabled_toolsets=['durable_dispatch'],quiet_mode=True,skip_tool_search_assembly=True)
 names={item['function']['name'] for item in raw}
-assert names=={'durable_submit','durable_status','durable_cancel'}, sorted(names)
+assert names=={'durable_submit','durable_status','durable_cancel','durable_roster'}, sorted(names)
 visible,deferred=classify_tools(raw)
 assert {item['function']['name'] for item in visible}==names
 assert deferred==[], [item['function']['name'] for item in deferred]

@@ -271,7 +271,7 @@ def test_delivery_disabled_registers_no_backfill(tmp_path):
                        'allowed_roots': [str(directory)]})
     before = {thread.name for thread in threading.enumerate()}
     plugin.register(context)
-    assert set(context.tools) == {'durable_submit', 'durable_status', 'durable_cancel'}
+    assert set(context.tools) == {'durable_submit', 'durable_status', 'durable_cancel', 'durable_roster'}
     assert context.unload_callbacks == []
     assert not ({thread.name for thread in threading.enumerate()} - before
                 & {'durable-dispatch-backfill'})
