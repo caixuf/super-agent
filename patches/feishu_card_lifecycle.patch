@@ -1,6 +1,134 @@
+diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
+index b1ffb8d..22af525 100644
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -4541,6 +4541,10 @@ class BasePlatformAdapter(ABC):
+         interrupt_event = self._active_sessions.get(session_key) or asyncio.Event()
+         self._active_sessions[session_key] = interrupt_event
+         _thread_metadata = _thread_metadata_for_event(event)
++        if _platform_name(getattr(event.source, "platform", None)) == "feishu":
++            _thread_metadata = dict(_thread_metadata or {})
++            _thread_metadata["_sa_session"] = session_key
++            _thread_metadata["_sa_turn"] = str(event.message_id or "")
+         typing_task = self._start_typing_refresh(event, interrupt_event, _thread_metadata)
+         try:
+             await self._run_processing_hook("on_processing_start", event)
+diff --git a/gateway/run.py b/gateway/run.py
+index 2db32d7..d369f03 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -3909,6 +3909,10 @@ class GatewayRunner(
+                     metadata.setdefault("user_id", str(user_id))
+         from gateway.session_context import source_route_metadata
+         metadata = source_route_metadata(source, metadata)
++        if getattr(source, "platform", None) == Platform.FEISHU:
++            metadata = dict(metadata or {})
++            metadata["_sa_session"] = self._session_key_for_source(source)
++            metadata["_sa_turn"] = str(getattr(source, "_sa_turn", "") or "")
+         # Routed profile for shared state.db namespaces: under profile_routes the transport adapter's
+         # stamp is not the profile that wrote the binding (Telegram prune path needs it).
+         # See #76423.
+diff --git a/gateway/run_busy.py b/gateway/run_busy.py
+index 2273eef..6524df9 100644
+--- a/gateway/run_busy.py
++++ b/gateway/run_busy.py
+@@ -880,7 +880,15 @@ class GatewayBusySessionMixin:
+ 
+     async def _send_busy_ack_reply(self, event: MessageEvent, adapter, message: str) -> None:
+         try:
+-            await self._send_busy_reply(event, adapter, message)
++            if event.source.platform == Platform.FEISHU:
++                metadata = dict(self._thread_metadata_for_source(event.source) or {})
++                running_event = self._session_state(self._session_key_for_source(event.source)).turn.event
++                metadata["_sa_turn"] = str(getattr(running_event, "message_id", "") or "")
++                metadata["_sa_status"] = True
++                await adapter._send_with_retry(chat_id=event.source.chat_id, content=message,
++                    reply_to=self._busy_reply_to(event, self._reply_anchor_for_event(event)), metadata=metadata)
++            else:
++                await self._send_busy_reply(event, adapter, message)
+         except Exception as e:
+             logger.debug("Failed to send busy-ack: %s", e)
+ 
+diff --git a/gateway/run_turn.py b/gateway/run_turn.py
+index 85adec0..3d4afb9 100644
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -1191,6 +1191,10 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
+             )
+         if metadata is None and _relay_prospective_thread_id:
+             metadata = {"reply_to_message_id": event_message_id}
++        if source.platform == Platform.FEISHU:
++            metadata = dict(metadata or {})
++            metadata["_sa_session"] = self._session_key_for_source(source)
++            metadata["_sa_turn"] = str(getattr(source, "_sa_turn", "") or "")
+         return metadata
+ 
+     def _run_agent_progress_threading(
+@@ -1253,7 +1257,8 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
+             else None
+         )
+         if source.platform == Platform.FEISHU and source.thread_id and event_message_id:
+-            _status_thread_metadata = {"thread_id": _progress_thread_id, "reply_to_message_id": event_message_id}
++            _status_thread_metadata = {"thread_id": _progress_thread_id, "reply_to_message_id": event_message_id,
++                                       "_sa_session": self._session_key_for_source(source), "_sa_turn": str(getattr(source, "_sa_turn", "") or "")}
+         else:
+             _status_thread_metadata = self._thread_metadata_for_progress(
+                 source, event_message_id, _progress_thread_id, _relay_prospective_thread_id,
+@@ -2281,11 +2286,11 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
+                         break
+                     _notify_res = await _notify_adapter.send(
+                         source.chat_id, _heartbeat_text,
+-                        metadata=_interim_metadata(_non_conversational_metadata(_status_thread_metadata, platform=source.platform)),
++                        metadata={**_interim_metadata(_non_conversational_metadata(_status_thread_metadata, platform=source.platform)), **({"_sa_status": True} if source.platform == Platform.FEISHU else {})},
+                     )
+                     if getattr(_notify_res, "success", False) and getattr(_notify_res, "message_id", None):
+                         _heartbeat_msg_id = str(_notify_res.message_id)
+-                        if turn_ctx._cleanup_progress:
++                        if turn_ctx._cleanup_progress and not getattr(_notify_res, "_sa_primary_card", False):
+                             turn_ctx._cleanup_msg_ids.append(_heartbeat_msg_id)
+             except Exception as _ne:
+                 logger.debug("Long-running notification error: %s", _ne)
+diff --git a/gateway/run_turn_progress.py b/gateway/run_turn_progress.py
+index 6200c33..64dea2a 100644
+--- a/gateway/run_turn_progress.py
++++ b/gateway/run_turn_progress.py
+@@ -132,7 +132,7 @@ class GatewayTurnProgressMixin:
+     def _track_progress_result(self, result) -> None:
+         """Remember a delivered progress/status message id for end-of-turn cleanup."""
+         ctx = self._ctx
+-        if ctx._cleanup_progress and getattr(result, "success", False) and getattr(result, "message_id", None):
++        if ctx._cleanup_progress and getattr(result, "success", False) and getattr(result, "message_id", None) and not getattr(result, "_sa_primary_card", False):
+             ctx._cleanup_msg_ids.append(str(result.message_id))
+ 
+     def _track_future_cleanup_id(self, fut) -> None:
+@@ -624,7 +624,8 @@ class GatewayTurnProgressMixin:
+     async def _send_progress_text(self, st, text: str):
+         ctx = self._ctx
+         result = await st.adapter.send(
+-            chat_id=ctx.source.chat_id, content=text, reply_to=ctx._progress_reply_to, metadata=ctx._progress_metadata,
++            chat_id=ctx.source.chat_id, content=text, reply_to=ctx._progress_reply_to,
++            metadata={**(ctx._progress_metadata or {}), **({"_sa_status": True} if ctx.source.platform == Platform.FEISHU else {})},
+         )
+         self._track_progress_result(result)
+         return result
+diff --git a/gateway/session_identity.py b/gateway/session_identity.py
+index ee04005..686154a 100644
+--- a/gateway/session_identity.py
++++ b/gateway/session_identity.py
+@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
+ 
+ _IDENTITY_ATTR = "_identity"
+ # Wire-invisible provenance copied alongside the identity when a source is duplicated.
+-_PROVENANCE_ATTRS = ("_transport_adapter_ref", "_authorization_profile_home", _IDENTITY_ATTR)
++_PROVENANCE_ATTRS = ("_transport_adapter_ref", "_authorization_profile_home", _IDENTITY_ATTR, "_sa_turn")
+ 
+ 
+ class IdentityUnresolved(RuntimeError):
+diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adapter.py
+index 59c5ec6..232fd52 100644
 --- a/plugins/platforms/feishu/adapter.py
 +++ b/plugins/platforms/feishu/adapter.py
-@@ -1732,40 +1732,18 @@
+@@ -1732,40 +1732,18 @@ class FeishuAdapter(BasePlatformAdapter):
          last_response = None
  
          # A topic in a group is a separate conversation even when chat_id is shared.
@@ -49,7 +177,7 @@
  
          # 卡片回复（本地增强）：当 card_replies 开启时生效
          if getattr(self, "_card_replies", False):
-@@ -1972,6 +1950,38 @@
+@@ -1972,6 +1950,38 @@ class FeishuAdapter(BasePlatformAdapter):
              self._remember_card_message(result.message_id or "")
          return result
  
@@ -88,7 +216,7 @@
      async def edit_message(self, chat_id: str, message_id: str, content: str, *, finalize: bool = False,
                             metadata: Optional[dict[str, Any]] = None) -> SendResult:
          """Edit a previously sent Feishu text/post message."""
-@@ -1987,16 +1997,7 @@
+@@ -1987,16 +1997,7 @@ class FeishuAdapter(BasePlatformAdapter):
                               if key[0] == chat_id and info.get("message_id") == message_id), None)
              live_info = self._active_live_card_per_chat.get(live_key)
              if live_info:
@@ -106,7 +234,7 @@
              card = self._build_reply_card(
                  content, finalize=turn_final, started_at=self._card_message_ids.get(message_id))
              body = self._build_patch_message_body(content=json.dumps(card, ensure_ascii=False))
-@@ -2892,10 +2893,19 @@
+@@ -2892,10 +2893,19 @@ class FeishuAdapter(BasePlatformAdapter):
          data = await self._reaction_call("Remove", message_id, reaction_id, _build, self._client.im.v1.message_reaction.delete)
          return data is not None
  
@@ -127,7 +255,7 @@
  
          # 首帧交互卡片（CardKit 2.0 原地流式更新规范）
          if getattr(self, "_card_replies", False) and chat_id:
-@@ -2918,8 +2928,10 @@
+@@ -2918,8 +2928,10 @@ class FeishuAdapter(BasePlatformAdapter):
                          stop_ev = asyncio.Event()
                          self._active_live_card_per_chat[live_key] = {
                              "message_id": cid,
@@ -138,7 +266,7 @@
                          }
  
                          async def _heartbeat_worker(c_id=cid, c_chat=live_key, s_ts=started_ts, ev=stop_ev):
-@@ -2934,13 +2946,8 @@
+@@ -2934,13 +2946,8 @@ class FeishuAdapter(BasePlatformAdapter):
                                  live = self._active_live_card_per_chat.get(c_chat)
                                  if not live or live.get("message_id") != c_id:
                                      break
@@ -153,7 +281,7 @@
                                  except Exception:
                                      pass
  
-@@ -2961,34 +2968,17 @@
+@@ -2961,34 +2968,27 @@ class FeishuAdapter(BasePlatformAdapter):
  
      async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
          message_id = event.message_id
@@ -191,125 +319,21 @@
 +        if live_info and live_info.get("origin_message_id") == message_id:
 +            if outcome is ProcessingOutcome.FAILURE:
 +                notice = "任务执行异常或超时，未能完成。"
++                await self._sa_patch_owned_card(live_key, live_info, notice, final=True, failed=True)
 +            elif outcome is ProcessingOutcome.CANCELLED:
 +                notice = "任务已取消。"
++                await self._sa_patch_owned_card(live_key, live_info, notice, final=True, failed=False)
 +            else:
-+                notice = "本轮结束，未能确认最终回复。"
-+            await self._sa_patch_owned_card(live_key, live_info, notice, final=True, failed=outcome is ProcessingOutcome.FAILURE)
++                content_text = (live_info.get("content") or "").strip()
++                if content_text and content_text != "正在排查处理中...":
++                    await self._sa_patch_owned_card(live_key, live_info, content_text, final=True, failed=False)
++                else:
++                    live_info["stop_event"].set()
++                    task = live_info.get("task")
++                    if task and task is not asyncio.current_task():
++                        await task
++                    self._card_message_ids.pop(live_info["message_id"], None)
++                    self._active_live_card_per_chat.pop(live_key, None)
          if not self._reactions_enabled() or not message_id:
              return
          start_reaction_id = self._pending_processing_reactions.get(message_id)
---- a/gateway/run.py
-+++ b/gateway/run.py
-@@ -3909,6 +3909,10 @@
-                     metadata.setdefault("user_id", str(user_id))
-         from gateway.session_context import source_route_metadata
-         metadata = source_route_metadata(source, metadata)
-+        if getattr(source, "platform", None) == Platform.FEISHU:
-+            metadata = dict(metadata or {})
-+            metadata["_sa_session"] = self._session_key_for_source(source)
-+            metadata["_sa_turn"] = str(getattr(source, "_sa_turn", "") or "")
-         # Routed profile for shared state.db namespaces: under profile_routes the transport adapter's
-         # stamp is not the profile that wrote the binding (Telegram prune path needs it).
-         # See #76423.
---- a/gateway/run_turn.py
-+++ b/gateway/run_turn.py
-@@ -1191,6 +1191,10 @@
-             )
-         if metadata is None and _relay_prospective_thread_id:
-             metadata = {"reply_to_message_id": event_message_id}
-+        if source.platform == Platform.FEISHU:
-+            metadata = dict(metadata or {})
-+            metadata["_sa_session"] = self._session_key_for_source(source)
-+            metadata["_sa_turn"] = str(getattr(source, "_sa_turn", "") or "")
-         return metadata
- 
-     def _run_agent_progress_threading(
-@@ -1253,7 +1257,8 @@
-             else None
-         )
-         if source.platform == Platform.FEISHU and source.thread_id and event_message_id:
--            _status_thread_metadata = {"thread_id": _progress_thread_id, "reply_to_message_id": event_message_id}
-+            _status_thread_metadata = {"thread_id": _progress_thread_id, "reply_to_message_id": event_message_id,
-+                                       "_sa_session": self._session_key_for_source(source), "_sa_turn": str(getattr(source, "_sa_turn", "") or "")}
-         else:
-             _status_thread_metadata = self._thread_metadata_for_progress(
-                 source, event_message_id, _progress_thread_id, _relay_prospective_thread_id,
-@@ -2281,11 +2286,11 @@
-                         break
-                     _notify_res = await _notify_adapter.send(
-                         source.chat_id, _heartbeat_text,
--                        metadata=_interim_metadata(_non_conversational_metadata(_status_thread_metadata, platform=source.platform)),
-+                        metadata={**_interim_metadata(_non_conversational_metadata(_status_thread_metadata, platform=source.platform)), **({"_sa_status": True} if source.platform == Platform.FEISHU else {})},
-                     )
-                     if getattr(_notify_res, "success", False) and getattr(_notify_res, "message_id", None):
-                         _heartbeat_msg_id = str(_notify_res.message_id)
--                        if turn_ctx._cleanup_progress:
-+                        if turn_ctx._cleanup_progress and not getattr(_notify_res, "_sa_primary_card", False):
-                             turn_ctx._cleanup_msg_ids.append(_heartbeat_msg_id)
-             except Exception as _ne:
-                 logger.debug("Long-running notification error: %s", _ne)
---- a/gateway/run_turn_progress.py
-+++ b/gateway/run_turn_progress.py
-@@ -132,7 +132,7 @@
-     def _track_progress_result(self, result) -> None:
-         """Remember a delivered progress/status message id for end-of-turn cleanup."""
-         ctx = self._ctx
--        if ctx._cleanup_progress and getattr(result, "success", False) and getattr(result, "message_id", None):
-+        if ctx._cleanup_progress and getattr(result, "success", False) and getattr(result, "message_id", None) and not getattr(result, "_sa_primary_card", False):
-             ctx._cleanup_msg_ids.append(str(result.message_id))
- 
-     def _track_future_cleanup_id(self, fut) -> None:
-@@ -624,7 +624,8 @@
-     async def _send_progress_text(self, st, text: str):
-         ctx = self._ctx
-         result = await st.adapter.send(
--            chat_id=ctx.source.chat_id, content=text, reply_to=ctx._progress_reply_to, metadata=ctx._progress_metadata,
-+            chat_id=ctx.source.chat_id, content=text, reply_to=ctx._progress_reply_to,
-+            metadata={**(ctx._progress_metadata or {}), **({"_sa_status": True} if ctx.source.platform == Platform.FEISHU else {})},
-         )
-         self._track_progress_result(result)
-         return result
---- a/gateway/run_busy.py
-+++ b/gateway/run_busy.py
-@@ -880,7 +880,15 @@
- 
-     async def _send_busy_ack_reply(self, event: MessageEvent, adapter, message: str) -> None:
-         try:
--            await self._send_busy_reply(event, adapter, message)
-+            if event.source.platform == Platform.FEISHU:
-+                metadata = dict(self._thread_metadata_for_source(event.source) or {})
-+                running_event = self._session_state(self._session_key_for_source(event.source)).turn.event
-+                metadata["_sa_turn"] = str(getattr(running_event, "message_id", "") or "")
-+                metadata["_sa_status"] = True
-+                await adapter._send_with_retry(chat_id=event.source.chat_id, content=message,
-+                    reply_to=self._busy_reply_to(event, self._reply_anchor_for_event(event)), metadata=metadata)
-+            else:
-+                await self._send_busy_reply(event, adapter, message)
-         except Exception as e:
-             logger.debug("Failed to send busy-ack: %s", e)
- 
---- a/gateway/platforms/base.py
-+++ b/gateway/platforms/base.py
-@@ -4541,6 +4541,10 @@
-         interrupt_event = self._active_sessions.get(session_key) or asyncio.Event()
-         self._active_sessions[session_key] = interrupt_event
-         _thread_metadata = _thread_metadata_for_event(event)
-+        if _platform_name(getattr(event.source, "platform", None)) == "feishu":
-+            _thread_metadata = dict(_thread_metadata or {})
-+            _thread_metadata["_sa_session"] = session_key
-+            _thread_metadata["_sa_turn"] = str(event.message_id or "")
-         typing_task = self._start_typing_refresh(event, interrupt_event, _thread_metadata)
-         try:
-             await self._run_processing_hook("on_processing_start", event)
---- a/gateway/session_identity.py
-+++ b/gateway/session_identity.py
-@@ -30,7 +30,7 @@
- 
- _IDENTITY_ATTR = "_identity"
- # Wire-invisible provenance copied alongside the identity when a source is duplicated.
--_PROVENANCE_ATTRS = ("_transport_adapter_ref", "_authorization_profile_home", _IDENTITY_ATTR)
-+_PROVENANCE_ATTRS = ("_transport_adapter_ref", "_authorization_profile_home", _IDENTITY_ATTR, "_sa_turn")
- 
- 
- class IdentityUnresolved(RuntimeError):
