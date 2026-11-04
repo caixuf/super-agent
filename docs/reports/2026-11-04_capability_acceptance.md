@@ -411,7 +411,7 @@ session slot 释放均由宿主 turn 结束路径完成；`final-send NOT suppre
 
 | 机 | release | 两步实测 |
 | :--- | :--- | :--- |
-| caixuf 本机 | `4480101-dirty` → `e400450`（helper 两树同步、gateway 重启、doctor ready） | 名册 9 个 / 7 秒；数学 `-6` / 3 秒 |
+| caixuf 本机 | 先 `4480101-dirty` 候选，最终收敛为干净 `7b8f2b7`（helper 两树同步、gateway 重启、doctor ready、三项 release 校验 true） | 名册 9 个 / 7 秒；数学 `-6` / 3 秒 |
 | 远端跑测机 | `e400450`（pinned 树 helper 同步、`roster_registry_path` 指向本地名册库、worker+gateway 重启、doctor ready） | `⚡ Durable_roster 0.1s` → 「15 个岗位 / 9 个在册成员 / 缺口 6 个」/ 21 秒；数学 `-6` 正常 |
 
 远端首次给 90s 预算时因**模型端点慢**在等待 API 时 CLI 超时（`KeyboardInterrupt`，非工具失败），
