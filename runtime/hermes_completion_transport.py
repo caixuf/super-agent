@@ -42,6 +42,17 @@ class HostSender:
             # Completion summaries are bounded by the queue consumer. Refuse
             # splitting, which would need one idempotency key per chunk.
             text = item['text']
+            if item.get('card'):
+                # Administrator opted into a Card 2.0 report. Use the host's own
+                # card renderer; a missing seam is a refusal, never a silent text fallback.
+                send_card = getattr(target.adapter, '_send_reply_card', None)
+                if send_card is None:
+                    return dict(ok=False, not_sent=True, error='card_adapter_unavailable')
+                result = await send_card(chat_id=target.chat_id, content=text,
+                                         reply_to=None, metadata=metadata, finalize=True)
+                if getattr(result, 'success', False) and getattr(result, 'message_id', None):
+                    return dict(ok=True, message_id=str(result.message_id))
+                return dict(ok=False, error='card_send_failed')
             if plugin_messages._fit(target.adapter, target.chat_id, text) != text:
                 return dict(ok=False, not_sent=True, error='completion_text_budget')
             result = await target.adapter.send(target.chat_id, text, metadata=metadata)
@@ -101,4 +112,5 @@ def create_transport(ctx, service):
     return transport_type(service.pool.root/'direct-delivery', profile=service.profile,
         sender=HostSender(ctx), render=_render,
         attempt_root=service.pool.root/'attempts',
-        attempt_provider=lambda job: service.pool.status(job).get('attempt'))
+        attempt_provider=lambda job: service.pool.status(job).get('attempt'),
+        card=ctx.get_config('completion_card_enabled', False) is True)

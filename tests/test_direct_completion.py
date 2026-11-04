@@ -11,14 +11,15 @@ ADDRESS = dict(profile='owner', session='session', route='route')
 ATTEMPT = 'a'*32
 
 
-def make_transport(tmp_path, sender):
+def make_transport(tmp_path, sender, card=False):
     directory = tmp_path/'attempts'/ATTEMPT
     directory.mkdir(parents=True, exist_ok=True)
     file = directory/'report.md'
     if not file.exists():
         file.write_text('verified report')
     transport = DirectCompletionTransport(tmp_path/'delivery', profile='owner', sender=sender,
-        render=lambda m: m['summary'], attempt_root=tmp_path/'attempts', attempt_provider=lambda job: ATTEMPT)
+        render=lambda m: m['summary'], attempt_root=tmp_path/'attempts', attempt_provider=lambda job: ATTEMPT,
+        card=card)
     message = dict(task_id='job', status='completed', summary='done', artifacts=[str(file)])
     return transport, message, file
 
@@ -147,3 +148,24 @@ def test_unknown_delivery_does_not_block_other_jobs(tmp_path):
     assert pool.delivery_record(jobs[1])['acknowledged']
     drain(pool, transport, profile='owner')
     assert sent == ['uncertain','ready']
+
+
+def test_card_opt_in_marks_only_the_summary_item(tmp_path):
+    calls = []
+    def sender(address, item, **kwargs):
+        calls.append(item)
+        return dict(ok=True, message_id='platform-'+str(len(calls)))
+    transport, message, _ = make_transport(tmp_path, sender, card=True)
+    assert transport.deliver(ADDRESS, message, idempotency_key='job')['accepted']
+    assert calls[0].get('card') is True
+    assert 'card' not in calls[1]
+
+
+def test_default_plan_has_no_card_marker(tmp_path):
+    calls = []
+    def sender(address, item, **kwargs):
+        calls.append(item)
+        return dict(ok=True, message_id='platform-'+str(len(calls)))
+    transport, message, _ = make_transport(tmp_path, sender)
+    assert transport.deliver(ADDRESS, message, idempotency_key='job')['accepted']
+    assert 'card' not in calls[0]

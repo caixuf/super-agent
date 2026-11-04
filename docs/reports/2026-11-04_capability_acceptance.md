@@ -138,3 +138,16 @@
 - 完整研发沙箱 / bubblewrap 与跨机停止信号。
 - 跨会话岗位经验沉淀与真实模型召回质量固定样本。
 - `C05` 的完整研发执行与 containment 门禁解开。
+
+### 卡片报告接线（D03 闭环）
+
+完成态投递原先只支持 text / document kind，卡片能力在独立的进度卡链路里，
+因此后台报告以纯文本送达。本轮做加法式接线：
+
+- `agentcore/direct_completion.py` 增加管理员可选的 `card` 标记（默认关闭，plan 字节不变）；
+- `runtime/hermes_completion_transport.py` 的 HostSender 增加 card 分支，复用宿主原生 Card 2.0 渲染；
+  宿主缺少卡片接缝时明确 `not_sent` 拒绝，**不静默降级为文本**；
+- `create_transport` 读 `completion_card_enabled` 管理员开关；
+- 新增 4 项单测覆盖 card plan 与 card 发送/拒绝分支。
+
+真实 Card 2.0 报告卡片已发到 bot 专属测试群并保留（未撤回），平台回读一致。

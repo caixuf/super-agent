@@ -18,10 +18,11 @@ import stat
 
 
 class DirectCompletionTransport:
-    def __init__(self, root, *, profile, sender, render, attempt_root, attempt_provider):
+    def __init__(self, root, *, profile, sender, render, attempt_root, attempt_provider, card=False):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.profile, self.sender, self.render = profile, sender, render
+        self.card = bool(card)
         self.attempt_root = Path(attempt_root).resolve()
         self.attempt_provider = attempt_provider
         with self.db() as db:
@@ -128,7 +129,10 @@ class DirectCompletionTransport:
                           or any(c not in '0123456789abcdef' for c in attempt)):
                 raise ValueError('owning attempt unavailable')
             # Validate and snapshot ALL attachments before sending any part.
-            plan = [dict(kind='text', text=self.render(message))] + [self._stage(p, attempt) for p in files]
+            head = dict(kind='text', text=self.render(message))
+            if self.card:
+                head['card'] = True
+            plan = [head] + [self._stage(p, attempt) for p in files]
             with self.db() as db:
                 db.execute('INSERT OR IGNORE INTO plans VALUES(?,?,?)', (identity, request, json.dumps(plan)))
                 saved = db.execute('SELECT request,plan FROM plans WHERE key=?', (identity,)).fetchone()

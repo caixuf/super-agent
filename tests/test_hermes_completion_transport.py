@@ -23,6 +23,9 @@ def host(monkeypatch):
         async def send_document(self, chat, path, **kw):
             calls.append(('file', chat, path, kw))
             return NS(success=True, message_id='file-receipt')
+        async def _send_reply_card(self, *, chat_id, content, reply_to, metadata, finalize):
+            calls.append(('card', chat_id, content, finalize))
+            return NS(success=True, message_id='card-receipt')
     adapter = Adapter()
     target = NS(platform='feishu', chat_id='chat', metadata={'thread_id':'thread'}, live=None, adapter=adapter)
     ctx = NS(plugin_id='durable-dispatch', _manager=NS(home_path='/profile/owner'))
@@ -84,3 +87,20 @@ def test_uuid_patch_is_idempotent_and_rejects_upstream_drift():
     assert patch.transform(updated) == updated
     with pytest.raises(ValueError,match='drifted'):
         patch.transform(source.replace('uuid_value=', 'different='))
+
+
+def test_card_report_uses_host_card_renderer(host):
+    sender, target, address, calls = host
+    result = asyncio.run(sender.send(object(), address,
+        dict(kind='text', text='done', card=True, delivery_uuid='stable-key')))
+    assert result['ok'] and result['message_id'] == 'card-receipt'
+    assert calls[0][0] == 'card' and calls[0][3] is True
+
+
+def test_card_report_refuses_when_host_card_seam_missing(host, monkeypatch):
+    sender, target, address, calls = host
+    monkeypatch.setattr(target.adapter, '_send_reply_card', None)
+    result = asyncio.run(sender.send(object(), address,
+        dict(kind='text', text='done', card=True, delivery_uuid='stable-key')))
+    assert result['ok'] is False and result['error'] == 'card_adapter_unavailable'
+    assert calls == []
