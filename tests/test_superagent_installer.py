@@ -650,6 +650,18 @@ def test_plan_refuses_enabled_feishu_card_without_host_implementation(tmp_path):
     assert "feishu_card_implementation_unverified" in plan["blockers"]
 
 
+def test_doctor_reports_configured_card_missing_from_host(tmp_path):
+    profile = _seed_profile(tmp_path)
+    _run(tmp_path, "install", check=True)
+    (profile / "config.yaml").write_text("platforms:\n  feishu:\n    enabled: true\n    card_replies: true\nplugins:\n  enabled: []\n  disabled: []\n")
+    result = _run(tmp_path, "doctor")
+    assert result.returncode != 0
+    report = json.loads(result.stdout)
+    assert report["status"] == "broken"
+    assert report["feishu_card_observation"]["status"] == "mismatch"
+    assert not report["feishu_card_observation"]["checks"]["card-replies"]
+
+
 def test_retired_progress_state_is_preserved_for_rollback(tmp_path):
     module = _load_installer()
     profile = _seed_profile(tmp_path)

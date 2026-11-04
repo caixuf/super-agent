@@ -1543,6 +1543,29 @@ def _recall_diagnostics_observation(profile_home: Path, managed_current: Path | 
         return {"status": "unknown", "reason": "configuration_unavailable"}
 
 
+def _feishu_card_observation(profile_home: Path, hermes_root) -> dict[str, Any]:
+    """Compare requested card behavior with installed host code, never claim delivery."""
+    import yaml
+    try:
+        config = yaml.safe_load((profile_home / "config.yaml").read_text(encoding="utf-8")) or {}
+        platform = (config.get("platforms") or {}).get("feishu") or {}
+        if not isinstance(platform, dict):
+            raise ValueError("invalid Feishu configuration")
+        if platform.get("enabled") is not True or platform.get("card_replies") is not True:
+            return {"status": "not_requested", "scope": "saved_profile_configuration_only"}
+        if not isinstance(hermes_root, str) or not Path(hermes_root).is_absolute():
+            return {"status": "unknown", "reason": "host_path_unavailable"}
+        root = Path(hermes_root)
+        specs = (("apply_feishu_card_replies.py", "card-replies"),
+                 ("apply_feishu_card_lifecycle.py", "card-lifecycle"),
+                 ("apply_card_delivery_guard.py", "card-delivery-guard"))
+        checks = {name: _patch_state(root, (script, name))["in_place"] for script, name in specs}
+        return {"status": "configured" if all(checks.values()) else "mismatch", "checks": checks,
+                "scope": "saved_configuration_and_host_files_only"}
+    except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
+        return {"status": "unknown", "reason": "configuration_unavailable"}
+
+
 def doctor(args: argparse.Namespace) -> int:
     found = _manifest(args)
     if found is None:
@@ -1559,11 +1582,13 @@ def doctor(args: argparse.Namespace) -> int:
         for name in [*manifest.get("plugins", []), *manifest.get("memory_providers", [])]
     )
     hash_ok = release_ok and manifest.get("tree_sha256") == _release_tree_hash(current.resolve())
-    ok = release_ok and links_ok and hash_ok
+    card_observation = _feishu_card_observation(profile_home, manifest.get("hermes_root"))
+    ok = release_ok and links_ok and hash_ok and card_observation["status"] not in ("mismatch", "unknown")
     print(json.dumps({"status": "ready" if ok else "broken",
+                      "feishu_card_observation": card_observation,
                       "release_valid": release_ok, "plugin_links_valid": links_ok,
                       "release_hash_valid": hash_ok,
-                      "status_scope": "managed_release_files_only",
+                      "status_scope": "managed_release_files_and_requested_card_host_files_only",
                       "runtime_observation": _gateway_runtime_observation(
                           args.profile, manifest.get("hermes_root")),
                       "worker_observation": _worker_runtime_observation(args.profile, current),
