@@ -168,7 +168,7 @@
 本机的门禁、派单、卡片与投递修复不能自动外推。远端另有 `deliver_completions: false`、
 runner 指向野生工作区、硬门禁未启用等具体缺口，需单独部署。
 
-## 8. 远端跑测机（imfl 高手）部署结果
+## 8. 远端跑测机部署结果
 
 本机全量 `verify.sh` 通过：**2720 passed / 44 skipped，退出码 0**；真实通道 5 passed、
 防退化靶场 5 passed、安装 dry-run、延迟门禁（186ms）与模型端点全过。
