@@ -1,8 +1,0 @@
-{
-  "schema_version": 1,
-  "overlay": "shared-final-render-v1",
-  "base_wheel_sha256": "861c7c7ec23a198e19fbe7911d760dc3b675b838504638cb7a8bf7ec7eee8bf2",
-  "base_identity": "5.0.13 with reviewed terminal-delivery and unfenced-ACK repairs",
-  "default_enabled": false,
-  "release_hold_cleared": false
-}

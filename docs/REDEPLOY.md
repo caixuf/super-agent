@@ -77,11 +77,12 @@ bash install/install.sh --profile <name> --compose-soul <业务叠加层.md> \
 `bash install/install.sh --require-ready` 会生成只读静态配置报告，并因运行时注册与端到端投递
 尚未有独立证据而失败关闭。该选项适合把“未证实”挡在验收门外，不代表安装器能启动或验证生产服务。
 
-Feishu 卡片的外部 HFC 运行态另走 [`integrations/hfc/README.md`](../integrations/hfc/README.md)；
-`tools/hfc_acceptance.py` 检查锁定版本、Hermes 兼容、sidecar 健康和观测到的回合样本。
-它不发送测试消息，客户端视觉表现、按钮回调和重复投递仍需私有测试会话人工验收。
-当前锁定版本存在已复现的消息交付缺陷，默认验收被 `no_known_delivery_loss` 阻断；
-`--infrastructure-only` 的 ready 不表示可生产启用，也不解除版本隔离。
+卡片与完成态投递由本仓原生链路承担：`agentcore/cardkit2_renderer.py` /
+`card_emit.py` 负责进度与终态，`agentcore/completion_delivery.py` /
+`direct_completion.py` / `feishu_transport.py` 负责回投与送达回读。
+宿主侧卡片生命周期由 `patches/feishu_card_lifecycle.patch` 与
+`patches/apply_feishu_card_lifecycle.py` 提供，安装器会关闭已退役的历史插件。
+自动化契约不发送测试消息；客户端视觉表现、按钮回调和重复投递仍需私有测试会话人工验收。
 
 ## 4. 只住在本机、不进仓的东西（必须逐项给值）
 

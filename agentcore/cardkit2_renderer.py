@@ -2,7 +2,7 @@
 
 Ported from proven production patterns (single-inflight async pipeline + CardKit 2.0
 semantic background palettes + native collapsible stage panels). Completely decoupled
-from external sidecars (HFC) and business logic.
+from external sidecars and business logic.
 """
 from __future__ import annotations
 

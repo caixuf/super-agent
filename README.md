@@ -110,16 +110,30 @@ Python、Git、Hermes、可选工具和凭据的独立运行镜像；仍须准�
 候选宿主也会在本轮持久提交回执后确定性确认并释放回合，不再调用模型轮询；
 真实 Agent/队列的隔离反例已覆盖。这仍不等于后台闭环或真实 IM 验收完成。
 
-### 交互与卡片架构（HFC 单一生产者）
-`agentcore.cardkit2_renderer` 已提供原生渲染与单在途异步更新组件，
-但当前尚无宿主插件/transport 的生产接线，**不能据此认定 HFC 已被替代或安全停用**：
-- **Single-Inflight 异步旁路管道**：单在途调度 + Last-Write-Wins 待发合并；合并不等于平台限流或送达保证。
-- **CardKit 2.0 企业级语义配色**：`wathet`/`turquoise-50`（进行中）、`indigo`/`blue-50`（完成）、`carmine`/`red-50`（失败）。
-- **公开阶段面板**：仅展示明确的公开阶段/进度摘要；`<think>` 内容不进入卡片。
-- **Drain 屏障**：最终交付前先 `close()` 停止新进度，再 `await drain()`；超时或更新失败显式报错，不能当作送达或远端顺序证明。
-- **唯一生产者（2026-11-03 定）**：**HFC 是本仓认可的唯一交互生产者**（进度卡与最终答复同一个所有者）。身份不靠版本号声明，按 [`integrations/hfc/lock.json`](integrations/hfc/lock.json) 的 `deployed_build` 记到具体 wheel 哈希与已验证的契约结果。
-- **原生链路保持未接线**：`FeishuCardKitAdapter`（`feishu_transport.py`）与 `cardkit2_renderer.CardStreamRenderer` 都是库，**不得同时上线**；`tests/test_single_card_producer.py` 会在有人接第二条时会红。
-- **投递语义**：`已接受` / `已渲染` / `已送达` 三态分离，终态只认 `delivered` / `not_sent` / `unknown`。上游 pin 的已知交付缺陷仍记为 quarantine，运行中的 build 另行记录证据；自动化契约通过**不等于**真实回合验收。
+### 交互与卡片架构（本仓原生链路）
+
+`agentcore/` 自带从渲染到投递的完整链路，不再依赖外部卡片 sidecar：
+进度卡与最终答复由同一个所有者驱动，身份由代码入口而非版本号声明。
+
+- **渲染与单在途更新**：`agentcore/cardkit2_renderer.py` 提供 CardKit 2.0 语义配色、
+  公开阶段面板（`<think>` 内容不进卡片）与单在途异步旁路（Last-Write-Wins 待发合并）；
+  合并不等于平台限流或送达保证。
+- **Drain 屏障**：最终交付前先 `close()` 停止新进度，再 `await drain()`；超时或更新失败
+  显式报错，不能当作送达或远端顺序证明。
+- **句柄持久化与恢复**：`agentcore/card_store.py` 落 SQLite、重启续 sequence；
+  `agentcore/stalled_card_bridge.py` 在崩溃恢复时保留未知状态，不盲目重发。
+- **完成态投递**：`agentcore/completion_delivery.py` / `direct_completion.py` /
+  `completion_backfill.py` 按 origin 回投；`agentcore/feishu_transport.py` 发送后从服务端
+  回读比对，按 delivery_key 至多一次，凭据不落日志。
+- **文档与附件**：`agentcore/markdown_delivery.py` / `deliverable_mode.py` /
+  `artifact_retention.py` 负责在线文档、附件与产物生命周期。
+- **投递语义**：`已接受` / `已渲染` / `已送达` 三态分离，终态只认
+  `delivered` / `not_sent` / `unknown`。自动化契约通过不等于真实回合验收。
+
+一个交互只能有一个生产者；本仓不再维护第二套外部 sidecar 发送者。
+宿主侧卡片生命周期由 `patches/feishu_card_lifecycle.patch` 与
+`patches/apply_feishu_card_lifecycle.py` 提供，安装器 `tools/superagent.py` 会关闭
+已退役的历史插件。
 
 ---
 

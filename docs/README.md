@@ -13,7 +13,7 @@
 | [`DISPATCH_ANALYSIS.md`](DISPATCH_ANALYSIS.md) | 派工与只读分析链路 |
 | [`REDEPLOY.md`](REDEPLOY.md) | 重新部署与复验步骤 |
 | [`RELEASE_READINESS.md`](RELEASE_READINESS.md) | 本次发版核对：已验证修复、真实接线与未完成门禁 |
-| [`RELEASE_CAPABILITIES.md`](RELEASE_CAPABILITIES.md) | 完整版发版能力表：通用运行、业务适配、实例部署及逐项验收口径；不是已通过声明 |
+| [`RELEASE_CAPABILITIES.md`](RELEASE_CAPABILITIES.md) | 源码能力面与发版核对：按当前代码模块分组，标注证据层级与验收出口；不是已通过声明 |
 | [`FRONTDESK_BOUNDARY.md`](FRONTDESK_BOUNDARY.md) | 候选宿主的前台权限边界、可信配置、执行接缝与限制；未生产启用 |
 | [`MEMORY_IDENTITY_ROUTES.md`](MEMORY_IDENTITY_ROUTES.md) | IM 个人记忆身份路由、独立 Worker、撤销与部署边界；不替代整体多租户审计 |
 
@@ -53,9 +53,9 @@
 | `agentcore/memory/memory_plasticity.py` | 突触可塑性反馈（按任务终态强化/抑制） | 未接线 |
 | `agentcore/memory/memory_sync.py` | 记忆库增量同步（导出 A 有 B 无的事实） | 未接线 |
 | `agentcore/feishu_transport.py` 的 `FeishuCardKitAdapter` | 用卡片实体做流式进度更新 | 未接线（且三处请求体与官方契约不符，接线前须重写） |
-| `agentcore/cardkit2_renderer.py` 的 `CardStreamRenderer` | 原生 CardKit 2.0 渲染与单在途更新 | 未接线（无宿主插件/transport 接线；**HFC 为唯一生产者**） |
+| `agentcore/cardkit2_renderer.py` 的 `CardStreamRenderer` | 原生 CardKit 2.0 渲染与单在途更新 | 作为库提供；宿主接线见 `patches/feishu_card_lifecycle.patch` |
 
 前三个记忆模块都在 docstring 顶部标了 `STATUS: 未接线`。
 **不要按「记忆引擎已具备这些能力」来理解它**——接线前需要先补调用方和对应测试。
-原生卡片组件的存在也不代表已替代 HFC；不得在未完成唯一发送者迁移与真实
-渠道验收前另开一个生产者。
+卡片与完成态投递由 `agentcore/` 原生链路承担，仓库不再维护外部卡片 sidecar 集成；
+一个交互只能有一个生产者，替换发送者须在同一次变更里完成迁移与真实渠道验收。

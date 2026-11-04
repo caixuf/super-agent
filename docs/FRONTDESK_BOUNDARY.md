@@ -58,7 +58,7 @@ IM 只允许 `help`、`commands`、`whoami`、`version`、`new`、`reset`、
 | `model_tools.handle_function_call` | tool-search bridge、middleware 和真实派发之前 |
 | `agent.tool_executor._dispatch_authorized_once` | 共享顺序/并发授权路径，覆盖 inline 工具 |
 | `agent.agent_runtime_helpers.invoke_tool` | 即使调用方已标记跳过 pre-hook，仍独立检查 |
-| `gateway.run_inbound._handle_message` | admitted event 之后、HFC/待审批/忙会话/快捷命令路由之前 |
+| `gateway.run_inbound._handle_message` | admitted event 之后、卡片/待审批/忙会话/快捷命令路由之前 |
 | `model_tools.get_tool_definitions` | 未缓存与缓存返回均按当前调用 profile 过滤 |
 | `agent.turn_tool_round.run_tool_round` | 本轮工具结果持久化及 guardrail 检查之后、压缩或下次模型调用之前 |
 | `agent.turn_finalizer.finalize_turn` | 将 `frontdesk_handoff` 作为正常交互结束，不将接单当作后台完成 |
