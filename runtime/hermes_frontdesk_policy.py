@@ -27,6 +27,25 @@ TOOL_DENIED = "frontdesk_tool_denied: use the durable task APIs; do not execute 
 COMMAND_DENIED = "frontdesk_command_denied: this profile only supports chat controls and durable task operations."
 _MAX_CONFIG_BYTES = 1024 * 1024
 
+#: Programmatic backend entries (the relay bridge's /v1/runs, API-server clients)
+#: are not a human frontdesk. Restricting them to task APIs would break every
+#: ordinary question that needs a real tool, so they keep their full toolset.
+#: Only messaging surfaces get the thin-frontdesk restriction; an unknown or
+#: unreadable platform stays restricted (fail-closed).
+_BACKEND_PLATFORMS = frozenset({"api_server"})
+
+
+def _backend_session() -> bool:
+    platform = ""
+    try:
+        from gateway.session_context import get_session_env
+        platform = (get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip()
+    except Exception:
+        # Host session context is unavailable (isolated runner, test harness):
+        # fall back to the raw env var the host binds. Unset stays restricted.
+        platform = (os.environ.get("HERMES_SESSION_PLATFORM", "") or "").strip()
+    return platform in _BACKEND_PLATFORMS
+
 
 def _settings(home: Path | str | None = None) -> dict[str, bool]:
     if home is None:
@@ -92,7 +111,7 @@ def _settings(home: Path | str | None = None) -> dict[str, bool]:
 def tool_block_message(tool_name: str, *, home: Path | str | None = None) -> str | None:
     try:
         policy = _settings(home)
-        if not policy["enabled"]:
+        if not policy["enabled"] or _backend_session():
             return None
         allowed = TASK_TOOLS | (MEMORY_READ_TOOLS if policy["memory_read_enabled"] else frozenset())
         return None if isinstance(tool_name, str) and tool_name in allowed else TOOL_DENIED
@@ -111,7 +130,7 @@ def filter_tool_definitions(
 ) -> list[dict[str, Any]]:
     try:
         policy = _settings(home)
-        if not policy["enabled"]:
+        if not policy["enabled"] or _backend_session():
             return definitions
         allowed = TASK_TOOLS | (MEMORY_READ_TOOLS if policy["memory_read_enabled"] else frozenset())
         return [item for item in definitions if item.get("function", {}).get("name") in allowed]

@@ -344,3 +344,29 @@ def test_durable_roster_reports_active_members_when_registry_configured(tmp_path
     assert result['members']['active'] == 2
     assert {'role': 'reviewer', 'count': 1} in result['members']['by_role']
 
+
+
+
+def test_backend_api_server_sessions_keep_their_full_toolset(tmp_path, monkeypatch):
+    home = tmp_path / 'profile'
+    home.mkdir()
+    (home / 'config.yaml').write_text(json.dumps({
+        'superagent': {'frontdesk': {'enabled': True, 'memory_read_enabled': False}}}))
+    defs = [{'function': {'name': n}} for n in ('terminal', 'read_file', 'durable_submit')]
+    monkeypatch.setenv('HERMES_SESSION_PLATFORM', 'api_server')
+    assert policy.filter_tool_definitions(defs, home=home) == defs
+    assert policy.tool_block_message('terminal', home=home) is None
+
+
+def test_messaging_sessions_stay_restricted(tmp_path, monkeypatch):
+    home = tmp_path / 'profile'
+    home.mkdir()
+    (home / 'config.yaml').write_text(json.dumps({
+        'superagent': {'frontdesk': {'enabled': True, 'memory_read_enabled': False}}}))
+    defs = [{'function': {'name': n}} for n in ('terminal', 'read_file', 'durable_roster')]
+    for surface in ('feishu', 'telegram', '', 'unknown-surface'):
+        monkeypatch.setenv('HERMES_SESSION_PLATFORM', surface)
+        filtered = policy.filter_tool_definitions(defs, home=home)
+        assert [d['function']['name'] for d in filtered] == ['durable_roster'], surface
+        assert policy.tool_block_message('terminal', home=home) == policy.TOOL_DENIED, surface
+
