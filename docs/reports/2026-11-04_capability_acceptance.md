@@ -368,5 +368,24 @@ session slot 释放均由宿主 turn 结束路径完成；`final-send NOT suppre
 - 相关既有测试 + 新增门禁：**126 passed，退出码 0**；新增门禁 **25 passed**
 - 业务中立门禁 **29 passed**
 - 全量 `verify.sh`：**退出码 0，2757 passed / 44 skipped（655.97s）**；静态 15 项、防退化靶场 5 passed、安装 dry-run、真实通道 5 passed（19.55s）、平台 OpenAPI 往返 113.5ms（预算 800ms）、模型端点全过
+- 部署：caixuf 本机两棵宿主树 helper 已同步、`f4b3520` release 已激活、gateway 重启、doctor `ready`。
 
-**未做**：灌灌侧 relay 的僵尸 journal TTL/归档（属另一台机器的生产桥，见 §13）。
+### ⚠ 真实两步实测复验：未通过，不得宣称生产级
+
+部署后重跑用户那两步（「你有几个同事」→ 数学题），结果：
+
+- **失败终态修好了**：回执变为「**后台任务未受理**：提交被拒、任务没有创建、不会有结果返回」，
+  不再显示「处理完成」卡片骗用户；数学题仍 4 秒正常返回。
+- **能力路由没修好**：模型日志明说 `colleague_list` 不在它的函数列表里，仍把查名册塞进
+  `durable_submit` → `source outside administrator roots` → 未受理。
+- **根因（权威）**：白名单 `filter_tool_definitions` 是「从已有 definitions 里挑」，不补工具。
+  实测 `_compute_tool_definitions` 在该 profile 只装配 34 个工具，**不含 `colleague_list` / `task_status`**；
+  而 `colleague_team` 插件单独调用 `register()` 能注册 7 个工具（含 `colleague_list`），
+  默认 `hermes-feishu` toolset 解析也包含 `colleague_team`。差异落在**宿主 gateway 进程的插件/工具集
+  装配层**（`tool_search` 延迟桥接 / 插件发现），不是仓内白名单代码。
+- 结论：**仓内三处修复 + 25 例压力/边界门禁 + 全量 verify 全绿，但用户实测的那条路径仍未通**。
+  生产级验收不能靠源码单测替代，此项保持「未通过」。
+
+**未做**：把 `colleague_list` 可靠送进前台工具面（需在 `durable_dispatch` 的 toolset 内新增只读
+名册工具，或修宿主插件装配/加 `_DIRECT_SURFACE_TOOLSETS`，二者都需重新全量验证）；
+灌灌侧 relay 的僵尸 journal TTL/归档（属另一台机器的生产桥）。
