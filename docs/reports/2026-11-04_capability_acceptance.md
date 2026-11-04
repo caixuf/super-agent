@@ -167,3 +167,30 @@
 **边界**：远端跑测机上的 super agent 实体与前置机上的中继脚本是另外两台机器；
 本机的门禁、派单、卡片与投递修复不能自动外推。远端另有 `deliver_completions: false`、
 runner 指向野生工作区、硬门禁未启用等具体缺口，需单独部署。
+
+## 8. 远端跑测机（imfl 高手）部署结果
+
+本机全量 `verify.sh` 通过：**2720 passed / 44 skipped，退出码 0**；真实通道 5 passed、
+防退化靶场 5 passed、安装 dry-run、延迟门禁（186ms）与模型端点全过。
+
+**代码**：干净源码 `b9be163` 已从内网仓库 clone 到远端，含全部接线（卡片分支、参数契约）。
+
+**配置**：迁移成功并重启服务 ——
+
+- 前台硬门禁启用，实时判定 `terminal` 拒绝、`durable_submit` 放行；
+- `deliver_completions` 两处 true、`completion_card_enabled: true`；
+- doctor `ready`、三项卡片检查 true、`blockers: []`；
+- 新的 delivery parked 基本停止（历史 5314 条，最近 200 行仅 10 条）。
+
+**代码 release 激活被安装器安全门禁阻断**：
+`legacy_card_patches_require_clean_candidate` / `feishu_card_implementation_unverified`。
+根因是远端宿主的过时 `card-native-markdown` 补丁仍在位、`card-replies` 不在位，
+plan 判定 `card_impl=unverified`；两个补丁脚本的 `--preflight` 均报「版本不匹配，
+无法干净应用，未修改宿主」。远端 hermes_root 是共享 git 树且带大量未提交改动，未擅自卸载。
+
+**未绕过门禁**——这道拦截本身就是部署质量保证。下一步需授权：
+A 维护窗口内收敛宿主遗留补丁后重跑 `update`；B 用 `candidate-hermes` 构建全新干净宿主。
+历史 outbox 21 条未 ACK 因 origin 不可寻址保持 parked，属设计行为（不猜会话），需单独归档。
+
+回退点：远端配置/runner 备份 `backups/pre-deploy-20261104173901`；
+本机可用 `tools/superagent.py rollback` 回退受管 release。
