@@ -742,8 +742,11 @@ def register(ctx):
         return
     ctx.register_system_prompt_section(
         'durable-dispatch-routing',
-        """Capability routing for bounded read-only evidence analysis:
-Use durable_submit for bounded read-only analysis of approved files, including named colleague roles. Choose by the work and source bounds, not by keywords. When the user names a colleague or says to continue with one, select its allowed role; if ambiguous or unsettled, ask. Submit one task, return its ID and role, then finish the turn without waiting or polling. NEVER submit interactive colleague work through terminal/execute_code or raw pool CLI: that loses the submitting conversation and cannot promise automatic delivery. Use durable_status/cancel with the returned role and task ID. An IM frontdesk only interacts, dispatches and reports; it must not execute or delegate work itself. Unsupported work must be reported as unavailable, never silently rerouted. Never provide an owner, queue path, shell command, runner, or model adapter.""",
+        """Capability routing for durable dispatch:
+Pick the role by what the work needs, not by keywords.
+- role=dev executes work: inspecting a repository, running git/read commands, checking versions or configuration, running a test. It needs only goal; omit sources entirely. Never attach sources to a dev task.
+- role=analysis performs read-only evidence analysis of files inside the administrator roots. It requires sources with absolute paths inside those roots. If a task is about inspecting or running something rather than analysing a supplied file, it is a dev task.
+If the user asks to look at changes, check logs, run a command or inspect the repo, submit role=dev with no sources. Do not claim you cannot see the repository: dev exists for exactly that. Submit one task, return its ID and role, then finish the turn without waiting or polling. NEVER submit work through terminal/execute_code or a raw pool CLI. Use durable_status/cancel with the returned role and task ID. An IM frontdesk only interacts, dispatches and reports. Unsupported work must be reported as unavailable, never silently rerouted. Never provide an owner, queue path, shell command, runner, or model adapter.""",
         position='after_memory', max_chars=1000,
     )
     pool_type, delivery = _engine(ctx.get_config('engine_root'))
