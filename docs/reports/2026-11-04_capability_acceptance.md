@@ -421,3 +421,57 @@ session slot 释放均由宿主 turn 结束路径完成；`final-send NOT suppre
 安装 dry-run、真实通道 5 passed（7.32s）、平台 OpenAPI 129.5ms（预算 800ms）、模型端点全过。
 
 **未做**：灌灌侧 relay 的僵尸 journal TTL/归档（另一台机器的生产桥，见后续章节）。
+
+## 13. 中继侧适配：api_server 豁免与僵尸 journal TTL
+
+### 发现的真实冲突
+
+前置中继机通过 `ssh → 远端 hermes_api_call.py → /v1/runs` 调用远端高手，会话平台为
+`HERMES_SESSION_PLATFORM=api_server`。但 frontdesk 过滤函数**不区分平台**（`_superagent_frontdesk_filter`
+无 platform 参数），把这条**后台程序化入口**也压成了「只能派单」：
+
+- 中继的普通问题（如「讲解框架」）拿不到 `terminal`/`read_file`，模型被迫改调 `durable_submit`；
+- 中继任务没有合法 `sources`，必然 `source outside administrator roots`；
+- 于是一次任务既干不了活、也派不出去。
+
+这与「薄前台」的语义不符：**`api_server` 是后台入口，不是人面前台**。
+
+### 修复
+
+`runtime/hermes_frontdesk_policy.py` 增加 `_BACKEND_PLATFORMS = {"api_server"}`：
+
+- `tool_block_message` / `filter_tool_definitions` 对该平台直接放行完整工具面；
+- 聊天类平台（feishu / telegram / 空 / 未知）**保持受限**（fail-closed）；
+- 平台标识优先读宿主 `gateway.session_context.get_session_env`，宿主不可用时回退到
+  `os.environ`，未设置仍受限。
+
+两机实测（`09400a4`）：`api_server → terminal 放行`；`feishu / 空 → 仍拒绝`。
+
+### 中继侧 TTL 止血
+
+中继 `relay_jobs.py` 对 journal **没有 TTL/归档**，两条 37h / 53h 前创建的记录一直每 4 秒轮询、
+永远 `request_not_found`，`updated_at` 一直刷新造成「还在跑」的假象。
+
+- 增加 `_MAX_JOURNAL_AGE_SECONDS = 6h`，仅对 `pending` / `running` 生效；
+  `unknown` / `delivery_unknown` 仍留人工核对。
+- 超期时标记 `failed` 并把 journal 移入 `relay-jobs/expired/`（保留证据，不删除）。
+- 重启后两条立即归档（37h / 53h），`running` 计数归零，日志有 `journal expired` 记录。
+- 备份：`relay_jobs.py.bak-ttl-<时间戳>`。
+
+### 端到端证据（决定性）
+
+通过 `api_server` 提交一个**必须用 `terminal`** 的任务：
+
+- 提交即受理：`run_c9154158…`，`state=running`；
+- 轮询终态：`state=completed`、`terminal=true`、`last_action=完成工具执行: terminal`；
+- 结果正文包含 `PROBE_TOOL_OK` —— 证明工具真的执行了，而不是被门禁挡住。
+
+对照修复前的同一路径：21:04 的会话只出现 `durable_status → task unavailable`、
+`durable_submit → source outside administrator roots`，从未执行任何工具。
+
+### 验证与提交
+
+- 相关测试：**130 passed**（边界、回合释放、派单、生产门禁）；中立门禁 29 passed。
+- 两机 release 均为干净 `09400a4`，doctor ready、三项校验 true。
+- 未做：真实聊天群端到端（需授权向测试群发一条消息）；中继协议客户端（10-28 版）未升级，
+  本轮只做 TTL 与平台豁免，不改其协议。
