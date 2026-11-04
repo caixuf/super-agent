@@ -17,6 +17,19 @@ from agentcore.preflight import (
 )
 
 
+class FakeResponse:
+    """Minimal urlopen() context-manager stand-in; only .status is read."""
+
+    def __init__(self, status: int):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
 def test_check_dns_latency_success():
     with patch("socket.gethostbyname", return_value="127.0.0.1"):
         res = check_dns_latency(target_host="localhost", max_acceptable_ms=500.0)
@@ -29,6 +42,65 @@ def test_check_dns_latency_timeout():
         res = check_dns_latency(target_host="invalid.local.test")
         assert res.passed is False
         assert "失败" in res.message or "Timeout" in res.message
+
+
+def test_check_feishu_api_retries_transient_connection_refusal():
+    """代理端口瞬断（Connection refused）重试一次后能连上就不该判失败。"""
+    import errno
+    import urllib.error
+
+    refused = urllib.error.URLError(ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"))
+    response = FakeResponse(200)
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(req)
+        if len(calls) == 1:
+            raise refused
+        return response
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        res = check_feishu_api_latency(max_acceptable_ms=800.0)
+    assert res.passed is True
+    assert len(calls) == 2
+    assert "200" in res.message
+
+
+def test_check_feishu_api_does_not_retry_timeout():
+    """超时属于被本门禁捕获的目标，不能靠重试洗成通过。"""
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(req)
+        raise TimeoutError("timed out")
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        res = check_feishu_api_latency(max_acceptable_ms=800.0)
+    assert res.passed is False
+    assert len(calls) == 1
+    assert "连接失败" in res.message
+
+
+def test_check_feishu_api_gives_up_after_all_attempts_refused():
+    """持续拒连仍然判失败，重试不是豁免。"""
+    import errno
+    import urllib.error
+
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.URLError(ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"))
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen) as mocked:
+        res = check_feishu_api_latency(max_acceptable_ms=800.0)
+    assert res.passed is False
+    assert mocked.call_count == 2
+
+
+def test_check_feishu_api_still_enforces_latency_budget_on_success():
+    """重试只修瞬断，不放松延迟预算：慢但连上的请求仍判失败。"""
+    with patch("urllib.request.urlopen", return_value=FakeResponse(200)):
+        res = check_feishu_api_latency(max_acceptable_ms=0.000001)
+    assert res.passed is False
+    assert "严重超时" in res.message
 
 
 def test_check_disk_space():

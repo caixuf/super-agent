@@ -31,7 +31,8 @@ def _alive(pid):
     try:
         state = Path('/proc/{}/stat'.format(pid)).read_text().rsplit(')', 1)[1].split()[0]
         return state != 'Z'
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+        # The process may exit between open() and read(); that is the "dead" case too.
         return False
 
 

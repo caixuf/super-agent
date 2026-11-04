@@ -69,8 +69,9 @@
 | 插件 | 状态 | 说明 |
 | :--- | :--- | :--- |
 | `colleague-catalog` | **可生产启用** | 只读名册：把管理员配置的岗位（`display_name`/`duty`/`can_do`/`boundaries`）暴露成 `colleague_catalog` 工具。**不授权、不派工、不落队列**；角色 id 必须与派工插件里的角色对得上，否则派工仍然会拒。 |
-| `colleague-team` | **未接驱动，勿在现有系统启用** | 登记库（`agentcore/colleague_registry.py`）与 `colleague_list/define_role/hire/grant/retire` 工具都已实现，但**实例创建、岗位派工、最终消息发送、生产停用四条驱动尚未接上**（见 `plugins/colleague_team/README.md` 的「当前边界」）。启用只能记账，**不要对外宣称"招聘完成/成员在岗"**。 |
+| `colleague-team` | **派工已接，仍不可生产启用** | 登记库与 `colleague_list/define_role/hire/grant/retire` 照旧；**岗位派工一路已接上**（`plugins/colleague_team/__init__.py` 的 `gateway_dispatch` 分支，eaa466e），完成回执可经宿主投递链回到原会话（`agentcore/pool.py` 的 `record_colleague_completion`，d2e7233）。**但门禁明确**：开关默认关闭，无可信 dispatcher 时返回 `gateway_dispatch_host_unavailable`，需宿主显式注册或注入 backend；`tool_backend` 停止证明固定返回 `attempt_bound_containment_unavailable`（`host_runtime.py` 的 `make_quiescence_verifier`），即**答复可回、后台工作仍保持未结算**；`safe_backend` 的 `idle()` 恒 False、`park()` 直接拒绝，退役排空走不到停放；成员只绑定宿主预配置的 profile，**插件不创建实例**。**不要对外宣称"招聘完成/成员在岗/生产可启用"**，细节见插件 README 的「Gateway 派工（额外关闭）」。 |
 
 要真的让同事干活，当前可用的两条链是：**durable-dispatch 名册**（只读分析岗，按 `queue_root` +
 worker 单元跑）与 **`delegate_task` 子 agent**（一次性叶子工人，深度 1）。
+`colleague-team` 的 Gateway 派工虽已接线，但按上表仍默认关闭、缺权威停止证明，暂不列为可用的第三条链。
 回执能不能回到会话见 `docs/COMPLETION_DELIVERY.md`。

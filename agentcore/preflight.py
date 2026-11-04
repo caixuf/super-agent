@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import socket
@@ -175,32 +176,72 @@ def check_config_baseline(config_path: Path | str | None = None) -> CheckItemRes
         )
 
 
+def _is_transient_connect_error(exc: BaseException) -> bool:
+    """Whether *exc* is a momentary connect failure worth one retry.
+
+    Only refusal/unreachable/reset qualify. A timeout is deliberately excluded:
+    the gate exists to catch a slow link, so waiting longer must not be laundered
+    into a pass by retrying it.
+    """
+    if isinstance(exc, urllib.error.URLError) and not isinstance(exc, urllib.error.HTTPError):
+        exc = exc.reason if isinstance(exc.reason, BaseException) else exc
+    transient = {errno.ECONNREFUSED, errno.ECONNRESET, errno.ENETUNREACH, errno.EHOSTUNREACH,
+                 errno.ECONNABORTED}
+    if isinstance(exc, OSError) and exc.errno in transient:
+        return True
+    return False
+
+
 def check_feishu_api_latency(
     target_url: str = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal",
     max_acceptable_ms: float = 800.0,
     timeout_s: float = 2.0,
+    connection_attempts: int = 2,
 ) -> CheckItemResult:
-    """探测平台 OpenAPI 基础网络链路与往返延迟 (Round-Trip Time)。"""
-    t0 = time.monotonic()
+    """探测平台 OpenAPI 基础网络链路与往返延迟 (Round-Trip Time).
+
+    ``connection_attempts`` 只覆盖「连接被拒/不可达」这类瞬断：本机代理端口短暂抖动会让
+    单次探测报 Connection refused，但并不代表链路长期不可用。重试**不放松延迟预算**：
+    连上之后测得的往返时间仍按 ``max_acceptable_ms`` 原样判定；超时也不重试，照旧判失败。
+    """
     req = urllib.request.Request(
         target_url,
         data=b"{}",
         headers={"Content-Type": "application/json; charset=utf-8"},
         method="POST",
     )
-    try:
-        # 即使无凭据返回 400/99991663，也证明 TCP 握手 + TLS + HTTP 往返闭环成功
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            status_code = resp.status
-    except urllib.error.HTTPError as err:
-        status_code = err.code
-    except Exception as exc:
+    attempts = max(1, int(connection_attempts))
+    status_code = None
+    last_exc = None
+    for attempt in range(attempts):
+        t0 = time.monotonic()
+        try:
+            # 即使无凭据返回 400/99991663，也证明 TCP 握手 + TLS + HTTP 往返闭环成功
+            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                status_code = resp.status
+            break
+        except urllib.error.HTTPError as err:
+            status_code = err.code
+            break
+        except Exception as exc:
+            last_exc = exc
+            # 只对「连接被拒/不可达」重试；超时照旧立即判失败，不靠重试洗白慢链路。
+            if attempt == attempts - 1 or not _is_transient_connect_error(exc):
+                dur_ms = (time.monotonic() - t0) * 1000.0
+                return CheckItemResult(
+                    name="平台 OpenAPI 往返延迟",
+                    passed=False,
+                    latency_ms=dur_ms,
+                    message=f"连接失败: {exc}",
+                    detail="平台 OpenAPI 网关无法连接，请检查外网出口、HTTPS 代理或防火墙配置",
+                )
+    if status_code is None:
         dur_ms = (time.monotonic() - t0) * 1000.0
         return CheckItemResult(
             name="平台 OpenAPI 往返延迟",
             passed=False,
             latency_ms=dur_ms,
-            message=f"连接失败: {exc}",
+            message=f"连接失败: {last_exc}",
             detail="平台 OpenAPI 网关无法连接，请检查外网出口、HTTPS 代理或防火墙配置",
         )
 
