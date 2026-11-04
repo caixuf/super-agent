@@ -10,9 +10,12 @@ set -euo pipefail
 
 BACKUP_DIR="${HOME}/superagent_backups/backup_$(date +%Y%m%d_%H%M%S)"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
-IMFL_PROFILE="${HOME}/.hermes/profiles/imfl"
-NVME_PROFILE="/mnt/nvme_ntfs/agents/hermes/profiles/imfl"
-BUSINESS_SKILLS_DIR="${HOME}/code/imfl_skills"
+# 现场身份由实例部署清单注入；通用仓只保留中性默认值，避免把业务/环境指纹写进版本库
+PROFILE_NAME="${AGENTCORE_PROFILE_NAME:-default}"
+PROFILE_DIR="${HOME}/.hermes/profiles/${PROFILE_NAME}"
+NVME_PROFILE="/mnt/nvme_ntfs/agents/hermes/profiles/${PROFILE_NAME}"
+SKILLS_DIR_NAME="${AGENTCORE_SKILLS_DIR_NAME:-business-skills}"
+BUSINESS_SKILLS_DIR="${HOME}/code/${SKILLS_DIR_NAME}"
 
 echo "======================================================================"
 echo " [Step 1/4] 备份核心业务资产与火种 (记忆库 / 业务Skills / 关键配置)"
@@ -20,9 +23,9 @@ echo "======================================================================"
 mkdir -p "${BACKUP_DIR}"
 
 # 1. 备份记忆库
-if [[ -d "${IMFL_PROFILE}/memories" ]]; then
-    echo "-> 备份用户主目录记忆库: ${IMFL_PROFILE}/memories"
-    cp -r "${IMFL_PROFILE}/memories" "${BACKUP_DIR}/memories_home"
+if [[ -d "${PROFILE_DIR}/memories" ]]; then
+    echo "-> 备份用户主目录记忆库: ${PROFILE_DIR}/memories"
+    cp -r "${PROFILE_DIR}/memories" "${BACKUP_DIR}/memories_home"
 elif [[ -d "${NVME_PROFILE}/memories" ]]; then
     echo "-> 备份NVME记忆库: ${NVME_PROFILE}/memories"
     cp -r "${NVME_PROFILE}/memories" "${BACKUP_DIR}/memories_nvme"
@@ -31,11 +34,11 @@ fi
 # 2. 备份业务技能库
 if [[ -d "${BUSINESS_SKILLS_DIR}" ]]; then
     echo "-> 备份业务专属技能: ${BUSINESS_SKILLS_DIR}"
-    cp -r "${BUSINESS_SKILLS_DIR}" "${BACKUP_DIR}/imfl_skills"
+    cp -r "${BUSINESS_SKILLS_DIR}" "${BACKUP_DIR}/${SKILLS_DIR_NAME}"
 fi
 
 # 3. 备份核心密钥与配置文件
-for cfg in "${IMFL_PROFILE}/config.yaml" "${NVME_PROFILE}/config.yaml" "${HOME}/.claude/settings.json"; do
+for cfg in "${PROFILE_DIR}/config.yaml" "${NVME_PROFILE}/config.yaml" "${HOME}/.claude/settings.json"; do
     if [[ -f "${cfg}" ]]; then
         echo "-> 备份关键配置: ${cfg}"
         cp "${cfg}" "${BACKUP_DIR}/"
@@ -50,8 +53,8 @@ echo "======================================================================"
 # 匹配所有历史涉案服务模式
 SERVICES_TO_STOP=(
     "analysis-colleague*"
-    "imfl-colleague@*"
-    "hermes-gateway-imfl*"
+    "${PROFILE_NAME}-colleague@*"
+    "hermes-gateway-${PROFILE_NAME}*"
     "superagent-*"
     "agentcore-*"
 )
@@ -77,7 +80,7 @@ echo " [Step 3/4] 抹除原机历史散落配置与野生运行时代码目录"
 echo "======================================================================"
 # 清理可能引起版本打架与配置漂移的野生残留目录
 DIRTY_TARGETS=(
-    "${HOME}/.hermes/profiles/imfl/proxy.env"
+    "${PROFILE_DIR}/proxy.env"
     "${HOME}/code/agentcore/agentcore/proxy.env"
     "${HOME}/.local/state/agentcore/analysis-queue"
     "${HOME}/.local/state/agentcore/liveness.db"
@@ -94,9 +97,9 @@ echo "======================================================================"
 echo " [Step 4/4] 恢复业务火种并核验系统纯净度"
 echo "======================================================================"
 # 校验当前工作区是否对齐
-CURRENT_ENGINE="${HOME}/super_agent/imfl/current"
-if [[ ! -d "${CURRENT_ENGINE}" && -d "/mnt/nvme_ntfs/agents/hermes/superagent/imfl/current" ]]; then
-    CURRENT_ENGINE="/mnt/nvme_ntfs/agents/hermes/superagent/imfl/current"
+CURRENT_ENGINE="${HOME}/super_agent/${PROFILE_NAME}/current"
+if [[ ! -d "${CURRENT_ENGINE}" && -d "/mnt/nvme_ntfs/agents/hermes/superagent/${PROFILE_NAME}/current" ]]; then
+    CURRENT_ENGINE="/mnt/nvme_ntfs/agents/hermes/superagent/${PROFILE_NAME}/current"
 fi
 if [[ -e "${CURRENT_ENGINE}" ]]; then
     echo "-> 当前受控引擎路径正常: $(readlink -f "${CURRENT_ENGINE}")"

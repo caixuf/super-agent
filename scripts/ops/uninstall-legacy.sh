@@ -2,7 +2,7 @@
 # ==============================================================================
 # uninstall-legacy.sh
 # 彻底清理历史单体服务、野路径软链和孤立配置的幂等对账清理脚本
-# 适用范围: Emily (白泽节点) 与 本机 WSL2
+# 适用范围: <remote-host> 与本机 WSL2
 # ==============================================================================
 set -euo pipefail
 
@@ -13,13 +13,19 @@ if [[ "${1:-}" == "--dry-run" ]]; then
 fi
 
 SYSTEMD_DIR="${HOME}/.config/systemd/user"
+# 现场身份与路径由实例部署清单注入；通用仓只保留中性默认值
+PROFILE_NAME="${AGENTCORE_PROFILE_NAME:-default}"
+PROFILE_DIR="${HOME}/.hermes/profiles/${PROFILE_NAME}"
+HOST_SOURCE_PATH="${AGENTCORE_HOST_SOURCE:-${HOME}/code/agentcore}"
+ENGINE_ROOT="${AGENTCORE_ENGINE_ROOT:-/mnt/nvme_ntfs/agents/hermes/superagent/${PROFILE_NAME}/current}"
+PROFILE_PLUGINS_DIR="/mnt/nvme_ntfs/agents/hermes/profiles/${PROFILE_NAME}/plugins"
 
-# 1. 废弃的单体服务黑名单（已统一收敛至 release 引擎模板 imfl-colleague@ 或 superagent 矩阵）
+# 1. 废弃的单体服务黑名单（已统一收敛至 release 引擎模板或 superagent 矩阵）
 LEGACY_SERVICES=(
     "analysis-colleague.service"
     "hermes-gw-reload-once.service"
     "agentcore-colleague.service"
-    "hermes-gateway-imfl.service.superagent-before"
+    "hermes-gateway-${PROFILE_NAME}.service.superagent-before"
 )
 
 echo "=== [Step 1/4] 清理历史僵尸 / 废弃单体 systemd 服务 ==="
@@ -52,11 +58,11 @@ if [[ -d "${SYSTEMD_DIR}" ]]; then
         if [[ "${DRY_RUN}" -eq 0 ]]; then
             for unit in ${DIRTY_UNITS}; do
                 echo "  正在将 ${unit} 中的 code/agentcore 纠偏为 current 规范路径..."
-                sed -i 's|/home/emily/code/agentcore|/mnt/nvme_ntfs/agents/hermes/superagent/imfl/current|g' "${unit}"
+                sed -i "s|${HOST_SOURCE_PATH}|${ENGINE_ROOT}|g" "${unit}"
                 RELOAD_NEEDED=1
             done
         else
-            echo "  [DRY-RUN] 将自动替换为 /mnt/nvme_ntfs/agents/hermes/superagent/imfl/current"
+            echo "  [DRY-RUN] 将自动替换为 ${ENGINE_ROOT}"
         fi
     else
         echo "现存所有 systemd 服务路径规范，无野生 code/agentcore 引用。"
@@ -70,7 +76,7 @@ fi
 
 # 3. 检查并清理损坏/孤立的插件死符号链接
 echo "=== [Step 3/4] 校验 profile 插件与运行时软链健康度 ==="
-PROFILE_PLUGINS_DIR="/mnt/nvme_ntfs/agents/hermes/profiles/imfl/plugins"
+PROFILE_PLUGINS_DIR="/mnt/nvme_ntfs/agents/hermes/profiles/${PROFILE_NAME}/plugins"
 if [[ -d "${PROFILE_PLUGINS_DIR}" ]]; then
     find "${PROFILE_PLUGINS_DIR}" -xtype l | while read -r deadlink; do
         echo "发现断裂软链: ${deadlink}"
@@ -86,8 +92,8 @@ fi
 # 4. 检查全局配置与 Key 隔离（防止多重 .env 互相覆盖）
 echo "=== [Step 4/4] 检查散落的环境变量与代理配置 ==="
 SCATTERED_ENVS=(
-    "${HOME}/.hermes/profiles/imfl/proxy.env"
-    "${HOME}/code/agentcore/agentcore/proxy.env"
+    "${PROFILE_DIR}/proxy.env"
+    "${HOST_SOURCE_PATH}/agentcore/proxy.env"
 )
 
 for envfile in "${SCATTERED_ENVS[@]}"; do
@@ -105,3 +111,4 @@ done
 echo "======================================================================"
 echo "清理与对账完成！系统运行时已全部锁定为 Single Source of Truth。"
 echo "======================================================================"
+
