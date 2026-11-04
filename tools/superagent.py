@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agentcore.profile_overlay import apply_profile_overlay
 
 REPO = Path(__file__).resolve().parents[1]
-DEFAULT_ROOT = Path.home() / ".hermes" / "superagent"
+DEFAULT_ROOT = Path.home() / "super_agent"
 DEFAULT_HERMES = Path.home() / ".hermes" / "hermes-agent"
 PLUGIN_SOURCES = tuple(sorted(p for p in (REPO / "plugins").glob("*/")))
 # Installed upstream plugins are pinned dependencies, not vendored source. They

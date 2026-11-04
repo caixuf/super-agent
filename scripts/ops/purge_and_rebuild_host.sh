@@ -94,8 +94,11 @@ echo "======================================================================"
 echo " [Step 4/4] 恢复业务火种并核验系统纯净度"
 echo "======================================================================"
 # 校验当前工作区是否对齐
-CURRENT_ENGINE="/mnt/nvme_ntfs/agents/hermes/superagent/imfl/current"
-if [[ -L "${CURRENT_ENGINE}" ]]; then
+CURRENT_ENGINE="${HOME}/super_agent/imfl/current"
+if [[ ! -d "${CURRENT_ENGINE}" && -d "/mnt/nvme_ntfs/agents/hermes/superagent/imfl/current" ]]; then
+    CURRENT_ENGINE="/mnt/nvme_ntfs/agents/hermes/superagent/imfl/current"
+fi
+if [[ -e "${CURRENT_ENGINE}" ]]; then
     echo "-> 当前受控引擎路径正常: $(readlink -f "${CURRENT_ENGINE}")"
 fi
 
@@ -104,3 +107,4 @@ echo " 原机历史环境推平与纯净重构完成！"
 echo " 业务资产备份位置: ${BACKUP_DIR}"
 echo " 系统已彻底摆脱原机旧配置与历史僵尸服务干扰。"
 echo "======================================================================"
+
