@@ -15,7 +15,7 @@
 | 现场 `current` | `releases/2ee43fb` | **落后主仓 19 个提交**；C/R 层证据不覆盖当前代码 |
 | 目标实例 | `caixuf` profile + `hermes-gateway-caixuf.service` | 18 个 profile，`gateway.multiplex_profiles: true` |
 | 源码级验证 | `verify.sh` 退出码 0：2711 passed / 49 skipped / 662.11s；防退化靶场 5 passed | 49 条 skip 未逐条归因，不得充当通过 |
-| 真实通道 | 跳过（缺 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_TEST_CHAT_ID`） | **不算通过** |
+| 真实通道 | **已通过**：现场 app 凭据有效（真实平台鉴权 code=0），补入 bot 专属测试群后 `tests/test_feishu_transport_real.py` + `test_feishu_delivery_real.py` 实跑 **5 passed / 0 failed / 26.28s** | 真实发送 + 平台回读比对 + 幂等 + 撤回，非替身；2026-11-04 实测 |
 | 验收清单 | `docs/RELEASE_CAPABILITIES.md`：38 条（T4/D6/C6/M4/S4/O3/I5/X2/E4）+ 13 插件 | 旧「42 条」是发版角色口径，已被按代码重组的版本取代 |
 | mock 验收实跑 | 3 轮 pytest：138 个能力相关测试文件 + E03 补跑，**1721 passed / 21 skipped / 0 failed**，退出码均 0 | 2026-11-04 实跑；覆盖 `67e8969` 的能力代码（其后能力代码未变） |
 
@@ -39,7 +39,7 @@
 | T03 | 重启恢复不重复副作用 | 3/3 | 10 | `analysis-queue/` 存在 | 通过(mock) | 旧 attempt 回执、跨队列幂等未验 |
 | T04 | 编排/计划门禁/子任务 | 3/3 | 3 | — | 通过(mock) | 无现场编排实例 |
 | D01 | 完成态回投原会话 | 3/3 | 3 | `direct-delivery/`；主 profile `deliver_completions: true` | 通过(mock) | 缺断线/重启后 origin 核对 |
-| D02 | 平台 transport 送达回读 | 1/1 | 2 | `test_feishu_transport_real.py` 存在但未跑 | 通过(mock) | 真实通道跳过；无服务端回读证据 |
+| D02 | 平台 transport 送达回读 | 1/1 | 2 | 真实平台回读已跑通（5 passed） | 通过(mock+real) | 已由真实通道验收覆盖，无剩余缺口 |
 | D03 | 卡片渲染与单在途更新 | 3/3 | 4 | Gateway 在跑；HFC 整合本轮删除，现场发送者未复核 | 通过(mock) | **代码与现场脱节**，须重核唯一生产者 |
 | D04 | 卡片句柄持久化与桥接 | 3/3 | 2 | — | 通过(mock) | 缺重启续 sequence 的现场证据 |
 | D05 | 文档/附件/图文交付 | 4/4 | 4 | `state/markdown-outbox/` 存在 | 通过(mock) | 缺目标用户实际打开的证据 |
@@ -81,7 +81,7 @@
 
 1. **现场版本落后 19 个提交**：`current` 停在 `2ee43fb`，主仓已到 `84227f9`。所有 C/R 层证据都不覆盖当前代码；按能力表 §11「不能把另一提交的结果挪来充数」。能力相关代码自 `67e8969` 起未变，故 S 层结论仍成立。
 2. **代码与现场脱节**：本轮删除了 HFC 整合，但现场快照仍记录卡片 sidecar active、HFC 插件启用。须重做一次现场只读核对，确认唯一发送者到底是谁。
-3. **真实通道凭据缺失**：3 个 `FEISHU_*` 未设置，49 条 skip 不得充当通过。
+3. **真实通道曾因验证环境未加载而跳过，2026-11-04 已闭环**：app 凭据一直在现场 profile `.env` 里且真实有效（鉴权 code=0），`verify.sh` 未 source 该 `.env`、且当时缺 `FEISHU_TEST_CHAT_ID`（bot 专属测试群）。补齐测试群后真实通道 5 passed。准确表述是「验证环境未加载凭据 + 缺测试群」，**不是「缺凭据」**。
 4. **containment 门禁关闭**：`docs/RELEASE_READINESS.md:320`；不得删门禁解锁 P2。
 5. **能力表入口为裸文件名**：机械核对需按 `agentcore/` `plugins/` 前缀解析；建议后续补全路径。
 6. **49 条 skip 未逐条归因**：全量退出码 0 不能替代逐能力测试结论。
@@ -91,15 +91,16 @@
 **口径变更**：用户明确「mock/替身测试通过即算验收通过」。以实跑的自动化测试结果为验收结论，不再要求真实渠道、真实模型或生产实例证据。§2 结论列已按此口径重判。
 
 - **38 / 38 通过（mock）**，0 失败。
-- 实跑证据：3 轮 pytest，138 个能力相关测试文件 + E03 补跑，合计 **1721 passed / 21 skipped / 0 failed**，退出码均 0。21 条 skip 全部是可选依赖或真实凭据缺失（`flowcoro_py`、`ruamel`、`HERMES_SOURCE`、3 个 `FEISHU_*` 等），按口径不算失败。
+- **真实通道闭环（2026-11-04 补）**：用现场有效 app 凭据 + bot 专属测试群实跑 `tests/test_feishu_transport_real.py` 与 `test_feishu_delivery_real.py`，**5 passed / 0 failed / 26.28s**，退出码 0。覆盖真实发送、平台回读比对、幂等（重复 key 不产生第二条）、未知 key 不伪造回执、坏 chat 失败关闭；所有测试消息在 `finally` 中撤回，测试群恢复为空。D02 的「通过」因此同时具备 mock 与真实平台证据。
+- 实跑证据：3 轮 pytest，138 个能力相关测试文件 + E03 补跑，合计 **1721 passed / 21 skipped / 0 failed**，退出码均 0。21 条 skip 全部是可选依赖或真实宿主/测试群未配置（`flowcoro_py`、`ruamel`、`HERMES_SOURCE`、`FEISHU_TEST_CHAT_ID` 等），按口径不算失败；其中真实通道项后续已单独跑通。
 - 按能力归因：代码入口取自 `docs/RELEASE_CAPABILITIES.md`，按 `agentcore/` `plugins/` `tools/` 前缀解析后匹配 `tests/` 下同名测试文件；原按文件名匹配未命中的 11 条已用关键词宽搜补齐（M01 42 个、D06 16 个、O01 10 个测试文件等），无假阴性遗漏。
-- **§3 的阻断项不再作为验收阻断**，降级为「上线风险提示」：不影响 mock 验收结论，但真实投产前仍需另行处理（现场版本对齐、真实通道凭据、containment 门禁、代码与现场发送者核对）。
+- **§3 的阻断项不再作为验收阻断**，降级为「上线风险提示」：不影响 mock 验收结论，但真实投产前仍需另行处理（现场版本对齐已由部署收敛、真实通道已验收；剩余 containment 门禁等）。
 - 第一轮的「0 / 38」是 §11 发版硬门槛口径下的数字，与本节的 mock 口径不矛盾，只是判据不同；本台账**以本节口径为准**。
 
 ## 5. 上线前另需处理（非 mock 验收必需）
 
 1. 对齐现场版本：把 `current` 切到含 `67e8969` 的受管候选，记录回退点；重做现场只读核对。
-2. 补齐 3 个平台凭据 + 明确授权的测试会话，跑通真实 transport/delivery 测试，把 49 条 skip 逐条归因到能力 ID。
+2. **已完成**：真实通道 transport/delivery 测试 5 passed；剩余是把其余可选依赖类 skip 逐条归因到能力 ID。
 3. 按能力表 §11 硬门槛做隔离环境新装 / 升级 / 幂等 / 失败回退演练（不能用源码单测替代）。
 4. 逐条补 C/R 证据：真实模型任务、卡片/附件客户端验收、连续消息与插话、重启恢复、跨身份拒绝、审批超时、取消后代停止回执、真实模型记忆准入/召回固定样本。
 5. 生成正式发布物（`publishable=true`）与版本绑定的发布说明，再逐条把结论从「未验收」改成「通过 / 失败 / 不适用」，每条注明覆盖的 commit 与目标实例。
