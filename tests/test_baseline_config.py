@@ -12,27 +12,6 @@ from agentcore.baseline_config import (
 )
 
 
-def test_baseline_repair_preserves_hfc_as_the_only_producer(tmp_path):
-    config = copy.deepcopy(CORE_RUNTIME_BASELINE)
-    config["plugins"]["enabled"] = ["hermes-feishu-card"]
-    path = tmp_path / "config.yaml"
-    path.write_text(yaml.safe_dump(config))
-    changed, _ = enforce_baseline_config(path)
-    assert changed
-    actual = yaml.safe_load(path.read_text())
-    assert actual["platforms"]["feishu"]["card_replies"] is False
-    assert actual["platforms"]["feishu"]["exec_approval_text"] is False
-    assert not audit_config_dict(actual)
-    assert enforce_baseline_config(path)[0] is False
-
-
-def test_disabled_hfc_does_not_take_native_delivery_ownership():
-    config = copy.deepcopy(CORE_RUNTIME_BASELINE)
-    config["plugins"]["enabled"] = ["hermes-feishu-card"]
-    config["plugins"]["disabled"] = ["hermes-feishu-card"]
-    assert not audit_config_dict(config)
-
-
 def test_audit_config_empty_reports_deviations():
     empty_cfg = {}
     deviations = audit_config_dict(empty_cfg)

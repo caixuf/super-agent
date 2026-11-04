@@ -36,7 +36,7 @@ def package_repo(tmp_path, monkeypatch):
         "install/superagent.sh": "#!/bin/sh\nexit 0\n",
         "identity/SOUL.generic.md": "# synthetic identity\n",
         "patches/demo.py": "# synthetic host patch\n",
-        "integrations/hfc/lock.json": "{}\n",
+        "integrations/example/lock.json": "{}\n",
         "README.md": "# synthetic distribution\n",
         "LICENSE": "synthetic license fixture\n",
         "pyproject.toml": "[project]\nname='synthetic'\nversion='0.1.0'\n",
@@ -72,7 +72,7 @@ def test_package_contains_installer_dependencies_and_license(package_repo, tmp_p
     module, _ = package_repo
     archive = module.build_package(tmp_path / "out")
     files = archive_files(archive)
-    for name in ("patches/demo.py", "integrations/hfc/lock.json", "pyproject.toml",
+    for name in ("patches/demo.py", "integrations/example/lock.json", "pyproject.toml",
                  "README.md", "LICENSE", "verify.sh", "identity/SOUL.generic.md"):
         assert name in files
     manifest = json.loads(files["release.json"])

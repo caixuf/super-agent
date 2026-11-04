@@ -138,15 +138,6 @@ def audit_config_dict(
     """Audit a configuration dictionary against the canonical baseline."""
     if baseline is None:
         baseline = copy.deepcopy(CORE_RUNTIME_BASELINE)
-        plugins = config.get("plugins") or {}
-        if isinstance(plugins, Mapping):
-            enabled = plugins.get("enabled") or []
-            disabled = plugins.get("disabled") or []
-            if "hermes-feishu-card" in enabled and "hermes-feishu-card" not in disabled:
-                # HFC must own final delivery as well as progress. A routine
-                # baseline repair must not re-enable the competing native path.
-                baseline["platforms"]["feishu"]["card_replies"] = False
-                baseline["platforms"]["feishu"]["exec_approval_text"] = False
     deviations: List[ConfigDeviation] = []
     leaves = _traverse_baseline(baseline)
 

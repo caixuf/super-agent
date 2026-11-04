@@ -746,7 +746,7 @@ def dev_cli(tmp_path):
                PYTHONPATH=os.pathsep.join([str(tmp_path), str(repo)]),
                PYTHONDONTWRITEBYTECODE="1")
     for key in tuple(env):
-        if key.startswith(("FEISHU_", "HFC_", "LONGTASK_")):
+        if key.startswith(("FEISHU_", "LONGTASK_")):
             env.pop(key, None)
     command = [
         sys.executable, "-m", "agentcore.dev_runner", "--policy", str(policy),

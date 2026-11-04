@@ -1,6 +1,6 @@
-"""Shared pure reply renderer for legacy cards and HFC final summaries.
+"""Shared pure reply renderer for card replies and final summaries.
 
-This module has no transport, profile, environment mutation or HFC dependency.
+This module has no transport, profile, environment mutation or sidecar dependency.
 Patch builders embed these exact bytes; never fork a second Markdown parser.
 """
 from __future__ import annotations

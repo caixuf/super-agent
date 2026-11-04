@@ -185,7 +185,7 @@ def card_renders_markdown(text: str) -> bool:
     return dividers == len(_card_tables(lines))''')
 
 
-# One source for host injection and the standalone HFC wheel. The host receives
+# One source for host injection and standalone card delivery. The host receives
 # ordinary source, not a runtime import from this checkout.
 _SHARED_RENDERER = Path(__file__).resolve().parents[1] / "agentcore/card_markdown.py"
 HELPERS = _SHARED_RENDERER.read_text(encoding="utf-8")
