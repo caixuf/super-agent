@@ -40,6 +40,10 @@ def plan(home: Path, engine: Path, unit_dir: Path, profile: str, python: Path, *
     root = settings.get("queue_root")
     roots = settings.get("allowed_roots")
     denied = settings.get("denied_globs", [])
+    concurrency = settings.get("worker_concurrency", 1)
+    if (isinstance(concurrency, bool) or not isinstance(concurrency, int)
+            or not 1 <= concurrency <= 16):
+        raise ValueError("worker_concurrency must be an integer between 1 and 16")
     if not isinstance(root, str) or not Path(root).is_absolute():
         raise ValueError("queue_root must be an absolute path")
     if not isinstance(roots, list) or not roots or not all(isinstance(p, str) and Path(p).is_absolute() and Path(p).is_dir() for p in roots):
@@ -92,7 +96,7 @@ def plan(home: Path, engine: Path, unit_dir: Path, profile: str, python: Path, *
     runner_data = [str(python), str(engine / "agentcore" / "analysis_runner.py"),
                    "--policy", str(policy), "--model-adapter", "agentcore.ccp_analysis_model:model"]
     argv = [str(python), "-m", "agentcore.pool", "--root", root, "worker",
-            "--runner-config", str(runner), "--workers", "1", "--backend", backend]
+            "--runner-config", str(runner), "--workers", str(concurrency), "--backend", backend]
     unit = ("[Unit]\nDescription=Super Agent durable worker for " + profile +
             "\nAfter=network-online.target\n\n[Service]\nType=simple\nUMask=0077\n"
             + "Environment=" + quote_systemd("PYTHONPATH=" + python_path) + "\n"

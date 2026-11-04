@@ -736,12 +736,17 @@ Use durable_submit for bounded read-only analysis of approved files, including n
             raise ValueError('colleague queues must be distinct')
         seen_roots.add(candidate.pool.root.resolve()); services[role]=candidate
     router = DispatchRouter(services)
-    names = ', '.join('%s=%s' % (role, service.display_name) for role, service in services.items())
+    max_source_lines = service.max_lines
+    names = ', '.join('%s=%s' % (role, svc.display_name) for role, svc in services.items())
     role_schema = {'type':'string','enum':list(services),
                    'description':'Administrator colleague role; use this to select the named colleague and preserve it for status/cancel. Known roles: ' + names}
     source_schema = {'type': 'object', 'additionalProperties': False, 'properties': {
-        'path': {'type': 'string', 'description': 'Absolute path to a regular file inside the administrator-approved roots; relative paths are rejected.'}, 'start_line': {'type': 'integer', 'minimum': 1},
-        'end_line': {'type': 'integer', 'minimum': 1}}, 'required': ['path']}
+        'path': {'type': 'string', 'description': 'Absolute path to a regular file inside the administrator-approved roots; relative paths are rejected.'},
+        'start_line': {'type': 'integer', 'minimum': 1,
+                       'description': 'Optional 1-based first line. Omit to start at line 1. Must be an integer, not a string.'},
+        'end_line': {'type': 'integer', 'minimum': 1,
+                     'description': 'Optional 1-based last line. Omit to analyze the whole file. When set, end_line >= start_line and the inclusive span (end_line - start_line + 1) must not exceed ' + str(max_source_lines) + ' lines; a larger or reversed range is rejected.'}},
+        'required': ['path']}
     submit_properties = {
         'goal': {'type': 'string', 'minLength': 1, 'maxLength': 4000},
         'request_key': {'type': 'string', 'minLength': 1, 'maxLength': 128,

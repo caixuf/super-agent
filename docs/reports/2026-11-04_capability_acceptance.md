@@ -213,3 +213,36 @@ python3 tools/superagent.py --root <managed-root> --profile <profile> \
 
 回退点：远端配置 / runner 备份 `backups/pre-deploy-20261104173901`；
 受管 release 可用 `tools/superagent.py rollback` 回退。
+
+## 9. 异步调度与并发（2026-11-04 实测）
+
+按「前台后台解耦 / IO 多路复用」方向补齐并发能力。逐项以本机实测为准。
+
+### 根因与已修
+
+| 项 | 修前 | 修后 / 证据 |
+| :--- | :--- | :--- |
+| 后台槽位持久性 | `install/setup_worker.py` 把 `--workers 1` 写死，重装即打回 | 改为读 `worker_concurrency`（默认 1、上限 16、拒绝 bool/越界/非整数）；现场 unit 与两份 config 均为 4；worker active |
+| 后台真并发 | 无实证 | 隔离压测用现场受管引擎代码：8 job / 4 workers，**peak overlap = 4**，总耗时 1.91s vs 串行预期 4.80s |
+| 一回合多任务 | 模型一回合提交 2 个任务全被拒 | `end_line - start_line + 1 > max_lines(400)` 被 fail-closed 拒，根因是 `start_line`/`end_line` 无 schema 说明导致模型瞎填；已补描述（可省略、整数、跨度上限） |
+| 多路闭环 | 无 | 修复后真实前台回合：一回合提交 2 个任务（⚡⚡），9 秒结束回合，队列 6→8，两个 job **同时 running**，随后各自 `completed` 且 result 独立；outbox 6→8，`delivery_obligations` 全 `delivered` |
+| 忙时输入串台 | `busy_input_mode: steer` 把新消息注入未结束回合 | 两份 config 切 `queue` 并重启生效；白名单含 queue，无 env 覆盖 |
+
+### 契约与测试
+
+- `docs/FRONTDESK_DISPATCH_PLAN.md` P1 的「初始一个执行槽位」改为槽位可配置、一个前台回合可提交多个后台任务。
+- `tests/test_worker_setup.py` 新增 8 例：配置生效 / 默认 1 / 6 类非法值拒绝。
+- 门禁与受影响测试：**144 passed，退出码 0**（含中立门禁、派单、回合释放、边界、worker 配置）。
+- 现场部署：受管 release `b8d270e-dirty` 候选包（含未提交改动，非正式发布物），doctor `ready`、三项 release 校验 true。
+
+### 未做（不标通过）
+
+1. **前台回合释放的物理 finalize**：宿主 hook（`agent/turn_tool_round.py` 注入段）拿到 `release_after_submission` 文本后只 `return _verdict("break")`，
+   没有关闭 stream consumer、结单卡片、释放 session slot。证据是全天 77 次 `Normal final-send NOT suppressed despite active stream consumer`。
+   需改宿主树 3 处 helper/补丁并重启正在对话的 bot，属维护窗口动作，未擅自做。
+2. **白名单只读名册查询工具**：`colleague-catalog` 只在 `plugins.enabled` 列表，`plugins.entries` 无对应 `settings.enabled` 与 roles 名册，
+   `register()` 首行即返回；硬加进白名单只会放行一个不存在的工具。需先由部署清单提供管理员名册数据。
+3. crowd 内 `--workers` 上限 16 为安全阀；真实并发收益受模型端点与 runner 只读策略限制，未做固定样本性能评测。
+
+回退点：config / unit 备份 `~/.hermes/superagent/caixuf/state/config-backups/` 下 `backup_20261104195133`（queue）与并发改动当次备份；
+受管 release 可用 `tools/superagent.py rollback`。

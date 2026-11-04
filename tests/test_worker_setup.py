@@ -260,3 +260,48 @@ def test_worker_plan_explicit_flowcoro_binds_exact_interpreter_and_directory(tmp
     with pytest.raises(ValueError, match="binding missing"):
         module.plan(home, REPO, unitdir, "p", Path(sys.executable),
                     backend="flowcoro", flowcoro_dir=native)
+
+
+
+_ABSENT = object()
+
+
+def _concurrency_config(tmp_path, value=_ABSENT):
+    home = tmp_path / "profile"
+    home.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    settings = {"enabled": True, "queue_root": str(tmp_path / "queue"),
+                "allowed_roots": [str(source)]}
+    if value is not _ABSENT:
+        settings["worker_concurrency"] = value
+    config = {"plugins": {"enabled": ["durable-dispatch"], "entries": {
+        "durable-dispatch": {"settings": settings}}}}
+    (home / "config.yaml").write_text(yaml.safe_dump(config))
+    return home
+
+
+def _unit_for(tmp_path, home):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("worker_setup_concurrency", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    files = module.plan(home, REPO, tmp_path / "units", "demo", Path(sys.executable).absolute())
+    return files[tmp_path / "units/superagent-worker-demo.service"]
+
+
+def test_worker_concurrency_follows_profile_setting(tmp_path):
+    unit = _unit_for(tmp_path, _concurrency_config(tmp_path, 4))
+    assert '"--workers" "4"' in unit
+
+
+def test_worker_concurrency_defaults_to_one(tmp_path):
+    unit = _unit_for(tmp_path, _concurrency_config(tmp_path))
+    assert '"--workers" "1"' in unit
+
+
+@pytest.mark.parametrize("bad", [0, -1, 17, True, "4", 1.5])
+def test_worker_concurrency_rejects_out_of_policy(tmp_path, bad):
+    with pytest.raises(ValueError, match="worker_concurrency"):
+        _unit_for(tmp_path, _concurrency_config(tmp_path, bad))
+
