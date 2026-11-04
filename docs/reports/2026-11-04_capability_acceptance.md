@@ -407,4 +407,14 @@ session slot 释放均由宿主 turn 结束路径完成；`final-send NOT suppre
 运行态工具面实测：`['durable_cancel', 'durable_roster', 'durable_status', 'durable_submit']`，
 4 个全在白名单内、无执行类逃逸。此项改为**通过**。
 
+### 两机部署与复验（e400450）
+
+| 机 | release | 两步实测 |
+| :--- | :--- | :--- |
+| caixuf 本机 | `4480101-dirty` → `e400450`（helper 两树同步、gateway 重启、doctor ready） | 名册 9 个 / 7 秒；数学 `-6` / 3 秒 |
+| 远端跑测机 | `e400450`（pinned 树 helper 同步、`roster_registry_path` 指向本地名册库、worker+gateway 重启、doctor ready） | `⚡ Durable_roster 0.1s` → 「15 个岗位 / 9 个在册成员 / 缺口 6 个」/ 21 秒；数学 `-6` 正常 |
+
+远端首次给 90s 预算时因**模型端点慢**在等待 API 时 CLI 超时（`KeyboardInterrupt`，非工具失败），
+给足 200s 预算后 21 秒正常完成；两机均如实区分「在册成员 ≠ 在线可接单」。
+
 **未做**：灌灌侧 relay 的僵尸 journal TTL/归档（另一台机器的生产桥，见后续章节）。
