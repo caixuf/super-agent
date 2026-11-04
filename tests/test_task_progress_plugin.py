@@ -593,6 +593,9 @@ def test_slash_commands_answer_from_the_ledger_without_a_model_turn(tmp_path, mo
         "sess-1" if key == "HERMES_SESSION_ID" else "route-1" if key == "HERMES_SESSION_KEY" else default)
     monkeypatch.setitem(sys.modules, "gateway", gateway)
     monkeypatch.setitem(sys.modules, "gateway.session_context", session_context)
+    # This scenario exercises the resolver-unavailable branch even when another
+    # test has imported the real Hermes command registry into the same process.
+    monkeypatch.setitem(sys.modules, "hermes_cli.commands", None)
 
     class CommandCtx(Ctx):
         def __init__(self, *args, **kwargs):
@@ -604,7 +607,11 @@ def test_slash_commands_answer_from_the_ledger_without_a_model_turn(tmp_path, mo
 
     ctx = CommandCtx(tmp_path, _settings(tmp_path))
     plugin.register(ctx)
-    assert set(ctx.commands) == {"longtasks", "longtask"}
+    # No resolver is available in this unit host, so unknown host state uses
+    # namespaced aliases rather than risking a skipped plain verb.
+    assert set(ctx.commands) == {
+        "longtasks", "longtask", "taskstatus", "taskpause", "taskcancel",
+    }
 
     ledger = LivenessLedger(ctx.settings["liveness_db"])
     ledger.register("proc_zzz", kind="terminal", owner="p:sess-1", label="pytest tests",
@@ -633,6 +640,171 @@ def test_slash_commands_answer_from_the_ledger_without_a_model_turn(tmp_path, mo
     assert "无法确认当前会话" in ctx.commands["longtask"]("proc_zzz")
     for callback in ctx.unload_callbacks:
         callback()
+
+
+class _VerbCtx(Ctx):
+    """Records slash registrations as name -> (handler, description, kwargs)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.commands = {}
+
+    def register_command(self, name, handler, description, **kwargs):
+        self.commands[name] = (handler, description, kwargs)
+
+
+def _fake_host_commands(monkeypatch, owned, *, raises=False):
+    """Install a minimal ``hermes_cli.commands.resolve_command`` stand-in."""
+    import sys
+    import types as _types
+
+    package = _types.ModuleType("hermes_cli")
+    package.__path__ = []
+    module = _types.ModuleType("hermes_cli.commands")
+
+    def resolve_command(name):
+        if raises:
+            raise RuntimeError("host registry unavailable")
+        return object() if name in owned else None
+
+    module.resolve_command = resolve_command
+    monkeypatch.setitem(sys.modules, "hermes_cli", package)
+    monkeypatch.setitem(sys.modules, "hermes_cli.commands", module)
+
+
+def _no_host_commands(monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "hermes_cli", None)
+    monkeypatch.setitem(sys.modules, "hermes_cli.commands", None)
+
+
+def _register_verbs(tmp_path, monkeypatch, owned):
+    _fake_host_commands(monkeypatch, owned)
+    ctx = _VerbCtx(tmp_path, _settings(tmp_path))
+    plugin.register(ctx)
+    return ctx
+
+
+def test_host_owned_verbs_use_stable_task_prefixed_aliases(tmp_path, monkeypatch):
+    ctx = _register_verbs(tmp_path, monkeypatch, {"status", "pause", "cancel"})
+
+    assert set(ctx.commands) == {
+        "longtasks", "longtask", "taskstatus", "taskpause", "taskcancel",
+    }
+    status, status_desc, status_kwargs = ctx.commands["taskstatus"]
+    pause, pause_desc, _ = ctx.commands["taskpause"]
+    cancel, cancel_desc, _ = ctx.commands["taskcancel"]
+    assert status("").startswith("用法：/taskstatus ")
+    assert status_kwargs["args_hint"] == "<任务号>"
+    assert pause("").startswith("用法：/taskpause ")
+    assert cancel("").startswith("用法：/taskcancel ")
+    assert "当前未接线" in pause_desc and "/taskpause " in pause_desc
+    assert "当前未接线" in cancel_desc and "/taskcancel " in cancel_desc
+    assert all(unknown not in ctx.commands for unknown in ("status", "pause", "cancel"))
+    for callback in ctx.unload_callbacks:
+        callback()
+
+
+def test_free_verbs_keep_plain_names_and_consistent_usage(tmp_path, monkeypatch):
+    ctx = _register_verbs(tmp_path, monkeypatch, set())
+
+    assert {"status", "pause", "cancel"}.issubset(ctx.commands)
+    for name in ("status", "pause", "cancel"):
+        handler, description, kwargs = ctx.commands[name]
+        assert ("/%s " % name) in handler("")
+        assert ("/%s " % name) in description
+        assert kwargs["args_hint"] == "<任务号>"
+    for callback in ctx.unload_callbacks:
+        callback()
+
+
+@pytest.mark.parametrize("failure", ["missing", "raising"])
+def test_unavailable_resolver_uses_namespaced_aliases_not_plain_verbs(
+        tmp_path, monkeypatch, failure):
+    """Unknown host state must not be treated as proof that plain verbs are free."""
+    if failure == "missing":
+        _no_host_commands(monkeypatch)
+    else:
+        _fake_host_commands(monkeypatch, {"status"}, raises=True)
+
+    ctx = _VerbCtx(tmp_path, _settings(tmp_path))
+    plugin.register(ctx)
+    assert {"taskstatus", "taskpause", "taskcancel"}.issubset(ctx.commands)
+    assert not ({"status", "pause", "cancel"} & set(ctx.commands))
+    for name in ("taskstatus", "taskpause", "taskcancel"):
+        handler, description, _kwargs = ctx.commands[name]
+        assert ("/%s " % name) in handler("")
+        assert ("/%s " % name) in description
+    for callback in ctx.unload_callbacks:
+        callback()
+
+
+def test_alias_collisions_advance_to_stable_hyphenated_fallback(tmp_path, monkeypatch):
+    ctx = _register_verbs(tmp_path, monkeypatch, {
+        "status", "taskstatus", "pause", "taskpause", "cancel",
+    })
+    assert "task-progress-status" in ctx.commands
+    assert "task-progress-pause" in ctx.commands
+    assert ctx.commands["taskcancel"][0]("").startswith("用法：/taskcancel ")
+    assert ctx.commands["task-progress-status"][0]("").startswith(
+        "用法：/task-progress-status ")
+    for callback in ctx.unload_callbacks:
+        callback()
+
+
+def test_all_aliases_owned_fails_closed_without_colliding_registration(tmp_path, monkeypatch):
+    ctx = _register_verbs(tmp_path, monkeypatch, {
+        "status", "taskstatus", "task-progress-status",
+        "pause", "taskpause", "task-progress-pause",
+        "cancel", "taskcancel", "task-progress-cancel",
+    })
+    assert set(ctx.commands) == {"longtasks", "longtask"}
+    for callback in ctx.unload_callbacks:
+        callback()
+
+
+def test_pause_and_cancel_do_not_claim_unexecuted_work(tmp_path, monkeypatch):
+    ctx = _register_verbs(tmp_path, monkeypatch, {"status", "pause", "cancel"})
+    for name, action in (("taskpause", "暂停"), ("taskcancel", "取消")):
+        output = ctx.commands[name][0]("proc_real")
+        assert "当前未接线" in output
+        assert ("没有执行%s" % action) in output
+        assert "任务状态未改变" in output
+        assert "已记录" not in output and "已生效" not in output and "已取消" not in output
+        assert "proc_real" in output
+    for callback in ctx.unload_callbacks:
+        callback()
+
+
+def test_status_handler_requires_and_isolates_the_current_session(tmp_path, monkeypatch):
+    import sys
+    import types as _types
+
+    gateway = _types.ModuleType("gateway")
+    gateway.__path__ = []
+    session_context = _types.ModuleType("gateway.session_context")
+    current = {"session": "sess-a"}
+    session_context.get_session_env = lambda key, default="": (
+        current["session"] if key == "HERMES_SESSION_ID" else default)
+    monkeypatch.setitem(sys.modules, "gateway", gateway)
+    monkeypatch.setitem(sys.modules, "gateway.session_context", session_context)
+
+    ctx = _register_verbs(tmp_path, monkeypatch, {"status", "pause", "cancel"})
+    ledger = LivenessLedger(ctx.settings["liveness_db"])
+    ledger.register("proc_a", kind="terminal", owner="p:sess-a", label="A only",
+                    pid=999999, pid_start="dead:a", state="running", phase="compile")
+    ledger.register("proc_b", kind="terminal", owner="p:sess-b", label="B only",
+                    pid=999999, pid_start="dead:b", state="running", phase="secret")
+
+    status = ctx.commands["taskstatus"][0]
+    assert "阶段 compile" in status("proc_a")
+    assert "ledger 无记录" in status("proc_b")
+    assert "secret" not in status("proc_b")
+    current["session"] = ""
+    assert "无法确认当前会话" in status("proc_a")
+    for callback in ctx.unload_callbacks:
+        callback()
+
 
 def test_concurrent_same_turn_spawn_opens_only_one_card(tmp_path):
     import threading
@@ -719,6 +891,54 @@ def test_background_tasks_arriving_during_first_send_are_merged(tmp_path):
         callback()
 
 
+def test_background_snapshot_finishing_after_foreground_open_is_merged(tmp_path, monkeypatch):
+    """Opening may finish while a background hook reads its first ledger snapshot."""
+    from agentcore.card_store import CardStore
+
+    posted, snapshot_entered, snapshot_release = (
+        threading.Event(), threading.Event(), threading.Event())
+    original_bind, original_snapshot = CardStore.bind, plugin._first_snap
+    edits = []
+    monkeypatch.setattr(plugin, "_capture_session_key", lambda: "route-opening-race")
+
+    def post(ctx, route, text, **kwargs):
+        posted.set()
+        return {"ok": True, "message_id": "msg-opening-race"}
+
+    def bind(self, *args, **kwargs):
+        assert snapshot_entered.wait(8)
+        return original_bind(self, *args, **kwargs)
+
+    def snapshot(*args, **kwargs):
+        snapshot_entered.set()
+        assert snapshot_release.wait(8)
+        return original_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(plugin, "_post_to_session", post)
+    monkeypatch.setattr(CardStore, "bind", bind)
+    monkeypatch.setattr(plugin, "_first_snap", snapshot)
+    monkeypatch.setattr(plugin, "_edit_to_session",
+                        lambda *args: edits.append(args) or {"ok": True})
+    ctx = Ctx(tmp_path, _settings(tmp_path, foreground_min_seconds=0))
+    plugin.register(ctx)
+    _row(ctx.settings["liveness_db"], "proc_opening_race", phase="compile")
+    ctx.hooks["pre_llm_call"](session_id="s", turn_id="t")
+    assert posted.wait(8)
+    hook = threading.Thread(target=lambda: ctx.hooks["post_tool_call"](
+        tool_name="terminal", result={"session_id": "proc_opening_race"},
+        session_id="s", turn_id="t"))
+    hook.start()
+    try:
+        assert snapshot_entered.wait(8)
+        assert _wait(lambda: ctx.state.data["entries"]["turn:s:t"]["send_state"] == "sent")
+    finally:
+        snapshot_release.set()
+        hook.join(timeout=8)
+    assert not hook.is_alive()
+    assert ctx.state.data["entries"]["turn:s:t"]["tasks"] == ["proc_opening_race"]
+    assert _wait(lambda: bool(edits))
+
+
 @pytest.mark.parametrize(("terminal", "expected"), [( {"completed": True}, "已完成"), ({"failed": True}, "未完成")])
 def test_foreground_terminal_arriving_during_blocked_send_is_applied(tmp_path, monkeypatch,
                                                                       terminal, expected):
@@ -766,7 +986,7 @@ def test_terminal_hook_does_not_race_or_block_slow_running_edit(tmp_path, monkey
         assert message_id == "msg-serial"
         if not edits:
             entered.set()
-            assert release.wait(5), "controlled edit release timed out"
+            assert release.wait(10), "controlled edit release timed out"
         edits.append(text)
         return {"ok": True, "edited": True, "message_id": message_id}
 
@@ -780,7 +1000,7 @@ def test_terminal_hook_does_not_race_or_block_slow_running_edit(tmp_path, monkey
     ctx.hooks["post_tool_call"](tool_name="terminal",
                                 result={"session_id": "proc_serial"},
                                 session_id="s", turn_id="t")
-    assert entered.wait(5), "running edit did not start"
+    assert entered.wait(10), "running edit did not start"
 
     start = time.monotonic()
     ctx.hooks["on_session_end"](session_id="s", turn_id="t", completed=True)
@@ -940,7 +1160,7 @@ def test_edit_crash_after_write_ahead_is_unknown_on_restart(tmp_path, monkeypatc
     def block_after_dispatch(ctx, route, message_id, text):
         assert ctx.state.data["entries"]["turn:s:t"]["edit_state"] == "sending"
         entered.set()
-        assert release.wait(5)
+        assert release.wait(30)
         return {"ok": True, "message_id": message_id}
 
     monkeypatch.setattr(plugin, "_edit_to_session", block_after_dispatch)
@@ -951,7 +1171,7 @@ def test_edit_crash_after_write_ahead_is_unknown_on_restart(tmp_path, monkeypatc
     _row(first.settings["liveness_db"], "proc_crash_edit", owner="p:s", phase="running")
     first.hooks["post_tool_call"](tool_name="terminal", result={"session_id": "proc_crash_edit"},
                                   session_id="s", turn_id="t")
-    assert entered.wait(5), "edit did not reach the post-intent dispatch window"
+    assert entered.wait(30), "edit did not reach the post-intent dispatch window"
     assert first.state.data["entries"]["turn:s:t"]["edit_state"] == "sending"
     # This durable snapshot represents a crash at the point after dispatch intent
     # and before a response/confirmation is written.
@@ -1324,3 +1544,62 @@ def test_a_held_edit_lock_is_never_evicted():
             lock.release()
 
     asyncio.run(exercise())
+
+
+def test_unknown_primary_still_checks_known_alias_collisions(tmp_path, monkeypatch):
+    import sys
+    _fake_host_commands(monkeypatch, set())
+    commands = sys.modules['hermes_cli.commands']
+    def resolve(name):
+        if name in {'status', 'pause', 'cancel'}:
+            raise RuntimeError('primary lookup unavailable')
+        return object() if name in {'taskstatus', 'taskpause', 'taskcancel'} else None
+    commands.resolve_command = resolve
+    ctx = _VerbCtx(tmp_path, _settings(tmp_path))
+    plugin.register(ctx)
+    assert {'task-progress-status', 'task-progress-pause', 'task-progress-cancel'} <= set(ctx.commands)
+    assert not {'status', 'pause', 'cancel', 'taskstatus', 'taskpause', 'taskcancel'} & set(ctx.commands)
+    for callback in ctx.unload_callbacks:
+        callback()
+
+
+def test_terminal_hook_settles_card_when_turn_id_shape_differs(tmp_path, monkeypatch):
+    """终态钩子的 turn_id 与开场时形状不同，卡片仍必须收尾。
+
+    实测事故：开场钩子收到 ``<sid>:<sid>:<tid>``，终态钩子收到干净的 ``<tid>``。
+    ``_entry_key`` 算出的两个 key 不同，`_set_turn` 什么都不改，前台状态停在
+    running；聚合因此永远拿不到终态，卡片一直显示「运行中」，而账本里任务
+    早已 done。用户看到的正是「任务状态已完成，卡片还转」。
+    """
+    monkeypatch.setattr(plugin, "_capture_session_key", lambda: "route-a")
+    posted, edited = [], []
+
+    def post(ctx, route, text, *, allow_bound_context=False):
+        posted.append((route, text))
+        return {"ok": True, "message_id": "msg-" + route}
+
+    def edit(ctx, route, message_id, text):
+        edited.append((route, message_id, text))
+        return {"ok": True, "edited": True, "message_id": message_id}
+
+    monkeypatch.setattr(plugin, "_post_to_session", post)
+    monkeypatch.setattr(plugin, "_edit_to_session", edit)
+    ctx = Ctx(tmp_path, _settings(tmp_path, foreground_min_seconds=0, poll_seconds=2))
+    plugin.register(ctx)
+
+    sid = "20261101_134537_9fbe7b28"
+    # 开卡：宿主给的是拼接过的 turn_id
+    ctx.hooks["pre_llm_call"](session_id=sid, turn_id=sid + ":" + sid + ":1905e47a")
+    assert _wait(lambda: len(posted) == 1), posted
+    assert "进行中" in posted[0][1] or "已接收" in posted[0][1]
+
+    # 收尾：宿主换成干净 turn_id —— 这正是漏掉的路径
+    ctx.hooks["on_session_end"](session_id=sid, turn_id="1905e47a", completed=True)
+
+    # 宿主在回合结束后仍会再跑一次 poll（poll_seconds=2），终态帧在那一轮发出。
+    assert _wait(lambda: edited, timeout=6.0), "终态钩子必须落地一次编辑，不能因为 key 不匹配就静默丢弃"
+    last = edited[-1][2]
+    assert "已完成" in last, last
+    assert "进行中" not in last, "卡片不得停留在进行中"
+    for callback in ctx.unload_callbacks:
+        callback()

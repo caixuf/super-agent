@@ -1,0 +1,80 @@
+--- a/gateway/session_managed_worker.py
++++ b/gateway/session_managed_worker.py
+@@ -628,6 +628,9 @@
+         from gateway.session_runtime_workers import tracked_write
+         scope = await tracked_write(authority, partial(reserve_admission_worker, authority,
+                     admission_id=row['admission_id'], process=process, principal_id=row['principal_id'], hello=hello))
++        if os.environ.get('SUPERAGENT_MANAGED_WORKER_SCOPE', '0') == '1':
++            from gateway.superagent_scope_binding import bind_scope
++            await asyncio.to_thread(bind_scope, authority, row, scope)
+         worker.worker = (scope['pid'], scope['birth'])
+         # The child reads nothing else until the exact reservation has committed.
+         frame = await asyncio.to_thread(_bootstrap, authority, ref, row, policy, scope, text)
+--- /dev/null
++++ b/gateway/superagent_scope_binding.py
+@@ -0,0 +1,65 @@
++"""Record an admission-to-scope binding; not a sandbox or stopped-work proof."""
++import hashlib
++import os
++from pathlib import Path
++import re
++import subprocess
++import time
++
++from hermes_state_runtime import RuntimeStoreError, _admission, _epoch
++
++
++def bind_scope(authority, row, scope):
++    admission = row.get('admission_id')
++    generation = row.get('generation')
++    pid = scope.get('pid') if isinstance(scope, dict) else None
++    if (not isinstance(admission, str) or not admission or type(generation) is not int or generation < 1
++            or type(pid) is not int or pid <= 0 or scope.get('generation') != generation
++            or scope.get('profile_id') != authority.profile_id):
++        raise RuntimeStoreError('scope_binding_invalid')
++    identity = hashlib.sha256((str(authority.profile_id) + '\0' + admission + '\0' + str(generation)).encode()).hexdigest()[:32]
++    unit = 'superagent-turn-' + identity + '.scope'
++    try:
++        result = subprocess.run(['systemctl', '--user', 'show', unit, '--property=ActiveState',
++                                 '--property=ControlGroup', '--property=Delegate'],
++                                capture_output=True, text=True, timeout=5, check=False)
++        if result.returncode != 0:
++            raise RuntimeError('scope_unavailable')
++        values = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
++        group = values.get('ControlGroup', '')
++        if (values.get('ActiveState') != 'active' or values.get('Delegate') != 'no'
++                or not group.startswith('/') or '..' in Path(group).parts or not group.endswith('/' + unit)):
++            raise RuntimeError('scope_identity_unverified')
++        process_group = Path('/proc/%d/cgroup' % pid).read_text().strip().split('::', 1)[-1]
++        if process_group != group and not process_group.startswith(group + '/'):
++            raise RuntimeError('worker_outside_scope')
++        events = dict(line.split() for line in (Path('/sys/fs/cgroup') / group.lstrip('/') / 'cgroup.events').read_text().splitlines())
++        boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
++        if events.get('populated') != '1' or not re.fullmatch(r'[0-9a-f-]{36}', boot):
++            raise RuntimeError('scope_not_live')
++    except (OSError, ValueError, subprocess.SubprocessError, RuntimeError) as exc:
++        raise RuntimeStoreError('scope_binding_unavailable') from exc
++    record = (str(authority.profile_id), admission, generation, scope['session_id'],
++              scope['execution_id'], pid, scope['birth'], unit, group, boot)
++    def write(conn):
++        _epoch(conn, authority.epoch)
++        current = _admission(conn, admission)
++        if current['status'] != 'started' or current['owner_epoch'] != authority.epoch or current['generation'] != generation:
++            raise RuntimeStoreError('scope_binding_stale')
++        worker = conn.execute('SELECT session_id,generation,owner_epoch,status FROM worker_executions WHERE execution_id=?',
++                              (scope['execution_id'],)).fetchone()
++        if (worker is None or worker['session_id'] != scope['session_id'] or worker['generation'] != generation
++                or worker['owner_epoch'] != authority.epoch or worker['status'] != 'registered'):
++            raise RuntimeStoreError('scope_binding_worker_mismatch')
++        conn.execute('CREATE TABLE IF NOT EXISTS superagent_scope_bindings ('
++                     'profile_id TEXT NOT NULL, admission_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, '
++                     'session_id TEXT NOT NULL, execution_id TEXT NOT NULL, pid INTEGER NOT NULL, birth REAL NOT NULL, '
++                     'unit TEXT NOT NULL, cgroup TEXT NOT NULL, boot_id TEXT NOT NULL, created REAL NOT NULL)')
++        existing = conn.execute('SELECT profile_id,admission_id,generation,session_id,execution_id,pid,birth,unit,cgroup,boot_id '
++                                'FROM superagent_scope_bindings WHERE admission_id=?', (admission,)).fetchone()
++        if existing is not None:
++            if tuple(existing) != record:
++                raise RuntimeStoreError('scope_binding_conflict')
++            return
++        conn.execute('INSERT INTO superagent_scope_bindings VALUES(?,?,?,?,?,?,?,?,?,?,?)', (*record, time.time()))
++    authority.db._execute_write(write)

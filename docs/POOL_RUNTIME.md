@@ -86,8 +86,12 @@ permission/profile boundaries.
 - The Worker only admits as many durable claims as it has execution slots.
 - Scheduler tool cancellation is cooperative. Ignored tokens do not kill a
   Python thread; a tool can still finish successfully after a cancellation request.
-- Durable job cancellation uses `Pool.cancel` / CLI `cancel JOB`. The runner
-  process group is terminated and the job finishes cancelled.
+- Durable job cancellation uses `Pool.cancel` / CLI `cancel JOB`. The request
+  remains nonterminal until the trusted executor confirms stop. Local subprocess
+  attempts use a Linux subreaper supervisor: detached/environment-clearing children
+  are adopted and reaped before an attempt-bound stop receipt permits cancellation.
+  `finalize_cancel` acknowledges a request, not stop; only never-claimed work can
+  finish immediately. A cancellation timeout is not evidence of stopped execution.
 - Each attempt has a wall-clock deadline, combined stdout/stderr budget and a
   configurable per-file limit (default 64 MiB). A fresh interpreter applies
   RLIMIT_FSIZE before exec, avoiding preexec_fn in threaded code. The file limit
@@ -98,20 +102,27 @@ permission/profile boundaries.
 
 ## Recovery guarantees and boundaries
 
-Job locks are inherited by the immediate runner. A lease expiry alone cannot
-start an overlapping runner that still holds that lock. Linux orphan reaping
-checks boot ID, PID starttime and process-group identity before killing a
-cancelled or deadline-expired runner. Old attempt tokens cannot finish a new
-attempt. Default replay is disabled; mark a task replay-safe only if its actions
-are idempotent, or independently check their external effects.
+Job locks are inherited by the supervisor, not the task command. A lease expiry
+alone cannot start an overlapping attempt. Before effects, every executor must
+pass `begin_execution`; a timeout/reclaimed attempt cannot later launch its stale
+runner. Local supervisor stop receipts bind the job, attempt, token, nonce and
+supervisor PID/start identity. Worker EOF also requests tree cleanup. A missing
+receipt, killed supervisor or synchronous owner crash remains unknown: no retry
+or terminal outbox is invented. Old attempt tokens cannot finish a new attempt.
+Default replay is disabled; even proven process exit does not make external
+effects idempotent. Replay still requires its explicit policy and remaining budget.
 
-The tiny crash window between process launch and PID registration is handled
-conservatively: a surviving lock can require operator recovery. A runner which
-deliberately daemonizes, closes the inherited lock and escapes its process group
-is outside this trusted-runner contract. For arbitrary code, use a per-attempt
-cgroup/container with filesystem and tool restrictions. An attempt directory is
-workspace separation, not a security sandbox. SQLite WAL/flock require a local
-POSIX filesystem; this implementation is not a multi-host coordinator.
+Before the ledger registration commits, the supervisor has no launch permission;
+afterwards it waits for a separate go message. The ready handshake precedes PID
+publication so early cancel cannot kill it before its stop handler is installed.
+This is a trusted local process-tree contract, not a hostile-code sandbox or proof
+about remote/daemon work. For arbitrary code, use a trusted attempt-bound sandbox
+with filesystem/tool restrictions; colleague write execution remains gated.
+Legacy active rows without these records remain uncertain and require operator
+reconciliation, not automatic replay. Drain/coordinate all queue participants
+before upgrading; mixed old/new workers do not share the admission invariant.
+See [stop contract](ATTEMPT_STOP_CONTRACT.md). SQLite WAL/flock require a local
+POSIX filesystem; this is not a multi-host coordinator.
 
 ## Outbox delivery
 
@@ -123,6 +134,121 @@ The external send and local ack are not one transaction: after a send succeeds
 but before ack, redelivery is possible. The transport must deduplicate/reconcile
 using job ID. Read-only `receipts` is an inspection API, not a multi-consumer
 claim. Never claim exactly-once external messages from this mechanism.
+
+## Development verification authority
+
+`dev_runner` treats queued payloads as data, not permission to launch host
+verification commands. Configure mandatory checks in the administrator-owned
+policy passed through `--policy`, alongside `allowed_roots`:
+
+```json
+{
+  "allowed_roots": ["/srv/isolated-worktrees"],
+  "verification_checks": [
+    {
+      "check_id": "unit",
+      "command": ["python3", "-m", "unittest", "-q"],
+      "timeout_s": 30,
+      "scope": "workspace_scoped",
+      "safety_tier": "isolated_test",
+      "critical": true
+    }
+  ]
+}
+```
+
+All policy checks run after a successful model result, whether or not the task
+declares checks. A nonempty payload `verification_checks` must match the entire
+normalized policy contract, including argv, environment, timeout, expected exit
+code, criticality, scope and safety tier. Unknown fields, duplicate configured
+check IDs, excessive counts and invalid contracts fail before model execution.
+Missing policy checks allow no task-supplied commands; omission of payload checks
+does not disable configured checks. Existing callers that previously supplied
+commands only in the payload must move their reviewed contracts into host policy.
+The runner snapshots contracts before model execution and holds the same worktree
+lock through verification. `safety_tier` describes intent; it does not sandbox code.
+
+For `sandbox=True`, configured checks require the host-injected Python API
+`verification_executor(argv, timeout_s, workdir, *, env)` or the explicit CLI
+`--verification-adapter module:callable`. No executor means an explicit
+pre-execution error, never a fallback to host commands.
+The host must independently verify that its adapter constrains files, credentials,
+network, budgets and descendants. Merely supplying a callback is not proof.
+Legacy three-argument verification executors remain compatible only when no
+check needs environment overrides. Signature compatibility is resolved before any
+check; executor exceptions never trigger a second invocation without environment.
+
+The CLI can also select `--runner-adapter module:callable` to avoid the legacy
+business bridge. Both flags are trusted administrator launch configuration, not
+queued payload fields; task fields with the same names do not select imports.
+Keep adapter modules and their import search path outside writable worktrees and
+under administrator ownership. Importing an adapter executes trusted Python code
+in the runner process; the CLI does not sandbox that module or certify it safe.
+
+```bash
+python3 -m agentcore.dev_runner \
+  --policy /srv/worker/policy.json --role-contract /srv/worker/role.md \
+  --workdir /srv/isolated-worktrees/task --agent-dir /srv/worker/task-cache \
+  --output-dir /srv/worker/task-receipts --sandbox \
+  --runner-adapter reviewed_runtime:generate \
+  --verification-adapter reviewed_runtime:verify
+```
+
+`reviewed_runtime` above is a deployment-specific module, not a bundled runtime.
+The synchronous generation contract is `generate(prompt, options)`, where options
+contains `workdir` and `agent_dir` as paths, plus `model`, `provider`, `tools`,
+`timeout`, and the requested `sandbox` boolean. It returns a result mapping (or
+an object with `to_dict()`) whose `ok` is an actual boolean. The verification
+contract is `verify(argv, timeout_s, workdir, *, env)`, returning a mapping with
+an integer or null `exit_code` and optional capture/status fields as used by
+`verification_gate`. New CLI adapters must accept the `env` keyword; legacy
+three-argument compatibility belongs to the existing Python API only.
+
+Explicit references are validated for synchronous callable signatures before
+generation. Invalid references/imports/signatures, raised adapter exceptions and
+malformed result shapes fail without retrying or falling back to the bridge.
+Unknown or abbreviated CLI flags are rejected. Python-level import/execution
+stdout is redirected to stderr so stdout carries one JSON receipt; this is not
+an OS-level output or secret-filtering boundary. Adapters still own their direct
+file-descriptor output, public results, budgets and isolation behavior. Omitted
+flags retain the previous bridge/local-verification behavior subject to the
+sandbox verification requirement above.
+
+Without sandbox mode and without an injected executor, administrator-approved
+checks still use the local process executor. Tests can execute arbitrary code
+from a worktree, so an allowlisted `pytest` or `unittest` command alone is not a
+security boundary. The legacy `dev_runner` model bridge and its `--sandbox` root
+mount also do not establish the trusted whole-attempt boundary required by
+`colleague_worker`. That gate remains closed. No arbitrary-code production
+readiness, actual model quality, or complete P2 delivery is claimed here.
+
+`tests/test_dev_runner.py` includes a real host-injected bubblewrap verification
+probe: generated artifacts pass two unit tests while a host-only file, inherited
+secret environment value and host loopback listener are inaccessible. Its model
+is a deterministic test callback, not a real model, and it tests this verification
+seam only. Bubblewrap absence is explicitly skipped, not counted as containment
+success. Process-tree cancellation and crash recovery remain separate gates.
+
+The CLI regressions additionally run both deterministic generation and unit-test
+verification in real bubblewrap subprocesses, then exercise the CLI as an actual
+Pool runner: passing code completes, failing generated code fails, cancellation
+and timeout during either phase reap an environment-clearing detached descendant
+before one terminal receipt. The local supervisor validates the attempt-bound
+stop proof. These are offline component/lifecycle checks, not actual model
+quality, hostile-code containment, production service readiness or IM delivery.
+
+The default local verification executor reads stdout and stderr concurrently,
+retaining at most 1 MiB per stream before UTF-8 decoding. Exceeding either
+budget stops the process group and sets `output_limited`; it cannot approve a
+check even when the returned exit code matches `expected_exit_code`.
+Invalid UTF-8 is replaced without discarding the observed exit status.
+Spawn/collection errors are likewise not successful reproduction checks.
+The command deadline also covers waiting after pipe EOF, and cleanup never
+performs an unbounded second `communicate()`. Direct-child reap is limited to
+one additional second. These limits constrain this local call's capture and
+wait behavior; they do not constrain all memory/disk/process usage by a verifier.
+Detached pipe holders may survive best-effort group cleanup: only a trusted
+attempt boundary can certify that the whole task has stopped.
 
 ## Verification
 

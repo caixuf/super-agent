@@ -19,12 +19,32 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# A delivered document is either a bridge file marker or a document URL.
-# Ordinary code/review URLs deliberately do not count.
+# A delivered document is either a bridge file marker or a document URL, or a
+# complete document attached through the chat's own media channel. Ordinary
+# code/review URLs deliberately do not count. A bare image does NOT count: the
+# reader asked for the document, and a screenshot of it is not the document.
 _DOC_LINK = re.compile(
     r'(?m)^\s*##FILE:\s*\S+'
     r'|https?://[^\s]*(?:/docx/|/wiki/|/docs/|/drive/|/sheets/|/slides/)'
 )
+# `MEDIA:` is how Hermes ships a file to the chat. Only self-contained documents
+# qualify here -- a PNG preview passes through the same channel and must not be
+# mistaken for the deliverable.
+_MEDIA_DOC = re.compile(r'(?m)^\s*MEDIA:\s*(\S+?\.(?:html|htm|pdf))\s*$', re.I)
+
+
+def _delivered(text) -> bool:
+    """Whether the reply actually handed over a document, not just a path."""
+    text = text or ''
+    if _DOC_LINK.search(text):
+        return True
+    for match in _MEDIA_DOC.finditer(text):
+        try:
+            if Path(match.group(1)).is_file():
+                return True
+        except OSError:
+            continue
+    return False
 _GUARD_NOTE = (
     "\n\n---\n"
     "⚠️ 交付校验未通过：本轮要求图文文档，但最终回复里没有检测到文档链接或 `##FILE`。"
@@ -101,12 +121,13 @@ class _DeliveryGuard:
     """Advice, enforcement, and a small per-turn audit record."""
 
     def __init__(self, advise_delivery, delivery_context, location_hint, *,
-                 include_delegated=False, audit_path=None):
+                 include_delegated=False, audit_path=None, enforce_delivery=False):
         self._advise_delivery = advise_delivery
         self._delivery_context = delivery_context
         self._location_hint = location_hint
         self._include_delegated = include_delegated
         self._audit_path = audit_path
+        self._enforce_delivery = enforce_delivery
         self._pending = {}
         self._lock = threading.Lock()
 
@@ -151,13 +172,15 @@ class _DeliveryGuard:
         return {'context': self._delivery_context(advice) + self._location_hint}
 
     def transform(self, *, response_text='', session_id='', **_kwargs):
+        if not self._enforce_delivery:
+            return None
         entry = self._entry(session_id)
         if not entry:
             return None
         advice = entry['advice']
         if advice.get('mode') != 'artifact':
             return None
-        if _DOC_LINK.search(response_text or ''):
+        if _delivered(response_text):
             return None
         if entry['warned']:
             return None
@@ -180,7 +203,7 @@ class _DeliveryGuard:
             'kind': advice.get('kind'),
             'reason_code': advice.get('reason_code'),
             'artifact_expected': advice.get('mode') == 'artifact',
-            'artifact_present': bool(_DOC_LINK.search(assistant_response or '')),
+            'artifact_present': bool(_delivered(assistant_response or '')),
             'guard_warned': entry['warned'],
             'user_chars': len(user_message) if isinstance(user_message, str) else 0,
             'response_chars': len(assistant_response or ''),
@@ -208,6 +231,7 @@ def register(ctx):
         _location_hint(ctx),
         include_delegated=ctx.get_config('include_delegated', False) is True,
         audit_path=_audit_path(ctx),
+        enforce_delivery=ctx.get_config('enforce_delivery', False) is True,
     )
     ctx.register_hook('pre_llm_call', guard.before)
     # post_llm_call is observer-only in Hermes; the enforceable seam is the

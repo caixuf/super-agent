@@ -48,7 +48,10 @@ def verdict(row: Optional[Dict[str, Any]]) -> str:
         return state
     if state in _STUCK:
         return state
-    if state in ("queued", "running"):
+    if state == "unverified":
+        # A claim of completion that has not passed its own evidence.
+        return "unverified"
+    if state in ("queued", "running", "waiting_user", "awaiting_plan_approval"):
         return state
     return "unknown"
 
@@ -66,6 +69,12 @@ def card_state(row: Optional[Dict[str, Any]]) -> CardState:
         return _TERMINAL_STATES[word]
     if word in _STUCK:
         return CardState.FAILED
+    if word == "waiting_user":
+        return CardState.WAITING_USER
+    if word == "awaiting_plan_approval":
+        return CardState.AWAITING_PLAN_APPROVAL
+    if word == "unverified":
+        return CardState.WAITING_USER      # someone must look at the evidence
     if word == "running":
         return CardState.RUNNING
     return CardState.QUEUED
@@ -84,7 +93,20 @@ def snapshot(row: Optional[Dict[str, Any]], *, now: float) -> Dict[str, Any]:
         started = float(started) if started else 0.0
     except (TypeError, ValueError):
         started = 0.0
+    # A finished task's clock stops when it finished. Measuring a terminal task
+    # against ``now`` keeps growing it forever: a six-second command read as two
+    # hours on a card frozen earlier, and the reader had no way to tell that the
+    # number was the age of the *entry*, not the length of the work.
     elapsed = max(0, int(now - started)) if started else 0
+    if started and verdict(data) in ("done", "failed", "cancelled"):
+        finished = data.get("updated_at") or data.get("heartbeat_at")
+        try:
+            finished = float(finished) if finished else 0.0
+        except (TypeError, ValueError):
+            finished = 0.0
+        if finished >= started:
+            elapsed = int(finished - started)
+
     done, total = data.get("progress_done"), data.get("progress_total")
     percent = None
     try:
@@ -108,6 +130,11 @@ def snapshot(row: Optional[Dict[str, Any]], *, now: float) -> Dict[str, Any]:
         "artifacts": tuple(str(a) for a in (artifacts or ()))[:6],
         "host": str(data.get("host") or ""),
         "terminal": card_state(data) in (CardState.DONE, CardState.FAILED, CardState.CANCELLED),
+        "role_id": str(data.get("role_id") or "").strip()[:64],
+        "display_name": str(data.get("display_name") or "").strip()[:80],
+        "task_title": str(data.get("task_title") or data.get("label") or "").strip()[:120],
+        "heartbeat_age_s": data.get("heartbeat_age_s"),
+        "attempt_id": str(data.get("attempt_id") or "").strip()[:64],
     }
 
 
@@ -158,6 +185,8 @@ def _clock_text(seconds: int) -> str:
 _STATE_WORD = {
     CardState.QUEUED: "已接收",
     CardState.RUNNING: "进行中",
+    CardState.WAITING_USER: "等待用户",
+    CardState.AWAITING_PLAN_APPROVAL: "等待计划审批",
     CardState.DONE: "已完成",
     CardState.FAILED: "未完成",
     CardState.CANCELLED: "已取消",
@@ -167,9 +196,23 @@ _STATE_WORD = {
 def render(snap: Dict[str, Any], *, title: str = "") -> str:
     """One editable entry's text. Every line comes from a field, none from imagination."""
     lines = []
-    head = title.strip() or snap.get("label") or snap.get("task_id") or "任务"
+    display_name = str(snap.get("display_name") or "").strip()
+    task_title = str(snap.get("task_title") or snap.get("label") or "").strip()
+    if display_name and task_title:
+        composed = "%s · %s" % (display_name, task_title)
+    else:
+        composed = display_name or task_title
+    head = title.strip() or composed or snap.get("label") or snap.get("task_id") or "任务"
     lines.append("**%s**" % head[:90])
-    lines.append("状态：%s%s" % (_STATE_WORD[card_state(snap)], _state_suffix(snap)))
+    if display_name and display_name not in head:
+        lines.append("岗位：%s" % display_name[:80])
+    lines.append("状态：%s%s" % (_state_text(snap), _state_suffix(snap)))
+    age = snap.get("heartbeat_age_s")
+    if age is not None and not snap.get("terminal"):
+        try:
+            lines.append("心跳：%d秒前" % max(0, int(float(age))))
+        except (TypeError, ValueError):
+            pass
     if snap.get("phase"):
         lines.append("当前：%s" % snap["phase"])
     if snap.get("percent") is not None:
@@ -241,15 +284,22 @@ def aggregate(snaps) -> Dict[str, Any]:
         verdict = "running"
     elif any(w in ("failed", "lost", "stalled") for w in words):
         verdict = "failed"          # a failure is never hidden behind a success
+    elif any(w in _WAITING_VERDICTS for w in words):
+        # A task parked on a human decision has not finished. Without this arm
+        # the word falls through to `done`, and the card tells the user the work
+        # is complete while the system is still waiting for their approval.
+        verdict = "waiting_user"
     elif any(w == "done" for w in words):
         verdict = "done"            # part of the work landed; one cancelled sibling is not the story
     elif any(w == "cancelled" for w in words):
         verdict = "cancelled"
     else:
-        verdict = "done"
+        # An unrecognised word means the ledger said something we cannot read.
+        # Claiming `done` here would announce a finish nobody observed.
+        verdict = "unknown"
     signature = "|".join("%s:%s:%s:%s" % (s.get("task_id") or "", s.get("verdict") or "",
                                           s.get("phase") or "", s.get("percent")) for s in items)
-    return {"verdict": verdict, "terminal": verdict != "running",
+    return {"verdict": verdict, "terminal": verdict not in _NON_TERMINAL_VERDICTS,
             "elapsed": max(int(s.get("elapsed") or 0) for s in items), "tasks": len(items),
             "signature": signature}
 
@@ -257,28 +307,142 @@ def aggregate(snaps) -> Dict[str, Any]:
 #: Ledger phases that carry no information for a reader.
 _QUIET_PHASES = frozenset({"", "started", "queued", "running"})
 
+#: Verdicts meaning "a human still owes an answer" — not finished, not running.
+_WAITING_VERDICTS = frozenset({"waiting_user", "awaiting_plan_approval"})
+
+#: Verdicts where more work may still arrive; the card must not print a finish time.
+_NON_TERMINAL_VERDICTS = frozenset({"running", "unknown", "unverified"}) | _WAITING_VERDICTS
+
+
+def format_verdict_pill(verdict: Optional[str]) -> str:
+    """The reader-facing word for a verdict, as plain text (no glyph, no decoration)."""
+    return verdict_word(verdict)
+
+
+#: One word per ledger verdict, for every line a reader sees. The ledger's
+#: vocabulary is code (running / lost / stalled); a card that prints it verbatim
+#: leaks English internals into a Chinese sentence, and `lost`/`stalled` -- the
+#: two states a killed background process actually lands in -- were missing
+#: entirely before this table existed.
+VERDICT_WORD = {
+    "queued": "已接收",
+    "running": "进行中",
+    "unverified": "待验收",
+    "done": "已完成",
+    "failed": "未完成",
+    "cancelled": "已取消",
+    "stalled": "无响应",
+    "lost": "进程已不在",
+    "waiting_user": "等待用户",
+    "awaiting_plan_approval": "等待计划审批",
+}
+
+
+def _state_text(snap: Dict[str, Any]) -> str:
+    """The reader-facing state: a claimed finish without its evidence is 待验收."""
+    word = str(snap.get("verdict") or snap.get("state") or "")
+    if word == "unverified":
+        return VERDICT_WORD["unverified"]
+    return _STATE_WORD[card_state(snap)]
+
+
+def verdict_word(verdict: Optional[str]) -> str:
+    """The reader-facing word for a ledger verdict; unknown values stay as-is."""
+    return VERDICT_WORD.get(str(verdict or ""), str(verdict or ""))
+
 
 def render_many(snaps, *, title: str = "任务") -> str:
-    """One entry over several tasks: a header, one line per task, and the longest elapsed."""
+    """One entry over several tasks: a rich header, structured bullet items, and elapsed time."""
     items = [s for s in (snaps or ()) if isinstance(s, dict)]
     if not items:
         return "**%s**\n状态：已接收\n（暂无新进展，收到进度会更新这一条）" % title
     head = aggregate(items)
     heading = ("任务" if head["tasks"] == 1
                else "任务（本轮 %d 个后台任务）" % head["tasks"])
-    lines = ["**%s**" % heading]
-    lines.append("状态：%s" % _STATE_WORD[card_state({"state": head["verdict"]})])
+    state_str = _state_text({"state": head["verdict"]})
+    elapsed_str = _clock_text(int(head["elapsed"]))
+
+    lines = [
+        "**%s**" % heading,
+        "状态：%s ｜ 已用（最长）：`%s`" % (state_str, elapsed_str),
+        "",
+    ]
     for snap in items[:6]:
-        bits = [snap.get("label") or snap.get("task_id") or "任务"]
-        word = {"running": "进行中", "queued": "已接收", "done": "已完成",
-                "failed": "未完成", "cancelled": "已取消"}.get(snap.get("verdict"), snap.get("verdict"))
-        bits.append(word)
+        label = str(snap.get("label") or snap.get("task_id") or "任务").strip()
+        pill = format_verdict_pill(snap.get("verdict"))
+        extra_bits = []
         if snap.get("phase") and snap["phase"] not in _QUIET_PHASES:
-            bits.append(snap["phase"])
+            extra_bits.append(str(snap["phase"]))
         if snap.get("percent") is not None:
-            bits.append("%.0f%%" % snap["percent"])
-        lines.append("· " + " · ".join(str(b) for b in bits if b))
+            extra_bits.append("%.0f%%" % snap["percent"])
+        extra_str = f" ({' · '.join(extra_bits)})" if extra_bits else ""
+        lines.append("· **%s** ｜ %s%s" % (label, pill, extra_str))
     if len(items) > 6:
         lines.append("· …另有 %d 个" % (len(items) - 6))
-    lines.append("已用（最长）：%s" % _clock_text(int(head["elapsed"])))
     return "\n".join(lines)[:MAX_TEXT]
+
+# --------------------------------------------------------------------------- #
+# Mid-run interrupt queue (Codex section 6-3) — queue follow-ups; never preempt irreversible
+# --------------------------------------------------------------------------- #
+
+IRREVERSIBLE_PHASES = frozenset({
+    "commit", "push", "deploy", "send", "payment", "delete", "destructive",
+})
+
+
+class FollowUpQueue:
+    """Queue mid-run user follow-ups on the main-dialog control path.
+
+    Drain only when the current phase is not irreversible. Never starts a second
+    long execution by itself — the host control path decides how to apply items.
+    """
+
+    def __init__(self):
+        self._items = []
+
+    def enqueue(self, text, *, kind="follow_up", task_id=""):
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("follow_up_text_required")
+        item = {"kind": kind, "text": text.strip()[:2000], "task_id": str(task_id or "")}
+        self._items.append(item)
+        return {"ok": True, "queued": len(self._items), "item": item}
+
+    def __len__(self):
+        return len(self._items)
+
+    def peek(self):
+        return list(self._items)
+
+    def drain(self, *, current_phase="", allow_preempt=False):
+        phase = str(current_phase or "").strip().lower()
+        if not allow_preempt and phase in IRREVERSIBLE_PHASES:
+            return []
+        items, self._items = self._items, []
+        return items
+
+
+def poll_progress_from_ledger(ledger, task_id, *, owner=None, now=None):
+    """User progress ask -> read liveness ledger only; never start a second long job."""
+    if ledger is None or not hasattr(ledger, "inspect"):
+        return {"ok": False, "error": "ledger_unavailable", "task_id": task_id}
+    kwargs = {}
+    if owner is not None:
+        kwargs["require_owner"] = owner
+    if now is not None:
+        kwargs["now"] = now
+    row = ledger.inspect(task_id, **kwargs)
+    if not row.get("ok"):
+        return row
+    started = float(row.get("started_at") or 0)
+    at = float(now if now is not None else started + float(row.get("elapsed_s") or 0))
+    snap = snapshot(row, now=at)
+    if "heartbeat_age_s" in row:
+        snap["heartbeat_age_s"] = row["heartbeat_age_s"]
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "snap": snap,
+        "verdict": row.get("verdict"),
+        "source": "liveness_ledger",
+        "second_exec": False,
+    }

@@ -38,6 +38,7 @@ memory provider；但内置 provider 只做 MEMORY.md / USER.md 的注入。自�
 from __future__ import annotations
 
 import json
+import importlib.util
 import logging
 import os
 import re
@@ -92,14 +93,24 @@ def format_recall(rows, *, limit=3, max_chars=1800):
 
 
 def _config_block() -> dict[str, Any]:
-    """`memory.localvec` 块（读不到就返回空 dict —— 插件绝不因配置缺失而抛）。"""
+    """Read trusted settings; unreadable is not an empty legacy configuration."""
     try:
         from hermes_cli.config import load_config_readonly
-        blk = (load_config_readonly().get("memory") or {}).get(NAME)
-        return dict(blk) if isinstance(blk, dict) else {}
-    except Exception as exc:  # pragma: no cover - 读配置失败不是致命错误
-        logger.debug("localvec: 读配置失败 %s", exc)
-        return {}
+        config = load_config_readonly()
+        # Hermes deliberately returns FailedConfigRead defaults/last-known-good
+        # on parser errors. Those are availability fallbacks, not authorization.
+        if not isinstance(config, dict) or getattr(config, 'read_error', None) is not None:
+            raise ValueError('memory configuration unavailable')
+        memory = config.get('memory', {})
+        if not isinstance(memory, dict):
+            raise ValueError('invalid memory configuration')
+        blk = memory.get(NAME, {})
+        if not isinstance(blk, dict):
+            raise ValueError('invalid localvec configuration')
+        return dict(blk)
+    except Exception as exc:
+        logger.debug("localvec: configuration unavailable: %s", type(exc).__name__)
+        return {'_config_unavailable': True}
 
 
 def _cmd_template(cfg: dict[str, Any]) -> list[str]:
@@ -108,6 +119,8 @@ def _cmd_template(cfg: dict[str, Any]) -> list[str]:
     模板里 `{query}` 在每次召回时替换；`{limit}` / `{timeout}` 在装载时替换。
     用 argv 列表而不是 shell 字符串：避免 query 里的引号/管道被 shell 解释。
     """
+    if cfg.get('_config_unavailable'):
+        return []
     raw: Any = cfg.get("recall_cmd") or os.environ.get("LOCALVEC_RECALL_CMD")
     if isinstance(raw, str):
         try:
@@ -137,6 +150,68 @@ class LocalVecProvider(MemoryProvider):
         self._worker_local = threading.local()
         self._session_id = ""
         self._last: Optional[RecallStatus] = None
+        self._router_enabled = False
+        self._router = None
+        self._route_engine = None
+        self._routed_providers = {}
+        self._identity_guard = None
+        self._recall_slots = None
+        self._config_failed = False
+
+    def _authorized(self):
+        try:
+            if self._config_failed:
+                return False
+            return self._identity_guard is None or self._identity_guard() is True
+        except Exception:
+            return False
+
+    def _routed_provider(self, session_id):
+        """One private recall runtime/cache per authenticated route and session."""
+        try:
+            sid = session_id or self._session_id
+            route = self._router.resolve(sid) if self._router is not None else None
+            if route is None:
+                return None
+            key = (route['cache_scope'], sid)
+            with self._lock:
+                if key in self._routed_providers:
+                    return self._routed_providers[key]
+                # Bound subprocess concurrency across principals, not just per
+                # principal. Busy children are never evicted and duplicated.
+                if len(self._routed_providers) >= MAX_INFLIGHT_RECALLS:
+                    idle = next((k for k, p in self._routed_providers.items() if not p._inflight), None)
+                    if idle is None:
+                        return None
+                    self._routed_providers.pop(idle).shutdown()
+                child = LocalVecProvider()
+                private_python = self._route_engine / '.superagent-venv/bin/python'
+                python = str(private_python) if private_python.is_file() else sys.executable
+                child._cfg = dict(self._cfg, sqlite_db=str(Path(route['data_dir']) / 'coding_memory_cv.db'),
+                                  user_id=route['user_id'], agent_id=route['agent_id'], profile=route['profile'])
+                entity_db = self._cfg.get('combined_entity_db')
+                if entity_db is not None:
+                    entity_path = Path(entity_db) if isinstance(entity_db, str) else None
+                    script = self._route_engine / 'tools/recall_combined.py'
+                    if not entity_path or not entity_path.is_absolute() or not entity_path.is_file() or not script.is_file():
+                        return None
+                    # A partial SQLite fallback would hide missing entity rules.
+                    child._cfg.pop('sqlite_db', None)
+                    child._cmd = [python, str(script), '--query={query}', '--entity-db', str(entity_path)]
+                else:
+                    child._cmd = [python, str(self._route_engine / 'tools/recall_memory.py'), '--query-text={query}']
+                child._cmd += ['--data-dir', route['data_dir'], '--user', route['user_id'],
+                               '--agent', route['agent_id'], '--profile', route['profile'],
+                               '--embed-url', self._cfg.get('embed_url', ''), '--limit', str(self._limit)]
+                child._limit, child._timeout = self._limit, self._timeout
+                child._session_id = sid
+                router = self._router
+                child._identity_guard = lambda: router.resolve(sid) == route
+                child._recall_slots = self._recall_slots
+                self._routed_providers[key] = child
+                return child
+        except Exception:
+            return None
 
     # -- 生命周期 ---------------------------------------------------------
     @property
@@ -145,7 +220,12 @@ class LocalVecProvider(MemoryProvider):
 
     def is_available(self) -> bool:
         """只看配置与可执行性，不触网、不建连接（激活门的约定）。"""
-        cmd = _cmd_template(_config_block())
+        cfg = _config_block()
+        if 'identity_routes_file' in cfg:
+            # Runtime identity may not be bound at provider discovery. Keep the
+            # provider selected so an invalid policy cannot select legacy memory.
+            return True
+        cmd = _cmd_template(cfg)
         return bool(cmd)
 
     def unavailable_reason(self) -> str:
@@ -155,11 +235,35 @@ class LocalVecProvider(MemoryProvider):
         """每个 agent 一个实例：绑定本实例的命令模板与参数，不设模块级可变状态。"""
         cfg = _config_block()
         self._cfg = cfg
+        self._config_failed = cfg.get('_config_unavailable') is True
         self._cmd = _cmd_template(cfg)
         self._limit = int(cfg.get("limit") or 6)
         self._timeout = float(cfg.get("timeout_s") or 8)
         self._session_id = session_id if isinstance(session_id, str) else ""
+        # Once this instance has selected routed mode, a subsequent config read
+        # failure/removal cannot silently select its legacy/environment command.
+        self._router_enabled = self._router_enabled or 'identity_routes_file' in cfg
+        self._router = None
+        if self._router_enabled:
+            self._cmd = []  # A configured router never falls back to recall_cmd/env.
+            try:
+                engine = Path(cfg.get('engine_root', ''))
+                if not engine.is_absolute() or not (engine / 'tools/recall_memory.py').is_file():
+                    raise ValueError('memory runtime missing')
+                spec = importlib.util.spec_from_file_location(
+                    '_localvec_memory_identity', engine / 'runtime/hermes_memory_identity.py')
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                self._router = module.IdentityRouter(cfg['identity_routes_file'])
+                self._route_engine = engine
+                if self._recall_slots is None:
+                    self._recall_slots = threading.BoundedSemaphore(MAX_INFLIGHT_RECALLS)
+            except Exception:
+                logger.warning('localvec: identity routing unavailable; legacy fallback refused')
         with self._lock:
+            for child in self._routed_providers.values():
+                child.shutdown()
+            self._routed_providers.clear()
             self._generation += 1
             self._last = None
             self._cache.clear()
@@ -168,7 +272,9 @@ class LocalVecProvider(MemoryProvider):
                 event.recall_result = None
                 event.recall_ok = False
                 event.set()
-        if self._cmd:
+        if self._router_enabled:
+            logger.info('localvec: authenticated memory routing selected')
+        elif self._cmd:
             logger.info("[localvec] 召回通道就绪（子进程）：%s", " ".join(self._cmd[:3]) + " …")
         else:
             logger.warning("[localvec] 未配置 recall_cmd，自动召回关闭")
@@ -187,6 +293,13 @@ class LocalVecProvider(MemoryProvider):
     # -- 召回 -------------------------------------------------------------
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """后台先算好 —— prefetch() 必须快，所以这里只排队、不阻塞。"""
+        if self._router_enabled:
+            child = self._routed_provider(session_id)
+            if child is not None:
+                child.queue_prefetch(query, session_id=session_id)
+            return
+        if not self._authorized():
+            return
         if not self._cmd or is_trivial_prompt(query):
             return
         key = (session_id or self._session_id, query)
@@ -203,6 +316,21 @@ class LocalVecProvider(MemoryProvider):
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         """取后台算好的结果；没有就同步算一次（子进程召回是亚秒级，不引入一轮滞后）。"""
+        if self._router_enabled:
+            generation = self._generation
+            child = self._routed_provider(session_id)
+            if child is None:
+                self._last = None
+                return RECALL_UNAVAILABLE
+            result = child.prefetch(query, session_id=session_id)
+            if generation != self._generation or not child._authorized():
+                self._last = None
+                return RECALL_UNAVAILABLE
+            self._last = child.recall_status()
+            return result
+        if not self._authorized():
+            self._last = None
+            return RECALL_UNAVAILABLE
         if not self._cmd or is_trivial_prompt(query):
             self._last = None
             return ""
@@ -243,10 +371,16 @@ class LocalVecProvider(MemoryProvider):
                 fallback = self._fallback_sqlite_recall(query)
                 if fallback:
                     text, count = fallback[0], fallback[1]
+                    if not self._authorized():
+                        self._last = None
+                        return RECALL_UNAVAILABLE
                     self._last = RecallStatus(provider_label="本地知识库(降级)", count=count, glyph=GLYPH) if text else None
                     return text
                 self._last = None
                 return RECALL_UNAVAILABLE
+        if not self._authorized():
+            self._last = None
+            return RECALL_UNAVAILABLE
         if hit:
             text = hit[0]
             count = hit[1]
@@ -259,61 +393,77 @@ class LocalVecProvider(MemoryProvider):
         return text
 
     def recall_status(self) -> Optional[RecallStatus]:
+        if self._router_enabled:
+            child = self._routed_provider('')
+            return child.recall_status() if child is not None and child._authorized() else None
         return self._last
 
     def _fallback_sqlite_recall(self, query: str) -> Optional[Tuple[str, int, bool]]:
-        """Dual-track recall fallback: automatic fallback to SQLite FTS5 / curated store if localvec fails."""
+        """Scoped, read-only fallback; missing identity is a recall failure."""
+        if not self._authorized():
+            return None
         try:
             import sqlite3
-            from agentcore.memory.config import get_config
-            from agentcore.memory.memory_scale import coarse_filter
-            cfg_db = self._cfg.get("sqlite_db")
-            db_path = str(cfg_db) if cfg_db else str(get_config().db_path)
-            if not os.path.isfile(db_path):
+            from pathlib import Path
+            db = self._cfg.get("sqlite_db")
+            user = self._cfg.get("user_id")
+            agent = self._cfg.get("agent_id")
+            profile = self._cfg.get("profile")
+            if (not isinstance(db, str) or not Path(db).is_absolute()
+                    or any(not isinstance(x, str) or not x.strip()
+                           for x in (user, agent, profile))):
                 return None
-            conn = sqlite3.connect(db_path, timeout=2.0)
+            path = Path(db)
+            if not path.is_file():
+                return None
+            conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2.0)
             conn.row_factory = sqlite3.Row
             try:
-                row_ids = coarse_filter(conn, query, limit=self._limit)
-                rows = []
-                if row_ids:
-                    placeholders = ",".join("?" * len(row_ids))
-                    rows = conn.execute(
-                        f"SELECT fact_id, statement, subject FROM working_fact WHERE rowid IN ({placeholders})",
-                        row_ids
-                    ).fetchall()
-                if not rows:
-                    # Dual-track fallback: check curated store / subject & statement substring
-                    clean_q = re.sub(r"[^\w\u4e00-\u9fff]", "", query)
-                    if clean_q:
-                        like_param = f"%{clean_q}%"
-                        rows = conn.execute(
-                            "SELECT fact_id, statement, subject FROM working_fact "
-                            "WHERE status='active' AND (statement LIKE ? OR subject LIKE ?) "
-                            "ORDER BY created_at DESC LIMIT ?",
-                            (like_param, like_param, self._limit)
-                        ).fetchall()
+                scope = ("f.user_id=? AND f.agent_id=? AND f.status='active' "
+                         "AND EXISTS (SELECT 1 FROM fact_tags t WHERE t.fact_id=f.fact_id "
+                         "AND t.key='profile' AND t.value=?)")
+                # Do not depend on the host importing the engine package.
+                # All terms are bounded and passed as SQL parameters.
+                terms = [term[:128] for term in re.findall(r"[\w\u4e00-\u9fff]+", query[:4096])[:8]]
+                if not terms:
+                    return None
+                clauses = []
+                parameters = []
+                for term in terms:
+                    term = term.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+                    clauses.append("(f.statement LIKE ? ESCAPE '!' OR f.subject LIKE ? ESCAPE '!')")
+                    parameters.extend(["%" + term + "%", "%" + term + "%"])
+                rows = conn.execute(
+                    f"SELECT f.fact_id, f.statement, f.subject FROM working_fact f "
+                    f"WHERE {scope} AND (" + " OR ".join(clauses) + ") "
+                    "ORDER BY f.created_at DESC LIMIT ?",
+                    (user, agent, profile, *parameters, self._limit),
+                ).fetchall()
                 if not rows:
                     return None
-                formatted_rows = [
-                    {"fact_id": r["fact_id"], "statement": r["statement"], "subject": r["subject"]}
-                    for r in rows
-                ]
-                block, count = format_recall(formatted_rows, limit=self._limit,
-                                             max_chars=int(self._cfg.get('max_chars') or 1800))
-                if block:
-                    return (block, count, True)
+                formatted = [{"fact_id": r["fact_id"], "statement": r["statement"], "subject": r["subject"]}
+                             for r in rows]
+                block, count = format_recall(formatted, limit=self._limit,
+                                             max_chars=int(self._cfg.get("max_chars") or 1800))
+                return (block, count, True) if block and self._authorized() else None
             finally:
                 conn.close()
         except Exception as exc:
-            logger.debug("[localvec] fallback sqlite recall failed: %s", exc)
-        return None
+            logger.debug("[localvec] scoped fallback failed: %s", type(exc).__name__)
+            return None
 
     def _start_recall(self, query: str, key: tuple[str, str], event: threading.Event) -> None:
+        reserved = False
         try:
+            if self._recall_slots is not None:
+                reserved = self._recall_slots.acquire(blocking=False)
+                if not reserved:
+                    raise RuntimeError('recall capacity reached')
             th = spawn_context_thread(self._recall_tracked, name="localvec-prefetch", args=(query,key,event))
             th.start()
         except Exception as exc:
+            if reserved:
+                self._recall_slots.release()
             with self._lock:
                 if self._inflight.get(key) is event:
                     del self._inflight[key]
@@ -337,10 +487,12 @@ class LocalVecProvider(MemoryProvider):
                 if self._inflight.get(key) is event:
                     del self._inflight[key]
                 event.set()
+            if self._recall_slots is not None:
+                self._recall_slots.release()
 
     def _recall(self, query: str, key: tuple[str, str]) -> bool:
         """子进程召回 + 格式化。任何异常都只记 debug —— 召回失败绝不能影响用户这一轮。"""
-        if not self._cmd:
+        if not self._cmd or not self._authorized():
             return False
         argv = [p.replace("{query}", query) for p in self._cmd]
         try:
@@ -363,6 +515,8 @@ class LocalVecProvider(MemoryProvider):
                     self._cache[key] = fallback
                     self._cache_written_at[key] = time.monotonic()
                 return True
+            return False
+        if not self._authorized():
             return False
         try:
             res = json.loads(proc.stdout or "{}")
@@ -396,6 +550,9 @@ class LocalVecProvider(MemoryProvider):
 
     def shutdown(self) -> None:
         with self._lock:
+            for child in self._routed_providers.values():
+                child.shutdown()
+            self._routed_providers.clear()
             self._generation += 1
             self._last = None
             self._cache.clear()

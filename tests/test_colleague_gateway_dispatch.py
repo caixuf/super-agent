@@ -1,4 +1,5 @@
 import hashlib
+import json
 import pytest
 
 from agentcore.colleague_registry import Actor, Registry, Supervisor
@@ -57,7 +58,7 @@ class FakeGateway:
             return {"admission_id": prior["admission_id"],
                     "execution_generation": self.generation if self.status != "queued" else None,
                     "ref":{"profile_id":"wrong" if self.wrong_ref else self.gateway_profile_id,
-                    "session_id":params["session_id"]}, "status": self.status, "outcome": "completed" if self.status == "terminal" else None,
+                    "session_id":params["session_id"]}, "status": self.status, "outcome": getattr(self, "outcome", "completed") if self.status == "terminal" else None,
                     "result": {"session_id":"local-"+"0"*64 if self.wrong_result_session else params["session_id"],"completed":True,"failed":False,
                                "interrupted":False,"final_response":getattr(self,"response_text","reviewed"),"messages":["SECRET_HISTORY"],
                                "last_reasoning":"SECRET_REASONING","usage":{"secret":"SECRET_USAGE"}}
@@ -116,7 +117,7 @@ def test_request_conflict_and_owner_binding_isolation(context):
     gateway.status = "terminal"
     pending = dispatcher.inspect(owner={"profile":"main", "session":"user-a"}, request_id="req-1")
     assert pending["state"] == "terminal"
-    assert pending["reservation"] == "awaiting_quiescence_evidence"
+    assert pending["reservation"] == "turn_released_background_unconfirmed"
     assert pending["member"] == {"member_id":"reviewer", "generation":1,
                                   "display_name":"Reviewer", "role_id":"review", "role_label":"Reviewer"}
     import hashlib
@@ -126,8 +127,11 @@ def test_request_conflict_and_owner_binding_isolation(context):
                                  "completed":True,"failed":False,"interrupted":False}
     assert "SECRET" not in repr(pending) and "messages" not in pending["result"]
     assert registry.work_status(supervisor=supervisor, member_id="reviewer", generation=1)["tracked_open"] == 1
-    with pytest.raises(ValueError, match="member_has_exclusive_work"):
-        _submit(dispatcher, owner=("main","user-b"), request="blocked")
+    gateway.status = "queued"
+    next_turn = _submit(dispatcher, owner=("main","user-b"), request="next")
+    assert next_turn["state"] == "queued"
+    assert next_turn["prior_background_unconfirmed"] == 1
+    assert registry.work_status(supervisor=supervisor, member_id="reviewer", generation=1)["tracked_open"] == 2
 
 
 def test_only_independent_quiescence_evidence_settles_and_two_users_get_separate_sessions(context):
@@ -283,3 +287,183 @@ def test_quiescence_evidence_intent_recovers_settlement_after_crash(context, mon
     with sqlite3.connect(restarted.db_path) as db:
         row = db.execute("SELECT quiescence_evidence_id,settlement_state FROM tasks WHERE request_id='req-1'").fetchone()
     assert row == ("durable-proof","settled")
+
+
+def test_receipt_refresh_never_resubmits_or_releases_without_proof(context):
+    registry, supervisor, gateway, state, dispatcher = context
+    _submit(dispatcher)
+    gateway.status = "terminal"
+    before = sum(method == "prompt.submit" for method, _ in gateway.calls)
+    result = dispatcher.refresh_pending()
+    after = sum(method == "prompt.submit" for method, _ in gateway.calls)
+    assert result == {"examined": 1, "refreshed": 1, "failed": 0}
+    assert before == after == 1
+    assert registry.work_status(supervisor=supervisor, member_id="reviewer", generation=1)["tracked_open"] == 1
+    import sqlite3
+    with sqlite3.connect(dispatcher.db_path) as db:
+        assert db.execute("SELECT state, settlement_state FROM tasks WHERE request_id='req-1'").fetchone() == ("terminal", None)
+
+
+def test_repeated_status_cannot_regress_settlement(context):
+    registry, supervisor, gateway, state, dispatcher = context
+    _submit(dispatcher)
+    gateway.status = "terminal"
+    dispatcher.all_work_quiescent = lambda member, generation, profile, session, admission: {
+        "all_owned_processes_terminal": True, "evidence_id": "first-proof", "member_id": member,
+        "generation": generation, "hermes_profile": profile, "hermes_session_id": session,
+        "admission_id": admission}
+    owner = {"profile": "main", "session": "user-a"}
+    assert dispatcher.inspect(owner=owner, request_id="req-1")["reservation"] == "closed"
+    assert dispatcher.inspect(owner=owner, request_id="req-1")["reservation"] == "closed"
+    # Simulate a stale reader attempting to publish older progress or evidence.
+    dispatcher._update(owner, "req-1", state="terminal", settlement_state="pending", quiescence_evidence_id="later-proof")
+    import sqlite3
+    with sqlite3.connect(dispatcher.db_path) as db:
+        assert db.execute("SELECT state, settlement_state, quiescence_evidence_id FROM tasks WHERE request_id='req-1'").fetchone() == ("settled", "settled", "first-proof")
+
+
+def test_settled_colleague_result_uses_bound_origin_and_single_outbox(context, tmp_path):
+    from agentcore.pool import Pool
+    registry, supervisor, gateway, state, dispatcher = context
+    pool = Pool(tmp_path / "delivery")
+    dispatcher.completion_sink = pool
+    dispatcher.all_work_quiescent = lambda member, generation, profile, session, admission: {
+        "all_owned_processes_terminal": True, "evidence_id": "trusted-proof", "member_id": member,
+        "generation": generation, "hermes_profile": profile, "hermes_session_id": session, "admission_id": admission}
+    owner = {"profile": "main", "session": "user-a", "route": "feishu:chat-1", "channel": "feishu", "chat": "chat-1"}
+    dispatcher.submit(owner=owner, member_id="reviewer", generation=1, request_id="req-1", prompt="review this")
+    gateway.status = "terminal"
+    assert dispatcher.refresh_pending()["refreshed"] == 1
+    dispatcher.inspect(owner=owner, request_id="req-1")
+    with pool.db() as db:
+        jobs = db.execute("select id,origin,status from jobs").fetchall()
+        assert len(jobs) == 1 and jobs[0]["status"] == "completed"
+        assert json.loads(jobs[0]["origin"]) == owner
+        assert db.execute("select count(*) from outbox").fetchone()[0] == 1
+
+
+def test_legacy_weak_settlement_never_auto_delivers(context, tmp_path):
+    from agentcore.pool import Pool
+    registry, supervisor, gateway, state, dispatcher = context
+    pool = Pool(tmp_path / "delivery")
+    dispatcher.completion_sink = pool
+    owner = {"profile": "main", "session": "user-a", "route": "feishu:chat-1"}
+    dispatcher.submit(owner=owner, member_id="reviewer", generation=1, request_id="req-1", prompt="review this")
+    gateway.status = "terminal"
+    dispatcher._update(owner, "req-1", state="settled", settlement_state="settled", quiescence_evidence_id="quiescence-legacy")
+    dispatcher.inspect(owner=owner, request_id="req-1")
+    with pool.db() as db:
+        assert db.execute("select count(*) from outbox").fetchone()[0] == 0
+
+
+def test_failed_colleague_turn_is_reported_without_claiming_quiescence(context, tmp_path):
+    from agentcore.pool import Pool
+    registry, supervisor, gateway, state, dispatcher = context
+    pool = Pool(tmp_path / "delivery")
+    dispatcher.completion_sink = pool
+    owner = {"profile": "main", "session": "user-a", "route": "feishu:chat-1"}
+    dispatcher.submit(owner=owner, member_id="reviewer", generation=1, request_id="req-1", prompt="review this")
+    gateway.status = "terminal"
+    gateway.outcome = "failed"
+    dispatcher.inspect(owner=owner, request_id="req-1")
+    with pool.db() as db:
+        row = db.execute("select status,result from jobs").fetchone()
+        assert row["status"] == "failed"
+        assert "后台工作状态请查询" in json.loads(row["result"])["summary"]
+        assert db.execute("select count(*) from outbox").fetchone()[0] == 1
+    dispatcher.all_work_quiescent = lambda member, generation, profile, session, admission: {
+        "all_owned_processes_terminal": True, "evidence_id": "trusted-proof", "member_id": member,
+        "generation": generation, "hermes_profile": profile, "hermes_session_id": session, "admission_id": admission}
+    dispatcher.inspect(owner=owner, request_id="req-1")
+    with pool.db() as db:
+        assert db.execute("select status from jobs").fetchone()[0] == "failed"
+        assert db.execute("select count(*) from outbox").fetchone()[0] == 1
+
+
+def test_same_request_never_replaces_original_delivery_origin(context):
+    import sqlite3
+    registry, supervisor, gateway, state, dispatcher = context
+    original = {"profile": "main", "session": "user-a", "route": "feishu:original", "chat": "original"}
+    changed = {"profile": "main", "session": "user-a", "route": "feishu:other", "chat": "other"}
+    kwargs = {"member_id": "reviewer", "generation": 1, "request_id": "req-1", "prompt": "review this"}
+    dispatcher.submit(owner=original, **kwargs)
+    dispatcher.submit(owner=changed, **kwargs)
+    with sqlite3.connect(dispatcher.db_path) as db:
+        raw = db.execute("select owner_origin from tasks where request_id='req-1'").fetchone()[0]
+    assert json.loads(raw) == original
+
+
+def test_outbox_handoff_recovers_after_local_receipt_write_failure(context, tmp_path, monkeypatch):
+    import sqlite3
+    from agentcore.pool import Pool
+    registry, supervisor, gateway, state, dispatcher = context
+    pool = Pool(tmp_path / "delivery")
+    dispatcher.completion_sink = pool
+    dispatcher.all_work_quiescent = lambda member, generation, profile, session, admission: {
+        "all_owned_processes_terminal": True, "evidence_id": "trusted-proof", "member_id": member,
+        "generation": generation, "hermes_profile": profile, "hermes_session_id": session, "admission_id": admission}
+    owner = {"profile": "main", "session": "user-a", "route": "feishu:chat-1"}
+    dispatcher.submit(owner=owner, member_id="reviewer", generation=1, request_id="req-1", prompt="review this")
+    gateway.status = "terminal"
+    original = dispatcher._update
+    fail = {"once": True}
+    def update(owner, request, **values):
+        if "delivery_job_id" in values and fail["once"]:
+            fail["once"] = False
+            raise sqlite3.OperationalError("simulated receipt write failure")
+        return original(owner, request, **values)
+    monkeypatch.setattr(dispatcher, "_update", update)
+    dispatcher.inspect(owner=owner, request_id="req-1")
+    dispatcher.refresh_pending()
+    with pool.db() as db:
+        assert db.execute("select count(*) from outbox").fetchone()[0] == 1
+    with sqlite3.connect(dispatcher.db_path) as db:
+        assert db.execute("select delivery_job_id from tasks where request_id='req-1'").fetchone()[0]
+
+
+def test_stale_receipt_cannot_regress_a_terminal_task(context):
+    registry, supervisor, gateway, state, dispatcher = context
+    owner = {"profile": "main", "session": "user-a"}
+    _submit(dispatcher)
+    gateway.status = "terminal"
+    assert dispatcher.inspect(owner=owner, request_id="req-1")["state"] == "terminal"
+    gateway.status = "started"
+    assert dispatcher.inspect(owner=owner, request_id="req-1")["state"] == "unknown"
+    dispatcher._update(owner, "req-1", state="started", terminal_outcome=None)
+    with dispatcher._db() as db:
+        row = db.execute("SELECT state, terminal_outcome FROM tasks WHERE request_id='req-1'").fetchone()
+    assert row["state"] == "terminal"
+    assert row["terminal_outcome"] == "completed"
+
+
+def test_native_turn_result_delivered_without_claiming_background_stopped(context, tmp_path):
+    from agentcore.pool import Pool
+    registry, supervisor, gateway, state, dispatcher = context
+    pool = Pool(tmp_path / "delivery")
+    dispatcher.completion_sink = pool
+    owner = {"profile": "main", "session": "user-a", "route": "feishu:chat-1"}
+    dispatcher.submit(owner=owner, member_id="reviewer", generation=1, request_id="req-1", prompt="review this")
+    gateway.status = "terminal"
+    result = dispatcher.inspect(owner=owner, request_id="req-1")
+    assert result["reservation"] == "turn_released_background_unconfirmed"
+    with pool.db() as db:
+        row = db.execute("SELECT result FROM jobs").fetchone()
+        assert "后台工作状态请查询" in json.loads(row["result"])["summary"]
+        assert db.execute("SELECT count(*) FROM outbox").fetchone()[0] == 1
+    dispatcher.inspect(owner=owner, request_id="req-1")
+    with pool.db() as db:
+        assert db.execute("SELECT count(*) FROM outbox").fetchone()[0] == 1
+
+
+def test_optional_delivery_metadata_failure_does_not_block_assignment(monkeypatch):
+    from agentcore import colleague_gateway_service as service
+    sentinel = object()
+    def read(name, default):
+        if name == "HERMES_SESSION_CHAT_ID":
+            raise RuntimeError("unavailable")
+        return {"HERMES_SESSION_KEY": "feishu:chat-1"}.get(name, default)
+    monkeypatch.setattr(service, "_SESSION_ENV", read)
+    monkeypatch.setattr(service, "_dispatcher", lambda _: sentinel)
+    dispatcher, owner = service._owner("main", "user-a", session_context_profile="main", session_context_id="user-a")
+    assert dispatcher is sentinel
+    assert owner == {"profile": "main", "session": "user-a", "route": "feishu:chat-1"}

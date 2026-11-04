@@ -47,3 +47,25 @@ def test_dry_run_writes_nothing(tmp_path):
     proc = _run(home, "--profile", "p", "--dry-run")
     assert "INSTALL" in proc.stdout
     assert not (home / ".hermes" / "profiles" / "p" / "skills").exists()
+
+
+def test_render_wrapper_uses_private_runtime(tmp_path):
+    import os
+    import subprocess
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[1]
+    engine = tmp_path / "engine"
+    (engine / "tools").mkdir(parents=True)
+    (engine / "tools/arch_doc.py").touch()
+    (engine / "tools/doc_browser.py").touch()
+    python = engine / ".superagent-venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text('#!/bin/sh\nprintf "private-runtime: %s\\n" "$*"\n')
+    python.chmod(0o755)
+    wrapper = repo / "skills/illustrated-doc-rendering/scripts/render_doc.sh"
+    proc = subprocess.run(["bash", str(wrapper), "--engine-root", str(engine), "input.md", "--html-only"],
+                          capture_output=True, text=True, env=os.environ.copy())
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.startswith("private-runtime:")
+    assert str(engine / "tools/arch_doc.py") in proc.stdout
+    assert "input.md --html-only" in proc.stdout

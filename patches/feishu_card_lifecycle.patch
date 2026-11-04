@@ -1,0 +1,315 @@
+--- a/plugins/platforms/feishu/adapter.py
++++ b/plugins/platforms/feishu/adapter.py
+@@ -1732,40 +1732,18 @@
+         last_response = None
+ 
+         # A topic in a group is a separate conversation even when chat_id is shared.
+-        live_key = (chat_id, str((metadata or {}).get("thread_id") or ""))
+-        if getattr(self, "_card_replies", False) and live_key in self._active_live_card_per_chat:
++        live_key = (chat_id, str((metadata or {}).get("thread_id") or ""), str((metadata or {}).get("_sa_session") or ""), str((metadata or {}).get("_sa_turn") or ""))
++        if (getattr(self, "_card_replies", False) and (not live_key[2] or not live_key[3] or live_key not in self._active_live_card_per_chat)
++                and any(key[:2] == live_key[:2] and (not live_key[2] or key[2] == live_key[2]) for key in self._active_live_card_per_chat)
++                and ((metadata or {}).get("_sa_status") or not (metadata or {}).get("_interim_send"))):
++            return SendResult(success=False, error="missing card session ownership")
++        if getattr(self, "_card_replies", False) and live_key[2] and live_key[3] and live_key in self._active_live_card_per_chat and not ((metadata or {}).get("_interim_send") and not (metadata or {}).get("_sa_status")):
+             live_info = self._active_live_card_per_chat[live_key]
+-            if (metadata or {}).get("expect_edits") and not (metadata or {}).get("notify"):
++            if ((metadata or {}).get("expect_edits") or (metadata or {}).get("_sa_status")) and not (metadata or {}).get("notify"):
+                 live_info["content"] = formatted
+                 return await self.edit_message(chat_id, live_info["message_id"], formatted)
+             if live_info:
+-                live_info["stop_event"].set()
+-                hb_task = live_info.get("task")
+-                if hb_task:
+-                    try:
+-                        await hb_task
+-                    except asyncio.CancelledError:
+-                        if asyncio.current_task().cancelling():
+-                            raise
+-                cid = live_info["message_id"]
+-                final_card = self._build_reply_card(formatted, finalize=True, started_at=live_info["started_at"])
+-                body = self._build_patch_message_body(content=json.dumps(final_card, ensure_ascii=False))
+-                req = self._build_patch_message_request(message_id=cid, request_body=body)
+-                try:
+-                    resp = await _feishu_update_with_retry(
+-                        lambda: self._run_blocking(self._client.im.v1.message.patch, req),
+-                        what="Final card patch",
+-                    )
+-                    res = self._finalize_send_result(resp, "update failed")
+-                    if res.success:
+-                        res.message_id = cid
+-                        self._card_message_ids.pop(cid, None)
+-                        if self._active_live_card_per_chat.get(live_key) is live_info:
+-                            self._active_live_card_per_chat.pop(live_key, None)
+-                    return res
+-                except Exception as exc:
+-                    logger.warning("[Feishu] Final card update raised (%s)", exc)
+-                    return SendResult(success=False, error="Card update failed")
++                return await self._sa_patch_owned_card(live_key, live_info, formatted, final=True)
+ 
+         # 卡片回复（本地增强）：当 card_replies 开启时生效
+         if getattr(self, "_card_replies", False):
+@@ -1972,6 +1950,38 @@
+             self._remember_card_message(result.message_id or "")
+         return result
+ 
++    def _send_retry_is_final(self, result):
++        return getattr(result, "error_kind", None) == "sa_card_update_unresolved" or super()._send_retry_is_final(result)
++
++    async def _sa_patch_owned_card(self, key, info, text, *, final=False, failed=False):
++        if final:
++            info["stop_event"].set()
++            task = info.get("task")
++            if task and task is not asyncio.current_task():
++                await task
++        async with info["update_lock"]:
++            if self._active_live_card_per_chat.get(key) is not info:
++                return SendResult(success=False, error="card no longer owned")
++            if not final and info["stop_event"].is_set():
++                return SendResult(success=False, error="card is terminating")
++            card = self._build_reply_card(text, finalize=final, is_failed=failed, started_at=info["started_at"])
++            request = self._build_patch_message_request(message_id=info["message_id"], request_body=self._build_patch_message_body(content=json.dumps(card, ensure_ascii=False)))
++            try:
++                response = await _feishu_update_with_retry(lambda: self._run_blocking(self._client.im.v1.message.patch, request), what="Owned card patch")
++                result = self._finalize_send_result(response, "card update failed")
++            except Exception:
++                return SendResult(success=False, error="card update failed", error_kind="sa_card_update_unresolved")
++            if not result.success:
++                return SendResult(success=False, error="card update failed", error_kind="sa_card_update_unresolved")
++            if result.success:
++                result.message_id = info["message_id"]
++                result._sa_primary_card = True
++                info["content"] = text
++                if final:
++                    self._card_message_ids.pop(info["message_id"], None)
++                    self._active_live_card_per_chat.pop(key, None)
++            return result
++
+     async def edit_message(self, chat_id: str, message_id: str, content: str, *, finalize: bool = False,
+                            metadata: Optional[dict[str, Any]] = None) -> SendResult:
+         """Edit a previously sent Feishu text/post message."""
+@@ -1987,16 +1997,7 @@
+                              if key[0] == chat_id and info.get("message_id") == message_id), None)
+             live_info = self._active_live_card_per_chat.get(live_key)
+             if live_info:
+-                live_info["content"] = content
+-                if turn_final:
+-                    live_info["stop_event"].set()
+-                    hb_task = live_info.get("task")
+-                    if hb_task:
+-                        try:
+-                            await hb_task
+-                        except asyncio.CancelledError:
+-                            if asyncio.current_task().cancelling():
+-                                raise
++                return await self._sa_patch_owned_card(live_key, live_info, content, final=turn_final)
+             card = self._build_reply_card(
+                 content, finalize=turn_final, started_at=self._card_message_ids.get(message_id))
+             body = self._build_patch_message_body(content=json.dumps(card, ensure_ascii=False))
+@@ -2892,10 +2893,19 @@
+         data = await self._reaction_call("Remove", message_id, reaction_id, _build, self._client.im.v1.message_reaction.delete)
+         return data is not None
+ 
++    def _sa_source_with_turn(self, source, turn):
++        from gateway.session_identity import replace_source
++        copied = replace_source(source)
++        copied._sa_turn = turn
++        return copied
++
+     async def on_processing_start(self, event: MessageEvent) -> None:
+         message_id = event.message_id
+         chat_id = getattr(event.source, "chat_id", "") or ""
+-        live_key = (chat_id, str(getattr(event.source, "thread_id", None) or ""))
++        # Clone the source per inbound turn: mutating a shared source would let a
++        # newer event overwrite the older turn token seen by late callbacks.
++        event.source = self._sa_source_with_turn(event.source, str(message_id or ""))
++        live_key = (chat_id, str(getattr(event.source, "thread_id", None) or ""), self._event_session_key(event), str(message_id or ""))
+ 
+         # 首帧交互卡片（CardKit 2.0 原地流式更新规范）
+         if getattr(self, "_card_replies", False) and chat_id:
+@@ -2918,8 +2928,10 @@
+                         stop_ev = asyncio.Event()
+                         self._active_live_card_per_chat[live_key] = {
+                             "message_id": cid,
++                            "origin_message_id": message_id,
+                             "started_at": started_ts,
+                             "stop_event": stop_ev,
++                            "update_lock": asyncio.Lock(),
+                         }
+ 
+                         async def _heartbeat_worker(c_id=cid, c_chat=live_key, s_ts=started_ts, ev=stop_ev):
+@@ -2934,13 +2946,8 @@
+                                 live = self._active_live_card_per_chat.get(c_chat)
+                                 if not live or live.get("message_id") != c_id:
+                                     break
+-                                hb_card = self._build_reply_card(live.get("content", "正在排查处理中..."), finalize=False, started_at=s_ts)
+-                                req = self._build_patch_message_request(
+-                                    message_id=c_id,
+-                                    request_body=self._build_patch_message_body(content=json.dumps(hb_card, ensure_ascii=False)),
+-                                )
+                                 try:
+-                                    await self._run_blocking(self._client.im.v1.message.patch, req)
++                                    await self._sa_patch_owned_card(c_chat, live, live.get("content", "正在排查处理中..."))
+                                 except Exception:
+                                     pass
+ 
+@@ -2961,34 +2968,17 @@
+ 
+     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
+         message_id = event.message_id
+-        if outcome is ProcessingOutcome.FAILURE:
+-            chat_id = getattr(event.source, "chat_id", "") or ""
+-            live_key = (chat_id, str(getattr(event.source, "thread_id", None) or ""))
+-            live_info = self._active_live_card_per_chat.get(live_key) if getattr(self, "_card_replies", False) else None
+-            if live_info:
+-                live_info["stop_event"].set()
+-                hb_task = live_info.get("task")
+-                if hb_task:
+-                    try:
+-                        await hb_task
+-                    except asyncio.CancelledError:
+-                        if asyncio.current_task().cancelling():
+-                            raise
+-                fail_card = self._build_reply_card("任务执行异常或超时，未能完成。", finalize=True, is_failed=True, started_at=live_info["started_at"])
+-                req = self._build_patch_message_request(
+-                    message_id=live_info["message_id"],
+-                    request_body=self._build_patch_message_body(content=json.dumps(fail_card, ensure_ascii=False)),
+-                )
+-                try:
+-                    response = await self._run_blocking(self._client.im.v1.message.patch, req)
+-                    result = self._finalize_send_result(response, "failure card update failed")
+-                    if result.success and self._active_live_card_per_chat.get(live_key) is live_info:
+-                        self._active_live_card_per_chat.pop(live_key, None)
+-                        self._card_message_ids.pop(live_info["message_id"], None)
+-                    elif not result.success:
+-                        logger.warning("[Feishu] Failed to mark card failed: %s", result.error)
+-                except Exception as exc:
+-                    logger.warning("[Feishu] Failed to mark card failed: %s", exc)
++        chat_id = getattr(event.source, "chat_id", "") or ""
++        live_key = (chat_id, str(getattr(event.source, "thread_id", None) or ""), self._event_session_key(event), str(message_id or ""))
++        live_info = self._active_live_card_per_chat.get(live_key) if getattr(self, "_card_replies", False) else None
++        if live_info and live_info.get("origin_message_id") == message_id:
++            if outcome is ProcessingOutcome.FAILURE:
++                notice = "任务执行异常或超时，未能完成。"
++            elif outcome is ProcessingOutcome.CANCELLED:
++                notice = "任务已取消。"
++            else:
++                notice = "本轮结束，未能确认最终回复。"
++            await self._sa_patch_owned_card(live_key, live_info, notice, final=True, failed=outcome is ProcessingOutcome.FAILURE)
+         if not self._reactions_enabled() or not message_id:
+             return
+         start_reaction_id = self._pending_processing_reactions.get(message_id)
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -3909,6 +3909,10 @@
+                     metadata.setdefault("user_id", str(user_id))
+         from gateway.session_context import source_route_metadata
+         metadata = source_route_metadata(source, metadata)
++        if getattr(source, "platform", None) == Platform.FEISHU:
++            metadata = dict(metadata or {})
++            metadata["_sa_session"] = self._session_key_for_source(source)
++            metadata["_sa_turn"] = str(getattr(source, "_sa_turn", "") or "")
+         # Routed profile for shared state.db namespaces: under profile_routes the transport adapter's
+         # stamp is not the profile that wrote the binding (Telegram prune path needs it).
+         # See #76423.
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -1191,6 +1191,10 @@
+             )
+         if metadata is None and _relay_prospective_thread_id:
+             metadata = {"reply_to_message_id": event_message_id}
++        if source.platform == Platform.FEISHU:
++            metadata = dict(metadata or {})
++            metadata["_sa_session"] = self._session_key_for_source(source)
++            metadata["_sa_turn"] = str(getattr(source, "_sa_turn", "") or "")
+         return metadata
+ 
+     def _run_agent_progress_threading(
+@@ -1253,7 +1257,8 @@
+             else None
+         )
+         if source.platform == Platform.FEISHU and source.thread_id and event_message_id:
+-            _status_thread_metadata = {"thread_id": _progress_thread_id, "reply_to_message_id": event_message_id}
++            _status_thread_metadata = {"thread_id": _progress_thread_id, "reply_to_message_id": event_message_id,
++                                       "_sa_session": self._session_key_for_source(source), "_sa_turn": str(getattr(source, "_sa_turn", "") or "")}
+         else:
+             _status_thread_metadata = self._thread_metadata_for_progress(
+                 source, event_message_id, _progress_thread_id, _relay_prospective_thread_id,
+@@ -2281,11 +2286,11 @@
+                         break
+                     _notify_res = await _notify_adapter.send(
+                         source.chat_id, _heartbeat_text,
+-                        metadata=_interim_metadata(_non_conversational_metadata(_status_thread_metadata, platform=source.platform)),
++                        metadata={**_interim_metadata(_non_conversational_metadata(_status_thread_metadata, platform=source.platform)), **({"_sa_status": True} if source.platform == Platform.FEISHU else {})},
+                     )
+                     if getattr(_notify_res, "success", False) and getattr(_notify_res, "message_id", None):
+                         _heartbeat_msg_id = str(_notify_res.message_id)
+-                        if turn_ctx._cleanup_progress:
++                        if turn_ctx._cleanup_progress and not getattr(_notify_res, "_sa_primary_card", False):
+                             turn_ctx._cleanup_msg_ids.append(_heartbeat_msg_id)
+             except Exception as _ne:
+                 logger.debug("Long-running notification error: %s", _ne)
+--- a/gateway/run_turn_progress.py
++++ b/gateway/run_turn_progress.py
+@@ -132,7 +132,7 @@
+     def _track_progress_result(self, result) -> None:
+         """Remember a delivered progress/status message id for end-of-turn cleanup."""
+         ctx = self._ctx
+-        if ctx._cleanup_progress and getattr(result, "success", False) and getattr(result, "message_id", None):
++        if ctx._cleanup_progress and getattr(result, "success", False) and getattr(result, "message_id", None) and not getattr(result, "_sa_primary_card", False):
+             ctx._cleanup_msg_ids.append(str(result.message_id))
+ 
+     def _track_future_cleanup_id(self, fut) -> None:
+@@ -624,7 +624,8 @@
+     async def _send_progress_text(self, st, text: str):
+         ctx = self._ctx
+         result = await st.adapter.send(
+-            chat_id=ctx.source.chat_id, content=text, reply_to=ctx._progress_reply_to, metadata=ctx._progress_metadata,
++            chat_id=ctx.source.chat_id, content=text, reply_to=ctx._progress_reply_to,
++            metadata={**(ctx._progress_metadata or {}), **({"_sa_status": True} if ctx.source.platform == Platform.FEISHU else {})},
+         )
+         self._track_progress_result(result)
+         return result
+--- a/gateway/run_busy.py
++++ b/gateway/run_busy.py
+@@ -880,7 +880,15 @@
+ 
+     async def _send_busy_ack_reply(self, event: MessageEvent, adapter, message: str) -> None:
+         try:
+-            await self._send_busy_reply(event, adapter, message)
++            if event.source.platform == Platform.FEISHU:
++                metadata = dict(self._thread_metadata_for_source(event.source) or {})
++                running_event = self._session_state(self._session_key_for_source(event.source)).turn.event
++                metadata["_sa_turn"] = str(getattr(running_event, "message_id", "") or "")
++                metadata["_sa_status"] = True
++                await adapter._send_with_retry(chat_id=event.source.chat_id, content=message,
++                    reply_to=self._busy_reply_to(event, self._reply_anchor_for_event(event)), metadata=metadata)
++            else:
++                await self._send_busy_reply(event, adapter, message)
+         except Exception as e:
+             logger.debug("Failed to send busy-ack: %s", e)
+ 
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -4541,6 +4541,10 @@
+         interrupt_event = self._active_sessions.get(session_key) or asyncio.Event()
+         self._active_sessions[session_key] = interrupt_event
+         _thread_metadata = _thread_metadata_for_event(event)
++        if _platform_name(getattr(event.source, "platform", None)) == "feishu":
++            _thread_metadata = dict(_thread_metadata or {})
++            _thread_metadata["_sa_session"] = session_key
++            _thread_metadata["_sa_turn"] = str(event.message_id or "")
+         typing_task = self._start_typing_refresh(event, interrupt_event, _thread_metadata)
+         try:
+             await self._run_processing_hook("on_processing_start", event)
+--- a/gateway/session_identity.py
++++ b/gateway/session_identity.py
+@@ -30,7 +30,7 @@
+ 
+ _IDENTITY_ATTR = "_identity"
+ # Wire-invisible provenance copied alongside the identity when a source is duplicated.
+-_PROVENANCE_ATTRS = ("_transport_adapter_ref", "_authorization_profile_home", _IDENTITY_ATTR)
++_PROVENANCE_ATTRS = ("_transport_adapter_ref", "_authorization_profile_home", _IDENTITY_ATTR, "_sa_turn")
+ 
+ 
+ class IdentityUnresolved(RuntimeError):

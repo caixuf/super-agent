@@ -113,5 +113,5 @@ def test_view_render_is_platform_agnostic(env):
     view = transport.views[-1].render()
     assert view["title"] == "跑用例"
     assert view["state"] == "running"
-    assert view["actions"] == ["cancel", "details", "logs"]
+    assert view["actions"] == ["cancel", "pause", "status", "details", "logs"]
     assert view["final"] is False

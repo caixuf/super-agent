@@ -69,18 +69,16 @@ def test_worker_refuses_a_runner_that_reports_no_containment():
 
 
 def test_receipt_is_null_when_the_queue_supplied_no_attempt_token():
-    # Executing without a token is allowed, but the receipt must not imply a
-    # proof it never had.
+    # No token means no attempt identity: fail before executing the turn.
     done = run_worker("colleague_worker_probe:plain")
-    assert done.returncode == 0, done.stderr
-    assert receipt(done)["ok"] is True
-    assert receipt(done)["quiescence_evidence_id"] is None
+    assert done.returncode == 1
+    assert receipt(done) == FAILED
 
 
-def test_receipt_ignores_a_malformed_attempt_token():
+def test_worker_rejects_a_malformed_attempt_token():
     done = run_worker("colleague_worker_probe:plain", env={containment.ENV: "not-a-token"})
-    assert done.returncode == 0, done.stderr
-    assert receipt(done)["quiescence_evidence_id"] is None
+    assert done.returncode == 1
+    assert receipt(done) == FAILED
 
 
 def test_valid_attempt_token_alone_does_not_prove_quiescence():
@@ -116,11 +114,8 @@ def test_sweep_stops_a_detached_descendant_that_outlived_the_group():
 def test_worker_succeeds_when_trusted_containment_is_provided():
     token = uuid.uuid4().hex
     done = run_worker("colleague_worker_probe:trusted", env={containment.ENV: token})
-    assert done.returncode == 0, done.stderr
-    rec = receipt(done)
-    assert rec["ok"] is True
-    assert rec["quiescence_evidence_id"] is not None
-    assert len(rec["quiescence_evidence_id"]) == 32
+    assert done.returncode == 1
+    assert receipt(done) == FAILED
 
 
 def test_worker_rejects_a_queue_envelope_it_did_not_define():
@@ -154,8 +149,5 @@ def test_failed_turn_still_sweeps_its_descendants():
 def test_worker_succeeds_when_trusted_containment_is_provided():
     token = uuid.uuid4().hex
     done = run_worker("colleague_worker_probe:trusted", env={containment.ENV: token})
-    assert done.returncode == 0, done.stderr
-    rec = receipt(done)
-    assert rec["ok"] is True
-    assert rec["quiescence_evidence_id"] is not None
-    assert len(rec["quiescence_evidence_id"]) == 32
+    assert done.returncode == 1
+    assert receipt(done) == FAILED

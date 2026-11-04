@@ -8,17 +8,45 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import math
 import os
-import re
-from contextlib import contextmanager
 from pathlib import Path
+import re
+import sys
 from typing import Sequence
+
+# Ensure repository root is on sys.path for test runners executing in subdirs or clean envs
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 import pytest
 
 from agentcore.memory.config import MemoryConfig, configure, reset_config
+
+
+@pytest.fixture
+def supervise_without_finish(monkeypatch):
+    """Run a real owned supervisor but lose only the SQLite finish callback."""
+    import sys
+    import time
+
+    def run(pool, claimed, *, lease_age=120):
+        original = pool.finish
+        with monkeypatch.context() as patch:
+            patch.setattr(pool, "finish", lambda *args, **kwargs: False)
+            assert pool.run_claimed(claimed, [sys.executable, "-c", "print('{\"ok\":true}')"])
+        assert pool.finish == original
+        with pool.db() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (claimed[0]["id"],)).fetchone()
+            assert pool._attempt_stopped(row)
+            db.execute("UPDATE jobs SET heartbeat=? WHERE id=?",
+                       (time.time() - lease_age, claimed[0]["id"]))
+        return claimed[0]["attempt"]
+
+    return run
 
 
 @pytest.fixture(scope="session", autouse=True)

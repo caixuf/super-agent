@@ -224,3 +224,124 @@ def test_observe_uses_external_heartbeat_without_faking_now(ledger):
     got = store.inspect("t1")
     assert got["heartbeat_age_s"] == 25.0  # now=1050, observed beat=1025
     assert got["verdict"] == "running"
+
+
+# --------------------------------------------------------------------------- #
+# Evidence gate: a claimed finish must also satisfy what the task registered
+# --------------------------------------------------------------------------- #
+
+def test_a_claim_of_done_without_its_evidence_is_not_a_finish(tmp_path):
+    """The ledger answers "is it done", not "did a runner say done"."""
+    clock = Clock()
+    ledger = liveness.LivenessLedger(tmp_path / "l.db", clock=clock)
+    ledger.ensure_schema()
+    report = tmp_path / "report.html"
+
+    ledger.register("t1", kind="bg", label="生成报告",
+                    expects=[{"kind": "file", "path": str(report), "min_bytes": 10}])
+    result = ledger.finish("t1", "done", exit_code=0)
+
+    assert result["changed"] is True
+    assert result["task"]["state"] == liveness.UNVERIFIED
+    assert result["gate"]["requested"] == "done"
+    assert result["gate"]["settled"] == liveness.UNVERIFIED
+    assert "待验收" in result["task"]["detail"]
+
+
+def test_the_same_task_settles_as_done_once_the_evidence_appears(tmp_path):
+    clock = Clock()
+    ledger = liveness.LivenessLedger(tmp_path / "l.db", clock=clock)
+    ledger.ensure_schema()
+    report = tmp_path / "report.html"
+
+    ledger.register("t2", kind="bg",
+                    expects=[{"kind": "file", "path": str(report), "min_bytes": 10}])
+    ledger.finish("t2", "done", exit_code=0)
+    assert ledger.get("t2")["state"] == liveness.UNVERIFIED
+
+    # Still short: the file exists but is too small.
+    report.write_text("short", encoding="utf-8")
+    assert ledger.verify("t2")["changed"] is False
+
+    report.write_text("long enough to pass the byte floor", encoding="utf-8")
+    settled = ledger.verify("t2")
+    assert settled["changed"] is True
+    assert settled["task"]["state"] == "done"
+
+
+def test_unverified_is_never_turned_back_into_running_by_a_late_beat(tmp_path):
+    clock = Clock()
+    ledger = liveness.LivenessLedger(tmp_path / "l.db", clock=clock)
+    ledger.ensure_schema()
+    ledger.register("t3", kind="bg",
+                    expects=[{"kind": "file", "path": str(tmp_path / "never")}])
+    ledger.finish("t3", "done", exit_code=0)
+
+    assert ledger.beat("t3") is None
+    assert ledger.get("t3")["state"] == liveness.UNVERIFIED
+
+
+def test_a_failure_is_never_downgraded_to_unverified(tmp_path):
+    """Only a claimed success is gated; a reported failure stands as reported."""
+    clock = Clock()
+    ledger = liveness.LivenessLedger(tmp_path / "l.db", clock=clock)
+    ledger.ensure_schema()
+    ledger.register("t4", kind="bg",
+                    expects=[{"kind": "file", "path": str(tmp_path / "never")}])
+
+    assert ledger.finish("t4", "failed", exit_code=2)["task"]["state"] == "failed"
+
+
+def test_exit_code_expectation_rejects_a_nonzero_finish(tmp_path):
+    clock = Clock()
+    ledger = liveness.LivenessLedger(tmp_path / "l.db", clock=clock)
+    ledger.ensure_schema()
+    ledger.register("t5", kind="bg", expects=[{"kind": "exit0"}])
+
+    assert ledger.finish("t5", "done", exit_code=3)["task"]["state"] == liveness.UNVERIFIED
+    assert ledger.verify("t5")["changed"] is False
+
+
+def test_an_unknown_expectation_kind_blocks_rather_than_passes(tmp_path):
+    """An expectation nobody can evaluate must not be read as satisfied."""
+    clock = Clock()
+    ledger = liveness.LivenessLedger(tmp_path / "l.db", clock=clock)
+    ledger.ensure_schema()
+    ledger.register("t6", kind="bg", expects=[{"kind": "telepathy"}])
+
+    assert ledger.finish("t6", "done", exit_code=0)["task"]["state"] == liveness.UNVERIFIED
+
+
+def test_a_task_without_expectations_still_finishes_normally(tmp_path):
+    clock = Clock()
+    ledger = liveness.LivenessLedger(tmp_path / "l.db", clock=clock)
+    ledger.ensure_schema()
+    ledger.register("t7", kind="bg")
+
+    assert ledger.finish("t7", "done", exit_code=0)["task"]["state"] == "done"
+
+
+def test_an_old_ledger_gains_the_expects_column(tmp_path):
+    """Existing deployments upgrade in place; no manual migration step."""
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    db = sqlite3.connect(str(path))
+    db.executescript(
+        "CREATE TABLE task_liveness (task_id TEXT PRIMARY KEY, kind TEXT NOT NULL,"
+        " owner TEXT NOT NULL DEFAULT '', label TEXT NOT NULL DEFAULT '',"
+        " state TEXT NOT NULL DEFAULT 'queued', started_at REAL NOT NULL,"
+        " heartbeat_at REAL NOT NULL, updated_at REAL NOT NULL, deadline REAL,"
+        " phase TEXT NOT NULL DEFAULT '', progress_done INTEGER, progress_total INTEGER,"
+        " detail TEXT NOT NULL DEFAULT '', pid INTEGER, pid_start TEXT,"
+        " host TEXT NOT NULL DEFAULT '', exit_code INTEGER,"
+        " artifacts TEXT NOT NULL DEFAULT '[]', tail TEXT NOT NULL DEFAULT '',"
+        " seq INTEGER NOT NULL DEFAULT 0);")
+    db.commit()
+    db.close()
+
+    clock = Clock()
+    ledger = liveness.LivenessLedger(path, clock=clock)
+    ledger.ensure_schema()
+    ledger.register("t8", kind="bg")
+    assert ledger.get("t8")["expects"] == []

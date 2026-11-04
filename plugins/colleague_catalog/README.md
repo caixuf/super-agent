@@ -39,3 +39,30 @@ requires a session identity, and optionally accepts an exact `role` filter.
 The static prompt hint asks the model to consult the directory; whether a model
 actually chooses and submits the right role must be verified in a real session.
 Installing this plugin does not change the existing dispatch or worker policy.
+
+## Portable colleague packs (Prefer B, optional)
+
+Administrators may opt into host-gated pack import/export. Default **off**.
+Set `pack_import_export: true` alongside `enabled: true`. Tools accept an
+**absolute host path only** — there is no model-writable import without that
+host gate.
+
+Pack discipline (OpenMausBot pattern citation, not a vendor tree):
+
+- roles use catalog `display_name` / `duty` / `can_do` / `boundaries`
+- no secrets, tokens, cookies, absolute host paths, or harness blobs in pack bytes
+- import is **additive**; conflicting `role_id` fields are rejected; identical is idempotent
+- skills land **disabled**; routines land **paused** metadata (no scheduler invented)
+- pack / catalog NOTICE: text grants **no** dispatch permissions
+
+```yaml
+plugins:
+  entries:
+    colleague-catalog:
+      enabled: true
+      settings:
+        enabled: true
+        pack_import_export: true
+        engine_root: /absolute/path/to/repo
+        roles: { ... }
+```

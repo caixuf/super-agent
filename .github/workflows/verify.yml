@@ -18,8 +18,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # pyproject 声明 requires-python >= 3.9；两端各跑一次，防止只兼容自己那版。
-        python: ["3.9", "3.12"]
+        # 覆盖 pyproject 声明的最低版本与最新版本。
+        # 曾经这里是 3.9 —— 两个层面都不成立：runner 镜像（ubuntu-26.04）拿不到
+        # 3.9 的 setup-python 包；而 3.10 实测在 import tomllib 处直接 ModuleNotFound。
+        # 声明因此改成 requires-python >= 3.11（跟代码的真实要求一致）。
+        python: ["3.11", "3.12"]
 
     steps:
       - uses: actions/checkout@v4
@@ -29,11 +32,16 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Install test runner
-        # 仓库本身零运行时依赖（pyproject 的 dependencies 为空），只需要 pytest。
+      - name: Install test extras
+        # 用仓库自己声明的 test extra，而不是手写包名：
+        #   test = ["pytest>=7.0", "markdown>=3.4"]
+        # 另外显式装 setuptools —— pyproject 用 setuptools 做 build backend，而
+        # Python 3.12 的 venv 不再自带它，测试里有 setuptools.find_packages 的
+        # 包发现断言。缺它会以 ModuleNotFoundError 直接失败（本仓实测过）：
+        #   184 passed, 1 failed  ->  test_ccp_config_import.py:54
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest
+          python -m pip install -e ".[test]" setuptools
 
       - name: Show interpreter identity
         # verify.sh 会挑「身上带 pytest 的解释器」；这里把选中者打出来，

@@ -1,0 +1,92 @@
+--- a/hermes_feishu_card/hook_runtime.py
++++ b/hermes_feishu_card/hook_runtime.py
+@@ -956,12 +956,24 @@
+             return None
+         keys = set(response)
+         if keys == {"ok", "applied"}:
++            # Legacy two-key sidecars remain compatible. New terminal responses
++            # add delivery.outcome and are checked below.
+             return (
+                 "card"
+                 if response.get("ok") is True
+                 and response.get("applied") is True
+                 else None
+             )
++        if keys == {"ok", "applied", "delivery"}:
++            delivery = response.get("delivery")
++            if (
++                response.get("ok") is True
++                and response.get("applied") is True
++                and type(delivery) is dict
++                and set(delivery) == {"outcome"}
++            ):
++                return "card" if delivery.get("outcome") == "delivered" else None
++            return None
+         if keys not in (
+             {"ok", "applied", "disposition"},
+             {"ok", "applied", "disposition", "native_handoff"},
+@@ -2224,15 +2236,22 @@
+ 
+ 
+ class _ExactCardDeliveryAdapterProxy:
+-    def __init__(self, delegate: Any) -> None:
++    def __init__(self, delegate: Any, *, delivery_outcome: str = "delivered") -> None:
+         self._delegate = delegate
++        self._delivery_outcome = delivery_outcome
+         self.name = str(getattr(delegate, "name", "feishu") or "feishu")
+ 
+     def __getattr__(self, name: str) -> Any:
+         return getattr(self._delegate, name)
+ 
+     async def _send_with_retry(self, *_args: Any, **_kwargs: Any) -> Any:
+-        return _send_result(True)
++        if self._delivery_outcome == "delivered":
++            return _send_result(True)
++        # ``unknown`` must never be treated as confirmed: return failure so
++        # Hermes keeps its normal bounded fallback rather than dropping the answer.
++        return _send_result(
++            False, error=f"card delivery outcome={self._delivery_outcome}"
++        )
+ 
+ 
+ def _exact_base_attachments(local_vars: dict[str, Any]) -> list[dict[str, str]]:
+@@ -2800,6 +2819,13 @@
+                 )
+             return fallback
+         applied = _event_was_applied(result, strict=True)
++        delivery_outcome = _terminal_delivery_outcome(result)
++        if applied and delivery_outcome != "delivered":
++            # Older sidecars may omit the explicit outcome; preserve their
++            # compatibility. A response that explicitly says not_sent/unknown
++            # must not become a fake successful send.
++            if delivery_outcome in {"not_sent", "unknown"}:
++                applied = False
+         if attempt is not None and applied:
+             # The sidecar has accepted this exact terminal. Do not reinterpret
+             # the old send as a new owner's claim after this await; consume only
+@@ -2829,7 +2855,7 @@
+             if normal_reason:
+                 diagnose_attempt(stage, normal_reason, consume=False)
+             return (
+-                _ExactCardDeliveryAdapterProxy(adapter),
++                _ExactCardDeliveryAdapterProxy(adapter, delivery_outcome=delivery_outcome),
+                 content,
+                 reply_to,
+                 metadata,
+@@ -2911,6 +2937,16 @@
+         _HFC_EXACT_COMPLETION_STAGE.set(None)
+ 
+ 
++def _terminal_delivery_outcome(result: Any) -> str:
++    if not isinstance(result, dict):
++        return "unknown"
++    delivery = result.get("delivery")
++    if not isinstance(delivery, dict):
++        return "delivered"  # legacy two-key response, compatibility only
++    outcome = delivery.get("outcome")
++    return outcome if outcome in {"delivered", "not_sent", "unknown"} else "unknown"
++
++
+ def _event_was_applied(result: Any, *, strict: bool = True) -> bool:
+     # Only an explicit sidecar commit may suppress Hermes' native delivery.
+     # Empty/legacy/malformed 2xx responses stay fail-open.

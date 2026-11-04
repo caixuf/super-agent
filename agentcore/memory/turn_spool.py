@@ -93,29 +93,63 @@ class TurnSpool:
             return state
 
     def ingest(self, enqueue):
-        """Move completed captures into the canonical turn queue; retry is idempotent."""
-        counts = {'enqueued': 0, 'unconfirmed': 0, 'discarded': 0}
+        """Move completed captures into the canonical turn queue; retry is idempotent.
+
+        Corrupt, foreign-principal and structurally invalid records are isolated
+        by renaming them out of the ``*.json`` scan set. A single bad record must
+        not terminate the runtime or block later valid turns.
+        """
+        counts = {'enqueued': 0, 'unconfirmed': 0, 'discarded': 0,
+                  'quarantined': 0}
         for path in sorted(self.root.glob('*.json')):
-            with self._locked(path):
-                record = json.loads(path.read_text())
-                if any(record.get(k) != v for k, v in self.identity.items()):
-                    raise ValueError('spool_principal_mismatch')
-                state = record['state']
-                if state == 'completed' and is_automated_turn(record.get('turn_id')):
-                    record['state'] = 'discarded'
-                    record['discard_reason'] = 'automated_turn'
+            try:
+                with self._locked(path):
+                    record = json.loads(path.read_text())
+                    if not isinstance(record, dict):
+                        raise ValueError('spool_record_invalid')
+                    required = ('session_id', 'turn_id', 'user_message',
+                                'assistant_reply', 'state')
+                    if any(key not in record for key in required):
+                        raise ValueError('spool_record_incomplete')
+                    if (not isinstance(record['session_id'], str)
+                            or not isinstance(record['turn_id'], str)
+                            or not isinstance(record['user_message'], str)
+                            or not isinstance(record['assistant_reply'], str)
+                            or not isinstance(record['state'], str)):
+                        raise ValueError('spool_record_invalid')
+                    if any(record.get(k) != v for k, v in self.identity.items()):
+                        raise ValueError('spool_principal_mismatch')
+                    state = record['state']
+                    if state == 'completed' and is_automated_turn(record.get('turn_id')):
+                        record['state'] = 'discarded'
+                        record['discard_reason'] = 'automated_turn'
+                        self._save(path, record)
+                        counts['discarded'] += 1
+                        continue
+                    if state != 'completed':
+                        if state == 'awaiting_verdict':
+                            counts['unconfirmed'] += 1
+                        elif state == 'discarded':
+                            counts['discarded'] += 1
+                        elif state != 'enqueued':
+                            raise ValueError('spool_state_invalid')
+                        continue
+                    result = enqueue(**{k: v for k, v in record.items() if k != 'state'},
+                                     status='completed', source='hermes_terminal_spool')
+                    if not isinstance(result, dict) or result.get('ok') is not True:
+                        raise RuntimeError('turn_enqueue_failed')
+                    record['state'] = 'enqueued'
                     self._save(path, record)
-                    counts['discarded'] += 1
-                    continue
-                if state != 'completed':
-                    if state in ('awaiting_verdict', 'discarded'):
-                        counts['unconfirmed' if state == 'awaiting_verdict' else 'discarded'] += 1
-                    continue
-                result = enqueue(**{k: v for k, v in record.items() if k != 'state'},
-                                 status='completed', source='hermes_terminal_spool')
-                if not isinstance(result, dict) or result.get('ok') is not True:
-                    raise RuntimeError('turn_enqueue_failed')
-                record['state'] = 'enqueued'
-                self._save(path, record)
-                counts['enqueued'] += 1
+                    counts['enqueued'] += 1
+            except RuntimeError:
+                raise
+            except (OSError, ValueError, TypeError):
+                # The reason is a fixed code. Never log the record body.
+                quarantine = path.with_name(path.name + '.quarantine')
+                try:
+                    os.replace(path, quarantine)
+                    os.chmod(quarantine, 0o600)
+                except OSError:
+                    pass
+                counts['quarantined'] += 1
         return counts

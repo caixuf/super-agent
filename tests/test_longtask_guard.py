@@ -53,7 +53,7 @@ def test_heavy_commands_are_converted(command):
 
 @pytest.mark.parametrize("command", [
     "cd /repo && bash docker/verify.sh",     # && 连接，第二段是长任务
-    "echo start; sleep 120; echo done",       # 复合命令里有长等待
+    "echo start; sleep 600; echo done",       # 复合命令里有长等待
 ])
 def test_compound_commands_are_detected(command):
     assert _hit(command), f"复合命令应命中：{command}"
@@ -66,6 +66,38 @@ def test_timeout_env_wrapped_pytest_converts_even_with_tool_timeout():
     )
 
 
+def test_short_declared_timeout_keeps_the_call_in_the_foreground():
+    """A caller who names a wait budget wants the result in this very call.
+
+    The guard exists to stop a *hidden* long wait from occupying the turn. When
+    the caller already bounded the wait, converting it to a background spawn
+    hides the very exit code they asked for -- the terminal returns "started"
+    and the verification they were about to do reads as unverified.
+    """
+    assert _hit("pytest tests/auth -q", timeout=120) is None
+    assert _hit("docker build -t img .", timeout=90) is None
+
+
+def test_a_long_declared_timeout_still_converts():
+    """A generous budget is a safety net, not a request to block this call."""
+    assert _hit("pytest tests -q", timeout=580)
+
+
+def test_the_threshold_is_configurable(monkeypatch):
+    """The ceiling comes from the environment at call time, not at import time."""
+    monkeypatch.setenv("LONGTASK_GUARD_FOREGROUND_TIMEOUT", "300")
+    assert guard.classify({"command": "pytest tests -q", "timeout": 240}) is None
+    assert guard.classify({"command": "pytest tests -q", "timeout": 400})
+
+    monkeypatch.setenv("LONGTASK_GUARD_FOREGROUND_TIMEOUT", "0")
+    assert guard.classify({"command": "pytest tests -q", "timeout": 60})
+
+
+def test_a_malformed_threshold_falls_back_to_the_default(monkeypatch):
+    monkeypatch.setenv("LONGTASK_GUARD_FOREGROUND_TIMEOUT", "not-a-number")
+    assert guard.classify({"command": "pytest tests -q", "timeout": 120}) is None
+
+
 def test_already_background_is_left_alone():
     """已经是后台就别再改 —— 重复改写会让 notify 语义漂移。"""
     assert _hit("pytest tests", background=True) is None
@@ -76,6 +108,11 @@ def test_already_background_is_left_alone():
     "sleep 5",
     "sleep 20",
     "sleep 29",
+    "sleep 30",
+    "sleep 120",
+    "sleep 180",
+    "sleep 2m",
+    "echo start; sleep 120; echo done",
     "sleep 0.5",
     "sleep 20; ls -la",
 ])
@@ -85,10 +122,10 @@ def test_short_sleeps_are_never_converted(command):
 
 
 @pytest.mark.parametrize("command", [
-    "sleep 30",
-    "sleep 120",
-    "echo start; sleep 120; echo done",
-    "sleep 2m",
+    "sleep 181",
+    "sleep 600",
+    "echo start; sleep 600; echo done",
+    "sleep 5m",
     "sleep 1h",
 ])
 def test_long_sleeps_are_converted(command):
@@ -299,7 +336,10 @@ def test_post_hook_writes_a_real_ledger_row(monkeypatch, tmp_path):
     row = store.get("proc_1", require_owner="p:s1")
     assert row is not None
     assert row["state"] == "running"
-    assert row["label"] == "pytest tests"
+    # `label` is what the progress card shows, so it is a readable name -- not
+    # the shell line. The command itself is kept in `detail` for debugging.
+    assert row["label"] == "跑测试套（pytest）"
+    assert row["detail"] == "pytest tests"
 
 
 def test_register_wires_both_hooks():
@@ -404,3 +444,31 @@ def test_silent_background_still_reaches_the_ledger(monkeypatch):
                 "pid": 42, "exit_code": 0, "error": None, "notify_on_complete": False},
         session_id="session-one")
     assert len(fake.register_calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Progress-card naming: a shell line is not a label
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("command,expected", [
+    # A wrapped, piped, redirected command still resolves to the work it does.
+    ('cd /srv/app && /usr/bin/python3 -m pytest bridge/tests -q 2>&1 | tail -5',
+     "跑测试套（pytest）"),
+    ("docker build -t img .", "建镜像（docker build）"),
+    # Not a known long task: fall back to the program name plus its arguments.
+    ("npm run build", "npm run build"),
+    ("git status", "git status"),
+    # A leading `cd` names no work on its own; the next segment decides.
+    ("cd /srv/app && make release", "make release"),
+    # Flags are dropped, positional arguments are kept: they name the target.
+    ("ls -la /tmp", "ls /tmp"),
+])
+def test_readable_label_names_the_work_not_the_shell_line(command, expected):
+    assert guard.readable_label(command) == expected
+
+
+def test_readable_label_is_bounded_and_never_empty_for_empty_input():
+    assert guard.readable_label("") == ""
+    assert guard.readable_label("   ") == ""
+    long_cmd = "cd /x && " + "runner " + " ".join("a%d" % i for i in range(40))
+    assert 0 < len(guard.readable_label(long_cmd)) <= 60

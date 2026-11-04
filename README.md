@@ -4,7 +4,7 @@
 
 - **持久任务池**：`agentcore.pool` 负责持久任务、依赖、租约与结果 outbox；`agentcore.worker` 通过有界 `AgentScheduler` 调用 stdlib 或真实 `flowcoro_py` 后端。支持取消、超时、输出预算和旧 attempt 隔离。
 - **只读分析运行器**：`agentcore.analysis_runner` 执行只读分析任务，产出 `citation_traceability_only` 结构化引用事实。
-- **研发同事运行器**：`agentcore.dev_runner` 在独立的 Git Worktree 中执行编码与测试任务，配备 `read, write, edit, bash` 工具，由跨进程 `fcntl.flock` 文件锁保证单一写者，产出 `dev_traceability_v1` 证据链。
+- **研发同事运行器**：`agentcore.dev_runner` 提供工作树编码与测试接缝，以跨进程 `fcntl.flock` 保持执行和验收单一写者；验收命令由管理员策略固定，任务不得自行执行宿主命令。CLI 可显式注入管理员审查的生成／验收适配器，不由任务选择模块；工作树、锁和适配器本身均不是安全沙箱，完整研发执行仍受可信隔离门禁约束，见 [验收授权边界](docs/POOL_RUNTIME.md#development-verification-authority)。
 - **研发同事模型**：`agentcore.colleague_dev` 定义了 8 大官方研发岗位契约（需求架构师、用例开发大师、红队评审员、仿真测试专家、归因专家、后端开发、前端卡片交互、运维巡检），支持编排闭环与平台 SOP 流水线原生桥接。
 
 使用与恢复边界见 [docs/POOL_RUNTIME.md](docs/POOL_RUNTIME.md) 与 [docs/DISPATCH_ANALYSIS.md](docs/DISPATCH_ANALYSIS.md)。
@@ -36,7 +36,7 @@
 | 文档 | `docs/` | —— | `MIGRATION.md`（八层迁移清单 + 资产表）、`PLUGINS.md`（插件/MCP/工具集注册）、`POOL_RUNTIME.md`、`DISPATCH_ANALYSIS.md`、`REDEPLOY.md` |
 | 平台适配补丁 | `patches/` | `<HERMES_HOME>/agentcore/patches/` | 消息平台适配：Card 2.4 流式卡片 + 纯文字审批；幂等重放与内容探针校验 |
 | 插件集 | `plugins/` | `<HERMES_HOME>/plugins/<name>` + profile `config.yaml` 的 `plugins.enabled` | `longtask_guard/`（前台长任务自动转后台 + 心跳/账本登记）、`task_status/`（长任务活体快照：state/elapsed/heartbeat age/tail）、`durable_dispatch/`（持久任务提交与状态查询）、`colleague_team/` 与 `colleague_catalog/`（研发团队管理与目录呈现）、`markdown_delivery/`（大文档直发与租户级共享）、`write_guard/`（写保护门禁）等 13 款通用插件 |
-| 安装器 | `install/install.sh` | —— | 幂等、`--dry-run` 零副作用、不启停服务、不碰凭据、不覆盖现场身份 |
+| 安装器 | `install/superagent.sh` + `tools/superagent.py` | —— | 单根受管安装、版本 release、原子切换/回滚、manifest 卸载；`install/install.sh` 保留为兼容入口 |
 | 干净室验证 | `docker/` | —— | 容器里从一个空 HOME 装一遍，20 项断言 |
 | 迁移口径 | `docs/MIGRATION.md` | —— | 「只在盘上」的漏项清单 + 可量化验收 |
 
@@ -48,8 +48,25 @@
 bash verify.sh                 # ← 先跑这个：静态 + 单测 + 安装 dry-run（约 30 秒，零依赖）
 bash verify.sh --with-docker   # 再加干净室部署验证（建镜像，几分钟）
 bash verify.sh --with-checks   # 再加宿主特性矩阵（需 Hermes 树 / Node；缺依赖的组降级 WARN）
+```
 
-bash install/install.sh --help              # 全部开关
+## 一键安装 / 整包升级
+
+Super Agent 的统一安装根、版本账本、升级回滚和完整卸载入口见
+[`docs/ONE_COMMAND_INSTALL.md`](docs/ONE_COMMAND_INSTALL.md)。
+
+```bash
+./install/superagent.sh plan --profile <profile>
+./install/superagent.sh install --profile <profile> --apply
+./install/superagent.sh update --profile <profile> --apply
+./install/superagent.sh uninstall --profile <profile> --apply
+```
+
+默认先出计划；只有 `--apply` 才修改系统。
+
+```bash
+bash install/superagent.sh plan --profile <name>   # 推荐入口：先看整包计划
+bash install/install.sh --help              # 兼容入口：全部底层开关
 bash install/install.sh --dry-run           # 只打印计划，**不改系统**
 bash install/install.sh --profile <name>    # 真装（通用资产；示例技能不会被装成生产技能）
 bash install/install.sh --profile <name> --compose-soul <业务叠加层.md>   # 合成生效身份
@@ -60,8 +77,49 @@ bash install/install.sh --profile <name> --apply-baseline                # 显�
 「环境缺失」不许伪装成「通过」。它会自己挑一个**真的带 pytest 的解释器**（PATH 上的
 `python3` 常常先命中没有 pytest 的沙箱 venv，那会让单测块假红，人会去怀疑代码而不是环境）。
 
-安装器**不做**：不启停任何服务（systemd 命令只打印给人执行）、不读写 `.env` / 凭据、
-不覆盖现场身份（默认不动 `SOUL.md`）、不改部署源（只读）。
+统一受管 `install` 不启停服务；`update`、候选宿主切换及底层完整安装
+有不同副作用，不能混用：`install/install.sh` 会按配置创建新 profile、配置并启动
+Worker/新网关和记忆服务。先看计划及 `--help`，需要时明确使用
+`--skip-worker`、`--skip-gateway`、`--skip-memory`；已有现场身份默认保留。
+本仓不打包或生成真实 `.env` / 凭据，部署方另行提供。
+
+### 源码整包交付
+
+```bash
+bash install/superagent.sh package --out-dir /absolute/release-output
+# 开发验证专用：允许未提交内容，不可当作正式发布包
+bash install/superagent.sh package --allow-dirty --out-dir /absolute/candidate-output
+```
+
+正式包要求干净的 Git 工作树，输入为已跟踪源码，包含安装脚本、补丁、元数据、
+许可证及验证入口。未跟踪文件不会进入候选包；需要交付的新文件必须先纳入版本管理。
+同一版本同一输入的归档可复现，已有归档不会被覆盖。`release.json` 记录版本、
+文件摘要及执行权限；解压后的源目录无需 `.git` 即可校验并识别版本。
+在源码根生成的 `.venv`、`.pytest_cache`、`build`、`agentcore.egg-info`
+不属于源码校验范围，其他新增源码、文件变更或权限漂移仍会报错。
+
+解压后使用同一 `install/superagent.sh plan/install/doctor` 入口。这不是包含
+Python、Git、Hermes、可选工具和凭据的独立运行镜像；仍须准备对应宿主依赖。
+受管版本先在临时目录构建，再发布完整目录；同名版本只能按相同内容复用，
+不允许原地覆盖修复，损坏目录会保留并拒绝激活/回滚。
+当前验收状态和未完成门禁见 [`docs/RELEASE_READINESS.md`](docs/RELEASE_READINESS.md)。
+
+前台专用 profile 的宿主工具权限边界已加入候选构建，固定允许持久任务 API，
+执行前独立拦截执行工具、间接入口及执行命令；默认不启用，不改现场 profile。
+配置与限制见 [`docs/FRONTDESK_BOUNDARY.md`](docs/FRONTDESK_BOUNDARY.md)。
+候选宿主也会在本轮持久提交回执后确定性确认并释放回合，不再调用模型轮询；
+真实 Agent/队列的隔离反例已覆盖。这仍不等于后台闭环或真实 IM 验收完成。
+
+### 交互与卡片架构（HFC 单一生产者）
+`agentcore.cardkit2_renderer` 已提供原生渲染与单在途异步更新组件，
+但当前尚无宿主插件/transport 的生产接线，**不能据此认定 HFC 已被替代或安全停用**：
+- **Single-Inflight 异步旁路管道**：单在途调度 + Last-Write-Wins 待发合并；合并不等于平台限流或送达保证。
+- **CardKit 2.0 企业级语义配色**：`wathet`/`turquoise-50`（进行中）、`indigo`/`blue-50`（完成）、`carmine`/`red-50`（失败）。
+- **公开阶段面板**：仅展示明确的公开阶段/进度摘要；`<think>` 内容不进入卡片。
+- **Drain 屏障**：最终交付前先 `close()` 停止新进度，再 `await drain()`；超时或更新失败显式报错，不能当作送达或远端顺序证明。
+- **唯一生产者（2026-11-03 定）**：**HFC 是本仓认可的唯一交互生产者**（进度卡与最终答复同一个所有者）。身份不靠版本号声明，按 [`integrations/hfc/lock.json`](integrations/hfc/lock.json) 的 `deployed_build` 记到具体 wheel 哈希与已验证的契约结果。
+- **原生链路保持未接线**：`FeishuCardKitAdapter`（`feishu_transport.py`）与 `cardkit2_renderer.CardStreamRenderer` 都是库，**不得同时上线**；`tests/test_single_card_producer.py` 会在有人接第二条时会红。
+- **投递语义**：`已接受` / `已渲染` / `已送达` 三态分离，终态只认 `delivered` / `not_sent` / `unknown`。上游 pin 的已知交付缺陷仍记为 quarantine，运行中的 build 另行记录证据；自动化契约通过**不等于**真实回合验收。
 
 ---
 
@@ -166,7 +224,8 @@ python3 -m pip install -e ".[test]"
 python3 -m pytest tests/ -q
 ```
 
-要求 Python >= 3.9。运行时零第三方依赖（标准库 `sqlite3` + 可选 `sqlite-vec` 扩展）。
+要求 Python >= 3.11（与 `pyproject.toml` 一致）。核心运行时零第三方依赖
+（标准库 `sqlite3` + 可选 `sqlite-vec` 扩展）；宿主、安装配置与文档工具的依赖另列。
 
 `agentcore/memory/vendor/vec0.so` 是 sqlite-vec 扩展，**随包分发**，召回时按包相对
 路径查找（不依赖当前工作目录）。扩展缺失时向量层自动降级到 Python 逐条计算，

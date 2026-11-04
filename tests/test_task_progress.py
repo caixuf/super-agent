@@ -5,6 +5,8 @@ is quiet, and overwriting a finished card with a late frame.
 """
 from __future__ import annotations
 
+import pytest
+
 from agentcore.task_card import CardState
 from agentcore.task_progress import (
     card_state, changed, render, should_emit, snapshot, terminal, verdict,
@@ -79,6 +81,13 @@ def test_aggregate_reports_the_worst_unfinished_story_without_hiding_failures():
     assert aggregate([snap("done"), snap("lost")])["verdict"] == "failed"
     assert aggregate([snap("done"), snap("cancelled")])["verdict"] == "done"
     assert aggregate([snap("cancelled"), snap("cancelled")])["verdict"] == "cancelled"
+    # A task parked on a human decision is not finished; the card must not say 已完成.
+    assert aggregate([snap("waiting_user")])["verdict"] == "waiting_user"
+    assert aggregate([snap("awaiting_plan_approval")])["verdict"] == "waiting_user"
+    assert aggregate([snap("done"), snap("waiting_user")])["verdict"] == "waiting_user"
+    assert aggregate([snap("waiting_user")])["terminal"] is False
+    # A word nobody taught us must never be announced as a finish.
+    assert aggregate([snap("frobnicating")])["verdict"] == "unknown"
     assert aggregate([snap("running", elapsed=90), snap("running", elapsed=30)])["elapsed"] == 90
 
     text = render_many([snap("running", "collect", "pytest tests"), snap("running", "bundle", "npm build")],
@@ -102,3 +111,151 @@ def test_foreground_and_background_terminal_aggregation():
     bg_failed = snapshot({"task_id": "proc_z", "state": "failed", "started_at": 1}, now=10)
     failed = aggregate_with_foreground([bg_failed], fg)
     assert failed["terminal"] and failed["verdict"] == "failed"
+
+
+# --------------------------------------------------------------------------- #
+# Reader-facing words: the card must not print the ledger's own vocabulary
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("verdict,word", [
+    ("queued", "已接收"),
+    ("running", "进行中"),
+    ("done", "已完成"),
+    ("failed", "未完成"),
+    ("cancelled", "已取消"),
+    # These two are what a killed background process actually becomes. They were
+    # missing from the map, so the card printed `lost` / `stalled` in English.
+    ("stalled", "无响应"),
+    ("lost", "进程已不在"),
+])
+def test_every_ledger_verdict_has_a_reader_facing_word(verdict, word):
+    from agentcore.task_progress import verdict_word
+
+    assert verdict_word(verdict) == word
+
+
+def test_render_many_never_shows_a_raw_verdict():
+    from agentcore.task_progress import render_many
+
+    def snap(word):
+        return {"task_id": "proc_" + word, "label": "跑测试套（pytest）", "verdict": word,
+                "state": word, "phase": "", "percent": None, "elapsed": 30,
+                "detail": "", "artifacts": (), "terminal": word != "running"}
+
+    text = render_many([snap("lost"), snap("stalled")], title="任务")
+    assert "lost" not in text and "stalled" not in text
+    assert "进程已不在" in text and "无响应" in text
+
+
+def test_an_unknown_verdict_is_shown_as_is_rather_than_dropped():
+    """A word this table has not met yet must still reach the reader."""
+    from agentcore.task_progress import verdict_word
+
+    assert verdict_word("some_future_state") == "some_future_state"
+    assert verdict_word(None) == ""
+
+
+def test_the_plugin_copy_of_the_word_table_matches_the_engine():
+    """The plugin keeps its own copy; a drift here is a wrong word on a card.
+
+    The engine package is a plain module, so a plugin hot-reload re-executes the
+    plugin file while ``agentcore`` stays whatever the gateway imported at boot.
+    The plugin therefore cannot call the engine's helper and carries the table
+    itself -- which makes "the two agree" a real invariant, not a style point.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    from agentcore.task_progress import VERDICT_WORD
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "task_progress_plugin_under_test", root / "plugins" / "task_progress" / "__init__.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert dict(module._VERDICT_WORD) == dict(VERDICT_WORD)
+
+
+# --------------------------------------------------------------------------- #
+# Baseline doc vs installer: a floor written in one place must exist in both
+# --------------------------------------------------------------------------- #
+
+def test_the_baseline_doc_and_the_installer_name_the_same_keys():
+    """`runtime/BASELINE.md` is the contract; `install/install.sh` enforces it.
+
+    They drift silently: a floor added to the doc but not to the installer is a
+    rule nobody applies, and a key in the installer missing from the doc is an
+    undocumented floor that later looks arbitrary. The one deliberate exception
+    is the write-protection switch, which the installer refuses to touch.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    doc = (root / "runtime" / "BASELINE.md").read_text(encoding="utf-8")
+    doc_keys = {
+        m.group(1) for m in re.finditer(r"^\| `([a-z][\w.]*)` \|", doc, re.M)
+    }
+    installer = (root / "install" / "install.sh").read_text(encoding="utf-8")
+    block = installer.split('for kv in "agent.max_turns', 1)[1].split("do\n", 1)[0]
+    install_keys = {
+        m.group(1) for m in re.finditer(r'"([a-z][\w.]*) [^"]+"', "for kv in \"agent.max_turns" + block)
+    }
+
+    assert install_keys, "installer baseline list not found"
+    assert install_keys <= doc_keys, "installer writes a floor the doc never states: %s" % (
+        install_keys - doc_keys)
+    # Every documented floor is applied, except the one the installer must not touch.
+    assert doc_keys - install_keys == {"security.protected_instruction_files"}, (
+        doc_keys - install_keys)
+
+
+def test_a_claimed_finish_awaits_its_evidence_on_the_card():
+    """`unverified` must never read as finished or as merely accepted."""
+    from agentcore.task_progress import render, render_many
+
+    snap = {"task_id": "proc_x", "label": "跑测试套（pytest）", "verdict": "unverified",
+            "state": "unverified", "phase": "", "percent": None, "elapsed": 30,
+            "detail": "待验收：文件不存在", "artifacts": (), "terminal": False}
+
+    single = render(snap)
+    assert "待验收" in single
+    assert "已完成" not in single
+    assert "已接收" not in single
+
+    multi = render_many([snap], title="任务")
+    assert "待验收" in multi
+
+
+def test_finished_task_clock_stops_at_finish():
+    """终态任务的耗时不随 wall clock 增长。
+
+    实测事故：一个 6 秒跑完的命令，33 分钟后在冻结的卡片上显示成两小时——
+    因为 elapsed 一直用 now 减 started_at。读者无从分辨那是「活了多久」
+    还是「跑了多久」。真实耗时就在账本里（updated_at - started_at）。
+    """
+    finished = dict(ROW, state="done", verdict=None, updated_at=1006.0)
+    finished.pop("verdict", None)
+    snap = snapshot(finished, now=1000.0 + 7500)     # 两小时后才被重新渲染
+    assert snap["verdict"] == "done"
+    assert snap["elapsed"] == 6, "终态任务应停在真实耗时 6 秒，而不是 7500 秒"
+
+    # 失败与取消同样停表
+    for word in ("failed", "cancelled"):
+        row = dict(ROW, state=word, updated_at=1003.0)
+        assert snapshot(row, now=1000.0 + 9999)["elapsed"] == 3, word
+
+
+def test_running_task_clock_still_advances():
+    """非终态仍然按 wall clock 走，不能把它也冻住。"""
+    running = dict(ROW, updated_at=1010.0)
+    assert snapshot(running, now=1300.0)["elapsed"] == 300
+
+
+def test_terminal_task_without_finish_stamp_falls_back_to_now():
+    """账本没记 updated_at 时不编造耗时，退回原来的算法。"""
+    row = dict(ROW, state="done")
+    row.pop("updated_at", None)
+    assert snapshot(row, now=1100.0)["elapsed"] == 100

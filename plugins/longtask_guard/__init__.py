@@ -94,6 +94,10 @@ def _ledger():
 
 #: The host's own background-spawn receipt (``terminal(background=True)`` result body).
 _SPAWN_RECEIPT_OUTPUT = "Background process started"
+#: A declared foreground wait budget at or below this many seconds is honoured:
+#: the caller asked for a result, not for a spawn receipt. 180s keeps an ordinary
+#: test run in the foreground while still catching a genuinely long command.
+DEFAULT_FOREGROUND_TIMEOUT = 180.0
 #: Tracked background process ids: ``proc_`` + short hex suffix.
 _PROCESS_ID = re.compile(r"proc_[0-9a-f]{1,}")
 
@@ -150,14 +154,19 @@ def _on_post_tool_call(tool_name: str = "", args: Any = None, result: Any = None
             return None
         profile = getattr(_CTX, "profile_name", "") or "local"
         owner = "%s:%s" % (profile, session_id or "local")
-        label = str(payload.get("command") or args.get("command") or "")[:200]
+        command = str(payload.get("command") or args.get("command") or "")
+        # The card shows `label`; a truncated shell line there reads as noise.
+        # Keep the readable name in `label` and the command itself in `detail`,
+        # where the single-task view can still show it for debugging.
+        label = readable_label(command)
         pid = payload.get("pid")
         try:
             pid = int(pid) if pid is not None else None
         except (TypeError, ValueError):
             pid = None
         ledger.register(process_id, kind="terminal", owner=owner, label=label,
-                        pid=pid, host="local", phase="started", state="running")
+                        pid=pid, host="local", phase="started", state="running",
+                        detail=command.strip()[:120])
         # A background start receipt carries exit_code=0 even while the child is
         # still running. Only a completion-shaped status may close the row.
         status = payload.get("status")
@@ -185,7 +194,7 @@ _HEAVY_PATTERNS: tuple[tuple[str, str], ...] = (
 
 #: ``sleep`` 只有够久才值得转后台。``sleep 20`` 这类短等待转成后台，
 #: 代价是**多一次进程完成唤醒**，换来的只是省 20 秒 —— 净亏。
-_SLEEP_BACKGROUND_MIN_SECONDS = 30
+_SLEEP_BACKGROUND_MIN_SECONDS = DEFAULT_FOREGROUND_TIMEOUT + 1
 _SLEEP_UNITS: dict[str, int] = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 
 
@@ -345,6 +354,52 @@ def _match_segment(segment: str, _depth: int = 0) -> Optional[str]:
     return None
 
 
+#: Shell builtins and noise words that name no work when they open a segment.
+_SHELL_NOISE = frozenset({"cd", "echo", "export", "set", "true", "time", "env", "nohup"})
+
+
+def readable_label(command: str) -> str:
+    """A short human name for a shell command, for the progress card.
+
+    The card is read by a person waiting on the task; a truncated shell line
+    tells them nothing. Reuse the long-task classifier's vocabulary
+    ("跑测试套（pytest）") and otherwise fall back to the program name plus its
+    leading arguments. Pure, so the naming can be pinned by a test.
+    """
+    text = (command or "").strip()
+    if not text:
+        return ""
+    segments = _shell_segments(text)
+    for segment in segments:
+        hit = _match_segment(segment)
+        if hit:
+            return hit
+    for segment in segments:
+        parts = segment.split()
+        if not parts or parts[0].rsplit("/", 1)[-1] in _SHELL_NOISE:
+            continue
+        args = [t for t in parts[1:] if not t.startswith("-")][:2]
+        return " ".join([parts[0].rsplit("/", 1)[-1], *args])[:60]
+    return text.rsplit("/", 1)[-1][:60]
+
+
+def _foreground_timeout_ceiling() -> float:
+    """A declared wait budget at or below this many seconds stays foreground.
+
+    Rationale: the guard exists to stop a *hidden* long wait from occupying the
+    turn. Once the caller writes an explicit ``timeout``, the wait is not hidden
+    — and turning the call into a background spawn throws away the exit code
+    they asked for. Zero disables the exemption.
+    """
+    raw = os.environ.get("LONGTASK_GUARD_FOREGROUND_TIMEOUT", "").strip()
+    if not raw:
+        return DEFAULT_FOREGROUND_TIMEOUT
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_FOREGROUND_TIMEOUT
+
+
 def classify(args: dict[str, Any]) -> Optional[str]:
     """返回该 `terminal` 调用命中的长任务说明；不是长任务则 None。纯函数，便于钉住判定。"""
     if not isinstance(args, dict):
@@ -355,6 +410,13 @@ def classify(args: dict[str, Any]) -> Optional[str]:
 
     # 已经是后台就没必要动它（重复改写会让 notify 语义漂移）。
     if args.get("background"):
+        return None
+
+    # 调用方已经写死了等待上限，说明他要的就是这次调用的结果（通常是退出码）。
+    # 把它改成后台，等于把答案换成了句“已启动”。
+    ceiling = _foreground_timeout_ceiling()
+    declared = args.get("timeout")
+    if ceiling > 0 and isinstance(declared, (int, float)) and 0 < declared <= ceiling:
         return None
 
     for segment in _shell_segments(command):

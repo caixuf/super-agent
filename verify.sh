@@ -72,6 +72,15 @@ else
   fail "单元测试未全过（完整输出：/tmp/verify_unit.log）"
 fi
 
+# ── ②.1 防退化靶场：Golden Evals 真实踩坑用例硬门禁
+section "②.1 防退化靶场（$PY -m pytest tests/evals -q）"
+if "$PY" -m pytest tests/evals -q >/tmp/verify_golden.log 2>&1; then
+  pass "$(tail -n 1 /tmp/verify_golden.log | tr -d '\n')"
+else
+  tail -n 20 /tmp/verify_golden.log | sed 's/^/    /'
+  fail "防退化靶场用例失败（完整输出：/tmp/verify_golden.log）"
+fi
+
 # ── ③ 安装器 dry-run：一个文件都不许建
 section "③ 安装器 dry-run（零副作用）"
 if [ -f install/install.sh ]; then
@@ -114,6 +123,35 @@ if [ -n "${FEISHU_APP_ID:-}" ] && [ -n "${FEISHU_APP_SECRET:-}" ] && [ -n "${FEI
   fi
 else
   skipped+=("真实消息平台交付（未设置 FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_TEST_CHAT_ID）")
+fi
+
+# ── ⑥.1 部署链路延迟硬门禁：探测关键往返延迟，拒绝带病上线
+section "⑥.1 部署链路延迟硬门禁（E2E Latency Gate）"
+if "$PY" -c '
+import sys
+from agentcore.preflight import (
+    check_dns_latency,
+    check_idempotent_store_latency,
+    check_feishu_api_latency,
+)
+checks = [
+    ("DNS 解析延迟", check_dns_latency("open.feishu.cn", max_acceptable_ms=300.0)),
+    ("幂等信箱读写延迟", check_idempotent_store_latency(max_acceptable_ms=20.0)),
+    ("平台 OpenAPI 往返延迟", check_feishu_api_latency(max_acceptable_ms=800.0)),
+]
+failed = [c for c in checks if not c[1].passed]
+for name, res in checks:
+    tag = "[PASS]" if res.passed else "[FAIL]"
+    print(f"  {tag} {name:<20} ({res.latency_ms:.1f}ms) - {res.message}")
+    if not res.passed and res.detail:
+        print(f"         -> {res.detail}")
+if failed:
+    sys.exit(1)
+' >/tmp/verify_latency.log 2>&1; then
+  cat /tmp/verify_latency.log
+else
+  cat /tmp/verify_latency.log
+  fail "链路延迟超出预算硬门禁（阻断部署，防止线上 3 秒超时雪崩）"
 fi
 
 # ── ⑦ 模型上下文体检：端点必须说清窗口，不能靠手写 pin

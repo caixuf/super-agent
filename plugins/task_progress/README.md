@@ -75,6 +75,11 @@ plugins:
 
 ## 升级复验清单
 
+宿主未提供 `gateway.plugin_messages` / `PluginContext.post_message` 时，插件使用随附的
+`legacy_messages.py`，仅支持 Feishu/Lark 已有会话。会话、profile、授权与适配器选择
+仍交给宿主检查；不创建会话、不触发模型回合，也不绕过跨 profile 限制。
+原生消息接口存在时仍优先使用。部署插件时必须连同这个文件一起更新。
+
 宿主升级后必须重跑：
 
 1. 探针：`PluginContext.post_message` 返回对象仍有 `ok` / `message_id` / `edit`；

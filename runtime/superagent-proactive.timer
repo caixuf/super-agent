@@ -1,0 +1,14 @@
+[Unit]
+Description=Hourly super-agent proactive observation pass
+
+[Timer]
+# Hourly is the deployment choice: often enough to notice a task that landed
+# without its evidence, rare enough to stay a background observation.
+OnCalendar=hourly
+# Persistent=true runs a missed pass after downtime. In observe mode that is a
+# reading, not a backlog of actions -- nothing is re-sent on catch-up.
+Persistent=true
+AccuracySec=2min
+
+[Install]
+WantedBy=timers.target

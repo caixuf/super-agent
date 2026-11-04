@@ -18,13 +18,13 @@
 
 ## 当前边界
 
-登记成功只是记账，不能说明实例已启动。此插件尚未接上真实的实例创建驱动、岗位派工、最终消息发送和生产停用流程；不要在现有运行系统中启用并宣称招聘已完成。
+登记成功只是记账，不能说明实例已启动。宿主可以接入预先配置的成员 profile 和 Gateway 派工；登记并不会自动创建、配置或验收一个新成员。岗位描述也不等于执行权限。
 
 主同事保护适用于本登记库及其管理工具。要防止拥有同一系统账号的任意终端命令直接删除主同事文件，还需要宿主进程隔离和文件权限；登记库本身不能提供这项保证。
 
 ## Gateway 派工（额外关闭）
 
-`gateway_dispatch.enabled` 默认关闭。即使打开，插件也只注册工具外壳；没有宿主安装的可信 dispatcher 时，调用会返回 `gateway_dispatch_host_unavailable`。工具只接受同事 ID/唯一显示名、任务文本和幂等 `request_id`。profile 与 session 从 Hermes 当前 runtime 和 handler 注入的 `session_id` 绑定，模型不能传 owner、generation、profile、principal、Gateway 地址或 session ID。状态查询只能从提交任务的同一 profile/session 读取。
+`gateway_dispatch.enabled` 默认关闭。启用后，可通过宿主配置的 `tool_backend` 或 `safe_backend` 创建并注册 dispatcher；没有可信 dispatcher 时，调用会返回 `gateway_dispatch_host_unavailable`。工具只接受同事 ID/唯一显示名、任务文本和幂等 `request_id`。profile 与 session 从 Hermes 当前 runtime 和 handler 注入的 `session_id` 绑定，模型不能传 owner、generation、profile、principal、Gateway 地址或 session ID。状态查询只能从提交任务的同一 profile/session 读取。
 
 真实宿主必须先构造并验证 `GatewayColleagueDispatcher`（Registry + Supervisor、真实 Provisioner、持久 Hermes session binding store、按 profile 绑定的 `HermesGatewayHost.connection_for_profile`），再在插件工具可用前显式注册：
 
@@ -46,7 +46,7 @@ bootstrap = ColleagueGatewayBootstrap(..., gateway_host=host,
 
 没注入时 `connection_for_profile` 报 `gateway_connector_required`、会话创建报 `session_store_factory_required`，不会退回任何隐式 import。插件启用派工时会同时调用 `colleague_gateway_service.configure_session_env(get_session_env)`；没有这个注入，派工工具拒绝运行（`session_env_provider_required`），因为无法判断当前是否 cron 会话。
 
-宿主必须自己提供 readiness attestation；仅能连上 Gateway 不代表成员 ready。当前仓库还没有可供生产直接使用的 Provisioner backend，也没有在现有服务中启动 bootstrap，因此工具仍不可用，不能通过设置开关伪装完成接入。Gateway 回执 terminal 不会自动关闭 reservation；后台进程未有宿主 quiescence 证据时保持占用。插件不发送 Feishu 消息。
+宿主提供的 backend 可连接已配置的成员并派工，但 Gateway 可达不代表权限隔离、任务停止证明或业务验收已完成。工具型后端当前的停止证明回调固定返回 `attempt_bound_containment_unavailable`：完成回执可在满足身份和结果校验后释放会话槽，但后台工作仍保持未结算；缺少原会话身份等条件时会话槽也可能保持占用。不要把工作树、unit 名或 terminal 状态当作整个任务及其子进程已停止的证明。完成结果可通过宿主配置的投递链路回到原会话，是否送达以真实回执为准。
 
 查状态时会附带一条简短说明：排队、处理中、状态待确认，以及「同事已回复但后台工作仍待确认」分别显示。只有答复已确认且后台占用已关闭，才说任务完成。
 

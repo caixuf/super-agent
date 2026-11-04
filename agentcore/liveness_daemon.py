@@ -48,7 +48,8 @@ class LivenessDaemon:
     def __init__(self, ledger: LivenessLedger, sink: Callable[[Dict[str, Any]], Any], *,
                  interval: float = DEFAULT_INTERVAL_SECONDS,
                  clock: Optional[Callable[[], float]] = None,
-                 sleep: Optional[Callable[[float], Any]] = None):
+                 sleep: Optional[Callable[[float], Any]] = None,
+                 pool: Any = None):
         if not callable(sink):
             raise ValueError("sink must be callable")
         try:
@@ -63,6 +64,9 @@ class LivenessDaemon:
         self._clock = clock or time.time
         self._sleep = sleep
         self.errors = 0
+        # Prefer-D2: optional pool reference — tick sweeps STARTING/CANCELING windows.
+        # Pool remains ledger authority; daemon never becomes a second scheduler.
+        self.pool = pool
 
     def _event(self, row: Dict[str, Any]) -> Dict[str, Any]:
         now = float(self._clock())
@@ -87,7 +91,22 @@ class LivenessDaemon:
         }
 
     def run_once(self) -> List[Dict[str, Any]]:
-        """Sweep once, emit one event per transition, return what was emitted."""
+        """Sweep once, emit one event per transition, return what was emitted.
+
+        Prefer-D2/D6: when a pool is bound, prefer ``reconcile_watchdog`` (includes
+        Prefer-D2 ``enforce_windows`` + finish-callback-loss reconcile). Fall back to
+        ``enforce_windows`` alone on older pools. Pool remains ledger authority.
+        """
+        if self.pool is not None:
+            try:
+                if hasattr(self.pool, "reconcile_watchdog"):
+                    self.pool.reconcile_watchdog(now=self._clock())
+                elif hasattr(self.pool, "enforce_windows"):
+                    self.pool.enforce_windows(now=self._clock())
+            except Exception:  # noqa: BLE001 — window/watchdog sweep must not stop the daemon
+                self.errors += 1
+                logger.warning("prefer-d6 pool.reconcile_watchdog/enforce_windows failed",
+                               exc_info=True)
         emitted: List[Dict[str, Any]] = []
         for row in self.ledger.sweep(now=self._clock()):
             event = self._event(row)
@@ -122,4 +141,44 @@ class LivenessDaemon:
         return {"iterations": iterations, "errors": self.errors}
 
 
-__all__ = ["LivenessDaemon", "JsonlSink", "DEFAULT_INTERVAL_SECONDS"]
+#: Prefer-C2 — liveness terminal states that may kick completion_delivery (no LLM).
+_TERMINAL_LIVENESS = frozenset({"done", "failed", "cancelled", "completed"})
+
+
+def terminal_delivery_sink(pool, transport=None):
+    """Build a liveness sink that kicks ``notify_on_terminal`` on terminal transitions.
+
+    Thin Prefer-C2 wire: one side-channel deliver attempt per terminal event. Failures
+    stay observable via the returned status; never fakes delivered when transport is
+    missing. Does not open a model turn or a second scheduler.
+    """
+    from agentcore.completion_delivery import notify_on_terminal
+
+    def _sink(event):
+        if not isinstance(event, dict):
+            return None
+        state = event.get("state")
+        if str(state or "").lower() not in _TERMINAL_LIVENESS:
+            return None
+        return notify_on_terminal(pool, transport, status=state)
+
+    return _sink
+
+
+
+#: Prefer-D4 — liveness stalled/lost → same-card ops (no auto-done).
+
+
+def stalled_card_sink(bridge):
+    """Build a liveness sink that kicks Prefer-D4 on stalled/lost transitions.
+
+    Thin Prefer-D4 wire: one actionable same-card attempt per transition (bridge
+    owns cooldown). Non-stall events return None. Does not open a model turn or
+    mark done/failed from silence alone.
+    """
+    from agentcore.stalled_card_bridge import stalled_card_sink as _impl
+    return _impl(bridge)
+
+
+__all__ = ["LivenessDaemon", "JsonlSink", "DEFAULT_INTERVAL_SECONDS",
+           "terminal_delivery_sink", "stalled_card_sink"]

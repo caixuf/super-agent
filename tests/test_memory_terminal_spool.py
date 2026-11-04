@@ -86,11 +86,15 @@ def test_conflicts_and_cross_principal_rejected(tmp_path):
     captured(s)
     with pytest.raises(ValueError, match='turn_capture_conflict'):
         s.capture(session_id='s', turn_id='t', user_message='different', assistant_reply='')
-    with pytest.raises(ValueError, match='spool_principal_mismatch'):
-        spool(tmp_path, user='other').ingest(lambda **kw: {'ok': True})
     s.finalize(session_id='s', turn_id='t', failed=True)
     with pytest.raises(ValueError, match='turn_verdict_conflict'):
         s.finalize(session_id='s', turn_id='t', completed=True)
+    bad = tmp_path / 'bad.json'
+    bad.write_text('{not-json')
+    result = spool(tmp_path, user='other').ingest(lambda **kw: {'ok': True})
+    assert result['quarantined'] == 2
+    assert {p.name for p in tmp_path.glob('*.json.quarantine')} >= {
+        bad.name + '.quarantine', next(tmp_path.glob('*.json.quarantine')).name}
 
 
 def test_real_plugin_uses_terminal_hook_without_engine_global_mutation(tmp_path):

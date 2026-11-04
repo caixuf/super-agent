@@ -1,4 +1,4 @@
-"""Deterministic gate contracts and safe verification execution harnesses.
+"""Deterministic gate contracts, safe verification execution harnesses, and evidence-based termination.
 
 Ported and adapted from open-source gate contracts and verification principles:
 - Enforces strict contract schemas for executable verification checks.
@@ -6,19 +6,36 @@ Ported and adapted from open-source gate contracts and verification principles:
 - Fails closed on critical failures to halt cascading corrupted executions.
 - Supports reproduction checks (expecting non-zero exits) as well as regular tests.
 - Issues tamper-evident, privacy-preserving verification receipts.
+
+核心增强（四大进阶特性 3）：
+1. 机器证据验证收尾门禁（Evidence-Based Termination）：
+   - 彻底废除口头表述结案，凡代码改动必须附带真实退出码 0 与用例通过数；
+   - 凡服务修改必须提供 systemd active (running) 或端口探针证据；
+   - 凡硬件/日志排查必须给出实际行号或命令原文字符；
+2. 失败自愈打回循环（Self-Correction Loop）：
+   - 机器断言失败时自动提取真实错误堆栈，生成 RepairContext 修复上下文；
+   - 自动打回重试（上限至多 3 轮）；
+   - 超过 3 轮如实汇报故障断点，严禁伪造假绿。
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import enum
 import hashlib
+import inspect
+import logging
+import math
 import os
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import re
+import selectors
 import shlex
 import signal
 import subprocess
 import time
-from typing import Any, Callable, Final, Mapping, Sequence
+from typing import Any, Callable, Dict, Final, List, Mapping, Optional, Sequence, Tuple, Union
+
+logger = logging.getLogger(__name__)
 
 VERIFICATION_CHECK_CONTRACT_SCHEMA: Final[str] = "verification_check_contract/v1"
 VERIFICATION_RECEIPT_SCHEMA: Final[str] = "verification_receipt/v1"
@@ -72,7 +89,7 @@ class VerificationCheck:
             raise ValueError(
                 f"command length ({len(raw_cmd)}) exceeds cap {MAX_VERIFICATION_COMMAND_CHARS}"
             )
-        if self.timeout_s <= 0 or self.timeout_s > MAX_VERIFICATION_TIMEOUT:
+        if not math.isfinite(self.timeout_s) or self.timeout_s <= 0 or self.timeout_s > MAX_VERIFICATION_TIMEOUT:
             raise ValueError(f"timeout_s must be in (0, {MAX_VERIFICATION_TIMEOUT}]")
         if self.scope not in VERIFICATION_SCOPES:
             raise ValueError(f"scope must be in {VERIFICATION_SCOPES}")
@@ -122,8 +139,10 @@ def normalize_verification_check(raw: Mapping[str, Any] | VerificationCheck) -> 
     timeout_s = float(raw.get("timeout_s", DEFAULT_CHECK_TIMEOUT))
     scope = str(raw.get("scope", "unit_scoped")).strip()
     safety_tier = str(raw.get("safety_tier", "read_only")).strip()
-    expected_exit_code = int(raw.get("expected_exit_code", 0))
+    expected_exit = int(raw.get("expected_exit_code", 0))
     critical = bool(raw.get("critical", True))
+
+    env_tuples = tuple(sorted(env_dict.items()))
 
     return VerificationCheck(
         check_id=check_id,
@@ -131,9 +150,9 @@ def normalize_verification_check(raw: Mapping[str, Any] | VerificationCheck) -> 
         timeout_s=timeout_s,
         scope=scope,
         safety_tier=safety_tier,
-        expected_exit_code=expected_exit_code,
+        expected_exit_code=expected_exit,
         critical=critical,
-        env=tuple(sorted(env_dict.items())),
+        env=env_tuples,
     )
 
 
@@ -142,63 +161,114 @@ def default_process_executor(
     timeout_s: float,
     workdir: Path,
     *,
-    env: Mapping[str, str] | Sequence[tuple[str, str]] | None = None,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Execute command safely under isolated child process with bounded output."""
-    start_t = time.monotonic()
-    timed_out = False
+    """Bound local command output while reading, never by trimming after capture.
+
+    Group cleanup is best effort, not proof about detached/remote descendants.
+    The Pool's attempt supervisor remains responsible for local tree settlement.
+    """
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise ValueError("positive_finite_verification_timeout_required")
+    t0 = time.monotonic()
     run_env = os.environ.copy()
     if env:
-        if isinstance(env, Mapping):
-            run_env.update({str(k): str(v) for k, v in env.items()})
-        else:
-            for k, v in env:
-                run_env[str(k)] = str(v)
+        run_env.update(env)
 
     try:
         proc = subprocess.Popen(
-            list(argv),
+            argv,
             cwd=str(workdir),
-            env=run_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            env=run_env,
             start_new_session=True,
         )
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            stdout, stderr = proc.communicate()
-        duration = time.monotonic() - start_t
-
-        stdout_str = stdout or ""
-        stderr_str = stderr or ""
-        if len(stdout_str.encode("utf-8")) > MAX_OUTPUT_BYTES:
-            stdout_str = stdout_str[: MAX_OUTPUT_BYTES // 2] + "\n[TRUNCATED: output exceeded limit]"
-        if len(stderr_str.encode("utf-8")) > MAX_OUTPUT_BYTES:
-            stderr_str = stderr_str[: MAX_OUTPUT_BYTES // 2] + "\n[TRUNCATED: output exceeded limit]"
-
-        return {
-            "exit_code": 124 if timed_out else proc.returncode,
-            "stdout": stdout_str,
-            "stderr": stderr_str,
-            "timed_out": timed_out,
-            "duration_s": duration,
-        }
     except Exception as exc:
-        duration = time.monotonic() - start_t
+        duration = time.monotonic() - t0
         return {
             "exit_code": -1,
             "stdout": "",
-            "stderr": f"ExecutionError: {type(exc).__name__}: {exc}",
+            "stderr": f"SpawnError: {type(exc).__name__}: {exc}",
             "timed_out": False,
+            "execution_error": True,
             "duration_s": duration,
         }
+
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    timed_out, limited_stream, error = False, None, None
+    deadline = t0 + timeout_s
+    try:
+        with selectors.DefaultSelector() as selector:
+            for name, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, name)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                for key, _ in selector.select(remaining):
+                    try:
+                        chunk = os.read(key.fd, 65536)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                        continue
+                    target = buffers[key.data]
+                    room = MAX_OUTPUT_BYTES - len(target)
+                    target.extend(chunk[:room])
+                    if len(chunk) > room:
+                        limited_stream = key.data
+                        break
+                if limited_stream:
+                    break
+        if not timed_out and not limited_stream:
+            # EOF does not mean the process has exited: a verifier can close
+            # both pipes and then keep running.
+            proc.wait(timeout=max(0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    except Exception as exc:
+        error = f"ExecutionError: {type(exc).__name__}: {exc}"
+    finally:
+        for stream in (proc.stdout, proc.stderr):
+            stream.close()
+        if proc.returncode is None:
+            # Do not poll/reap the leader before signalling: its unreaped PID
+            # anchors this process group even when the leader exited first.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                error = "ExecutionError: process_stop_unconfirmed"
+        # Never communicate() again: a detached child may hold a pipe forever.
+
+    output = {}
+    for name, data in buffers.items():
+        # Invalid UTF-8 must not erase a real exit status, or expand a bounded
+        # byte capture into an unbounded returned string.
+        text = data.decode("utf-8", errors="replace")
+        output[name] = text.encode("utf-8")[:MAX_OUTPUT_BYTES].decode("utf-8", errors="ignore")
+    if limited_stream:
+        output[limited_stream] += f"\n[TRUNCATED: output exceeded {MAX_OUTPUT_BYTES} bytes]"
+    if timed_out:
+        output["stderr"] += f"\nCommand timed out after {timeout_s}s"
+    if error:
+        output["stderr"] += "\n" + error
+    return {
+        "exit_code": 124 if timed_out else (-1 if error else proc.returncode),
+        **output,
+        "timed_out": timed_out,
+        "output_limited": limited_stream is not None,
+        "execution_error": error is not None,
+        "duration_s": time.monotonic() - t0,
+    }
 
 
 def evaluate_verification_checks(
@@ -215,8 +285,20 @@ def evaluate_verification_checks(
     if len(checks) > MAX_VERIFICATION_CHECKS:
         raise ValueError(f"number of checks ({len(checks)}) exceeds limit ({MAX_VERIFICATION_CHECKS})")
 
-    exec_fn = executor or default_process_executor
+    exec_fn = default_process_executor if executor is None else executor
     norm_checks = [normalize_verification_check(c) for c in checks]
+    # Negotiate the legacy three-argument shape without executing anything.
+    # A TypeError from inside an executor can follow real effects; retrying it
+    # without env both duplicates execution and silently changes the contract.
+    signature = inspect.signature(exec_fn)
+    try:
+        signature.bind((), DEFAULT_CHECK_TIMEOUT, target_dir, env={})
+        executor_accepts_env = True
+    except TypeError:
+        signature.bind((), DEFAULT_CHECK_TIMEOUT, target_dir)
+        executor_accepts_env = False
+        if any(check.env for check in norm_checks):
+            raise TypeError("verification_executor_env_required") from None
 
     results: list[dict[str, Any]] = []
     halted_on_critical = False
@@ -237,12 +319,13 @@ def evaluate_verification_checks(
             })
             continue
 
-        try:
+        if executor_accepts_env:
             raw_res = exec_fn(check.command, check.timeout_s, target_dir, env=dict(check.env))  # type: ignore
-        except TypeError:
+        else:
             raw_res = exec_fn(check.command, check.timeout_s, target_dir)
         exit_code = raw_res.get("exit_code")
         timed_out = bool(raw_res.get("timed_out"))
+        execution_error = bool(raw_res.get("execution_error") or raw_res.get("output_limited"))
         stdout = str(raw_res.get("stdout", ""))
         stderr = str(raw_res.get("stderr", ""))
         duration = float(raw_res.get("duration_s", 0.0))
@@ -254,6 +337,10 @@ def evaluate_verification_checks(
             status = "timed_out"
             passed = False
             any_timed_out = True
+            any_failed = True
+        elif execution_error:
+            status = "error"
+            passed = False
             any_failed = True
         elif exit_code == check.expected_exit_code:
             status = "passed"
@@ -271,6 +358,8 @@ def evaluate_verification_checks(
             "stdout_sha256": stdout_digest,
             "stderr_sha256": stderr_digest,
             "duration_s": round(duration, 3),
+            "output_limited": bool(raw_res.get("output_limited")),
+            "execution_error": execution_error,
         })
 
         if not passed and check.critical:
@@ -323,3 +412,379 @@ def validate_verification_receipt(receipt: Mapping[str, Any] | object) -> list[s
     if "not" not in str(receipt.get("claim_boundary", "")).casefold():
         errors.append("claim_boundary must state a limitation")
     return errors
+
+
+# =========================================================================
+# 进阶机器证据验证门禁与失败自愈循环
+# =========================================================================
+
+class EvidenceType(str, enum.Enum):
+    CODE_TEST = "code_test"
+    SERVICE_STATUS = "service_status"
+    LOG_ASSERTION = "log_assertion"
+    CUSTOM = "custom"
+
+
+@dataclass
+class VerificationEvidence:
+    evidence_type: EvidenceType = EvidenceType.CUSTOM
+    passed: bool = True
+    summary: str = ""
+    details: Dict[str, Any] = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
+
+
+@dataclass
+class CodeVerificationEvidence(VerificationEvidence):
+    evidence_type: EvidenceType = EvidenceType.CODE_TEST
+    command: str = ""
+    exit_code: int = -1
+    passed_tests: int = 0
+    failed_tests: int = 0
+    raw_output_snippet: str = ""
+
+
+@dataclass
+class ServiceVerificationEvidence(VerificationEvidence):
+    evidence_type: EvidenceType = EvidenceType.SERVICE_STATUS
+    service_name: str = ""
+    active_status: str = ""
+    port: Optional[int] = None
+    probe_http_status: Optional[int] = None
+
+
+@dataclass
+class LogAssertionEvidence(VerificationEvidence):
+    evidence_type: EvidenceType = EvidenceType.LOG_ASSERTION
+    log_path: str = ""
+    pattern: str = ""
+    matched_content: str = ""
+    line_number: Optional[int] = None
+
+
+@dataclass
+class VerificationReport:
+    task_id: str
+    task_type: str
+    ok: bool
+    passed_assertions: List[str]
+    failed_assertions: List[str]
+    evidences: List[Dict[str, Any]]
+    error_summary: str = ""
+    timestamp: float = field(default_factory=time.time)
+
+    def to_markdown(self) -> str:
+        status_label = "[PASS]" if self.ok else "[FAIL]"
+        lines = [
+            f"### {status_label} 机器验证收尾报告: {self.task_id}",
+            f"- 任务类型: {self.task_type}",
+            f"- 验收结论: {'全部断言通过' if self.ok else '门禁拦截，存在未满足项'}",
+        ]
+        if self.passed_assertions:
+            lines.append("- 通过的机器断言:")
+            for p in self.passed_assertions:
+                lines.append(f"  + [OK] {p}")
+        if self.failed_assertions:
+            lines.append("- 失败的机器断言:")
+            for f in self.failed_assertions:
+                lines.append(f"  * [FAIL] {f}")
+        if self.error_summary:
+            lines.append(f"- 故障诊断摘要: {self.error_summary}")
+        return "\n".join(lines)
+
+
+class VerificationGateError(RuntimeError):
+    """机器验证门禁拦截异常"""
+    def __init__(self, message: str, report: VerificationReport) -> None:
+        super().__init__(message)
+        self.report = report
+
+
+class VerificationGate:
+    """机器证据验证门禁管理器"""
+
+    def verify_code_execution(
+        self,
+        task_id: str,
+        command: str,
+        exit_code: int,
+        stdout_tail: str = "",
+        min_passed_tests: int = 1,
+    ) -> VerificationReport:
+        """验证代码/测试运行结果"""
+        passed_assertions: List[str] = []
+        failed_assertions: List[str] = []
+
+        if exit_code == 0:
+            passed_assertions.append(f"命令退出码为 0: `{command}`")
+        else:
+            failed_assertions.append(f"命令非零退出 (exit_code={exit_code}): `{command}`")
+
+        passed_count = 0
+        failed_count = 0
+        m_pass = re.search(r"(\d+)\s+passed", stdout_tail)
+        if m_pass:
+            passed_count = int(m_pass.group(1))
+        m_fail = re.search(r"(\d+)\s+failed", stdout_tail)
+        if m_fail:
+            failed_count = int(m_fail.group(1))
+
+        if failed_count > 0:
+            failed_assertions.append(f"测试套件出现 {failed_count} 项失败")
+        elif exit_code == 0 and passed_count >= min_passed_tests:
+            passed_assertions.append(f"测试套件全部通过 ({passed_count} 项 passed)")
+        elif exit_code == 0 and passed_count < min_passed_tests:
+            failed_assertions.append(f"通过用例数不足: 实际 {passed_count} 项, 期望至少 {min_passed_tests} 项")
+
+        is_ok = len(failed_assertions) == 0 and exit_code == 0
+        err_msg = "; ".join(failed_assertions) if not is_ok else ""
+
+        ev = CodeVerificationEvidence(
+            passed=is_ok,
+            summary=f"代码测试结果: exit_code={exit_code}, passed={passed_count}, failed={failed_count}",
+            command=command,
+            exit_code=exit_code,
+            passed_tests=passed_count,
+            failed_tests=failed_count,
+            raw_output_snippet=stdout_tail[-500:],
+        )
+
+        return VerificationReport(
+            task_id=task_id,
+            task_type="code_test",
+            ok=is_ok,
+            passed_assertions=passed_assertions,
+            failed_assertions=failed_assertions,
+            evidences=[asdict(ev)],
+            error_summary=err_msg,
+        )
+
+    def verify_service_status(
+        self,
+        task_id: str,
+        service_name: str,
+        active_status: str,
+        port_listening: Optional[bool] = None,
+        http_probe_code: Optional[int] = None,
+    ) -> VerificationReport:
+        """验证系统服务与端口探针"""
+        passed_assertions: List[str] = []
+        failed_assertions: List[str] = []
+
+        if active_status.lower() in ("active", "running", "active (running)"):
+            passed_assertions.append(f"服务处于活跃运行态: {service_name} ({active_status})")
+        else:
+            failed_assertions.append(f"服务状态异常: {service_name} (status={active_status})")
+
+        if port_listening is not None:
+            if port_listening:
+                passed_assertions.append(f"服务端口正在正常监听")
+            else:
+                failed_assertions.append(f"服务端口未见监听")
+
+        if http_probe_code is not None:
+            if 200 <= http_probe_code < 400:
+                passed_assertions.append(f"HTTP 探针返回成功码 {http_probe_code}")
+            else:
+                failed_assertions.append(f"HTTP 探针返回异常状态码 {http_probe_code}")
+
+        is_ok = len(failed_assertions) == 0
+        err_msg = "; ".join(failed_assertions) if not is_ok else ""
+
+        ev = ServiceVerificationEvidence(
+            passed=is_ok,
+            summary=f"服务状态: {service_name} -> {active_status}",
+            service_name=service_name,
+            active_status=active_status,
+            probe_http_status=http_probe_code,
+        )
+
+        return VerificationReport(
+            task_id=task_id,
+            task_type="service_status",
+            ok=is_ok,
+            passed_assertions=passed_assertions,
+            failed_assertions=failed_assertions,
+            evidences=[asdict(ev)],
+            error_summary=err_msg,
+        )
+
+    def verify_log_evidence(
+        self,
+        task_id: str,
+        log_path: str,
+        pattern: str,
+        log_content: str,
+    ) -> VerificationReport:
+        """验证排查日志中包含的关键事实特征与行号"""
+        passed_assertions: List[str] = []
+        failed_assertions: List[str] = []
+        matched_snippet = ""
+        matched_line_no = None
+
+        lines = log_content.splitlines() if isinstance(log_content, str) else []
+        try:
+            compiled_pattern = re.compile(pattern)
+        except re.error as exc:
+            compiled_pattern = None
+            failed_assertions.append(f"无效的正则表达式模式: `{pattern}` ({exc})")
+
+        if compiled_pattern is not None:
+            for i, line in enumerate(lines, start=1):
+                if compiled_pattern.search(line):
+                    matched_snippet = line.strip()
+                    matched_line_no = i
+                    break
+
+            if matched_snippet:
+                passed_assertions.append(f"日志 `{log_path}` 第 {matched_line_no} 行命中特征: `{matched_snippet[:80]}`")
+            else:
+                failed_assertions.append(f"日志 `{log_path}` 未找到预期特征: `{pattern}`")
+
+        is_ok = len(failed_assertions) == 0
+        err_msg = "; ".join(failed_assertions) if not is_ok else ""
+
+        ev = LogAssertionEvidence(
+            passed=is_ok,
+            summary=f"日志特征核验: {log_path} -> {'HIT' if is_ok else 'MISS'}",
+            log_path=log_path,
+            pattern=pattern,
+            matched_content=matched_snippet,
+            line_number=matched_line_no,
+        )
+
+        return VerificationReport(
+            task_id=task_id,
+            task_type="log_assertion",
+            ok=is_ok,
+            passed_assertions=passed_assertions,
+            failed_assertions=failed_assertions,
+            evidences=[asdict(ev)],
+            error_summary=err_msg,
+        )
+
+    def assert_evidence(self, report: VerificationReport) -> None:
+        """门禁断言铁律：未提供有效证据或验证失败，直接拦截并拒绝结案。"""
+        if not report.ok:
+            raise VerificationGateError(
+                f"[GATE_REJECTED] 机器断言验证未通过: {report.error_summary}",
+                report=report,
+            )
+
+
+@dataclass
+class RepairContext:
+    attempt: int
+    max_attempts: int
+    last_report: VerificationReport
+    error_summary: str
+    suggested_action: str = ""
+
+
+@dataclass
+class SelfHealingResult:
+    success: bool
+    total_attempts: int
+    final_report: VerificationReport
+    attempt_history: List[Dict[str, Any]]
+    terminated_reason: str
+
+
+class SelfCorrectionLoop:
+    """至多 3 轮失败自愈打回循环"""
+
+    def __init__(self, max_attempts: int = 3) -> None:
+        self.max_attempts = max(1, min(max_attempts, 5))
+
+    def run(
+        self,
+        task_id: str,
+        execute_fn: Callable[[int, Optional[RepairContext]], Any],
+        verify_fn: Callable[[Any], VerificationReport],
+    ) -> SelfHealingResult:
+        """驱动执行与门禁验证，遇到失败提取堆栈并自动重试（至多 3 轮）。"""
+        history: List[Dict[str, Any]] = []
+        repair_context: Optional[RepairContext] = None
+        last_report: Optional[VerificationReport] = None
+
+        for attempt in range(1, self.max_attempts + 1):
+            t0 = time.time()
+            try:
+                action_result = execute_fn(attempt, repair_context)
+            except Exception as exec_err:
+                action_result = None
+                report = VerificationReport(
+                    task_id=task_id,
+                    task_type="execution_exception",
+                    ok=False,
+                    passed_assertions=[],
+                    failed_assertions=[f"执行过程发生异常: {exec_err}"],
+                    evidences=[],
+                    error_summary=str(exec_err),
+                )
+            else:
+                try:
+                    report = verify_fn(action_result)
+                    if not isinstance(report, VerificationReport):
+                        report = VerificationReport(
+                            task_id=task_id,
+                            task_type="verification_adapter",
+                            ok=bool(report),
+                            passed_assertions=["验证返回 True"] if report else [],
+                            failed_assertions=["验证返回 False 或未满足"] if not report else [],
+                            evidences=[],
+                            error_summary="" if report else "校验未通过",
+                        )
+                except Exception as verify_err:
+                    report = VerificationReport(
+                        task_id=task_id,
+                        task_type="verification_exception",
+                        ok=False,
+                        passed_assertions=[],
+                        failed_assertions=[f"验证过程发生异常: {verify_err}"],
+                        evidences=[],
+                        error_summary=str(verify_err),
+                    )
+
+            duration = time.time() - t0
+            last_report = report
+            history.append({
+                "attempt": attempt,
+                "ok": report.ok,
+                "duration_s": round(duration, 3),
+                "error_summary": report.error_summary,
+                "passed_count": len(report.passed_assertions),
+                "failed_count": len(report.failed_assertions),
+            })
+
+            if report.ok:
+                logger.info("[SelfCorrectionLoop] 任务在第 %d 轮成功通过机器验证门禁", attempt)
+                return SelfHealingResult(
+                    success=True,
+                    total_attempts=attempt,
+                    final_report=report,
+                    attempt_history=history,
+                    terminated_reason="ALL_CRITERIA_MET",
+                )
+
+            logger.warning(
+                "[SelfCorrectionLoop] 第 %d/%d 轮验证未通过: %s",
+                attempt, self.max_attempts, report.error_summary
+            )
+
+            if attempt < self.max_attempts:
+                repair_context = RepairContext(
+                    attempt=attempt,
+                    max_attempts=self.max_attempts,
+                    last_report=report,
+                    error_summary=report.error_summary,
+                    suggested_action=f"修复上一轮失败断言: {'; '.join(report.failed_assertions)}",
+                )
+
+        return SelfHealingResult(
+            success=False,
+            total_attempts=self.max_attempts,
+            final_report=last_report,
+            attempt_history=history,
+            terminated_reason=f"EXCEEDED_MAX_RETRY_LIMIT_{self.max_attempts}",
+        )

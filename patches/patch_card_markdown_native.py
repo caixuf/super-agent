@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import os
 import sys
 from pathlib import Path
@@ -35,10 +36,160 @@ ANCHOR_AFTER = '''def _markdown_needs_post(text: str) -> bool:
     return bool(_CARD_MARKDOWN_COMPLEX_RE.search(text or ""))
 '''
 
-HELPERS = (
-    '''# Cards accepted these structures natively (JSON 2.0) long ago, so a reply containing\n# headings or tables no longer has to leave the card as a post. Only what JSON 2.0 cannot\n# express here (block quotes, horizontal rules, fenced code, >5 tables) still falls back.\n_CARD_UNSUPPORTED_RE = re.compile(r"(?m)(^\\s*>\\s+|^\\s*---+\\s*$|^\\s*```|^\\s*~~~)")\n_CARD_TABLE_HEADER_RE = re.compile(r"^\\s*\\|.*\\|\\s*$")\n_CARD_TABLE_DIVIDER_RE = re.compile(r"^\\s*\\|?\\s*:?-{2,}:?\\s*(\\|\\s*:?-{2,}:?\\s*)+\\|?\\s*$")\n_CARD_TABLE_MAX = 5\n_CARD_V2_ENV = "HERMES_FEISHU_CARD_V2"\n_CARD24_ENV = "HERMES_FEISHU_CARD_24"\n\n\ndef _card_v2_enabled() -> bool:\n    """Native tables need card JSON 2.0, which older clients render as '请升级客户端'.\n\n    Opt-in per deployment: unset keeps the previous behaviour (complex markdown -> post).\n    """\n    return (os.environ.get(_CARD_V2_ENV) or "").strip().lower() in ("1", "true", "yes", "on")\n\n\ndef _md_table_cells(line: str) -> list[str]:\n    return [cell.strip().replace("\\\\|", "|") for cell in line.strip().strip("|").split("|")]\n\n\ndef _card_tables(lines: list[str]) -> list[tuple[int, int, dict[str, Any]]]:\n    """Locate GFM pipe tables: ``[(start, stop, element)]``; ``stop`` is exclusive."""\n    found: list[tuple[int, int, dict[str, Any]]] = []\n    index = 0\n    while index < len(lines) - 1:\n        line = lines[index]\n        if not (_CARD_TABLE_HEADER_RE.match(line) and _CARD_TABLE_DIVIDER_RE.match(lines[index + 1])):\n            index += 1\n            continue\n        stop = index + 2\n        while stop < len(lines) and _CARD_TABLE_HEADER_RE.match(lines[stop]):\n            stop += 1\n        if len(found) < _CARD_TABLE_MAX:\n            header = _md_table_cells(line)\n            rows = [{"c%d" % n: (row[n] if n < len(row) else "")\n                     for n in range(len(header))}\n                    for row in (_md_table_cells(text) for text in lines[index + 2:stop])]\n            found.append((index, stop, {\n                "tag": "table", "page_size": 10, "row_height": "low",\n                "freeze_first_column": len(header) > 2,\n                "header_style": {"text_size": "normal", "background_style": "grey", "bold": True},\n                "columns": [{"name": "c%d" % n, "display_name": header[n] or " ",\n                             "data_type": "lark_md", "width": "auto", "vertical_align": "top"}\n                            for n in range(len(header))],\n                "rows": rows,\n            }))\n        index = stop\n    return found\n\n\ndef build_card_elements(content: str) -> list[dict[str, Any]]:\n    """One markdown reply -> card elements: markdown blocks with native tables in place."""\n    if not content:\n        return [{"tag": "markdown", "content": " "}]\n    lines = content.splitlines()\n    elements: list[dict[str, Any]] = []\n    cursor = 0\n    for start, stop, table in _card_tables(lines):\n        prose = "\\n".join(lines[cursor:start])\n        if prose.strip():\n            elements.append({"tag": "markdown", "content": prose})\n        elements.append(table)\n        cursor = stop\n    tail = "\\n".join(lines[cursor:])\n    if tail.strip() or not elements:\n        elements.append({"tag": "markdown", "content": tail or " "})\n    return elements\n\n\n_CARD24_INLINE_MD_RE = re.compile(r"\\*\\*(.+?)\\*\\*|`([^`]+)`|\\[([^\\]]+)\\]\\(([^)]+)\\)")\n\n\ndef _card24_text(content: str) -> str:\n    """Markdown -> the plain-text subset card_components v2 accepts (no markdown tag)."""\n    text = _CARD24_INLINE_MD_RE.sub(\n        lambda m: m.group(1) or m.group(2) or ("%s (%s)" % (m.group(3), m.group(4))), content or "")\n    text = text.replace("**", "").replace("`", "")\n    return re.sub(r"(?m)^#{1,6}\\s+", "", text)\n\n\ndef card_components_v2() -> bool:\n    """Card 2.4 ('card_components' v2) rejects the 1.0 ``markdown``/``note`` tags.\n\n    Opt-in per deployment; the 2.0 path (markdown + table components) stays the default.\n    """\n    return (os.environ.get(_CARD24_ENV) or "").strip().lower() in ("1", "true", "yes", "on")\n\n\ndef build_card24_elements(content: str) -> list[dict[str, Any]]:\n    """Same split as the 2.0 builder: plain_text blocks, tables with plain-text cells."""\n    elements = build_card_elements(content)\n    for element in elements:\n        if element.get("tag") != "table":\n            continue\n        for column in element["columns"]:\n            column["data_type"] = "text"\n        for row in element["rows"]:\n            for column in element["columns"]:\n                row[column["name"]] = _card24_text(str(row.get(column["name"], "")))\n    return [element if element.get("tag") == "table"\n            else {"tag": "div",
-                  "text": {"tag": "plain_text", "content": _card24_text(element.get("content", "")) or " "}}\n            for element in elements]\n\n\ndef card_renders_markdown(text: str) -> bool:\n    """True when every construct in *text* has a native card representation."""\n    text = text or ""\n    if _CARD_UNSUPPORTED_RE.search(text):\n        return False\n    lines = text.splitlines()\n    # A table beyond the five-per-card limit keeps its divider rows as prose: count those, too.\n    dividers = sum(1 for index in range(len(lines) - 1)\n                   if _CARD_TABLE_HEADER_RE.match(lines[index])\n                   and _CARD_TABLE_DIVIDER_RE.match(lines[index + 1]))\n    return dividers == len(_card_tables(lines))\n\n\n_CARD24_INLINE_MD_RE = re.compile(r"\\*\\*(.+?)\\*\\*|`([^`]+)`|\\[([^\\]]+)\\]\\(([^)]+)\\)")\n\n\ndef _card24_text(content: str) -> str:\n    """Markdown -> the plain-text subset card_components v2 accepts (no markdown tag)."""\n    text = _CARD24_INLINE_MD_RE.sub(\n        lambda m: m.group(1) or m.group(2) or ("%s (%s)" % (m.group(3), m.group(4))), content or "")\n    text = text.replace("**", "").replace("`", "")\n    return re.sub(r"(?m)^#{1,6}\\s+", "", text)\n\n\ndef card_components_v2() -> bool:\n    """Card 2.4 ('card_components' v2) rejects the 1.0 ``markdown``/``note`` tags.\n\n    Opt-in per deployment; the 2.0 path (markdown + table components) stays the default.\n    """\n    return (os.environ.get(_CARD24_ENV) or "").strip().lower() in ("1", "true", "yes", "on")\n\n\ndef build_card24_elements(content: str) -> list[dict[str, Any]]:\n    """Same split as the 2.0 builder: plain_text blocks, tables with plain-text cells."""\n    elements = build_card_elements(content)\n    for element in elements:\n        if element.get("tag") != "table":\n            continue\n        for column in element["columns"]:\n            column["data_type"] = "text"\n        for row in element["rows"]:\n            for column in element["columns"]:\n                row[column["name"]] = _card24_text(str(row.get(column["name"], "")))\n    return [element if element.get("tag") == "table"\n            else {"tag": "div",
-                  "text": {"tag": "plain_text", "content": _card24_text(element.get("content", "")) or " "}}\n            for element in elements]\n\n\ndef card_renders_markdown(text: str) -> bool:\n    """True when every construct in *text* has a native card representation."""\n    text = text or ""\n    if _CARD_UNSUPPORTED_RE.search(text):\n        return False\n    lines = text.splitlines()\n    # A table beyond the five-per-card limit keeps its divider rows as prose: count those, too.\n    dividers = sum(1 for index in range(len(lines) - 1)\n                   if _CARD_TABLE_HEADER_RE.match(lines[index])\n                   and _CARD_TABLE_DIVIDER_RE.match(lines[index + 1]))\n    return dividers == len(_card_tables(lines))\n''')
+LEGACY_HELPERS = (
+    '''# Cards render headings, tables, block quotes, horizontal rules and fenced code
+# natively — verified against the live API on both card JSON 1.0 and 2.0 (all returned
+# code=0). The old regex excluded them and cost every reply containing a code block or a
+# `---` divider its card, which read as "the card UI is broken". Only the per-card table
+# cap still forces a fallback, and that is counted exactly below.
+_CARD_UNSUPPORTED_RE = re.compile(r"(?!x)x")  # matches nothing; kept for call-site compat
+# Lines inside a fence are code, not markdown: a `| a | b |` row in a shell snippet must
+# not be lifted into a table element (it would be torn out of the block that renders it).
+_CARD_FENCE_RE = re.compile(r"^\\s*(?:```|~~~)")
+_CARD_TABLE_HEADER_RE = re.compile(r"^\\s*\\|.*\\|\\s*$")
+_CARD_TABLE_DIVIDER_RE = re.compile(r"^\\s*\\|?\\s*:?-{2,}:?\\s*(\\|\\s*:?-{2,}:?\\s*)+\\|?\\s*$")
+_CARD_TABLE_MAX = 5
+_CARD_V2_ENV = "HERMES_FEISHU_CARD_V2"
+_CARD24_ENV = "HERMES_FEISHU_CARD_24"
+
+
+def _card_v2_enabled() -> bool:
+    """Native tables need card JSON 2.0, which older clients render as '请升级客户端'.
+
+    Opt-in per deployment: unset keeps the previous behaviour (complex markdown -> post).
+    """
+    return (os.environ.get(_CARD_V2_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _md_table_cells(line: str) -> list[str]:
+    return [cell.strip().replace("\\\\|", "|") for cell in line.strip().strip("|").split("|")]
+
+
+def _fenced_line_flags(lines: list[str]) -> list[bool]:
+    """Per-line: is it inside (or the opening/closing of) a code fence?"""
+    flags: list[bool] = []
+    inside = False
+    for line in lines:
+        if _CARD_FENCE_RE.match(line):
+            flags.append(True)
+            inside = not inside
+            continue
+        flags.append(inside)
+    return flags
+
+
+def _card_tables(lines: list[str]) -> list[tuple[int, int, dict[str, Any]]]:
+    """Locate GFM pipe tables: ``[(start, stop, element)]``; ``stop`` is exclusive.
+
+    Fenced regions are skipped: a pipe-shaped row inside a shell/python snippet is code
+    that the markdown block must render verbatim, not a table to lift out of it.
+    """
+    found: list[tuple[int, int, dict[str, Any]]] = []
+    fenced = _fenced_line_flags(lines)
+    index = 0
+    while index < len(lines) - 1:
+        line = lines[index]
+        if fenced[index] or not (_CARD_TABLE_HEADER_RE.match(line) and _CARD_TABLE_DIVIDER_RE.match(lines[index + 1])):
+            index += 1
+            continue
+        stop = index + 2
+        while stop < len(lines) and not fenced[stop] and _CARD_TABLE_HEADER_RE.match(lines[stop]):
+            stop += 1
+        if len(found) < _CARD_TABLE_MAX:
+            header = _md_table_cells(line)
+            rows = [{"c%d" % n: (row[n] if n < len(row) else "")
+                     for n in range(len(header))}
+                    for row in (_md_table_cells(text) for text in lines[index + 2:stop])]
+            found.append((index, stop, {
+                "tag": "table", "page_size": 10, "row_height": "low",
+                "freeze_first_column": len(header) > 2,
+                "header_style": {"text_size": "normal", "background_style": "grey", "bold": True},
+                "columns": [{"name": "c%d" % n, "display_name": header[n] or " ",
+                             "data_type": "lark_md", "width": "auto", "vertical_align": "top"}
+                            for n in range(len(header))],
+                "rows": rows,
+            }))
+        index = stop
+    return found
+
+
+def build_card_elements(content: str) -> list[dict[str, Any]]:
+    """One markdown reply -> card elements: markdown blocks with native tables in place."""
+    if not content:
+        return [{"tag": "markdown", "content": " "}]
+    lines = content.splitlines()
+    elements: list[dict[str, Any]] = []
+    cursor = 0
+    for start, stop, table in _card_tables(lines):
+        prose = "\\n".join(lines[cursor:start])
+        if prose.strip():
+            elements.append({"tag": "markdown", "content": prose})
+        elements.append(table)
+        cursor = stop
+    tail = "\\n".join(lines[cursor:])
+    if tail.strip() or not elements:
+        elements.append({"tag": "markdown", "content": tail or " "})
+    return elements
+
+
+_CARD24_INLINE_MD_RE = re.compile(r"\\*\\*(.+?)\\*\\*|`([^`]+)`|\\[([^\\]]+)\\]\\(([^)]+)\\)")
+
+
+def _card24_text(content: str) -> str:
+    """Markdown -> the plain-text subset card_components v2 accepts (no markdown tag)."""
+    text = _CARD24_INLINE_MD_RE.sub(
+        lambda m: m.group(1) or m.group(2) or ("%s (%s)" % (m.group(3), m.group(4))), content or "")
+    text = text.replace("**", "").replace("`", "")
+    return re.sub(r"(?m)^#{1,6}\\s+", "", text)
+
+
+def card_components_v2() -> bool:
+    """Card 2.4 ('card_components' v2) rejects the 1.0 ``markdown``/``note`` tags.
+
+    Opt-in per deployment; the 2.0 path (markdown + table components) stays the default.
+    """
+    return (os.environ.get(_CARD24_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def build_card24_elements(content: str) -> list[dict[str, Any]]:
+    """Same split as the 2.0 builder: plain_text blocks, tables with plain-text cells."""
+    elements = build_card_elements(content)
+    for element in elements:
+        if element.get("tag") != "table":
+            continue
+        for column in element["columns"]:
+            column["data_type"] = "text"
+        for row in element["rows"]:
+            for column in element["columns"]:
+                row[column["name"]] = _card24_text(str(row.get(column["name"], "")))
+    return [element if element.get("tag") == "table"
+            else {"tag": "div",
+                  "text": {"tag": "plain_text", "content": _card24_text(element.get("content", "")) or " "}}
+            for element in elements]
+
+
+def card_renders_markdown(text: str) -> bool:
+    """True when every construct in *text* has a native card representation."""
+    text = text or ""
+    if _CARD_UNSUPPORTED_RE.search(text):
+        return False
+    lines = text.splitlines()
+    fenced = _fenced_line_flags(lines)
+    # A table beyond the five-per-card limit keeps its divider rows as prose: count those, too.
+    # Fenced lines are excluded on BOTH sides — a `|---|` inside a code block is snippet text,
+    # not a divider, and counting it made every reply with a piped shell command lose its card.
+    dividers = sum(1 for index in range(len(lines) - 1)
+                   if not fenced[index] and not fenced[index + 1]
+                   and _CARD_TABLE_HEADER_RE.match(lines[index])
+                   and _CARD_TABLE_DIVIDER_RE.match(lines[index + 1]))
+    return dividers == len(_card_tables(lines))''')
+
+
+# One source for host injection and the standalone HFC wheel. The host receives
+# ordinary source, not a runtime import from this checkout.
+_SHARED_RENDERER = Path(__file__).resolve().parents[1] / "agentcore/card_markdown.py"
+HELPERS = _SHARED_RENDERER.read_text(encoding="utf-8")
+HELPERS = HELPERS[HELPERS.index("# Cards render"):].rstrip("\n")
 
 
 SEND_OLD = '''        if (getattr(self, "_card_replies", False) and (metadata or {}).get("expect_edits")
@@ -70,12 +221,26 @@ BUILD_PROBE_V11 = "else build_card_elements(content))\n        if not finalize:"
 #: The streaming tip is a 1.0 ``note``; 2.4 rejects it (200861) and the whole card falls
 #: back to plain text. Rewritten in both tree shapes.
 NOTE_OLD = '''            elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": tip}]})'''
-NOTE_NEW = '''            if card_components_v2():
+NOTE_MALFORMED = '''            if card_components_v2():
+                # 'note' is a 1.0 tag; 2.4 rejects it (200861) and falls back to plain text.
+                elements.append({"tag": "div", "text": {"tag": "plain_text", "content": tip}})
+            else:
+                if _card_v2_enabled() or card_components_v2():
+                # 'note' is a 1.0 tag; 2.0/2.4 reject it (200861) and fall back to plain text.
+                elements.append({"tag": "div", "text": {"tag": "plain_text", "content": tip}})
+            else:
+                elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": tip}]})'''
+NOTE_V1 = '''            if card_components_v2():
                 # 'note' is a 1.0 tag; 2.4 rejects it (200861) and falls back to plain text.
                 elements.append({"tag": "div", "text": {"tag": "plain_text", "content": tip}})
             else:
                 elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": tip}]})'''
-NOTE_PROBE = "if card_components_v2():\n                # 'note' is a 1.0 tag"
+NOTE_NEW = '''            if _card_v2_enabled() or card_components_v2():
+                # 'note' is a 1.0 tag; 2.0/2.4 reject it (200861) and fall back to plain text.
+                elements.append({"tag": "div", "text": {"tag": "plain_text", "content": tip}})
+            else:
+                elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": tip}]})'''
+NOTE_PROBE = "if _card_v2_enabled() or card_components_v2():\n                # 'note' is a 1.0 tag"
 
 RETURN_OLD = '''        return {
             "config": {"wide_screen_mode": True},
@@ -87,11 +252,25 @@ RETURN_OLD_V11 = '''        header = {"title": {"tag": "plain_text", "content": 
                   "template": "green" if finalize else "blue"}
         return {"schema": "2.0", "config": {"wide_screen_mode": True, "update_multi": True},
                 "header": header, "body": {"elements": elements}}'''
-RETURN_NEW = '''        header = {"title": {"tag": "plain_text", "content": name},
+RETURN_V1 = '''        header = {"title": {"tag": "plain_text", "content": name},
                   "template": "green" if finalize else "blue"}
         if card_components_v2():
             # 2.4 rejects the 1.0 markdown/note tags; plain_text and table are accepted.
             card: dict[str, Any] = {"schema": "2.0", "config": {"update_multi": True},
+                                    "header": header, "body": {"elements": elements}}
+        elif _card_v2_enabled():
+            # update_multi stays true on every frame: the PATCH API requires a shared card
+            # before AND after each update, and the streaming frames are exactly those updates.
+            card = {"schema": "2.0", "config": {"wide_screen_mode": True, "update_multi": True},
+                    "header": header, "body": {"elements": elements}}
+        else:
+            return {"config": {"wide_screen_mode": True}, "header": header, "elements": elements}
+        return card'''
+RETURN_NEW = '''        header = {"title": {"tag": "plain_text", "content": name},
+                  "template": "green" if finalize else "blue"}
+        if card_components_v2():
+            # 2.4 rejects the 1.0 markdown/note tags; plain_text and table are accepted.
+            card: dict[str, Any] = {"schema": "2.0", "config": {"wide_screen_mode": True, "update_multi": True},
                                     "header": header, "body": {"elements": elements}}
         elif _card_v2_enabled():
             # update_multi stays true on every frame: the PATCH API requires a shared card
@@ -111,23 +290,66 @@ RETURN_PROBE = "if card_components_v2():\n            # 2.4 rejects"
 #: Every shape the helper block has taken on a real host (the 2.4 upgrade rewrites it).
 #: shape of a host where only the 2.0 switch line was added by hand (no helper block)
 V2_ENV_ONLY = "_CARD_TABLE_MAX = 5\n_CARD_V2_ENV = \"HERMES_FEISHU_CARD_V2\"\n\n\n"
-V11_HELPERS_FULL = HELPERS.split("_CARD24_INLINE_MD_RE = re.compile(")[0].lstrip("\n").rstrip() + "\n"
+V11_HELPERS_FULL = LEGACY_HELPERS.split("_CARD24_INLINE_MD_RE = re.compile(")[0].lstrip("\n").rstrip() + "\n"
 #: signature of the first published version of the helper block (before the 2.4 branch).
-V11_HELPERS = HELPERS.split("_CARD24_INLINE_MD_RE = re.compile(")[0].lstrip("\n").rstrip() + "\n"
+V11_HELPERS = LEGACY_HELPERS.split("_CARD24_INLINE_MD_RE = re.compile(")[0].lstrip("\n").rstrip() + "\n"
 #: v1.1 as actually landed on a host: the 2.0 switch sits after card_renders_markdown.
-V11_HELPERS_TAIL = HELPERS.split("_CARD24_INLINE_MD_RE = re.compile(")[0].lstrip("\n") + '_CARD_V2_ENV = \"HERMES_FEISHU_CARD_V2\"' + "\n"
+V11_HELPERS_TAIL = LEGACY_HELPERS.split("_CARD24_INLINE_MD_RE = re.compile(")[0].lstrip("\n") + '_CARD_V2_ENV = \"HERMES_FEISHU_CARD_V2\"' + "\n"
 
 
 def _strip_24(value: str) -> str:
     """Drop the 2.4 branch lines from generated code (keeps the v1.1 shape when absent)."""
     return "".join(line for line in value.splitlines(True) if "card_components_v2" not in line)
 
-#: (name, old, new, probe). One entry per step; a step is done when its probe is present and
-#: its own target shape no longer matches. Two trees exist in the wild: pristine (markdown
-#: block per card) and v1.1 (native tables, 2.0 payload) — chain-safe shapes.
-EDITS = [
+
+#: --- 0.22.x tree shape -------------------------------------------------------------
+#: 0.22 deleted ``_markdown_needs_post`` from the adapter, so every anchor above misses and
+#: ``--apply`` refuses to write. Measured on 0.22.2 (2026-10-31): each anchor below hits
+#: exactly once in a stock 0.22.2 adapter. The helper block itself is unchanged — only the
+#: five places that carry it move.
+ANCHOR_022 = '_POST_CONTENT_INVALID_RE = re.compile(r"content format of the post type is incorrect", re.IGNORECASE)\n'
+
+SEND_OLD_022 = '        if getattr(self, "_card_replies", False) and (metadata or {}).get("expect_edits"):\n'
+SEND_NEW_022 = ('        if (getattr(self, "_card_replies", False) and (metadata or {}).get("expect_edits")\n'
+                '                and not any(not card_renders_markdown(chunk) for chunk in chunks)):\n')
+
+#: 0.22 keeps its finalize/turn_final logic inside the branch, so only the gate line changes.
+EDIT_OLD_022 = ('        if getattr(self, "_card_replies", False) and self._is_card_message(message_id):\n'
+                '            card = self._build_reply_card(\n')
+EDIT_NEW_022 = ('        if (getattr(self, "_card_replies", False) and self._is_card_message(message_id)\n'
+                '                and card_renders_markdown(content)):\n'
+                '            card = self._build_reply_card(\n')
+#: 0.22's gate is an ``and`` clause on the if-line, not a nested ``if not`` — its own probe.
+EDIT_PROBE_022 = "and card_renders_markdown(content)):"
+
+#: No trailing newline on purpose: the replacement must not consume the line break before
+#: ``if not finalize:`` — doing so glues the two lines together (caught by the 0.22 test).
+BUILD_OLD_022 = '        elements: list[dict[str, Any]] = [{"tag": "markdown", "content": content or " "}]'
+
+RETURN_OLD_022 = '''        return {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": name},
+                       "template": "green" if finalize else "blue"},
+            "elements": elements,
+        }
+'''
+
+#: (name, old, new, probe) per tree shape. A host carries exactly ONE shape, so a shape's
+#: steps are only judged against a tree of that shape — otherwise --check reports the other
+#: shapes' anchors as missing on a perfectly good tree (which is what 0.22 hit).
+PRISTINE_STEPS = [
     ("helpers", ANCHOR_AFTER, ANCHOR_AFTER + HELPERS, "_CARD24_ENV = \"HERMES_FEISHU_CARD_24\""),
-    # Upgrade a tree patched by the first version of this script (helpers, no 2.4 branch).
+    ("send-gate", SEND_OLD, SEND_NEW, SEND_PROBE),
+    ("edit-gate", EDIT_OLD, EDIT_NEW, EDIT_PROBE),
+    # both shapes end in the same builder; the shared probe covers either tree
+    ("build", BUILD_OLD, BUILD_NEW, BUILD_PROBE),
+    ("tip", NOTE_OLD, NOTE_NEW, NOTE_PROBE),
+    # A tree without the streaming tip (synthetic or a host variant) still returns the 1.0 card.
+    ("return-no-tip", RETURN_OLD, RETURN_NEW, RETURN_PROBE),
+]
+
+#: v1.1: helper block already present (2.0 tables, no 2.4 branch) -> upgrade in place.
+V11_STEPS = [
     # v1.1 helper block (ends at card_renders_markdown) -> full block with the 2.4 branch
     ("helpers-24", V11_HELPERS_FULL, HELPERS, "def card_components_v2() -> bool:"),
     ("helpers-24-tail", V11_HELPERS_TAIL, HELPERS, "def card_components_v2() -> bool:"),
@@ -135,15 +357,46 @@ EDITS = [
     ("block", V2_ENV_ONLY, HELPERS, "def card_components_v2() -> bool:"),
     ("send-gate", SEND_OLD, SEND_NEW, SEND_PROBE),
     ("edit-gate", EDIT_OLD, EDIT_NEW, EDIT_PROBE),
-    # both shapes end in the same builder; the shared probe covers either tree
     ("build", BUILD_OLD, BUILD_NEW, BUILD_PROBE),
     ("build-v11", BUILD_OLD_V11, _strip_24(BUILD_NEW), BUILD_PROBE),
+    ("tip-malformed", NOTE_MALFORMED, NOTE_NEW, NOTE_PROBE),
+    ("tip-v1", NOTE_V1, NOTE_NEW, NOTE_PROBE),
     ("tip", NOTE_OLD, NOTE_NEW, NOTE_PROBE),
     # both shapes end in the same 2.0 payload; one probe covers either tree
     # A tree without the streaming tip (synthetic or a host variant) still returns the 1.0 card.
+    ("return-v1", RETURN_V1, RETURN_NEW, RETURN_PROBE),
     ("return-no-tip", RETURN_OLD, RETURN_NEW, RETURN_PROBE),
     ("return-v11", RETURN_OLD_V11, _strip_24(RETURN_NEW_V11), RETURN_PROBE),
 ]
+
+#: 0.22.x: helpers hang off the module-level regex block; the card gates are one-liners.
+STEPS_022 = [
+    ("helpers-022", ANCHOR_022, ANCHOR_022 + HELPERS, "_CARD24_ENV = \"HERMES_FEISHU_CARD_24\""),
+    ("tip-022", NOTE_OLD, NOTE_NEW, NOTE_PROBE),
+    ("send-gate-022", SEND_OLD_022, SEND_NEW_022, SEND_PROBE),
+    ("edit-gate-022", EDIT_OLD_022, EDIT_NEW_022, EDIT_PROBE_022),
+    ("build-022", BUILD_OLD_022, BUILD_NEW.rstrip("\n"), BUILD_PROBE),
+    ("return-022", RETURN_OLD_022, RETURN_NEW, RETURN_PROBE),
+]
+
+#: Union, for callers that only ask "is any known shape fully patched?".
+EDITS = PRISTINE_STEPS + V11_STEPS + STEPS_022
+
+
+def shape_of(text: str) -> str:
+    """Which adapter shape is this file? Decided by anchors unique to one shape."""
+    if "def _markdown_needs_post" in text:
+        return "pristine"
+    if ANCHOR_022 in text:
+        return "022"
+    if "_CARD_V2_ENV" in text or "build_card_elements" in text:
+        return "v11"
+    return "unknown"
+
+
+def steps_for(text: str):
+    return {"pristine": PRISTINE_STEPS, "v11": V11_STEPS,
+            "022": STEPS_022, "unknown": []}[shape_of(text)]
 
 
 def _agent_dir(explicit):
@@ -157,21 +410,29 @@ def _helper_gone(text: str) -> bool:
 
 
 def _missing(text):
-    """Not in place = probe absent, or the unchanged anchor still present.
+    """Not in place = a probe for THIS tree's shape is absent.
 
-    When the probe is present the edit's *new* text is in the file, so the old anchor can
-    only survive where the new text already contains it (chained anchors such as
-    ``ANCHOR_AFTER + helpers``) — that is not a miss.
+    Only the shape's own steps are judged: pristine/v1.1/0.22 anchors do not coexist in one
+    adapter, so checking the union would report the other shapes as missing on a good tree.
+    An already-patched tree reports its probes as present for whichever shape it became.
     """
-    # An edit that already has its text in place is done, even when its old anchor is still
-    # there (chained anchors) — except for the no-op "v1.1" markers, whose job is only to be
-    # superseded once the real edit applied.
+    # The broken nested branch contains NOTE_PROBE too; a substring is not
+    # evidence that the adapter can load. Repair this exact known shape first.
+    if NOTE_MALFORMED in text:
+        return [(NOTE_MALFORMED, NOTE_NEW)]
+    steps = steps_for(text)
+    if not steps:
+        return []
     missing = []
-    for name, old, _new, probe in EDITS:
+    if LEGACY_HELPERS in text:
+        missing.append((LEGACY_HELPERS, "SHARED_CARD_RENDERER_VERSION = 1"))
+    for name, old, _new, probe in steps:
         if probe in text:
             continue
         if name.startswith("helpers") and _helper_gone(text):
             continue                     # any helper shape is done once the 2.4 branch exists
+        if (name.endswith("-v1") or name.endswith("-v11") or name.endswith("-malformed")) and text.count(old) == 0:
+            continue
         missing.append((old, probe))
     return missing
 
@@ -189,18 +450,30 @@ def main() -> int:
         print("[FAIL] 找不到 %s" % path)
         return 2
     text = path.read_text(encoding="utf-8")
+    steps = steps_for(text)
+    if not steps:
+        print("[FAIL] 认不出这棵树的形态（既无 0.22 锚点，也无 _markdown_needs_post / 旧辅助块）")
+        return 2
     missing = _missing(text)
+    if args.check or not missing:
+        try:
+            ast.parse(text, filename=str(path))
+        except SyntaxError as exc:
+            print("[FAIL] adapter 语法错误：%s" % exc)
+            return 2
     if args.check:
         if not missing:
-            print("[PASS] 卡片原生表格补丁：在位（%d 处）" % len(EDITS))
+            print("[PASS] 卡片原生表格补丁：在位（形态 %s，%d 步全中）" % (shape_of(text), len(steps)))
             return 0
-        print("[FAIL] 卡片原生表格补丁：不在位（缺 %d 处）" % len(missing))
+        print("[FAIL] 卡片原生表格补丁：不在位（形态 %s，缺 %d 处）" % (shape_of(text), len(missing)))
         for _old, probe in missing:
             print("  - 缺 %r" % probe[:70])
         return 1
     if not missing:
         print("[PASS] 已在位，无需重放")
         return 0
+    text = text.replace(NOTE_MALFORMED, NOTE_NEW)
+    text = text.replace(LEGACY_HELPERS, HELPERS)
     # Pass 1 assembles the final text from the ORIGINAL file; pass 2 writes it. An earlier
     # step can therefore absorb a later step's anchor (helpers carry their own markers)
     # without the later pass having to rewrite text it just produced.
@@ -209,7 +482,7 @@ def main() -> int:
             return False
         return text.count(old) > 0
 
-    for index, (name, old, new, probe) in enumerate(EDITS):
+    for index, (name, old, new, probe) in enumerate(steps):
         if not _needs(name, old, new, probe):
             continue                     # done, or this tree never had that shape
         count = text.count(old)
@@ -227,6 +500,11 @@ def main() -> int:
     still = _missing(text)
     if still:
         print("[FAIL] 应用后仍缺 %d 处（本文件不支持该树形，请人工核对）" % len(still))
+        return 2
+    try:
+        ast.parse(text, filename=str(path))
+    except SyntaxError as exc:
+        print("[FAIL] 拒绝写入有语法错误的 adapter：%s" % exc)
         return 2
     path.write_text(text, encoding="utf-8")
     print("[PASS] 补丁已应用；重启网关后生效")

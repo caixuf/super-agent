@@ -1,0 +1,28 @@
+[Unit]
+Description=super-agent proactive observation pass (observe mode: records, never sends)
+# Observe mode reads the repo and the liveness ledger, writes its own findings
+# record, and sends nothing. Delivering a finding is a separate explicit step,
+# so this unit is safe to run unattended and safe to leave enabled.
+#
+# The checkout directory name is a deployment choice, not a convention: this
+# deployment has run from both `code/agentcore` and `code/super-agent`. Point
+# AGENTCORE_REPO at the tree you actually want watched, in
+# ~/.config/agent-pool/proactive.env:
+#
+#   AGENTCORE_REPO=%h/code/super-agent
+#
+# `WorkingDirectory` cannot expand variables, so it carries the default and the
+# pass itself is driven by `--repo` + `PYTHONPATH`; a different checkout only
+# needs the env file, not an edited unit.
+
+[Service]
+Type=oneshot
+Environment=AGENTCORE_STATE_DIR=%h/.local/state/agentcore
+Environment=AGENTCORE_PROACTIVE_MODE=observe
+Environment=AGENTCORE_REPO=%h/code/agentcore
+EnvironmentFile=-%h/.config/agent-pool/proactive.env
+Environment=PYTHONPATH=${AGENTCORE_REPO}
+WorkingDirectory=%h/code/agentcore
+UMask=0077
+ExecStart=/usr/bin/python3 -m agentcore.proactive_watch --mode observe --repo ${AGENTCORE_REPO} --liveness-db %h/.local/state/agentcore/liveness.db
+Nice=10

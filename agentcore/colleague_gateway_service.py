@@ -80,7 +80,22 @@ def _owner(profile_name, session_id, *, session_context_profile, session_context
     dispatcher = _dispatcher(profile_name)
     if dispatcher is None:
         raise RuntimeError("gateway_dispatch_host_unavailable")
-    return dispatcher, {"profile": profile_name, "session": session_id}
+    owner = {"profile": profile_name, "session": session_id}
+    # The route is supplied exclusively by Hermes' current session context;
+    # no model argument or later active chat may choose the destination.
+    for field, variable in (("route", "HERMES_SESSION_KEY"),
+                            ("channel", "HERMES_SESSION_PLATFORM"),
+                            ("chat", "HERMES_SESSION_CHAT_ID"),
+                            ("thread", "HERMES_SESSION_THREAD_ID")):
+        try:
+            value = _SESSION_ENV(variable, "")
+        except Exception:
+            # Delivery metadata is optional. Never infer it or let a missing
+            # platform field make an otherwise authenticated assignment fail.
+            continue
+        if isinstance(value, str) and value.strip() and len(value) <= 512:
+            owner[field] = value.strip()
+    return dispatcher, owner
 
 
 def _member(dispatcher, profile_name, reference):

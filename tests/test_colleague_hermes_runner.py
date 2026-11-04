@@ -255,6 +255,73 @@ def test_binding_loader_rejects_shared_session_or_injected_profile(tmp_path):
         load_profile_bindings(path)
 
 
+@pytest.mark.parametrize("field", [
+    "member_id", "generation", "owner_profile", "owner_session",
+    "hermes_profile", "hermes_session_id",
+])
+@pytest.mark.parametrize("escaped", [False, True])
+def test_binding_loader_rejects_duplicate_identity_fields(tmp_path, field, escaped):
+    entry = {
+        "member_id": "reviewer", "generation": 1, "owner_profile": "main",
+        "owner_session": "source-a", "hermes_profile": "reviewer",
+        "hermes_session_id": "local-" + "a" * 64,
+    }
+    # Even identical values are ambiguous. Escaped spellings must not evade
+    # duplicate detection after JSON decoding.
+    key = json.dumps(field) if not escaped else '"\\u%04x%s"' % (ord(field[0]), field[1:])
+    raw = '[{' + key + ':' + json.dumps(entry[field]) + ',' + json.dumps(entry)[1:] + ']'
+    path = tmp_path / "bindings.json"
+    path.write_text(raw, encoding="utf-8")
+    path.chmod(0o600)
+    with pytest.raises(ValueError, match="duplicate_binding_field"):
+        load_profile_bindings(path)
+
+
+@pytest.mark.parametrize("replacement_kind", ["symlink", "public_file"])
+def test_binding_loader_validates_the_file_it_actually_reads(tmp_path, monkeypatch, replacement_kind):
+    import io
+
+    entry = {
+        "member_id": "reviewer", "generation": 1, "owner_profile": "main",
+        "owner_session": "source-a", "hermes_profile": "reviewer",
+        "hermes_session_id": "local-" + "a" * 64,
+    }
+    path = tmp_path / "bindings.json"
+    path.write_text(json.dumps([entry]))
+    path.chmod(0o600)
+    target = tmp_path / "replacement.json"
+    target.write_text(json.dumps([{**entry, "owner_session": "source-b"}]))
+    target.chmod(0o600 if replacement_kind == "symlink" else 0o644)
+    replacement = tmp_path / "replacement-link"
+    if replacement_kind == "symlink":
+        replacement.symlink_to(target)
+    else:
+        replacement = target
+    original_io_open, original_os_open = io.open, os.open
+    swapped = False
+
+    def swap_before_open(file):
+        nonlocal swapped
+        if (not swapped and isinstance(file, (str, os.PathLike))
+                and os.fspath(file) == str(path)):
+            swapped = True
+            os.replace(replacement, path)
+
+    def io_open(file, *args, **kwargs):
+        swap_before_open(file)
+        return original_io_open(file, *args, **kwargs)
+
+    def os_open(file, *args, **kwargs):
+        swap_before_open(file)
+        return original_os_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(io, "open", io_open)
+    monkeypatch.setattr(os, "open", os_open)
+    with pytest.raises((ValueError, OSError)):
+        load_profile_bindings(path)
+    assert swapped, "the replacement must occur immediately before the actual open"
+
+
 def test_installed_hermes_parser_accepts_stdin_oneshot_with_exact_session_id():
     import os
     import subprocess
@@ -358,8 +425,20 @@ def test_launch_claims_client_scope_when_the_turn_runs_elsewhere(tmp_path, monke
     pidfile = tmp_path / "delegatee.pid"
     script = tmp_path / "gateway_delegating_hermes"
     # ``env -i`` mirrors a gateway child: it does not inherit the attempt token.
-    script.write_text("#!/bin/sh\nenv -i setsid sleep 60 >/dev/null 2>&1 &\necho $! > \"$PIDFILE\"\n"
-                      "echo 'turn complete'\n")
+    # 用绝对路径调 setsid/sleep：``env -i`` 会清空 PATH，靠 PATH 解析的可执行文件
+    # 在精简镜像里会直接退出，pid 记下来时进程已经死了（CI 上就是这样红的）。
+    # setsid 缺失时退化为普通后台进程 —— 两种情形都不继承环境，用例要证的东西不变。
+    script.write_text(
+        "#!/bin/sh\n"
+        "SLEEP_BIN=/bin/sleep; [ -x \"$SLEEP_BIN\" ] || SLEEP_BIN=/usr/bin/sleep\n"
+        "if command -v setsid >/dev/null 2>&1; then\n"
+        "  env -i setsid \"$SLEEP_BIN\" 300 >/dev/null 2>&1 &\n"
+        "else\n"
+        "  env -i \"$SLEEP_BIN\" 300 >/dev/null 2>&1 &\n"
+        "fi\n"
+        "echo $! > \"$PIDFILE\"\n"
+        "echo 'turn complete'\n"
+    )
     script.chmod(0o755)
     monkeypatch.setenv("PIDFILE", str(pidfile))
     result = _launch([str(script)], input="", timeout=10)
@@ -369,7 +448,20 @@ def test_launch_claims_client_scope_when_the_turn_runs_elsewhere(tmp_path, monke
         assert result.containment_scope == "cli_client"
         assert result.quiescent is False
         assert result.containment["survivors"] == []
-        os.kill(delegatee, 0)  # still running: the sweep never saw it
+        # 轮询而不是立刻判定：fork 后到被调度起来之间有一个小窗口。
+        alive = False
+        for _ in range(40):
+            try:
+                os.kill(delegatee, 0)
+                alive = True
+                break
+            except ProcessLookupError:
+                time.sleep(0.05)
+        if not alive:
+            # 前提建立不起来：这个沙箱会回收已脱离会话的后台子进程（GitHub runner
+            # 实测如此），那就无法证明「扫描没看见它」——因为根本不存在可被扫描的
+            # 存活进程。按仓库既有原则：环境缺口记 SKIP，不算通过，也不伪装成红。
+            pytest.skip("sandbox reaps detached children; containment premise unavailable")
     finally:
         with suppress(ProcessLookupError):
             os.kill(delegatee, signal.SIGKILL)
@@ -383,3 +475,44 @@ def test_session_creator_without_a_host_store_factory_refuses_to_guess():
         cwd_for_profile=lambda profile: "/tmp")
     with pytest.raises(RuntimeError, match="session_store_factory_required"):
         creator.create("reviewer_profile", "req-1")
+
+
+def test_gateway_creator_passes_host_selected_empty_toolsets(tmp_path):
+    from agentcore.colleague_hermes_runner import HermesGatewaySessionCreator
+    calls = []
+    class Store:
+        def call(self, method, **kwargs):
+            calls.append((method, kwargs))
+            return {"session_id": ("local-" + "a" * 64)}
+    creator = HermesGatewaySessionCreator(lambda profile: object(), cwd_for_profile=lambda profile: str(tmp_path), store_factory=lambda connection: Store(), toolsets=())
+    assert creator.create("architect", "request") == ("local-" + "a" * 64)
+    assert calls[0][1]["toolsets"] == []
+
+
+def test_gateway_creator_rejects_untrusted_toolset_type():
+    from agentcore.colleague_hermes_runner import HermesGatewaySessionCreator
+    with pytest.raises(ValueError, match="trusted_toolsets_required"):
+        HermesGatewaySessionCreator(lambda profile: object(), cwd_for_profile=lambda profile: "/tmp", toolsets=["terminal"])
+
+
+def test_gateway_creator_accepts_only_trusted_model_options(tmp_path):
+    from agentcore.colleague_hermes_runner import HermesGatewaySessionCreator
+    observed = []
+    class Store:
+        def call(self, method, **kw):
+            observed.append(kw)
+            return {"session_id": "local-" + "a" * 64}
+    options = {"safe_mode": True, "model": "model", "provider": "custom", "base_url": "http://127.0.0.1:1234/v1", "api_key": "example"}
+    creator = HermesGatewaySessionCreator(lambda profile: object(), cwd_for_profile=lambda profile: str(tmp_path), store_factory=lambda connection: Store(), toolsets=(), session_options_for_profile=lambda profile: options)
+    creator.create("architect", "req")
+    assert observed[0]["safe_mode"] is True and observed[0]["toolsets"] == []
+    assert observed[0]["model"] == "model" and observed[0]["request_id"] == "req"
+
+
+def test_gateway_creator_rejects_host_options_that_override_identity(tmp_path):
+    from agentcore.colleague_hermes_runner import HermesGatewaySessionCreator
+    class Store:
+        def call(self, method, **kwargs): pytest.fail("unsafe options reached gateway")
+    creator = HermesGatewaySessionCreator(lambda profile: object(), cwd_for_profile=lambda profile: str(tmp_path), store_factory=lambda connection: Store(), session_options_for_profile=lambda profile: {"request_id": "attacker"})
+    with pytest.raises(ValueError, match="invalid_trusted_session_options"):
+        creator.create("architect", "request")

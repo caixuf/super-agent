@@ -19,9 +19,16 @@ VERDICT_DEFER: Final[str] = "DEFER"     # Plausible observation needing second v
 # Credential protection patterns
 _CREDENTIAL_PATTERNS: Final[Tuple[re.Pattern, ...]] = (
     re.compile(r"-----BEGIN [A-Z0-9_-]+ PRIVATE KEY-----"),
-    re.compile(r"(?:api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]\s*['\"][A-Za-z0-9_\-\.]{16,}['\"]", re.IGNORECASE),
+    # Quoted and unquoted assignments are both secrets. The value matcher
+    # accepts synthetic test markers without requiring a known prefix.
+    re.compile(
+        r"(?:api[_-]?key|secret[_-]?key|access[_-]?token|password|passwd|密码|口令)"
+        r"\s*(?:是|为|[:=：])?\s*['\"]?[A-Za-z0-9_\-]{12,}['\"]?",
+        re.IGNORECASE),
     re.compile(r"\bbearer\s+[A-Za-z0-9_\-\.]{30,}\b", re.IGNORECASE),
     re.compile(r"\bAKID[A-Za-z0-9]{16,}\b"),
+    re.compile(r"\b(?:sk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_\-]{16,}\b",
+               re.IGNORECASE),
 )
 
 # Hard evidence markers (commit hashes, numeric thresholds, explicit signals, task/case identifiers)

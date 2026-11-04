@@ -59,6 +59,8 @@ def test_register_opt_in_and_bounded_submission(tmp_path):
     routing = context.prompt_sections['durable-dispatch-routing']['content']
     assert 'durable_submit' in routing and 'finish the turn' in routing
     assert 'not by keywords' in routing
+    assert 'must not execute or delegate work itself' in routing
+    assert 'Use delegate_task' not in routing
     result = call(context, 'submit', args, session_id='trusted-session')
     assert result['ok'] and result['status'] == 'queued'
     assert 'finish this turn' in result['next_action']
@@ -373,5 +375,68 @@ def test_status_enriches_with_liveness_ledger(tmp_path):
 
     cancel_res = service.cancel('session-one', {'task_id': task_id})
     assert cancel_res['ok'] is True
-    live_cancelled = ledger.get(task_id)
-    assert live_cancelled['state'] == 'cancelled'
+    assert cancel_res['cancellation_requested'] is True
+    assert ledger.get(task_id)['state'] == 'queued'
+    # The queue, not the interactive cancellation tool, confirms the terminal.
+    assert service.pool.claim() is None
+    assert service.status('session-one', {'task_id': task_id})['status'] == 'cancelled'
+    assert ledger.get(task_id)['state'] == 'cancelled'
+
+
+@pytest.mark.parametrize('running', [False, True])
+def test_cancel_request_keeps_liveness_nonterminal_until_queue_confirms(tmp_path, running):
+    from agentcore.liveness import LivenessLedger
+    clock = [100.0]
+    ledger = LivenessLedger(tmp_path / 'liveness.db', clock=lambda: clock[0])
+    context, args = make_context(tmp_path)
+    service = plugin.DispatchService(context.settings['queue_root'], 'test-profile',
+                                     context.settings['allowed_roots'], liveness_ledger=ledger)
+    task = service.submit('session', args)['task_id']
+    claimed = service.pool.claim() if running else None
+    try:
+        state = 'running' if running else 'queued'
+        ledger.observe(task, state=state, heartbeat_at=100.0)
+        clock[0] = 200.0
+        answer = service.cancel('session', {'task_id': task})
+        assert answer['cancellation_requested'] is True
+        assert answer['status'] == state
+        observed = ledger.get(task)
+        assert observed['state'] == state
+        assert observed['heartbeat_at'] == 100.0, 'a cancellation request is not a worker heartbeat'
+        assert 'awaiting' in observed['detail']
+        assert ledger.beat(task, phase='still stopping') is not None
+        if claimed:
+            service.pool.finish(task, claimed[0]['attempt'], False, {})
+        else:
+            assert service.pool.claim() is None
+        assert service.status('session', {'task_id': task})['status'] == 'cancelled'
+        assert ledger.get(task)['state'] == 'cancelled'
+    finally:
+        if claimed:
+            os.close(claimed[1])
+
+
+@pytest.mark.parametrize('terminal', ['completed', 'failed'])
+def test_cancellation_racing_worker_finish_projects_actual_outcome(tmp_path, monkeypatch, terminal):
+    from agentcore.liveness import LivenessLedger
+    ledger = LivenessLedger(tmp_path / 'liveness.db')
+    context, args = make_context(tmp_path)
+    service = plugin.DispatchService(context.settings['queue_root'], 'test-profile',
+                                     context.settings['allowed_roots'], liveness_ledger=ledger)
+    task = service.submit('session', args)['task_id']
+    row, fd = service.pool.claim()
+    try:
+        with service.pool.db() as db:
+            db.execute('UPDATE jobs SET replay_safe=0 WHERE id=?', (task,))
+
+        def complete_before_cancel(job):
+            service.pool.finish(job, row['attempt'], terminal == 'completed', {})
+
+        monkeypatch.setattr(service.pool, 'cancel', complete_before_cancel)
+        answer = service.cancel('session', {'task_id': task})
+        assert answer['status'] == terminal
+        assert answer['already_terminal'] is True
+        assert answer['request_accepted'] is False
+        assert ledger.get(task)['state'] == ('done' if terminal == 'completed' else terminal)
+    finally:
+        os.close(fd)

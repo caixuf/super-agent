@@ -6,7 +6,7 @@
 #   ② 包安装          离开仓目录仍可 import；随包 .so 在包内（打包元数据正确）
 #   ③ dry-run         零副作用：一个文件都不许建
 #   ④ 真实安装        资产落位；绝不覆盖现场身份；示例技能不得装成生产技能；
-#                     没有 Hermes 时补丁步骤必须优雅跳过而不是报错
+#                     没有 Hermes 时须明确选择 --skip-patch，不能伪报完整部署
 #   ⑤ 幂等            重跑退出码 0、识别出「已一致」、文件集合不变
 #   ⑥ 合成生效身份    骨架 + 业务叠加层；占位符必须被替换干净
 #   ⑦ 引擎端到端      写入 → 汇合 → 召回（离线确定性嵌入，不依赖网络/模型）
@@ -35,12 +35,12 @@ indent() { sed 's/^/     /'; }
 
 # --------------------------------------------------------------------------- #
 step "① 仓自检（业务无关门禁 + 引擎单测）"
-if out="$(cd "$REPO" && python3 -m pytest tests -q 2>&1)"; then
+if out="$(cd "$REPO" && python3 -m pytest tests -q --tb=short 2>&1)"; then
   printf '%s\n' "$out" | tail -2 | indent
   n="$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | head -1)"
   if [ -n "$n" ]; then pass "单测通过（$n）"; else bad "没解析到 passed 计数"; fi
 else
-  printf '%s\n' "$out" | tail -20 | indent
+  printf '%s\n' "$out" | indent
   bad "仓自检失败"
 fi
 
@@ -71,7 +71,7 @@ fi
 # --------------------------------------------------------------------------- #
 step "③ --dry-run 必须零副作用"
 rm -rf "$HOME/.hermes"
-if bash "$REPO/install/install.sh" --dry-run --profile "$PROFILE" > "$LOG" 2>&1; then
+if bash "$REPO/install/install.sh" --dry-run --profile "$PROFILE" --skip-patch > "$LOG" 2>&1; then
   pass "--dry-run 退出码 0"
 else
   tail -15 "$LOG" | indent
@@ -86,7 +86,7 @@ fi
 
 # --------------------------------------------------------------------------- #
 step "④ 真实安装（模拟「没有 Hermes CLI 的新机器」）"
-if bash "$REPO/install/install.sh" --profile "$PROFILE" > "$LOG" 2>&1; then
+if bash "$REPO/install/install.sh" --profile "$PROFILE" --skip-patch > "$LOG" 2>&1; then
   pass "安装器退出码 0"
 else
   tail -20 "$LOG" | indent
@@ -152,10 +152,13 @@ else
   bad "examples/ 被当成生产技能装了 $n_ex 个"
 fi
 
-if grep -qE 'Hermes 安装树不存在|跳过补丁' "$LOG"; then
-  pass "没有 Hermes 时补丁步骤优雅跳过（不是失败）"
+if bash "$REPO/install/install.sh" --profile "$PROFILE" > "$LOG.missing" 2>&1; then
+  bad "缺少 Hermes 补丁目标却返回成功"
+elif grep -qE 'Hermes 安装树不存在|未找到 hermes CLI' "$LOG.missing"; then
+  pass "缺少 Hermes CLI 或补丁目标时明确失败"
 else
-  bad "补丁步骤没有优雅跳过"
+  tail -20 "$LOG.missing" | indent
+  bad "缺少 Hermes 时没有明确的补丁失败"
 fi
 
 # ⑩ 段（人工步骤）必须把变量都展开：这里是那个 unbound 缺陷的回归哨兵
@@ -173,9 +176,45 @@ printf '  --- ⑩ 段节选（本脚本只打印、不执行）\n'
 sed -n '/需要人工执行的步骤/,$p' "$LOG" | head -12 | indent
 
 # --------------------------------------------------------------------------- #
+step "④b 安装后的私有运行时真实渲染（离线 Chromium）"
+if out="$(cd /tmp && "$P/agentcore/.superagent-venv/bin/python" - "$P/agentcore" <<'PY'
+import json
+from pathlib import Path
+import sys
+import tempfile
+
+from PIL import Image
+import yaml, markdown, pygments, websocket
+
+engine = Path(sys.argv[1])
+assert Path(sys.prefix) == engine / '.superagent-venv', 'private interpreter was lost'
+sys.path.insert(0, str(engine / 'tools'))
+import arch_doc
+
+with tempfile.TemporaryDirectory(prefix='installed-document-') as directory:
+    html, png = (Path(directory) / name for name in ('check.html', 'check.png'))
+    body, toc = arch_doc.md_to_html_with_toc(
+        '# Deployment check\n\n## Pipeline\n\n```mermaid\nflowchart LR\n A[Submit] --> B[Worker]\n```\n')
+    arch_doc.render(html, 'Deployment check', body, toc=toc, footer='Offline rendering check')
+    manifest = arch_doc.screenshot(html, png, 900, 900)
+    assert manifest['pages'] and png.stat().st_size > 5000
+    with Image.open(png) as image:
+        image.verify()
+    print(json.dumps({'private_runtime': True, 'png_bytes': png.stat().st_size,
+                      'pages': len(manifest['pages']), 'rendered': True}))
+PY
+)"; then
+  printf '%s\n' "$out" | indent
+  pass "私有 Python 保持虚拟环境身份，真实浏览器生成含图 PNG"
+else
+  printf '%s\n' "$out" | tail -20 | indent
+  bad "安装后的文档渲染失败"
+fi
+
+# --------------------------------------------------------------------------- #
 step "⑤ 幂等：同一目标重跑一遍"
 before="$(find "$P" -type f | sort | md5sum | cut -d' ' -f1)"
-if bash "$REPO/install/install.sh" --profile "$PROFILE" > "$LOG" 2>&1; then
+if bash "$REPO/install/install.sh" --profile "$PROFILE" --skip-patch > "$LOG" 2>&1; then
   pass "重跑退出码 0"
 else
   tail -20 "$LOG" | indent
@@ -197,7 +236,7 @@ fi
 # --------------------------------------------------------------------------- #
 step "⑥ 合成生效身份（骨架 + 业务叠加层）"
 printf '# 业务叠加层（示例）\n- 业务技能源 / 业务 MCP 工具 / 业务领域词表由业务仓提供。\n' > /tmp/overlay.md
-if bash "$REPO/install/install.sh" --profile "$PROFILE" --compose-soul /tmp/overlay.md > "$LOG" 2>&1; then
+if bash "$REPO/install/install.sh" --profile "$PROFILE" --skip-patch --compose-soul /tmp/overlay.md > "$LOG" 2>&1; then
   pass "合成退出码 0"
 else
   tail -20 "$LOG" | indent

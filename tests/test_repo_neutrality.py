@@ -71,6 +71,24 @@ def _pattern(token: str) -> "re.Pattern[str]":
 
 PATTERNS = [(token, _pattern(token)) for token in BANNED]
 
+#: **第二类：环境指纹**（主机名 / 内网地址）。与 BANNED 分开是因为泄露路径不同 ——
+#: 业务词是从业务仓抄代码带进来的，环境指纹是贴运行日志、写交接报告时带进来的。
+#: 两者后果一样，都必须拦。
+#:
+#: 为什么单独加这一层：先前只有 BANNED，于是 8 份交接/报告里的大写 ``Emily``
+#: 一路进到公开树里没人拦（小写 emily 早被替换过，大小写不敏感这一层当初漏了）。
+ENV_TOKENS = ("emily", "guanguan", "caixuf2")
+#: 内网地址段：10/8、192.168/16、172.16/12。公网地址不在射程内。
+INTRANET_IP = re.compile(r"\b(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b")
+#: 实验网段：172.100/16 不在 RFC1918 里（它属于公网分配区间），但内部就是这么用的，
+#: 所以单列一条 —— 不能假称它是「内网地址」，也不能因为不是 RFC1918 就放过。
+LAB_NET = re.compile(r"\b172\.100\.\d{1,3}\.\d{1,3}\b")
+ENV_PATTERNS = [("host:" + token, _pattern(token)) for token in ENV_TOKENS]
+ENV_PATTERNS.append(("intranet-ip", INTRANET_IP))
+ENV_PATTERNS.append(("lab-net", LAB_NET))
+
+ALL_PATTERNS = PATTERNS + ENV_PATTERNS
+
 
 #: 生成物 / 缓存目录 —— **必须显式排除**，不能只靠 `.gitignore` 和 git：
 #: 门禁在「没有 .git 的导出目录」里跑时（干净室就是这么跑的：`git archive` 不带 `.git`），
@@ -110,7 +128,7 @@ def _looks_binary(path: Path) -> bool:
 def _violations(path: Path):
     text = path.read_bytes().decode("utf-8", "ignore")
     for line_no, line in enumerate(text.splitlines(), 1):
-        for token, pattern in PATTERNS:
+        for token, pattern in ALL_PATTERNS:
             if pattern.search(line):
                 yield token, line_no, line.strip()[:160]
 
@@ -148,8 +166,31 @@ def test_no_business_literals_anywhere_in_repo():
             found.append("%s:%s [%s] %s"
                          % (path.relative_to(REPO_ROOT), line_no, token, text))
     assert not found, (
-        "本仓不得出现业务字面量（举例请用占位符，如 <business-domain> / "
-        "{{BUSINESS_OVERLAY}}）：\n" + "\n".join(found))
+        "本仓不得出现业务字面量或环境指纹（举例请用占位符，如 <business-domain> / "
+        "<remote-host> / 10.x.x.x）：\n" + "\n".join(found))
+
+
+@pytest.mark.parametrize("token", ENV_TOKENS)
+def test_gate_detects_hostname_fingerprint(token):
+    """自检：主机名（含大写写法）必须被抓到 —— 大小写漏一层就足以让 8 份文档漏网。"""
+    for variant in (token, token.capitalize(), token.upper()):
+        hits = list(_violations(_write_probe("deployed on %s instance\n" % variant)))
+        assert any(hit[0] == "host:" + token for hit in hits), (
+            "%r 的写法 %r 抓不到，门禁是假的" % (token, variant))
+
+
+def test_gate_detects_intranet_ip():
+    """自检：内网地址段必须被抓到，公网地址不得误判。"""
+    for ip in ("192.168.137.2", "10.182.168.53"):
+        assert list(_violations(_write_probe("endpoint %s health\n" % ip))), ip
+    # 实验网段单列（不在 RFC1918 内，但确实是内部拓扑）
+    hits = [h for h in _violations(_write_probe("endpoint 172.100.100.112 health\n"))
+            if h[0] == "lab-net"]
+    assert hits, "实验网段没被抓到"
+    for ip in ("8.8.8.8", "172.32.0.1", "127.0.0.1"):
+        hits = [h for h in _violations(_write_probe("endpoint %s health\n" % ip))
+                if h[0] == "intranet-ip"]
+        assert not hits, "公网/回环地址 %s 被误判成内网" % ip
 
 
 @pytest.mark.parametrize("token", BANNED)

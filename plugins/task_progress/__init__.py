@@ -61,6 +61,31 @@ _EDIT_LOCKS_GUARD = threading.Lock()
 #: 长跑网关会为**每条**消息留一把锁，从不回收 —— 上限是唯一兜底。
 _MAX_EDIT_LOCKS = 512
 
+#: Reader-facing word for a ledger verdict.
+#:
+#: Kept here rather than imported from ``agentcore.task_progress`` on purpose:
+#: the engine package is a plain module, so a plugin hot-reload re-executes this
+#: file while ``agentcore`` stays the copy the gateway imported at boot. Calling
+#: a helper that only exists in the *new* engine code would raise AttributeError
+#: in the running gateway until it restarts. Two small tables beat a live crash;
+#: ``tests/test_task_progress.py`` keeps them identical.
+_VERDICT_WORD = {
+    "queued": "已接收",
+    "running": "进行中",
+    "unverified": "待验收",
+    "done": "已完成",
+    "failed": "未完成",
+    "cancelled": "已取消",
+    "stalled": "无响应",
+    "lost": "进程已不在",
+    "waiting_user": "等待用户",
+    "awaiting_plan_approval": "等待计划审批",
+}
+
+
+def _verdict_word(verdict: Any) -> str:
+    return _VERDICT_WORD.get(str(verdict or ""), str(verdict or ""))
+
 
 class _EditOutcomeUnknown(Exception):
     pass
@@ -215,7 +240,8 @@ class _Entry:
     """One editable entry shared by a foreground turn and its background tasks."""
 
     __slots__ = ("key", "message", "writer", "tasks", "foreground", "session_key",
-                 "owner", "snap", "last_emit_at", "final", "frozen", "edit_state")
+                 "owner", "snap", "last_emit_at", "final", "frozen", "edit_state",
+                 "terminal_pending")
 
     def __init__(self, key: str, message: Any, tasks, *, foreground=None, session_key="", owner=""):
         self.key = key
@@ -230,6 +256,8 @@ class _Entry:
         self.final = False
         self.frozen = False
         self.edit_state = "confirmed"
+        #: Set by the terminal lifecycle hook so the next poll bypasses the throttle.
+        self.terminal_pending = False
 
 
 def _settings(ctx) -> dict:
@@ -257,8 +285,23 @@ def _store(ctx, modules: dict, settings: dict):
     return modules["card_store"].CardStore(path)
 
 
+def _message_transport():
+    try:
+        return importlib.import_module('gateway.plugin_messages')
+    except ModuleNotFoundError as exc:
+        if exc.name != 'gateway.plugin_messages':
+            raise
+    name = '_super_agent_task_progress_legacy_messages'
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name('legacy_messages.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sys.modules[name] = module
+    return sys.modules[name]
+
+
 def _resolve_target(ctx, session_key: str):
-    from gateway import plugin_messages
+    plugin_messages = _message_transport()
     from gateway.run import _gateway_runner_ref
     runner = _gateway_runner_ref()
     if runner is None:
@@ -298,7 +341,7 @@ def _run_edit_on_loop(coro, timeout: float = 15.0):
 
 async def _edit_only_unlocked(target, message_id: str, text: str, *, plugin_id: str) -> dict:
     """Edit one existing message without the host API's send-on-edit fallback."""
-    from gateway import plugin_messages
+    plugin_messages = _message_transport()
     if not isinstance(message_id, str) or not message_id:
         return {"ok": False, "error": "missing_message_id"}
     if target.live is not None:
@@ -381,7 +424,7 @@ def _capture_session_key() -> str:
 
 
 def _post_to_session(ctx, session_key: str, text: str, *, allow_bound_context=False) -> dict:
-    if not session_key or allow_bound_context:
+    if (not session_key or allow_bound_context) and callable(getattr(ctx, 'post_message', None)):
         # Only a synchronous lifecycle hook may use its already-bound host context.
         try:
             handle = ctx.post_message(text)
@@ -389,7 +432,7 @@ def _post_to_session(ctx, session_key: str, text: str, *, allow_bound_context=Fa
                     "message_id": getattr(handle, "message_id", None), "handle": handle}
         except Exception:
             return {"ok": False, "error": "no_conversation"}
-    from gateway import plugin_messages
+    plugin_messages = _message_transport()
     target, error = _resolve_target(ctx, session_key)
     if target is None:
         return {"ok": False, "error": error or "no_conversation"}
@@ -441,6 +484,8 @@ def register(ctx) -> None:
     card_state = modules["task_card"].CardState
     state = getattr(ctx, "state", None)
     entries: Dict[str, _Entry] = {}
+    #: Terminal-publish workers, joined on unload so none outlives the plugin.
+    _terminal_threads: list = []
     lock = threading.Lock()
     stop = threading.Event()
     wake = threading.Event()
@@ -496,6 +541,86 @@ def register(ctx) -> None:
         record["edit_state"] = edit_state
         members[key] = record
         return _state_set("entries", members)
+
+    def _rehydrate_entry(key: str, state_word: str) -> bool:
+        """Rebuild an in-memory entry from its durable record, for a terminal frame.
+
+        Returns True when the entry now exists and can be edited. A record without a
+        message id cannot be edited, so it is not treated as success — announcing a
+        finish we cannot render would be the same lie in a different place.
+        """
+        record = dict((_state_get("entries", {}) or {}).get(key) or {})
+        message_id = str(record.get("message_id") or "")
+        if not message_id:
+            return False
+        session_key = str(record.get("session_key") or "")
+        owner = str(record.get("owner") or "")
+        tasks = [t for t in (record.get("tasks") or []) if isinstance(t, str)]
+        foreground = record.get("foreground")
+        if not isinstance(foreground, dict):
+            foreground = {}
+        foreground = dict(foreground)
+        foreground.update(state=state_word, phase="本轮已完成" if state_word == "done" else "状态待确认",
+                          detail="")
+        try:
+            entry = _Entry(key, _RouteMessage(ctx, session_key, message_id), tasks,
+                           foreground=foreground, session_key=session_key, owner=owner)
+        except Exception:
+            logger.debug("task-progress: cannot rehydrate %s", key, exc_info=True)
+            return False
+        with lock:
+            existing = entries.get(key)
+            if existing is not None:
+                return True
+            entries[key] = entry
+        return True
+
+    def _publish_terminal_now(key: str, state_word: str) -> None:
+        """Publish the terminal frame on a short-lived thread.
+
+        Two constraints meet here. The hook must return immediately — it runs on the
+        host's turn-teardown path, and a slow transport there stalls the turn (its own
+        test pins that). And the frame must not wait for the next poll — the loop may
+        be mid-sleep, and a frozen/throttled entry would never pick it up, leaving the
+        card parked on 进行中 while the ledger says done. A one-shot thread satisfies
+        both: the hook returns at once, and the edit is attempted now.
+        """
+        try:
+            entry = entries.get(key)
+            if entry is None or entry.final:
+                return
+        except Exception:
+            return
+
+        def _run() -> None:
+            try:
+                with lock:
+                    entry = entries.get(key)
+                    if entry is None or entry.final:
+                        return
+                now = time.time()
+                snaps = _snaps(entry)
+                head, foreground = _head(entry, snaps, now)
+                text = _render_entry(entry, snaps, foreground)
+                result = _publish(entry, text, final=True)
+                if not result.get("ok"):
+                    entry.final = False
+                    logger.debug("task-progress: terminal publish deferred for %s: %s",
+                                 key, result.get("error"))
+                    return
+                entry.snap = head
+                entry.last_emit_at = now
+                _close_card(store, entry, card_state, progress)
+            except Exception:
+                logger.debug("task-progress: terminal publish failed for %s", key, exc_info=True)
+
+        with lock:
+            entry.terminal_pending = True
+        worker = threading.Thread(target=_run, name="task-progress-terminal", daemon=True)
+        with lock:
+            _terminal_threads.append(worker)
+        worker.start()
+        wake.set()
 
     def _publish(entry: _Entry, text: str, *, final: bool) -> dict:
         if entry.final:
@@ -569,7 +694,20 @@ def register(ctx) -> None:
                     members[key] = record
                     _state_set("entries", members)
                     return
-                if key in entries or store.load(key) is not None:
+                existing = entries.get(key)
+                if existing is not None:
+                    # Opening can finish while _open reads the initial snapshot.
+                    # Recheck membership under the same lock as entry publication,
+                    # rather than losing the task at this hand-off boundary.
+                    if existing.owner != owner:
+                        return
+                    waiting = [task for task in tasks if task not in existing.tasks]
+                    if waiting:
+                        existing.tasks.extend(waiting)
+                        existing.snap = None
+                        _persist_entry(existing)
+                    return
+                if store.load(key) is not None:
                     return
                 members = dict(_state_get("entries", {}) or {})
                 prior = members.get(key) or {}
@@ -809,8 +947,11 @@ def register(ctx) -> None:
                 continue
             snaps = _snaps(entry)
             head, foreground = _head(entry, snaps, now)
-            if not progress.should_emit(entry.snap, head, last_emit_at=entry.last_emit_at,
-                                        now=now, min_interval=float(settings["min_interval"])):
+            # A terminal frame requested by the lifecycle hook must not be dropped by
+            # the throttle: waiting out min_interval here is what left cards spinning.
+            forced = entry.terminal_pending
+            if not forced and not progress.should_emit(entry.snap, head, last_emit_at=entry.last_emit_at,
+                                                       now=now, min_interval=float(settings["min_interval"])):
                 continue
             text = _render_entry(entry, snaps, foreground)
             final = bool(head.get("terminal"))
@@ -843,6 +984,7 @@ def register(ctx) -> None:
                 continue
             entry.snap = head
             entry.last_emit_at = now
+            entry.terminal_pending = False
             if final:
                 _close_card(store, entry, card_state, progress)
 
@@ -1028,6 +1170,32 @@ def register(ctx) -> None:
         if not session_id or not turn_id:
             return None
         key = _entry_key(turn_id, session_id, "")
+        # The host does not pass the same ``turn_id`` shape to every hook: the turn
+        # that opened the card can key as "<sid>:<sid>:<tid>" while the terminal hook
+        # arrives as "<tid>". Keying only by this hook's own turn_id then matches
+        # nothing, the foreground state never leaves "running", and the card sits on
+        # 运行中 forever while the ledger says done. Resolve the entry from whichever
+        # source still knows about it: live memory first, then the durable record —
+        # the card was posted, so the record exists even when no in-memory entry does.
+        if key not in entries:
+            with lock:
+                candidates = list(entries.keys())
+            if not candidates:
+                candidates = [k for k in (_state_get("entries", {}) or {})
+                              if isinstance(k, str)]
+            matched = [k for k in candidates
+                       if isinstance(k, str) and session_id in k
+                       and k.rstrip().endswith(turn_id)]
+            if not matched:
+                matched = [k for k in candidates
+                           if isinstance(k, str) and session_id in k]
+            if matched:
+                key = sorted(matched)[-1]
+                logger.info(
+                    "task-progress: terminal hook turn_id %r did not key an entry; "
+                    "settling %s for session %s",
+                    str(turn_id)[:40], key[-40:], str(session_id)[:40],
+                )
         if completed is True and failed is not True and interrupted is not True:
             state_word, phase, detail = "done", "本轮已完成", ""
         elif failed is True:
@@ -1044,10 +1212,19 @@ def register(ctx) -> None:
                 pending.update(state=state_word, phase=phase, detail=detail,
                                terminal_at=time.time())
                 turns[key] = pending
+        if not existed:
+            # The card is posted and the durable record names its message id, but no
+            # in-memory entry survived (a restart, or the foreground entry was never
+            # materialized). Rebuild just enough of it to write the terminal frame —
+            # otherwise the card is unreachable and stays on its last running frame.
+            existed = _rehydrate_entry(key, state_word)
+            if existed:
+                pending = None
         if not existed and pending is None:
             return None
         if existed:
             _set_turn(key, phase=phase, detail=detail, state=state_word)
+            _publish_terminal_now(key, state_word)
         with lock:
             if not is_opening:
                 turns.pop(key, None)
@@ -1093,9 +1270,7 @@ def register(ctx) -> None:
                                    reverse=True)[:20]
         for task_id, (turn, frozen) in recent_foreground:
             snap = progress.foreground_snapshot(turn, now=time.time())
-            word = {"queued": "已接收", "running": "进行中", "done": "已完成",
-                    "failed": "未完成", "cancelled": "已中断", "unknown": "状态待确认"}.get(
-                        snap["verdict"], snap["verdict"])
+            word = _verdict_word(snap["verdict"])
             minutes, seconds = divmod(int(snap["elapsed"]), 60)
             elapsed = "%d分%02d秒" % (minutes, seconds) if minutes else "%d秒" % seconds
             lines.append("· `%s` 前台回合 · %s · 已用 %s%s%s" % (
@@ -1103,7 +1278,7 @@ def register(ctx) -> None:
                 " · 进度消息更新待确认" if frozen else ""))
         for row in rows:
             snap = progress.snapshot(row, now=time.time())
-            word = {"queued": "已接收", "running": "进行中"}.get(snap["verdict"], snap["verdict"])
+            word = _verdict_word(snap["verdict"])
             minutes, seconds = divmod(int(snap["elapsed"]), 60)
             elapsed = "%d分%02d秒" % (minutes, seconds) if minutes else "%d秒" % seconds
             lines.append("· `%s` %s · 已用 %s%s" % (snap["task_id"], word, elapsed,
@@ -1136,6 +1311,101 @@ def register(ctx) -> None:
         register_command("longtask", _cmd_longtask, "一个长任务的当前状态：/longtask <任务号>",
                          args_hint="<任务号>")
 
+        #: Preferred verb, then two stable plugin namespaces.  The host rejects a
+        #: plugin command whose name is already a built-in, so every candidate is
+        #: checked with the host's own resolver before registration.  The choices
+        #: are ordered (not generated): the effective command is stable across
+        #: plugin reloads and host versions that do not add the same verbs.
+        _VERB_CANDIDATES = {
+            "status": ("status", "taskstatus", "task-progress-status"),
+            "pause": ("pause", "taskpause", "task-progress-pause"),
+            "cancel": ("cancel", "taskcancel", "task-progress-cancel"),
+        }
+        installed = {}
+
+        def _host_owns(name: str) -> Optional[bool]:
+            """Return the host's answer, or ``None`` when it cannot be inspected.
+
+            ``PluginContext.register_command`` rejects built-ins by calling this
+            same resolver.  A missing or broken resolver is not evidence that a
+            plain verb is free: the host may still reject it internally.  Keep
+            the unknown state separate so registration can choose a namespaced
+            fallback instead of advertising a command that may not exist.
+            """
+            try:
+                from hermes_cli.commands import resolve_command  # host module
+            except Exception:  # noqa: BLE001 - host module is optional here
+                return None
+            try:
+                return resolve_command(name) is not None
+            except Exception:  # noqa: BLE001 - resolver outage must not break load
+                return None
+
+        def _register_verb(primary, handler, description, args_hint=None):
+            """Register the first host-free candidate and return its exact name.
+
+            If all candidates are built-ins, do not register a colliding command:
+            the host would silently skip it and its usage text would be a lie.
+            """
+            candidates = _VERB_CANDIDATES[primary]
+            plain_owned = _host_owns(candidates[0])
+            # Unknown host state is deliberately treated as unsafe for the plain
+            # verb.  The second candidate is the stable task-prefixed namespace;
+            # third-party collisions there are outside this plugin's remit.
+            start = 1 if plain_owned is not False else 0
+            for name in candidates[start:]:
+                if name != candidates[0] and _host_owns(name) is True:
+                    continue
+                kwargs = {"args_hint": args_hint} if args_hint else {}
+                register_command(name, handler, description.replace("<verb>", name), **kwargs)
+                installed[primary] = name
+                return name
+            logger.warning("task-progress: every alias for %s conflicts with a host command",
+                           primary)
+            return None
+
+        def _verb(primary: str) -> str:
+            return installed.get(primary, primary)
+
+        # Prefer-D1 slash verbs (reliable classify path; free-text optional).
+        def _cmd_status(raw_args: str = "") -> str:
+            task = (raw_args or "").strip().split()[0] if (raw_args or "").strip() else ""
+            if not task:
+                return "用法：/%s <任务号>（或 /longtask <任务号>）" % _verb("status")
+            session = _session_id()
+            if not session:
+                return "无法确认当前会话，暂时不能查询任务进度。"
+            try:
+                from agentcore.barge_in_control import BargeInController
+                ctrl = BargeInController(ledger=ledger, clock=time.time)
+                out = ctrl.status(task, owner="%s:%s" % (
+                    getattr(ctx, "profile_name", "") or "local", session))
+                return out.get("message") or str(out)
+            except Exception as exc:  # noqa: BLE001
+                return "status 短路径不可用：%s" % type(exc).__name__
+
+        def _cmd_pause(raw_args: str = "") -> str:
+            task = (raw_args or "").strip().split()[0] if (raw_args or "").strip() else ""
+            if not task:
+                return "用法：/%s <任务号>（当前未接线，不会暂停任务）" % _verb("pause")
+            return ("暂停命令当前未接线：没有执行暂停，任务状态未改变。 task=%s" % task)
+
+        def _cmd_cancel(raw_args: str = "") -> str:
+            task = (raw_args or "").strip().split()[0] if (raw_args or "").strip() else ""
+            if not task:
+                return "用法：/%s <任务号>（当前未接线，不会取消任务）" % _verb("cancel")
+            return ("取消命令当前未接线：没有执行取消，任务状态未改变。 task=%s" % task)
+
+        _register_verb("status", _cmd_status,
+                       "任务进度短路径（不启动模型回合）：/<verb> <任务号>",
+                       args_hint="<任务号>")
+        _register_verb("pause", _cmd_pause,
+                       "暂停任务（当前未接线，不会暂停）：/<verb> <任务号>",
+                       args_hint="<任务号>")
+        _register_verb("cancel", _cmd_cancel,
+                       "取消任务（当前未接线，不会取消）：/<verb> <任务号>",
+                       args_hint="<任务号>")
+
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     ctx.register_hook("post_tool_call", _on_post_tool_call)
@@ -1147,6 +1417,13 @@ def register(ctx) -> None:
         stop.set()
         wake.set()
         thread.join(timeout=5.0)
+        # Terminal-publish threads are short-lived but must not outlive the plugin:
+        # a stray edit landing after unload writes to a card this instance no longer
+        # owns, and in tests it lands in the next case's fake transport.
+        with lock:
+            stragglers = [t for t in _terminal_threads if t.is_alive()]
+        for worker in stragglers:
+            worker.join(timeout=2.0)
 
     on_unload = getattr(ctx, "on_unload", None)
     if callable(on_unload):

@@ -43,12 +43,13 @@ def test_ledger_construction_without_a_path_stays_in_the_sandbox():
     from agentcore.liveness import LivenessLedger, default_db_path
 
     before = default_db_path()
-    existed = before.exists()
+    # 比的是「线上账本」自己的前后状态。原版把 sandbox 路径的 exists() 拿去和
+    # live 路径比（`existed = before.exists()` 却断言在 `live` 上），两个不同的文件，
+    # 于是只要线上账本原本已存在就必然假红 —— CI 上就是这么红的。
+    live = Path.home() / ".local" / "state" / "agentcore" / "liveness.db"
+    live_existed = live.exists()
     ledger = LivenessLedger(None)
     ledger.ensure_schema()
     assert Path(ledger.path).resolve() == before.resolve()
-    assert Path(ledger.path).resolve() != (Path.home() / ".local" / "state" / "agentcore"
-                                           / "liveness.db").resolve()
-    # 真账本不该因为这条用例被创建或改动
-    live = Path.home() / ".local" / "state" / "agentcore" / "liveness.db"
-    assert live.exists() == existed or not existed
+    assert Path(ledger.path).resolve() != live.resolve()
+    assert live.exists() == live_existed, "未配置路径的账本不得创建或删除线上账本"

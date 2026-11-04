@@ -97,3 +97,50 @@ def test_unverified_evidence_fails_visibly_through_durable_status(tmp_path, monk
     assert len(requests) == 2  # Existing read-only queue retry policy.
     assert status["status"] == "failed"
     assert status["result"]["runner_error"] == "unverified_citation"
+
+
+def test_generated_worker_executes_a_submitted_task(tmp_path, monkeypatch):
+    import subprocess
+    import yaml
+
+    CCPHandler.requests = []
+    CCPHandler.invalid = False
+    server = ThreadingHTTPServer(("127.0.0.1", 0), CCPHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        sources = tmp_path / "approved"
+        sources.mkdir()
+        source = sources / "sample.log"
+        source.write_text("synthetic warning: retry budget reached\n")
+        home = tmp_path / "profile"
+        home.mkdir()
+        queue = tmp_path / "queue"
+        config = {"plugins": {"enabled": ["durable-dispatch"], "entries": {
+            "durable-dispatch": {"settings": {"enabled": True, "queue_root": str(queue),
+                                               "allowed_roots": [str(sources)]}}}}}
+        (home / "config.yaml").write_text(yaml.safe_dump(config))
+        run = subprocess.run([sys.executable, str(REPO / "install/setup_worker.py"),
+                              "--profile-home", str(home), "--engine-root", str(REPO),
+                              "--profile", "canary", "--unit-dir", str(tmp_path / "units"),
+                              "--python", sys.executable, "--apply"], capture_output=True, text=True)
+        assert run.returncode == 0, run.stderr
+        provider = tmp_path / "provider.yaml"
+        provider.write_text("providers:\n  litellm:\n    base_url: http://127.0.0.1:%d/v1\n    key_env: CCP_TEST_KEY\n" % server.server_port)
+        monkeypatch.setenv("PI_EXECUTOR_HERMES_CONFIG", str(provider))
+        monkeypatch.setenv("CCP_TEST_KEY", "test-only-key")
+        monkeypatch.delenv("PI_CCP_API_KEY", raising=False)
+        monkeypatch.setenv("PYTHONPATH", str(REPO))
+        service = PLUGIN.DispatchService(str(queue), "canary", [str(sources)])
+        task = service.submit("session", {"request_key": "generated", "goal": "Explain",
+                                           "sources": [{"path": str(source)}]})
+        result = subprocess.run([sys.executable, "-m", "agentcore.pool", "--root", str(queue),
+                                 "worker", "--runner-config", str(home / "worker/runner.json"),
+                                 "--drain"], env=os.environ.copy(), capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert service.status("session", {"task_id": task["task_id"]})["status"] == "completed"
+        assert len(CCPHandler.requests) == 1
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()

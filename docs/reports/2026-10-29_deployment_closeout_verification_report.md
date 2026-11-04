@@ -16,9 +16,9 @@
 | **FlowCoro** | stdlib 后端（降级回退） | 原生 C++ 绑定缺失时走标准库事件轮询，已在回归中覆盖 |
 | **模型上下文契约** | `1,000,000 tokens` (source=`model/info`) | 经 `checks/model_context_check.sh` 实时探测 |
 
-### 1.2 本机（caixuf）与目标实例（Emily）差异核对
+### 1.2 本机（caixuf）与目标实例差异核对
 
-| 配置项 | 本机环境 (WSL2 / caixuf) | 目标生产实例 (Emily) | 收尾处置与启用策略 |
+| 配置项 | 本机环境 (WSL2 / caixuf) | 目标生产实例  | 收尾处置与启用策略 |
 | :--- | :--- | :--- | :--- |
 | **运行形态** | 用户态开发机，CLI / 测试 Profile | Systemd 服务守护，网关常驻 | 保持开发机不直连生产，部署前走隔离 Profile |
 | **现役 Profile** | `caixuf`, `caixufcanary`, `ccp`, `deepseek`, `mimo` | 专用生产 Profile（与业务镜像绑定） | 密钥与业务凭据完全留在目标机本地，不回传 |

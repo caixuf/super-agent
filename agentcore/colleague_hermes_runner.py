@@ -69,14 +69,27 @@ def load_profile_bindings(path: str | Path) -> dict[tuple[str, int, str, str], P
     Each inbound owner conversation maps to its own pre-created Hermes session ID.
     Title lookup is never used, because duplicate titles can resolve ambiguously.
     """
+    def unique_fields(pairs):
+        entry = {}
+        for key, value in pairs:
+            if key in entry:
+                raise ValueError("duplicate_binding_field")
+            entry[key] = value
+        return entry
+
     source = Path(path)
     if not source.is_absolute() or source.is_symlink():
         raise ValueError("absolute_binding_file_required")
-    info = source.stat()
-    if (not source.is_file() or info.st_mode & 0o077 or info.st_size > 65536
-            or (hasattr(os, "getuid") and info.st_uid != os.getuid())):
+    fd = os.open(source, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_size > 65536
+                or (hasattr(os, "getuid") and info.st_uid != os.getuid())):
+            raise ValueError("private_binding_file_required")
+        data = stream.read(65537)
+    if len(data) > 65536:
         raise ValueError("private_binding_file_required")
-    raw = json.loads(source.read_text(encoding="utf-8"))
+    raw = json.loads(data.decode("utf-8"), object_pairs_hook=unique_fields)
     if not isinstance(raw, list) or len(raw) > 4096:
         raise ValueError("invalid_bindings")
     result: dict[tuple[str, int, str, str], ProfileBinding] = {}
@@ -130,7 +143,8 @@ class HermesGatewaySessionCreator:
     """
 
     def __init__(self, connection_for_profile: Callable, *, cwd_for_profile: Callable,
-                 store_factory: Callable | None = None):
+                 store_factory: Callable | None = None, toolsets: tuple[str, ...] | None = None,
+                 session_options_for_profile: Callable | None = None):
         """``store_factory(connection)`` builds the host's session store.
 
         The store belongs to the host runtime; this package only drives the
@@ -143,6 +157,12 @@ class HermesGatewaySessionCreator:
         self.connection_for_profile = connection_for_profile
         self.cwd_for_profile = cwd_for_profile
         self.store_factory = store_factory
+        if toolsets is not None and (not isinstance(toolsets, tuple) or any(not isinstance(x, str) or not x for x in toolsets)):
+            raise ValueError("trusted_toolsets_required")
+        self.toolsets = toolsets
+        if session_options_for_profile is not None and not callable(session_options_for_profile):
+            raise ValueError("trusted_session_options_provider_required")
+        self.session_options_for_profile = session_options_for_profile
 
     def create(self, profile: str, request_id: str) -> str:
         if self.store_factory is None:
@@ -155,8 +175,20 @@ class HermesGatewaySessionCreator:
         # Stable parameters on every retry; no title lookup, ambient route, or client
         # environment is sent. request_id is consumed by gateway.session_controls,
         # whose durable local receipt maps it back to the exact session ID.
-        snapshot = store.call("session.create", request_id=request_id, source="cli",
-                             cwd=cwd, row_cwd="")
+        params = {"request_id": request_id, "source": "cli", "cwd": cwd, "row_cwd": ""}
+        if self.toolsets is not None:
+            params["toolsets"] = list(self.toolsets)
+        if self.session_options_for_profile is not None:
+            options = self.session_options_for_profile(profile)
+            allowed = {"safe_mode", "model", "provider", "base_url", "api_key"}
+            if not isinstance(options, dict) or set(options) - allowed:
+                raise ValueError("invalid_trusted_session_options")
+            if "safe_mode" in options and type(options["safe_mode"]) is not bool:
+                raise ValueError("invalid_trusted_session_options")
+            if any(not isinstance(value, str) or not value.strip() for key, value in options.items() if key != "safe_mode"):
+                raise ValueError("invalid_trusted_session_options")
+            params.update(options)
+        snapshot = store.call("session.create", **params)
         if not isinstance(snapshot, dict):
             raise RuntimeError("invalid_hermes_session_create_result")
         session_id = snapshot.get("stored_session_id") or snapshot.get("session_id")

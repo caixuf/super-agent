@@ -129,10 +129,13 @@ def test_model_crash_is_not_automatically_executed_twice(env):
         queue.run_once(lease=0.01)
     time.sleep(0.03)
     runtime.model = lambda *args, **kwargs: pytest.fail('model must not run twice')
-    # Pool can retry the safe lookup, but runtime reports unknown without a call.
-    assert queue.run_once(lease=0.01)['job_state'] == 'queued'
-    assert queue.run_once(lease=0.01)['job_state'] == 'failed'
-    assert queue.inspect_completion(owner=args['owner'], job_id=job)['text'] is None
+    # A synchronous owner died without acknowledging stop. A free lock/expired
+    # lease cannot authorize a replacement or fabricate a terminal result.
+    assert queue.run_once(lease=0.01)['state'] == 'empty'
+    assert queue.run_once(lease=0.01)['state'] == 'empty'
+    assert queue.pool.status(job)['status'] == 'running'
+    assert queue.inspect_completion(owner=args['owner'], job_id=job) is None
+    assert queue.pool.receipts() == []
     assert reg.work_status(supervisor=host, member_id='alice', generation=1)['tracked_open'] == 2
 
 

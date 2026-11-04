@@ -15,4 +15,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 doc_engine="$(python3 "$doc_here/resolve_engine.py" "${doc_engine_args[@]}")"
-exec python3 "$doc_engine/tools/arch_doc.py" "${doc_render_args[@]}"
+if [ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ] && [ -d "$doc_engine/.browser-cache" ]; then
+  export PLAYWRIGHT_BROWSERS_PATH="$doc_engine/.browser-cache"
+fi
+doc_python="$doc_engine/.superagent-venv/bin/python"
+[ -x "$doc_python" ] || doc_python=python3
+exec "$doc_python" "$doc_engine/tools/arch_doc.py" "${doc_render_args[@]}"

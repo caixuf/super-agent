@@ -27,6 +27,7 @@ import json
 import logging
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -105,7 +106,7 @@ def classify_by_rules(new: Dict[str, Any], old: Dict[str, Any]) -> Optional[Dict
 
 
 def _load_chat_completions():
-    """取当前可用的对话补全函数，取不到返回 None（冲突按并存处理）。
+    """取当前可用的对话补全函数，取不到返回 None（冲突判定改为 defer）。
 
     引擎不自行导入 LLM 客户端，由宿主通过 MemoryConfig.llm_fn / llm_loader
     注入。历史教训：写死包名 + 补 sys.path 的加载方式，一旦失败就静默落到
@@ -122,7 +123,10 @@ def judge(new: Dict[str, Any], old: Dict[str, Any]) -> Dict[str, Any]:
 
     chat_completions = _load_chat_completions()
     if chat_completions is None:
-        return {"relation": "coexist", "reason": "llm_unavailable", "by": "fallback"}
+        # An unavailable reviewer cannot establish that two facts may coexist.
+        # Automatic writers surface this as a retryable/deferred outcome and
+        # keep the old fact authoritative.
+        return {"relation": "defer", "reason": "llm_unavailable", "by": "fallback"}
 
     prompt = "【新记录】\n主题: %s\n内容: %s\n\n【已有记录】\n主题: %s\n内容: %s" % (
         new.get("subject") or "(无)", new.get("statement") or "",
@@ -138,8 +142,8 @@ def judge(new: Dict[str, Any], old: Dict[str, Any]) -> Dict[str, Any]:
             verdict["by"] = "llm"
             return verdict
     except Exception as exc:
-        logger.warning("冲突判定调用失败，按并存处理: %s", exc)
-    return {"relation": "coexist", "reason": "judge_failed", "by": "fallback"}
+        logger.warning("冲突判定调用失败，保留旧事实并延后新候选: %s", type(exc).__name__)
+    return {"relation": "defer", "reason": "judge_failed", "by": "fallback"}
 
 
 VALID_RELATIONS = ("supersede", "duplicate", "coexist", "unrelated", "reject_new")
@@ -156,7 +160,7 @@ def parse_verdict(raw: str) -> Optional[Dict[str, Any]]:
     except (json.JSONDecodeError, ValueError) as exc:
         # 模型输出偶尔带说明文字或截断；解析不出来就交回调用方兜底（按并存处理），
         # 但必须留痕迹——否则「判定失败」会被误读成「判定为并存」。
-        logger.warning("冲突判定结果无法解析: %s | 原文前 120 字: %s", exc, text[:120])
+        logger.warning("冲突判定结果无法解析: %s", type(exc).__name__)
         return None
     if not isinstance(data, dict):
         return None
@@ -166,18 +170,25 @@ def parse_verdict(raw: str) -> Optional[Dict[str, Any]]:
     return {"relation": relation, "reason": str(data.get("reason") or "")[:200]}
 
 
-def resolve(new: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+def resolve(new: Dict[str, Any], candidates: List[Dict[str, Any]],
+            *, conservative: bool = False,
+            max_candidates: int = 16,
+            time_budget_seconds: float = 10.0) -> Dict[str, Any]:
     """对新事实与其候选集做整体裁决。
 
     设计要点：
     - reject_new 优先级最高：新记录本身不合格就别写，不必再比。
     - supersede 只会指向**最相似的那一条**：一条新事实同时取代多条通常是模型
       过度归纳（历史教训：一条 G2 经验把三条 G1 全标掉了）。
-    - 其余一律 coexist：漏判并存只是多一条记录，误判取代会让旧知识凭空消失。
+    - 无法裁决时 action=skip / relation=defer：保留旧事实，隔离新候选。
     """
     if not candidates:
         return {"action": "write", "relation": "new", "superseded": [], "judged": []}
+    if conservative and len(candidates) > max(1, int(max_candidates)):
+        return {"action": "skip", "relation": "defer",
+                "reason": "conflict_budget_exceeded", "superseded": [], "judged": []}
 
+    started = time.monotonic()
     judged: List[Dict[str, Any]] = []
     best: Optional[Dict[str, Any]] = None
     best_sim = -1.0
@@ -190,8 +201,12 @@ def resolve(new: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Dict[str, 
         # 0.42，低于 CANDIDATE_FLOOR 就被直接筛掉 —— 旧结论永远取代不掉，
         # 库里新旧并存，每次召回都在猜哪条是真的（2026-10-23 实测）。
         same_subject = bool(new_subject) and new_subject == _norm(old.get("subject", ""))
-        if sim < CANDIDATE_FLOOR and not same_subject:
+        if sim < CANDIDATE_FLOOR and not same_subject and not conservative:
             continue
+        if conservative and time.monotonic() - started >= max(0.1, float(time_budget_seconds)):
+            return {"action": "skip", "relation": "defer",
+                    "reason": "conflict_time_budget_exceeded",
+                    "superseded": [], "judged": judged}
         v = judge(new, old)
         v["against"] = old.get("fact_id")
         v["similarity"] = round(sim, 3)
@@ -199,6 +214,13 @@ def resolve(new: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Dict[str, 
         if v["relation"] == "reject_new":
             return {"action": "skip", "relation": "reject_new",
                     "reason": v.get("reason"), "superseded": [], "judged": judged}
+        if v["relation"] == "defer":
+            # Fail closed: no reviewer verdict means no write. Keeping the old
+            # fact plus a deferred audit is safer than silently accumulating
+            # contradictory memories.
+            return {"action": "skip", "relation": "defer",
+                    "reason": v.get("reason"), "against": v.get("against"),
+                    "superseded": [], "judged": judged}
         if v["relation"] == "duplicate":
             # 同一结论换了个说法：不写新行，指回已有的那条。
             # 这条分支以前缺失，duplicate 会被后面一律归成 coexist —— 于是

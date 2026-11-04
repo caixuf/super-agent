@@ -16,12 +16,45 @@
 | :--- | :--- |
 | `feishu_card_replies.patch` | 适配器本地增强：回复渲染成交互卡片（流式原地更新） + 审批以纯文字下发（不依赖卡片回调） |
 | `apply_feishu_card_replies.py` | 幂等重放 + 在位校验 + 配置生效值检查 |
+| `patch_card_finalize.py` | 卡片终态/同卡收尾 |
+| `patch_card_markdown_native.py` | 原生表格 / Card 2.0 元素 |
+| `patch_feishu_update_retry.py` | **卡片原地更新加入重试** — 见下方「为什么原地更新要重试」 |
+
+### 为什么原地更新要重试
+
+卡片一开，一条回复不再是一次发送，而是**一串 PATCH 帧**（每 `edit_interval` 一帧）。
+发送路径 `_feishu_send_with_retry` 给新消息发送做了 3 次指数退避，但 `edit_message`
+里卡片帧和文本帧原本都是**裸调用**（`adapter.py` 的 `message.patch` / `message.update`）。
+
+于是同一类网络故障有两种结果。一次 DNS 抖动（`Temporary failure in name resolution`）
+让某一帧失败后，代码的动作不是重试，而是**不可逆降级**：跳出卡片分支、把 message_id
+从 `_card_message_ids` 摘掉，此后再也回不到卡片形态。用户看到的要么是「半截卡片 +
+一条纯文本终稿」，要么是网关判定未投递成功而重发终稿
+（`possible duplicate send`）——同一条回复出现两份形态不同的副本。
+
+`patch_feishu_update_retry.py` 给这两处补上同构重试：3 次、指数退避，且**只重试可恢复
+的故障**（网络异常 / 408 / 429 / 5xx）；4xx 语义错误立刻失败，重试只会拖长降级。
+重试耗尽才回落原有降级路径 —— **先争取保住卡片，实在不行才降级**。
+
+判别这一层是否在位：
+
+```bash
+python3 patches/patch_feishu_update_retry.py --check --agent-dir ~/.hermes/hermes-agent
+```
+
+`hermes update` 覆盖安装树后会回到裸调用，`--check` 会报 `[FAIL] 不在位`。
 
 补丁携带两个开关（都在 profile `config.yaml` 的 `platforms.feishu` 下）：
 
 - `card_replies`（默认 false）—— 卡片回复；任何发送/更新失败都回落到原来的 text/post 路径。
 - `exec_approval_text`（默认 false）—— 审批以纯文本下发（把 `/approve` 指引写进消息体）。
   卡片回调需要平台应用订阅 `card.action.trigger` 并配回调地址；没配时按钮点了没反应。
+
+回复卡片还依赖 `streaming.enabled: true`（配置顶层）。`streaming.transport: off`
+或 `display.platforms.feishu.streaming: false` 也会关闭卡片所需的预览路径。
+只开 `card_replies` 不会把普通非流式消息变成卡片；`--config` 会检查这些前置条件。
+需要原生表格时，在网关进程环境设置 `HERMES_FEISHU_CARD_V2=1`，使用 Card JSON 2.0。
+配置/环境修改后重启网关，确认新进程已连接消息平台；代码探针通过不等于实际投递验收。
 
 ## 用法
 

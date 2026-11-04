@@ -143,6 +143,10 @@ class Registry:
                   work_id TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('open','closed')),
                   PRIMARY KEY(profile_id,member_id),
                   FOREIGN KEY(profile_id,member_id) REFERENCES colleague_members(profile_id,member_id));
+                CREATE TABLE IF NOT EXISTS colleague_turn_releases (
+                  profile_id TEXT NOT NULL, member_id TEXT NOT NULL, generation INTEGER NOT NULL,
+                  work_id TEXT NOT NULL, admission_id TEXT NOT NULL, execution_generation INTEGER NOT NULL,
+                  PRIMARY KEY(profile_id,member_id,generation,work_id));
                 CREATE TABLE IF NOT EXISTS colleague_history (
                   sequence INTEGER PRIMARY KEY AUTOINCREMENT, profile_id TEXT NOT NULL,
                   action TEXT NOT NULL, actor_id TEXT NOT NULL, target_id TEXT NOT NULL,
@@ -468,11 +472,17 @@ class Registry:
             if row["status"] != "active":
                 raise ValueError("member_not_accepting_work")
             open_row = db.execute(
-                "SELECT work_id FROM colleague_work WHERE profile_id=? AND member_id=? AND status='open' LIMIT 1",
+                "SELECT w.work_id FROM colleague_work w WHERE w.profile_id=? AND w.member_id=? AND w.status='open' "
+                "AND NOT EXISTS (SELECT 1 FROM colleague_turn_releases r WHERE r.profile_id=w.profile_id "
+                "AND r.member_id=w.member_id AND r.generation=w.generation AND r.work_id=w.work_id) LIMIT 1",
                 (self.profile_id, member_id),
             ).fetchone()
             if open_row is not None:
                 raise ValueError("member_has_unresolved_work")
+            count = db.execute("SELECT count(*) FROM colleague_work WHERE profile_id=? AND member_id=? AND status='open'",
+                               (self.profile_id, member_id)).fetchone()[0]
+            if count >= _MAX_OPEN_WORK:
+                raise ValueError("member_work_capacity")
             db.execute("INSERT INTO colleague_work VALUES (?,?,?,?,'open')",
                        (self.profile_id, member_id, generation, work_id))
             db.execute("""INSERT INTO colleague_exclusive_work(profile_id,member_id,generation,work_id,status)
@@ -481,6 +491,41 @@ class Registry:
                 (self.profile_id, member_id, generation, work_id))
             self._event(db, "work_reserved", "host:supervisor", member_id, generation, {"work_id": work_id, "exclusive": True})
             return {"work_id": work_id, "reserved": True, "created": True}
+
+    def release_gateway_turn(self, *, supervisor, member_id, generation, work_id, admission_id, execution_generation):
+        """Release only a completed Hermes turn slot; retain unresolved work for lifecycle review."""
+        self._host(supervisor)
+        member_id, work_id = _identity(member_id, "member_id"), _request(work_id)
+        if (type(generation) is not int or generation < 1 or type(execution_generation) is not int
+                or execution_generation < 0 or not isinstance(admission_id, str)
+                or not admission_id or len(admission_id) > 256):
+            raise ValueError("invalid_turn_release_identity")
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if self._member(db, member_id)["generation"] != generation:
+                raise ValueError("stale_member_generation")
+            prior = db.execute("SELECT admission_id,execution_generation FROM colleague_turn_releases "
+                               "WHERE profile_id=? AND member_id=? AND generation=? AND work_id=?",
+                               (self.profile_id, member_id, generation, work_id)).fetchone()
+            if prior is not None:
+                if (prior["admission_id"], prior["execution_generation"]) != (admission_id, execution_generation):
+                    raise ValueError("turn_release_identity_mismatch")
+                return {"turn_released": True, "background_status": "unknown"}
+            work = db.execute("SELECT status FROM colleague_work WHERE profile_id=? AND member_id=? "
+                              "AND generation=? AND work_id=?",
+                              (self.profile_id, member_id, generation, work_id)).fetchone()
+            fence = db.execute("SELECT generation,work_id,status FROM colleague_exclusive_work "
+                               "WHERE profile_id=? AND member_id=?", (self.profile_id, member_id)).fetchone()
+            if (work is None or work["status"] != "open" or fence is None or fence["status"] != "open"
+                    or (fence["generation"], fence["work_id"]) != (generation, work_id)):
+                raise ValueError("turn_release_reservation_mismatch")
+            db.execute("INSERT INTO colleague_turn_releases VALUES(?,?,?,?,?,?)",
+                       (self.profile_id, member_id, generation, work_id, admission_id, execution_generation))
+            db.execute("DELETE FROM colleague_exclusive_work WHERE profile_id=? AND member_id=? "
+                       "AND generation=? AND work_id=?", (self.profile_id, member_id, generation, work_id))
+            self._event(db, "gateway_turn_released", "host:supervisor", member_id, generation,
+                        {"work_id": work_id, "background_status": "unknown"})
+            return {"turn_released": True, "background_status": "unknown"}
 
     def settle_work(self, *, supervisor, member_id, generation, work_id):
         self._host(supervisor)
