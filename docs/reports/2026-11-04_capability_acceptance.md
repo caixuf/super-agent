@@ -383,9 +383,28 @@ session slot 释放均由宿主 turn 结束路径完成；`final-send NOT suppre
   而 `colleague_team` 插件单独调用 `register()` 能注册 7 个工具（含 `colleague_list`），
   默认 `hermes-feishu` toolset 解析也包含 `colleague_team`。差异落在**宿主 gateway 进程的插件/工具集
   装配层**（`tool_search` 延迟桥接 / 插件发现），不是仓内白名单代码。
-- 结论：**仓内三处修复 + 25 例压力/边界门禁 + 全量 verify 全绿，但用户实测的那条路径仍未通**。
-  生产级验收不能靠源码单测替代，此项保持「未通过」。
+- 结论（当时）：源码全绿但真实路径未通，保持「未通过」。
 
-**未做**：把 `colleague_list` 可靠送进前台工具面（需在 `durable_dispatch` 的 toolset 内新增只读
-名册工具，或修宿主插件装配/加 `_DIRECT_SURFACE_TOOLSETS`，二者都需重新全量验证）；
-灌灌侧 relay 的僵尸 journal TTL/归档（属另一台机器的生产桥）。
+### 后续修复：durable_roster（已通过真实复验）
+
+在 `durable_dispatch` 插件内新增只读 `durable_roster` 工具。关键点：该插件注册在
+`durable_dispatch` toolset，而此 toolset 属于宿主 `_DIRECT_SURFACE_TOOLSETS`，**不会被
+`tool_search` 延迟桥接替换**——这是 `colleague_list` 失败而 `durable_*` 能进工具面的原因。
+
+- 工具返回管理员配置的角色表 + 可选真实名册（`roster_registry_path` 只读 sqlite，
+  `colleague_members.status=active` 计数与按岗位分布）；**不派单、不产生任务、不写状态**。
+- 白名单加入 `durable_roster`；失败回执的路由提示改为指向它。
+- 只读打开（`mode=ro` + timeout）、结果有界（16 条）、不回显路径。
+- 新增 2 例单测（无 registry / 有 registry，含畸形参数拒绝与零任务创建）。
+
+**真实两步实测复验（部署后）**：
+
+| 步骤 | 结果 |
+| :--- | :--- |
+| 「你有几个同事」 | 模型主动调用 `⚡ Durable_roster`，7 秒返回「名册 9 个在册成员，primary/architect/backend/frontend/test/cases/reviewer/triage/ops 各 1」，并区分「在册 ≠ 都能接单」；**不再被塞进 `durable_submit`、不再未受理** |
+| 「2-8的结果是几」 | 3 秒返回 `-6`，0 次工具调用 |
+
+运行态工具面实测：`['durable_cancel', 'durable_roster', 'durable_status', 'durable_submit']`，
+4 个全在白名单内、无执行类逃逸。此项改为**通过**。
+
+**未做**：灌灌侧 relay 的僵尸 journal TTL/归档（另一台机器的生产桥，见后续章节）。

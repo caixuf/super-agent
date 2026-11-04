@@ -14,7 +14,7 @@ from typing import Any
 UNCONFIRMED = (
     "**后台任务未受理**：本次提交被拒，任务没有创建，不会有结果返回。"
     "前台本轮已结束。请保留原请求键并查询核对，不要换键重复提交。\n\n"
-    "若只是查询同事名册或任务状态，请改用只读查询工具直接回答，不要派单；"
+    "若只是查询同事名册或任务状态，请改用只读工具 durable_roster 直接回答，不要派单；"
     "派单只用于有合法源文件的只读分析任务。"
 )
 #: Only these opaque, administrator-defined error codes may be echoed to the

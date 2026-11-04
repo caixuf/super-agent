@@ -260,7 +260,7 @@ def test_rejected_submit_never_looks_like_accepted_handoff(monkeypatch, tmp_path
     assert '未受理' in reply and '任务没有创建' in reply
     assert '处理完成' not in reply
     assert 'source outside administrator roots' in reply
-    assert '改用只读查询工具' in reply
+    assert 'durable_roster' in reply
 
 
 def test_error_codes_are_whitelisted_and_paths_never_leak(monkeypatch, tmp_path):
@@ -310,3 +310,37 @@ def test_mixed_batch_keeps_accepted_tasks_and_flags_uncertain(monkeypatch, tmp_p
         home=home)
     assert not turn.is_rejected_handoff(reply), 'a mixed batch still has an accepted task'
     assert 'b' * 32 in reply and '另有 1 笔提交结果未确认' in reply
+
+
+
+def test_durable_roster_is_read_only_and_reports_configured_roles(tmp_path):
+    ctx, sources, root = make_env(tmp_path)
+    assert 'durable_roster' in ctx.tools
+    result = call(ctx, 'roster', {}, session_id='s-roster')
+    assert result['ok'] and result['source'] == 'dispatcher_roles'
+    assert result['count'] == len(result['roles']) >= 1
+    assert any(r['role'] == 'analysis' for r in result['roles'])
+    # No task may be created by a roster query.
+    assert not plugin.Pool(root).receipts()
+    assert call(ctx, 'roster', {'bogus': 1}, session_id='s')['ok'] is False
+
+
+def test_durable_roster_reports_active_members_when_registry_configured(tmp_path):
+    import sqlite3
+    reg = tmp_path / 'registry.sqlite'
+    con = sqlite3.connect(str(reg))
+    con.execute('create table colleague_members (role_id text, status text)')
+    con.executemany('insert into colleague_members values (?,?)',
+                    [('analysis', 'active'), ('reviewer', 'active'),
+                     ('retired', 'inactive')])
+    con.commit(); con.close()
+    sources = tmp_path / 'sources'; sources.mkdir()
+    (sources / 'data.log').write_text('x')
+    settings = {'enabled': True, 'queue_root': str(tmp_path / 'queue'),
+                'allowed_roots': [str(sources)], 'roster_registry_path': str(reg)}
+    ctx = Context(settings); plugin.register(ctx)
+    result = call(ctx, 'roster', {}, session_id='s')
+    assert result['ok'] and result['source'] == 'roster_registry'
+    assert result['members']['active'] == 2
+    assert {'role': 'reviewer', 'count': 1} in result['members']['by_role']
+

@@ -509,8 +509,41 @@ def enqueue_tab_follow_up(task_id, text, *, owner="", origin=None, inbox=None):
 
 class DispatchRouter:
     """One public entry point, administrator-owned queues and per-role policies."""
-    def __init__(self,services):
+    def __init__(self,services, roster_path=None):
         self.services = services
+        self._roster_path = roster_path
+
+    def roster(self,session_id,args):
+        """Read-only roster query: never submits, executes or delegates work.
+
+        Answers "how many colleagues do you have" without forcing a query through
+        durable_submit, which requires source files inside allowed_roots. The
+        dispatcher's own role table is always authoritative; an administrator may
+        additionally point at a colleague registry for live member counts.
+        """
+        if not isinstance(args,dict) or set(args)-{'role'}:
+            raise ValueError('roster takes no arguments')
+        entries=[{'role':role,'display_name':svc.display_name,
+                  'display_label':svc.display_label}
+                 for role,svc in sorted(self.services.items())]
+        result={'ok':True,'source':'dispatcher_roles','count':len(entries),
+                'roles':entries[:16]}
+        path=self._roster_path
+        if path is not None and Path(path).is_file():
+            import sqlite3
+            con=sqlite3.connect('file:'+str(path)+'?mode=ro',uri=True,timeout=5)
+            try:
+                total=con.execute(
+                    "select count(*) from colleague_members where status='active'").fetchone()[0]
+                by_role=con.execute(
+                    "select role_id,count(*) from colleague_members where status='active' "
+                    "group by role_id order by role_id limit 16").fetchall()
+            finally:
+                con.close()
+            result['members']={'active':int(total),
+                               'by_role':[{'role':str(r),'count':int(n)} for r,n in by_role]}
+            result['source']='roster_registry'
+        return result
 
     def _call(self,action,session_id,args):
         if not isinstance(args,dict): raise ValueError('dispatch arguments required')
@@ -735,7 +768,11 @@ Use durable_submit for bounded read-only analysis of approved files, including n
         if candidate.pool.root.resolve() in seen_roots:
             raise ValueError('colleague queues must be distinct')
         seen_roots.add(candidate.pool.root.resolve()); services[role]=candidate
-    router = DispatchRouter(services)
+    roster_path = ctx.get_config('roster_registry_path')
+    if (not isinstance(roster_path, str) or not roster_path
+            or not Path(roster_path).is_absolute()):
+        roster_path = None
+    router = DispatchRouter(services, roster_path=roster_path)
     max_source_lines = service.max_lines
     names = ', '.join('%s=%s' % (role, svc.display_name) for role, svc in services.items())
     role_schema = {'type':'string','enum':list(services),
@@ -762,6 +799,8 @@ Use durable_submit for bounded read-only analysis of approved files, including n
          {'task_id': {'type': 'string'},'role':role_schema}, ['task_id']),
         ('cancel', 'Request cancellation of a durable task belonging to this same session.',
          {'task_id': {'type': 'string'},'role':role_schema}, ['task_id']),
+        ('roster', 'Read-only: list the administrator-configured colleague roles and, when a roster registry is configured, the count of active members. Answer roster/status questions with this instead of durable_submit; it creates no task and requires no source files.',
+         {}, []),
     )
     for action, description, properties, required in entries:
         name = 'durable_' + action
