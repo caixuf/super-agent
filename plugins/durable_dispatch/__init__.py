@@ -339,7 +339,9 @@ class DispatchService:
                     origin[field] = value.strip()
         return origin
 
-    def _sources(self, sources):
+    def _sources(self, sources, *, allow_empty=False):
+        if allow_empty and sources is None:
+            return []
         if not isinstance(sources, list) or not 1 <= len(sources) <= self.max_sources:
             raise ValueError('source count outside policy')
         normalized = []
@@ -379,7 +381,11 @@ class DispatchService:
             raise ValueError('goal must contain 1 to 4000 characters')
         if not isinstance(key, str) or not key.strip() or len(key) > 128:
             raise ValueError('request_key must contain 1 to 128 characters')
-        payload = {'goal': goal, 'sources': self._sources(args.get('sources')),
+        # Only the read-only evidence role analyses source files. Execution roles
+        # (dev/ops) act on a goal, so requiring sources there would make every
+        # real task unsubmittable.
+        sources = self._sources(args.get('sources'), allow_empty=self.role != 'analysis')
+        payload = {'goal': goal, 'sources': sources,
                    '_dispatch_owner': owner, '_colleague_role': self.role,
                    '_colleague_name': self.display_name,
                    '_colleague_label': self.display_label}
@@ -788,13 +794,13 @@ Use durable_submit for bounded read-only analysis of approved files, including n
         'goal': {'type': 'string', 'minLength': 1, 'maxLength': 4000},
         'request_key': {'type': 'string', 'minLength': 1, 'maxLength': 128,
                         'description': 'Stable key for retries of the same request; use a new key for an intentional rerun.'},
-        'sources': {'type': 'array', 'items': source_schema, 'minItems': 1, 'maxItems': 8,
+        'sources': {'type': 'array', 'items': source_schema, 'maxItems': 8,
                    'description': 'Every source path must be absolute and inside the administrator-approved roots. A rejected submission ends the turn, so verify the path before calling.'},
         'role': role_schema,
     }
     entries = (
-        ('submit', 'Persist a read-only evidence analysis task. Return its ID and finish the turn; do not wait or poll.',
-         submit_properties, ['goal', 'sources', 'request_key']),
+        ('submit', 'Persist a durable task. For the analysis role, sources are required (read-only evidence analysis). For an execution role, omit sources and describe the work in goal. Return its ID and finish the turn; do not wait or poll.',
+         submit_properties, ['goal', 'request_key']),
         ('status', 'Read a durable task belonging to this same session, only when progress is requested.',
          {'task_id': {'type': 'string'},'role':role_schema}, ['task_id']),
         ('cancel', 'Request cancellation of a durable task belonging to this same session.',

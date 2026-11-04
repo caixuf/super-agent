@@ -32,7 +32,7 @@ _MAX_CONFIG_BYTES = 1024 * 1024
 #: ordinary question that needs a real tool, so they keep their full toolset.
 #: Only messaging surfaces get the thin-frontdesk restriction; an unknown or
 #: unreadable platform stays restricted (fail-closed).
-_BACKEND_PLATFORMS = frozenset({"api_server"})
+_BACKEND_PLATFORMS = frozenset({"api_server", "local"})
 
 
 def _backend_session() -> bool:
