@@ -742,7 +742,7 @@ def register(ctx):
         return
     ctx.register_system_prompt_section(
         'durable-dispatch-routing',
-        """Capability routing for durable dispatch:
+        """Capability routing for durable dispatch. Use durable_submit for every task.
 Pick the role by what the work needs, not by keywords.
 - role=dev executes work: inspecting a repository, running git/read commands, checking versions or configuration, running a test. It needs only goal; omit sources entirely. Never attach sources to a dev task.
 - role=analysis performs read-only evidence analysis of files inside the administrator roots. It requires sources with absolute paths inside those roots. If a task is about inspecting or running something rather than analysing a supplied file, it is a dev task.
