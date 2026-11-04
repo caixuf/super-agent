@@ -284,3 +284,40 @@ session slot 释放均由宿主 turn 结束路径完成；`final-send NOT suppre
   无 finalize 相关报错。warning 计数 77→77 未增长，但 CLI 回合本就不建 stream consumer，
   **不据此宣称消除误报**；该诊断属宿主 `run_turn.py`，不在本仓改动范围。
 - 门禁与受影响测试：**148 passed，退出码 0**。
+
+## 11. 远端跑测机部署：85b424d
+
+本机实测与推送完成后，按之前验证过的正规路径部署到远端。
+
+### 部署前差异
+
+| 项 | 部署前 | 部署后 |
+| :--- | :--- | :--- |
+| 受管 release | `b9be163` | **`85b424d`**（干净候选，`update` 退出码 0） |
+| 源码仓 | `85b424d` CLEAN | 同左 |
+| EOS 补丁 | pinned 树 V1 hook、`finalize=0` | pinned 树 `hook=1 / finalize=1`，`--check` installed |
+| `busy_input_mode` | `steer` | `queue`（两份 config 同一 inode，改一次即同步） |
+| 后台槽位 | `--workers 1` | `--workers 4`，`worker_concurrency: 4` |
+
+**范围约束**：远端只有 gateway 实际 `sys.path` 的 pinned 树装了 frontdesk 全套；
+共享 `hermes-agent` 树完全没有 policy/turn helper，因此**只给 pinned 树做 V1→V2 迁移**，
+不给共享宿主树新增一整套门禁边界。
+
+### 部署质量验证
+
+- `plan`：退出码 0、`blockers: []`、`card_impl: release-cardkit`（显式 `--hermes-root` 指向干净候选）。
+- doctor `ready`、三项 release 校验 true、gateway/worker `service_state: active`。
+- 门禁实时判定：`enabled=True`、`terminal` 拒绝、`durable_submit` 放行、`finalize_after_release` 可调用。
+- 重启日志无 traceback / SyntaxError / ImportError。
+- 真实前台回合：首次用引擎源码路径被 `source outside administrator roots` 拒（**远端 roots 是业务目录，
+  属正确 fail-closed，非部署缺陷**）；换 roots 内真实文件后派单成功，jobs 26→27、`running`→`completed`、
+  outbox 27、`delivery_obligations` 全 `delivered`、回执「前台回合已结束」。
+
+### 回退点
+
+- 配置/unit/宿主树备份：`backups/pre-finalize-<时间戳>`（含 `config.yaml`、`worker.unit`、两棵树
+  的 `turn_tool_round.*.py` 与 helper）。
+- 受管 release：`tools/superagent.py rollback` 可退回 `b9be163`。
+- 更早的配置/runner 备份仍在 `backups/pre-deploy-20261104173901`。
+
+**未做**：远端真实 IM 回合的 EOS 效果（CLI 回合不建 stream consumer）；共享宿主树未装门禁（按现状保留）。
