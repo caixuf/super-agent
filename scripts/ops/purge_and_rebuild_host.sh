@@ -1,113 +1,95 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# purge_and_rebuild_host.sh
-# 彻底根治环境漂移与原机历史污染：
-# 1. 严格备份业务火种（记忆库 + 业务Skills + 配置密钥）
-# 2. 暴力铲平原机历史地质层（停服务、删旧systemd、清残余配置目录）
-# 3. 干净恢复与声明式重建环境，杜绝历史配置击穿
+# purge_and_rebuild_host.sh — 纯净重建（备份 → 归档 → 受管重建 → 验证）
+#
+# 默认只读预演；--apply 才执行。所有清理改为归档到备份目录，可回退。
+# 重建复用受管安装器，不在本脚本手工拼装路径；不重启运行中的服务。
+# 现场身份由实例部署清单注入；通用仓只保留中性默认值。
 # ==============================================================================
 set -euo pipefail
 
-BACKUP_DIR="${HOME}/superagent_backups/backup_$(date +%Y%m%d_%H%M%S)"
-SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
-# 现场身份由实例部署清单注入；通用仓只保留中性默认值，避免把业务/环境指纹写进版本库
 PROFILE_NAME="${AGENTCORE_PROFILE_NAME:-default}"
-PROFILE_DIR="${HOME}/.hermes/profiles/${PROFILE_NAME}"
-NVME_PROFILE="/mnt/nvme_ntfs/agents/hermes/profiles/${PROFILE_NAME}"
+AGENTCORE_ROOT="${AGENTCORE_ROOT:-${HOME}/.hermes/superagent}"
+MANAGED_ROOT="${AGENTCORE_ROOT}/${PROFILE_NAME}"
+CURRENT="${MANAGED_ROOT}/current"
+HERMES_HOME="${AGENTCORE_HERMES_HOME:-${HOME}/.hermes}"
+PROFILE_DIR="${HERMES_HOME}/profiles/${PROFILE_NAME}"
 SKILLS_DIR_NAME="${AGENTCORE_SKILLS_DIR_NAME:-business-skills}"
-BUSINESS_SKILLS_DIR="${HOME}/code/${SKILLS_DIR_NAME}"
+SKILLS_DIR="${HOME}/code/${SKILLS_DIR_NAME}"
+SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
+INSTALLER="${AGENTCORE_INSTALLER:-${HOME}/code/super-agent/tools/superagent.py}"
+BACKUP_DIR="${MANAGED_ROOT}/state/purge-backups/backup_$(date +%Y%m%d%H%M%S)"
 
-echo "======================================================================"
-echo " [Step 1/4] 备份核心业务资产与火种 (记忆库 / 业务Skills / 关键配置)"
-echo "======================================================================"
-mkdir -p "${BACKUP_DIR}"
+APPLY=0
+case "${1:-}" in
+    --apply) APPLY=1 ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    *) ;;
+esac
 
-# 1. 备份记忆库
-if [[ -d "${PROFILE_DIR}/memories" ]]; then
-    echo "-> 备份用户主目录记忆库: ${PROFILE_DIR}/memories"
-    cp -r "${PROFILE_DIR}/memories" "${BACKUP_DIR}/memories_home"
-elif [[ -d "${NVME_PROFILE}/memories" ]]; then
-    echo "-> 备份NVME记忆库: ${NVME_PROFILE}/memories"
-    cp -r "${NVME_PROFILE}/memories" "${BACKUP_DIR}/memories_nvme"
+log()   { printf '  %s\n' "$*"; }
+step()  { printf '\n=== %s ===\n' "$*"; }
+archive() {
+    local target="$1"
+    [[ -e "${target}" ]] || return 0
+    if (( APPLY == 0 )); then log "[DRY-RUN] 将归档: ${target}"; return 0; fi
+    mkdir -p "${BACKUP_DIR}"
+    mv "${target}" "${BACKUP_DIR}/$(basename "${target}")"
+    log "已归档: ${target}"
+}
+
+printf '模式=%s profile=%s 真相源=%s\n' "$([[ ${APPLY} -eq 1 ]] && echo apply || echo dry-run)" "${PROFILE_NAME}" "${CURRENT}"
+printf '备份目录=%s\n' "${BACKUP_DIR}"
+[[ -d "${CURRENT}" ]] || { printf '受管 current 不存在，拒绝继续\n' >&2; exit 1; }
+
+step '[1/4] 备份业务火种（记忆 / 技能 / 两份配置）'
+if (( APPLY == 1 )); then
+    mkdir -p "${BACKUP_DIR}"
+    for src in "${PROFILE_DIR}/memories" "${SKILLS_DIR}" "${PROFILE_DIR}/config.yaml" "${HERMES_HOME}/config.yaml"; do
+        if [[ -e "${src}" ]]; then cp -a "${src}" "${BACKUP_DIR}/"; log "已备份: ${src}"; fi
+    done
+    log "备份项数: $(find "${BACKUP_DIR}" -maxdepth 1 | wc -l)"
+else
+    log '[DRY-RUN] 将备份 memories / skills / 两份 config.yaml'
 fi
 
-# 2. 备份业务技能库
-if [[ -d "${BUSINESS_SKILLS_DIR}" ]]; then
-    echo "-> 备份业务专属技能: ${BUSINESS_SKILLS_DIR}"
-    cp -r "${BUSINESS_SKILLS_DIR}" "${BACKUP_DIR}/${SKILLS_DIR_NAME}"
-fi
-
-# 3. 备份核心密钥与配置文件
-for cfg in "${PROFILE_DIR}/config.yaml" "${NVME_PROFILE}/config.yaml" "${HOME}/.claude/settings.json"; do
-    if [[ -f "${cfg}" ]]; then
-        echo "-> 备份关键配置: ${cfg}"
-        cp "${cfg}" "${BACKUP_DIR}/"
+step '[2/4] 下线历史遗留服务并归档遗留 unit'
+for pattern in "analysis-colleague*" "${PROFILE_NAME}-colleague@*"; do
+    if (( APPLY == 1 )); then
+        systemctl --user stop "${pattern}" 2>/dev/null || true
+        systemctl --user disable "${pattern}" 2>/dev/null || true
+        log "已 stop/disable: ${pattern}"
+    else
+        log "[DRY-RUN] 将 stop/disable: ${pattern}"
     fi
 done
-
-echo "业务资产火种已安全落盘至: ${BACKUP_DIR}"
-
-echo "======================================================================"
-echo " [Step 2/4] 暴力下线并清理原机历史僵尸进程与 Systemd 服务"
-echo "======================================================================"
-# 匹配所有历史涉案服务模式
-SERVICES_TO_STOP=(
-    "analysis-colleague*"
-    "${PROFILE_NAME}-colleague@*"
-    "hermes-gateway-${PROFILE_NAME}*"
-    "superagent-*"
-    "agentcore-*"
-)
-
-for pattern in "${SERVICES_TO_STOP[@]}"; do
-    echo "-> 停止服务: ${pattern}"
-    systemctl --user stop "${pattern}" 2>/dev/null || true
-    systemctl --user disable "${pattern}" 2>/dev/null || true
+for f in "${SYSTEMD_USER_DIR}"/analysis-colleague*.service \
+         "${SYSTEMD_USER_DIR}"/hermes-gw-reload-once*.service \
+         "${SYSTEMD_USER_DIR}"/*superagent-before*; do
+    archive "${f}"
 done
 
-# 删除旧 systemd unit 文件，彻底根治死服务
-if [[ -d "${SYSTEMD_USER_DIR}" ]]; then
-    echo "-> 清理旧 unit 文件..."
-    rm -f "${SYSTEMD_USER_DIR}"/analysis-colleague*.service \
-          "${SYSTEMD_USER_DIR}"/hermes-gw-reload-once*.service \
-          "${SYSTEMD_USER_DIR}"/*superagent-before* 2>/dev/null || true
-fi
-systemctl --user daemon-reload
-systemctl --user reset-failed 2>/dev/null || true
+step '[3/4] 归档散落配置与运行时状态（不删除，可回退）'
+for f in "${PROFILE_DIR}/proxy.env" \
+         "${HOME}/.local/state/agentcore/analysis-queue" \
+         "${HOME}/.local/state/agentcore/liveness.db"; do
+    archive "${f}"
+done
 
-echo "======================================================================"
-echo " [Step 3/4] 抹除原机历史散落配置与野生运行时代码目录"
-echo "======================================================================"
-# 清理可能引起版本打架与配置漂移的野生残留目录
-DIRTY_TARGETS=(
-    "${PROFILE_DIR}/proxy.env"
-    "${HOME}/code/agentcore/agentcore/proxy.env"
-    "${HOME}/.local/state/agentcore/analysis-queue"
-    "${HOME}/.local/state/agentcore/liveness.db"
-)
-
-for target in "${DIRTY_TARGETS[@]}"; do
-    if [[ -e "${target}" ]]; then
-        echo "-> 移除污染文件/运行时状态: ${target}"
-        rm -rf "${target}"
+step '[4/4] 受管重建与验证'
+if (( APPLY == 1 )); then
+    systemctl --user daemon-reload
+    if [[ -f "${INSTALLER}" ]]; then
+        log '调用受管安装器 update ...'
+        python3 "${INSTALLER}" --root "${AGENTCORE_ROOT}" --profile "${PROFILE_NAME}" update 2>&1 | tail -10 || true
+        log '调用 doctor 验证 ...'
+        python3 "${INSTALLER}" --root "${AGENTCORE_ROOT}" --profile "${PROFILE_NAME}" doctor 2>&1 | head -20 || true
+    else
+        log '安装器不可用，跳过重建验证'
     fi
-done
-
-echo "======================================================================"
-echo " [Step 4/4] 恢复业务火种并核验系统纯净度"
-echo "======================================================================"
-# 校验当前工作区是否对齐
-CURRENT_ENGINE="${HOME}/super_agent/${PROFILE_NAME}/current"
-if [[ ! -d "${CURRENT_ENGINE}" && -d "/mnt/nvme_ntfs/agents/hermes/superagent/${PROFILE_NAME}/current" ]]; then
-    CURRENT_ENGINE="/mnt/nvme_ntfs/agents/hermes/superagent/${PROFILE_NAME}/current"
+    log "重建完成；可回退备份: ${BACKUP_DIR}"
+    log '运行中的服务需重启才加载新代码 —— 本脚本不重启'
+    log "  建议: systemctl --user restart hermes-gateway-${PROFILE_NAME}.service"
+else
+    log '[DRY-RUN] 将执行受管 update + doctor（不重启服务）'
 fi
-if [[ -e "${CURRENT_ENGINE}" ]]; then
-    echo "-> 当前受控引擎路径正常: $(readlink -f "${CURRENT_ENGINE}")"
-fi
-
-echo "======================================================================"
-echo " 原机历史环境推平与纯净重构完成！"
-echo " 业务资产备份位置: ${BACKUP_DIR}"
-echo " 系统已彻底摆脱原机旧配置与历史僵尸服务干扰。"
-echo "======================================================================"
-
