@@ -417,4 +417,7 @@ session slot 释放均由宿主 turn 结束路径完成；`final-send NOT suppre
 远端首次给 90s 预算时因**模型端点慢**在等待 API 时 CLI 超时（`KeyboardInterrupt`，非工具失败），
 给足 200s 预算后 21 秒正常完成；两机均如实区分「在册成员 ≠ 在线可接单」。
 
+全量 `verify.sh`：**退出码 0，2759 passed / 44 skipped（674.02s）**；静态 15 项、防退化靶场 5 passed、
+安装 dry-run、真实通道 5 passed（7.32s）、平台 OpenAPI 129.5ms（预算 800ms）、模型端点全过。
+
 **未做**：灌灌侧 relay 的僵尸 journal TTL/归档（另一台机器的生产桥，见后续章节）。
