@@ -560,7 +560,7 @@ for need in identity/SOUL.generic.md identity/agents toolsets patches plugins \
             install/enable_plugins.py install/plugin_defaults.py \
             install/enable_plugins.py install/configure_defaults.py install/configure_delivery.py install/configure_gateway.py install/setup_worker.py install/setup_memory.py install/bootstrap_dependencies.py \
             patches/feishu_card_replies.patch patches/apply_feishu_card_replies.py patches/feishu_card_lifecycle.patch patches/apply_feishu_card_lifecycle.py \
-            patches/patch_card_finalize.py patches/patch_card_markdown_native.py \
+            patches/patch_card_finalize.py patches/patch_card_markdown_native.py patches/apply_card_delivery_guard.py \
             patches/patch_feishu_update_retry.py patches/patch_feishu_delivery_uuid.py skills; do
   if [ -e "$REPO_ROOT/$need" ]; then ok "$need"
   else fail "缺少源资产：$REPO_ROOT/$need"; exit 1; fi
@@ -746,6 +746,7 @@ if [ "$DO_PATCH" = "1" ]; then
     log "    [plan] python3 $UPDATE_RETRY --check --agent-dir $HERMES_AGENT_DIR"
     log "    [plan] python3 $UPDATE_RETRY --apply --agent-dir $HERMES_AGENT_DIR   （仅当 --check 不在位）"
     log "    [plan] python3 $DELIVERY_UUID --hermes-root $HERMES_AGENT_DIR [--apply]"
+    log "    [plan] python3 $REPO_ROOT/patches/apply_card_delivery_guard.py --agent-dir $HERMES_AGENT_DIR --apply"
   elif [ ! -d "$HERMES_AGENT_DIR" ]; then
     fail "Hermes 安装树不存在（$HERMES_AGENT_DIR），无法应用补丁。装好 Hermes 后重跑本步。"
   else
@@ -791,6 +792,11 @@ if [ "$DO_PATCH" = "1" ]; then
       ok "卡片生命周期补丁已验证或应用"
     else
       fail "卡片生命周期补丁不兼容，不能继续部署"
+    fi
+    if python3 "$REPO_ROOT/patches/apply_card_delivery_guard.py" --agent-dir "$HERMES_AGENT_DIR" --apply; then
+      ok "卡片更新未知结果防重复保护已验证或应用"
+    else
+      fail "卡片防重复保护不兼容，不能继续部署"
     fi
   fi
 else

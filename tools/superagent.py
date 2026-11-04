@@ -633,6 +633,18 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         blockers.append("legacy_card_patches_require_clean_candidate")
     if card_current and not _patch_state(hermes_root, ("apply_feishu_card_lifecycle.py", "card-lifecycle"))["in_place"]:
         blockers.append("card_lifecycle_not_verified")
+    if card_current and not _patch_state(hermes_root, ("apply_card_delivery_guard.py", "card-delivery-guard"))["in_place"]:
+        blockers.append("card_delivery_guard_not_verified")
+    import yaml
+    try:
+        profile_config = yaml.safe_load((profile_home / "config.yaml").read_text(encoding="utf-8")) or {}
+        feishu = (profile_config.get("platforms") or {}).get("feishu") or {}
+        if isinstance(feishu, dict) and feishu.get("enabled") is True and feishu.get("card_replies") is True and not card_current:
+            blockers.append("feishu_card_implementation_unverified")
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
+        blockers.append("feishu_card_config_unreadable")
     return {
         "schema_version": 1,
         "action": "superagent-managed-install",

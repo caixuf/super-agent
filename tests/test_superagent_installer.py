@@ -625,6 +625,31 @@ def test_current_cardkit_is_not_misclassified_as_legacy(tmp_path, monkeypatch):
     assert "legacy_card_patches_require_clean_candidate" in plan["blockers"]
 
 
+def test_plan_blocks_card_if_update_outcome_guard_is_missing(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    module = _load_installer()
+    _seed_profile(tmp_path)
+    monkeypatch.setattr(module, "_git_identity", lambda: ("candidate", "candidate"))
+    monkeypatch.setattr(module, "_plugin_names", lambda args: ["example"])
+    monkeypatch.setattr(module, "_external_plugin_sources", lambda args: [])
+    monkeypatch.setattr(module, "_keep_patch_state", lambda root: [])
+    monkeypatch.setattr(module, "_legacy_patch_state", lambda root: [{"id": "card-replies", "in_place": True}, {"id": "card-native-markdown", "in_place": False}])
+    monkeypatch.setattr(module, "_patch_state", lambda root, spec: {"in_place": spec[1] == "card-lifecycle"})
+    monkeypatch.setattr(module, "_profile_home", lambda args: tmp_path / ".hermes/profiles/demo")
+    monkeypatch.setattr(module, "_managed_root", lambda args: tmp_path / ".hermes/superagent/demo")
+    args = SimpleNamespace(hermes_root=tmp_path / ".hermes/hermes-agent", runtime_manifest=None, profile="demo")
+    assert "card_delivery_guard_not_verified" in module.build_plan(args)["blockers"]
+
+
+def test_plan_refuses_enabled_feishu_card_without_host_implementation(tmp_path):
+    profile = _seed_profile(tmp_path)
+    (profile / "config.yaml").write_text("platforms:\n  feishu:\n    enabled: true\n    card_replies: true\nplugins:\n  enabled: []\n  disabled: []\n")
+    result = _run(tmp_path, "plan")
+    assert result.returncode != 0
+    plan = json.loads(result.stdout)
+    assert "feishu_card_implementation_unverified" in plan["blockers"]
+
+
 def test_retired_progress_state_is_preserved_for_rollback(tmp_path):
     module = _load_installer()
     profile = _seed_profile(tmp_path)
