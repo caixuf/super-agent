@@ -13,6 +13,7 @@ from agentcore.preflight import (
     check_feishu_api_latency,
     check_idempotent_store_latency,
     check_tcp_port_available,
+    default_dns_budget_ms,
     run_preflight_suite,
 )
 
@@ -42,6 +43,46 @@ def test_check_dns_latency_timeout():
         res = check_dns_latency(target_host="invalid.local.test")
         assert res.passed is False
         assert "失败" in res.message or "Timeout" in res.message
+
+
+def test_check_dns_latency_retries_when_first_sample_over_budget():
+    """第一次超预算再采一次；第二次进预算则通过（first-under-budget）。"""
+    calls = {"n": 0}
+
+    def fake_resolve(host):
+        calls["n"] += 1
+        return "1.2.3.4"
+
+    # Force both samples to report fixed latencies via monotonic clock.
+    times = iter([0.0, 0.400, 0.400, 0.450])  # 400ms then 50ms
+
+    with patch("socket.gethostbyname", side_effect=fake_resolve), patch(
+        "time.monotonic", side_effect=lambda: next(times)
+    ):
+        res = check_dns_latency(target_host="open.feishu.cn", max_acceptable_ms=300.0)
+    assert res.passed is True
+    assert calls["n"] == 2
+    assert "第2/2次采样" in res.message
+
+
+def test_check_dns_latency_fails_when_all_samples_over_budget():
+    """两次都超预算绝不能洗成通过。"""
+    times = iter([0.0, 0.400, 0.400, 0.750])  # 400ms then 350ms, both > 300
+
+    with patch("socket.gethostbyname", return_value="1.2.3.4"), patch(
+        "time.monotonic", side_effect=lambda: next(times)
+    ):
+        res = check_dns_latency(target_host="open.feishu.cn", max_acceptable_ms=300.0)
+    assert res.passed is False
+    assert "严重超时" in res.message
+    assert "2次采样" in res.message
+
+
+def test_default_dns_budget_ms_gha_vs_deploy(monkeypatch):
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    assert default_dns_budget_ms() == 300.0
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert default_dns_budget_ms() == 500.0
 
 
 def test_check_feishu_api_retries_transient_connection_refusal():

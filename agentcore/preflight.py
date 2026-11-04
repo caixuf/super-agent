@@ -50,29 +50,71 @@ class PreflightReport:
         return "\n".join(lines)
 
 
-def check_dns_latency(target_host: str = "open.feishu.cn", max_acceptable_ms: float = 300.0) -> CheckItemResult:
-    """探测目标域名 DNS 解析延迟。"""
-    t0 = time.monotonic()
-    try:
-        # 强制单次 socket 解析
-        ip = socket.gethostbyname(target_host)
-        dur_ms = (time.monotonic() - t0) * 1000.0
-        passed = dur_ms <= max_acceptable_ms
-        msg = f"已解析到 {ip} 耗时 {dur_ms:.1f}ms"
-        detail = ""
-        if not passed:
-            msg = f"DNS 解析严重超时 (耗时 {dur_ms:.1f}ms > {max_acceptable_ms}ms)"
-            detail = "请检查 /etc/resolv.conf，推荐使用 114.114.114.114 或内网网关 DNS"
-        return CheckItemResult(name="DNS 解析延迟", passed=passed, latency_ms=dur_ms, message=msg, detail=detail)
-    except Exception as exc:
-        dur_ms = (time.monotonic() - t0) * 1000.0
-        return CheckItemResult(
-            name="DNS 解析延迟",
-            passed=False,
-            latency_ms=dur_ms,
-            message=f"域名解析失败: {exc}",
-            detail="DNS 上游无响应或网络不可达，请切换为可用 DNS",
-        )
+def default_dns_budget_ms() -> float:
+    """DNS 延迟预算：部署机 300ms；GitHub Actions 500ms（与模块 docstring 对齐）。
+
+    GHA runner 的公网 DNS 抖动更大，300ms 会把偶发慢解析误判成部署故障；
+    真实部署主机仍保持更紧的 300ms 门禁。
+    """
+    if os.environ.get("GITHUB_ACTIONS"):
+        return 500.0
+    return 300.0
+
+
+def check_dns_latency(
+    target_host: str = "open.feishu.cn",
+    max_acceptable_ms: float | None = None,
+    resolve_attempts: int = 2,
+) -> CheckItemResult:
+    """探测目标域名 DNS 解析延迟。
+
+    默认最多采两次样（``resolve_attempts=2``），语义是 **first-under-budget**：
+    任一次成功解析 ≤ 预算即通过；若第一次已超预算再采一次，**两次都超预算仍失败**，
+    绝不会把仍然过慢的第二次样本洗成通过。解析异常立即失败，不靠重试洗白。
+    """
+    budget = default_dns_budget_ms() if max_acceptable_ms is None else float(max_acceptable_ms)
+    attempts = max(1, int(resolve_attempts))
+    samples: list[tuple[str, float]] = []
+
+    for attempt in range(attempts):
+        t0 = time.monotonic()
+        try:
+            # 强制单次 socket 解析
+            ip = socket.gethostbyname(target_host)
+            dur_ms = (time.monotonic() - t0) * 1000.0
+        except Exception as exc:
+            dur_ms = (time.monotonic() - t0) * 1000.0
+            return CheckItemResult(
+                name="DNS 解析延迟",
+                passed=False,
+                latency_ms=dur_ms,
+                message=f"域名解析失败: {exc}",
+                detail="DNS 上游无响应或网络不可达，请切换为可用 DNS",
+            )
+
+        samples.append((ip, dur_ms))
+        if dur_ms <= budget:
+            sample_note = f" (第{attempt + 1}/{attempts}次采样)" if attempts > 1 and attempt > 0 else ""
+            return CheckItemResult(
+                name="DNS 解析延迟",
+                passed=True,
+                latency_ms=dur_ms,
+                message=f"已解析到 {ip} 耗时 {dur_ms:.1f}ms{sample_note}",
+                detail="",
+            )
+
+    # 所有成功样本都超预算 → 失败（报告最优一次，仍按预算判失败）
+    best_ip, best_ms = min(samples, key=lambda item: item[1])
+    return CheckItemResult(
+        name="DNS 解析延迟",
+        passed=False,
+        latency_ms=best_ms,
+        message=(
+            f"DNS 解析严重超时 (最优 {best_ms:.1f}ms / {len(samples)}次采样 "
+            f"> {budget}ms)"
+        ),
+        detail="请检查 /etc/resolv.conf，推荐使用 114.114.114.114 或内网网关 DNS",
+    )
 
 
 def check_disk_space(path: str = "/", min_free_gb: float = 5.0) -> CheckItemResult:

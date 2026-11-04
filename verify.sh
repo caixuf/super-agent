@@ -134,8 +134,9 @@ from agentcore.preflight import (
     check_idempotent_store_latency,
     check_feishu_api_latency,
 )
+# DNS 预算由 check_dns_latency 默认值决定：部署机 300ms，GITHUB_ACTIONS 下 500ms
 checks = [
-    ("DNS 解析延迟", check_dns_latency("open.feishu.cn", max_acceptable_ms=300.0)),
+    ("DNS 解析延迟", check_dns_latency("open.feishu.cn")),
     ("幂等信箱读写延迟", check_idempotent_store_latency(max_acceptable_ms=20.0)),
     ("平台 OpenAPI 往返延迟", check_feishu_api_latency(max_acceptable_ms=800.0)),
 ]
