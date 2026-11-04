@@ -553,7 +553,10 @@ class DispatchRouter:
 
     def _call(self,action,session_id,args):
         if not isinstance(args,dict): raise ValueError('dispatch arguments required')
-        role = args.get('role','analysis')
+        # Execution is the safe default: a task that was never given a role must
+        # still be able to run. Analysis is narrower (needs sources inside the
+        # administrator roots), so it stays opt-in by naming it.
+        role = args.get('role') or ('dev' if 'dev' in self.services else 'analysis')
         if not isinstance(role,str) or role not in self.services:
             raise ValueError('unknown administrator colleague role')
         result = getattr(self.services[role],action)(session_id,
@@ -784,8 +787,9 @@ If the user asks to look at changes, check logs, run a command or inspect the re
     router = DispatchRouter(services, roster_path=roster_path)
     max_source_lines = service.max_lines
     names = ', '.join('%s=%s' % (role, svc.display_name) for role, svc in services.items())
+    default_role = 'dev' if 'dev' in services else 'analysis'
     role_schema = {'type':'string','enum':list(services),
-                   'description':'Administrator colleague role; use this to select the named colleague and preserve it for status/cancel. Known roles: ' + names}
+                   'description':'Role for this task; omit it to use ' + default_role + '. Known roles: ' + names}
     source_schema = {'type': 'object', 'additionalProperties': False, 'properties': {
         'path': {'type': 'string', 'description': 'Absolute path to a regular file inside the administrator-approved roots; relative paths are rejected.'},
         'start_line': {'type': 'integer', 'minimum': 1,
