@@ -151,3 +151,19 @@
 - 新增 4 项单测覆盖 card plan 与 card 发送/拒绝分支。
 
 真实 Card 2.0 报告卡片已发到 bot 专属测试群并保留（未撤回），平台回读一致。
+
+## 7. 四条改造清单在 caixuf 本机的逐项判定
+
+按外部提出的四条（前台立即结单 / 后台独立推送 / 禁用视觉走查 / 会话瘦身）逐项核对，
+明确区分「本机已修」「本机部分具备」「属于其他机器或宿主层」。
+
+| 条 | 本机判定 | 证据 |
+| :--- | :--- | :--- |
+| 1 前台立即结单、0 秒阻塞 | **回合释放已具备并实测**；卡片终态由宿主 adapter 的 finalize 负责 | `frontdesk_turn.release_after_submission()` 实测回「前台回合已结束，可继续发消息」，72 项边界测试通过；CLI 会话无卡片，卡片结单需真实 IM 回合验证。前置机上的手写轮询脚本不属于本机 |
+| 2 后台异步独立推送 | **本轮已接线并部署**：完成态支持 Card 2.0 报告，管理员开关已开启 | 真实平台发送 / 回读 / 幂等 / 保留消息均有实证；`completion_card_enabled: true`，release `13b08b4` 已部署。本地 CLI 会话的回执因 route 为 `local` 会 parked，属设计行为 |
+| 3 禁用视觉走查 | **已由硬门禁解决，比提示词彻底** | 工具面过滤实测放行仅 `durable_submit`，`vision_analyze` / `browser` / `screenshot` / `read_file` / `terminal` / `execute_code` 全部被挡 |
+| 4 会话瘦身与切片 | **部分具备**：压缩在工作，本轮已收紧；强制新分支缺失 | 单会话最多 1542 条消息、2693 条已 compacted；`threshold` 0.7→0.5、`protect_last_n_turns` 20→12。仓内与宿主均无 `session_rotation` / `new_branch` 实现，属宿主层缺口，不标通过 |
+
+**边界**：远端跑测机上的 super agent 实体与前置机上的中继脚本是另外两台机器；
+本机的门禁、派单、卡片与投递修复不能自动外推。远端另有 `deliver_completions: false`、
+runner 指向野生工作区、硬门禁未启用等具体缺口，需单独部署。
