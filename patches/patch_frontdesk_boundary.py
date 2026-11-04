@@ -77,7 +77,7 @@ _ROUND_START = (
     "    _frontdesk_result_start = len(messages)\n" + _ROUND_EXECUTE
 )
 _ROUND_END = "    # Reset per-turn retry counters so one truncation can't poison the turn.\n"
-_ROUND_RELEASE = '''    # SUPERAGENT_FRONTDESK_TURN_RELEASE
+_ROUND_RELEASE_V1 = '''    # SUPERAGENT_FRONTDESK_TURN_RELEASE
     _frontdesk_submit_ids = [coalesce_tool_call_id(tc) for tc in assistant_message.tool_calls
                              if tc.function.name == "durable_submit"]
     _frontdesk_reply = None
@@ -97,6 +97,23 @@ _ROUND_RELEASE = '''    # SUPERAGENT_FRONTDESK_TURN_RELEASE
         return _verdict("break")
 
 '''
+# A handoff acknowledges a durable submission and ends the turn. Close the display
+# stream box at that moment instead of leaving it open until turn teardown; this
+# mirrors the host's own guardrail-halt and pre-tool-flush EOS paths.
+_ROUND_RELEASE_V2 = _ROUND_RELEASE_V1.replace(
+    '        agent._session_messages = messages\n',
+    '        agent._session_messages = messages\n'
+    '        try:\n'
+    '            from superagent_frontdesk_turn import finalize_after_release\n'
+    '            finalize_after_release(agent)\n'
+    '        except Exception:\n'
+    '            pass\n', 1)
+_ROUND_RELEASE = _ROUND_RELEASE_V2
+# Hosts already carrying the V1 handoff block must be migrated in place; the
+# generic EDITS anchor would otherwise insert a second copy of the hook.
+MIGRATIONS = {
+    Path("agent/turn_tool_round.py"): ((_ROUND_RELEASE_V1, _ROUND_RELEASE_V2),),
+}
 _ROUND_COMPLETED = 'or str(_turn_exit_reason).startswith("text_response(")'
 _REVIEW_GATE = _tool_gate("        ", '"memory"') + (
     "        if _frontdesk_block is not None:\n"
@@ -131,6 +148,11 @@ EDITS = {
 
 def transform(relative: Path, source: str) -> str:
     after = source
+    for old, new in MIGRATIONS.get(relative, ()):
+        if new in after:
+            break
+        if old in after:
+            after = after.replace(old, new, 1)
     for old, new in EDITS[relative]:
         if new in after:
             if after.count(new) != 1:

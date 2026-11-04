@@ -237,12 +237,50 @@ python3 tools/superagent.py --root <managed-root> --profile <profile> \
 
 ### 未做（不标通过）
 
-1. **前台回合释放的物理 finalize**：宿主 hook（`agent/turn_tool_round.py` 注入段）拿到 `release_after_submission` 文本后只 `return _verdict("break")`，
-   没有关闭 stream consumer、结单卡片、释放 session slot。证据是全天 77 次 `Normal final-send NOT suppressed despite active stream consumer`。
-   需改宿主树 3 处 helper/补丁并重启正在对话的 bot，属维护窗口动作，未擅自做。
+1. ~~前台回合释放的物理 finalize 缺失~~ **（2026-11-04 晚间取证后纠正：此条定性过头，已修）**
+   复核宿主代码发现：turn 结束路径本就有 `_finish_stream_consumer → stream_consumer.finish(final_response)`
+   （`run_turn_runner.py:1327`）负责流收尾与卡片结单；session slot 由 `_release_session_guard` 在 turn
+   结束时释放（A/B 连续回合实测已证明）；全天 77 次 `Normal final-send NOT suppressed` **全部
+   `streamed=False`**，是「consumer 建了但本回合没走流」的保守诊断误报，平台侧回读证实每个 user
+   消息只对应 1 张 app 卡片、**无重复发送**。真正缺的只是 handoff 分支没有像同文件
+   `guardrail_halt` / 工具前 flush 那样显式发 EOS 关闭 display 流框，已补（见 §10）。
 2. **白名单只读名册查询工具**：`colleague-catalog` 只在 `plugins.enabled` 列表，`plugins.entries` 无对应 `settings.enabled` 与 roles 名册，
    `register()` 首行即返回；硬加进白名单只会放行一个不存在的工具。需先由部署清单提供管理员名册数据。
 3. 仓内 `--workers` 上限 16 为安全阀；真实并发收益受模型端点与 runner 只读策略限制，未做固定样本性能评测。
 
 回退点：config / unit 备份 `~/.hermes/superagent/caixuf/state/config-backups/` 下 `backup_20261104195133`（queue）与并发改动当次备份；
 受管 release 可用 `tools/superagent.py rollback`。
+
+## 10. 前台 handoff 显式 EOS（物理终态收口）
+
+### 纠正
+
+§9 把「物理 finalize 缺失」列为未做项是**过度定性**，取证后撤回：流收尾、卡片结单、
+session slot 释放均由宿主 turn 结束路径完成；`final-send NOT suppressed` 是保守诊断误报，
+平台侧无重复发送。详见 §9 第 1 条的勘误。
+
+### 本轮实际补齐
+
+真实差异：同文件 `guardrail_halt` 分支与工具前 flush 都会显式
+`agent.stream_delta_callback(None)` 关闭 display 流框，而 frontdesk handoff 分支只
+`return _verdict("break")`，流框要等 turn teardown 兜底。
+
+- `runtime/hermes_frontdesk_turn.py` 新增 `finalize_after_release(agent)`：仅发 EOS，
+  不发消息、不动任务账本、不向模型循环抛异常；无 callback 或 callback 抛错均为安全 no-op。
+- `patches/patch_frontdesk_boundary.py` 的 handoff hook 在 break 前调用它；新增
+  `MIGRATIONS` 做 V1→V2 就地迁移，保证对**已装旧 hook 的宿主**不重复插入第二段。
+- 迁移与幂等验证：真实宿主文件 V1→V2、全新宿主插入 V2、二次 transform 幂等、
+  `--apply` 二次幂等，hook 计数恒为 1。
+- 单测 4 例：EOS 恰好一次 / 无 callback 为 no-op / callback 抛错不外泄 / 补丁迁移幂等。
+
+### 部署与验证
+
+- 两棵宿主树（默认树与 gateway 实际 `sys.path` 的 pinned 树）均 `--apply` 成功，
+  hook 数 1、finalize 调用数 1、helper 已同步；`--check` 两树均 installed。
+- 备份：`~/.hermes/superagent/caixuf/state/config-backups/`（`turn_tool_round.*.py` / `helper.*.py`）。
+- 重启 gateway：`ActiveState=active`、doctor `ready`、三项 release 校验 true、门禁实时
+  `terminal` 仍拒绝、无导入/语法错误。
+- 真实前台回合：派单成功（jobs 8→9，`running`→`completed`），回执「前台回合已结束」，
+  无 finalize 相关报错。warning 计数 77→77 未增长，但 CLI 回合本就不建 stream consumer，
+  **不据此宣称消除误报**；该诊断属宿主 `run_turn.py`，不在本仓改动范围。
+- 门禁与受影响测试：**148 passed，退出码 0**。

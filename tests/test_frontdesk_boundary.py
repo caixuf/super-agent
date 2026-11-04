@@ -759,3 +759,58 @@ finally:
 print("frontdesk-real-turn-release-passed")
 ''')
     assert "frontdesk-real-turn-release-passed" in output
+
+
+
+# --- handoff physical finalize (EOS) -----------------------------------------
+
+def _turn_helper():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("frontdesk_turn_test", REPO / "runtime/hermes_frontdesk_turn.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_finalize_after_release_emits_eos_to_stream_callback():
+    calls = []
+    agent = type("Agent", (), {"stream_delta_callback": lambda self, value: calls.append(value)})()
+    assert _turn_helper().finalize_after_release(agent) is True
+    assert calls == [None], "EOS (None) must close the display stream box exactly once"
+
+
+def test_finalize_after_release_without_callback_is_a_noop():
+    assert _turn_helper().finalize_after_release(object()) is False
+
+
+def test_finalize_after_release_never_raises_on_broken_callback():
+    def broken(_value):
+        raise RuntimeError("display sink unavailable")
+    agent = type("Agent", (), {"stream_delta_callback": broken})()
+    assert _turn_helper().finalize_after_release(agent) is False
+
+
+def test_frontdesk_release_hook_is_idempotent_and_migrates_v1(tmp_path):
+    staged = _stage_host(tmp_path)
+    _apply(staged)
+    target = staged / "agent/turn_tool_round.py"
+    after = target.read_text(encoding="utf-8")
+    assert after.count("SUPERAGENT_FRONTDESK_TURN_RELEASE") == 1
+    assert "finalize_after_release(agent)" in after
+    _apply(staged)
+    assert target.read_text(encoding="utf-8") == after, "re-applying must not duplicate the hook"
+    checked = subprocess.run([sys.executable, str(PATCH), "--check", "--agent-dir", str(staged)],
+                             capture_output=True, text=True)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    # Simulate a host carrying the pre-finalize V1 block, then re-apply.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("fd_patch_migration", PATCH)
+    patch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(patch)
+    assert patch._ROUND_RELEASE_V2 in after
+    target.write_text(after.replace(patch._ROUND_RELEASE_V2, patch._ROUND_RELEASE_V1, 1), encoding="utf-8")
+    _apply(staged)
+    migrated = target.read_text(encoding="utf-8")
+    assert "finalize_after_release(agent)" in migrated
+    assert migrated.count("SUPERAGENT_FRONTDESK_TURN_RELEASE") == 1, "migration must not insert a second hook"
+

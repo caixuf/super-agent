@@ -26,6 +26,25 @@ _STATES = {
 }
 
 
+def finalize_after_release(agent: Any) -> bool:
+    """Close the display stream box as soon as a durable handoff ends the turn.
+
+    The host's guardrail-halt and pre-tool-flush paths emit an EOS to
+    ``stream_delta_callback`` so an open progress card is settled immediately.
+    A frontdesk handoff must do the same; otherwise the box lingers until turn
+    teardown. This never sends a message, never touches the task ledger, and
+    never raises into the model loop. Returns whether an EOS was emitted.
+    """
+    callback = getattr(agent, "stream_delta_callback", None)
+    if not callable(callback):
+        return False
+    try:
+        callback(None)
+    except Exception:
+        return False
+    return True
+
+
 def release_after_submission(
     submit_call_ids: list[str], tool_results: list[dict[str, Any]],
     *, home: Path | str | None = None,
