@@ -557,6 +557,15 @@ class DispatchRouter:
         # still be able to run. Analysis is narrower (needs sources inside the
         # administrator roots), so it stays opt-in by naming it.
         role = args.get('role') or ('dev' if 'dev' in self.services else 'analysis')
+        if (role == 'analysis' and 'dev' in self.services and args.get('sources')):
+            # A source outside the analysis roots is not an analysis task at all:
+            # inspecting a repository is execution work. Route it instead of failing
+            # the whole turn closed.
+            try:
+                self.services['analysis']._sources(args.get('sources'))
+            except (PermissionError, ValueError):
+                role = 'dev'
+                args = {k: v for k, v in args.items() if k != 'sources'}
         if not isinstance(role,str) or role not in self.services:
             raise ValueError('unknown administrator colleague role')
         result = getattr(self.services[role],action)(session_id,
