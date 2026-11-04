@@ -12,9 +12,49 @@ import re
 from typing import Any
 
 UNCONFIRMED = (
-    "后台提交结果未确认，前台本轮已结束。请保留原请求键并查询核对，"
-    "不要换键重复提交。"
+    "**后台任务未受理**：本次提交被拒，任务没有创建，不会有结果返回。"
+    "前台本轮已结束。请保留原请求键并查询核对，不要换键重复提交。\n\n"
+    "若只是查询同事名册或任务状态，请改用只读查询工具直接回答，不要派单；"
+    "派单只用于有合法源文件的只读分析任务。"
 )
+#: Only these opaque, administrator-defined error codes may be echoed to the
+#: conversation. Never copy exception bodies, config values or file paths into IM.
+_SAFE_ERRORS = frozenset({
+    "absolute source path required", "source outside administrator roots",
+    "source line range outside policy", "source count outside policy",
+    "regular source file required", "sensitive source path denied",
+    "addressable submitting conversation required before dispatch",
+    "unexpected dispatch arguments", "invalid source fields",
+})
+def is_rejected_handoff(reply: str | None) -> bool:
+    """True when a handoff acknowledgement reports no accepted task.
+
+    Lets a host renderer choose the failed terminal card instead of a generic
+    'completed' one; a task that was never created must never look delivered.
+    """
+    return isinstance(reply, str) and reply.startswith("**后台任务未受理**")
+
+
+def _rejection_reason(tool_results: list[dict[str, Any]]) -> str:
+    """Return bounded, whitelisted error codes; never leak paths or config."""
+    codes: list[str] = []
+    for row in tool_results:
+        if not (isinstance(row, dict) and row.get("role") == "tool"
+                and row.get("name") == "durable_submit"):
+            continue
+        raw = row.get("content")
+        if not isinstance(raw, str) or len(raw) > 65536:
+            continue
+        try:
+            receipt = json.loads(raw)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(receipt, dict) or receipt.get("ok") is True:
+            continue
+        code = receipt.get("error")
+        if isinstance(code, str) and code in _SAFE_ERRORS and code not in codes:
+            codes.append(code)
+    return "; ".join(codes[:3])
 UNAVAILABLE = (
     "frontdesk_handoff_unavailable: 前台交接检查不可用，本轮停止。"
     "提交结果可能已持久化；请保留原请求键核对，不要换键重复提交。"
@@ -92,7 +132,10 @@ def release_after_submission(
             role = None
         accepted[receipt["task_id"]] = (receipt["status"], role)
     if not accepted:
-        return UNCONFIRMED
+        reason = _rejection_reason(tool_results)
+        if not reason:
+            return UNCONFIRMED
+        return UNCONFIRMED + "\n\n拒绝原因：" + reason
     lines = ["已持久记录后台任务：", ""]
     for task_id, (state, role) in accepted.items():
         lines.append(f"- `{task_id}`：{_STATES[state]}" + (f"（`{role}`）" if role else ""))

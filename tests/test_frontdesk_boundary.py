@@ -50,7 +50,7 @@ def test_frontdesk_denies_execution_and_indirect_entries(policy, tmp_path, name)
 def test_frontdesk_exposes_task_apis_without_creating_extra_capabilities(policy, tmp_path):
     _enable(tmp_path)
     names = {"durable_submit", "durable_status", "durable_cancel", "task_status",
-             "terminal", "memory_search_l1", "not_registered"}
+             "colleague_list", "terminal", "memory_search_l1", "not_registered"}
     definitions = [{"type": "function", "function": {"name": name}} for name in names]
     filtered = policy.filter_tool_definitions(definitions, home=tmp_path)
     assert {item["function"]["name"] for item in filtered} == policy.TASK_TOOLS
@@ -647,7 +647,9 @@ try:
         rows=db.execute("SELECT id,status FROM jobs").fetchall()
     assert len(rows)==(0 if scenario=="refused" else 1),rows
     if scenario=="refused":
-        assert "未确认" in first["final_response"] and "已持久记录" not in first["final_response"],first
+        assert "未受理" in first["final_response"] and "任务没有创建" in first["final_response"],first
+        assert "已持久记录" not in first["final_response"],first
+        assert "拒绝原因：sensitive source path denied" in first["final_response"],first
     elif scenario=="helper-failed":
         assert "frontdesk_handoff_unavailable" in first["final_response"] and "private" not in first["final_response"],first
     elif scenario=="accepted":
