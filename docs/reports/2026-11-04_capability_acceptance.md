@@ -180,17 +180,36 @@ runner 指向野生工作区、硬门禁未启用等具体缺口，需单独部�
 - 前台硬门禁启用，实时判定 `terminal` 拒绝、`durable_submit` 放行；
 - `deliver_completions` 两处 true、`completion_card_enabled: true`；
 - doctor `ready`、三项卡片检查 true、`blockers: []`；
-- 新的 delivery parked 基本停止（历史 5314 条，最近 200 行仅 10 条）。
+- 投递链路畅通：`delivery_obligations` 27 条全部 `delivered`、`chat_id` 无 NULL；队列 jobs
+  21 completed + 4 failed，无卡住任务。日志里周期性的 `completion delivery backlog` WARN
+  是 backfill 巡检噪声（多个 gateway 各自轮询历史 outbox 快照），不是投递失败；本机同样有
+  671 条同类日志且已验证全绿。低峰采样的「基本停止」结论已被这轮复核修正。
 
-**代码 release 激活被安装器安全门禁阻断**：
-`legacy_card_patches_require_clean_candidate` / `feishu_card_implementation_unverified`。
-根因是远端宿主的过时 `card-native-markdown` 补丁仍在位、`card-replies` 不在位，
-plan 判定 `card_impl=unverified`；两个补丁脚本的 `--preflight` 均报「版本不匹配，
-无法干净应用，未修改宿主」。远端 hermes_root 是共享 git 树且带大量未提交改动，未擅自卸载。
+**代码 release 已激活**：`current` → `releases/b9be163`，`update` 退出码 0。
 
-**未绕过门禁**——这道拦截本身就是部署质量保证。下一步需授权：
-A 维护窗口内收敛宿主遗留补丁后重跑 `update`；B 用 `candidate-hermes` 构建全新干净宿主。
+初次 `update` 被 `legacy_card_patches_require_clean_candidate` /
+`feishu_card_implementation_unverified` 阻断，真实原因**不是宿主不干净，而是少传了目标参数**：
+安装器默认 `--hermes-root` 指向共享工作树（带过时 `card-native-markdown` 补丁、22 处未提交改动），
+而现场 gateway 的 `ExecStart` 实际运行的是**受管干净候选** `hermes/v0.22.5-bf0203a794a0`
+（`hermes-current` 软链已指向它，`adapter-is-clean` 标记、git HEAD、冒烟均合规）。
+
+正确解法是把 `--hermes-root` 显式指向**实际运行宿主**，让门禁验证真实目标，而不是绕过它：
+
+```bash
+python3 tools/superagent.py --root <managed-root> --profile <profile> \
+  --hermes-root <managed-root>/hermes/v0.22.5-bf0203a794a0 update
+```
+
+- 该宿主下 `plan` 退出码 0、`blockers: []`、`card_impl: release-cardkit`；
+- `update` 只在受管 root 内切 `current` / 重链插件 / 重启服务，**未触碰共享宿主**；
+- 部署后复核：新 release 含卡片分支、参数契约与 `cardkit2_renderer`；doctor `ready`、
+  三项 release 校验 true；四项配置（frontdesk / 两处投递 / 卡片开关）全部保留；
+  门禁实时判定 `terminal` / `vision_analyze` 拒绝、工具面只剩 4 个派单工具；gateway / worker active。
+
+经验：门禁报「需要干净候选」时，先核对 `--hermes-root` 是否指向实际运行宿主，
+再判断要不要重建候选；共享工作树的遗留补丁不是部署目标的状态。
+
 历史 outbox 21 条未 ACK 因 origin 不可寻址保持 parked，属设计行为（不猜会话），需单独归档。
 
-回退点：远端配置/runner 备份 `backups/pre-deploy-20261104173901`；
-本机可用 `tools/superagent.py rollback` 回退受管 release。
+回退点：远端配置 / runner 备份 `backups/pre-deploy-20261104173901`；
+受管 release 可用 `tools/superagent.py rollback` 回退。
