@@ -169,7 +169,7 @@ def test_default_memory_source_never_falls_back_to_another_profile(tmp_path, mon
     other = home / ".hermes" / "profiles" / "caixuf" / "memories" / "MEMORY.md"
     other.parent.mkdir(parents=True)
     other.write_text("other profile", encoding="utf-8")
-    active = home / ".hermes" / "profiles" / "imfl"
+    active = home / ".hermes" / "profiles" / "active-profile"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("HERMES_HOME", str(active))
     monkeypatch.delenv("SUPER_AGENT_MEMORY_FILE", raising=False)

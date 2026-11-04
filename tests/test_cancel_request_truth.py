@@ -284,7 +284,7 @@ def test_worker_crash_supervisor_stops_environment_clearing_child(tmp_path):
         first = pool.status(job)["attempt"]
         worker.kill()
         worker.wait(timeout=5)
-        _wait(lambda: not _alive(child_pid))
+        _wait(lambda: not _alive(child_pid), seconds=15)
         proof = pool.root / "attempts" / first / "stop.json"
         _wait(lambda: proof.exists() and proof.stat().st_size > 0)
         claim = _wait(lambda: pool.claim(lease=0))

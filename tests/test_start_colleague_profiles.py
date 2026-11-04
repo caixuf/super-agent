@@ -13,7 +13,7 @@ spec.loader.exec_module(module)
 
 
 def test_starts_each_gateway_only_after_preceding_identity(tmp_path):
-    for name in ("imfl-test", "imfl-cases"):
+    for name in ("colleague-test", "colleague-cases"):
         (tmp_path / name).mkdir()
     events = []
 
@@ -25,19 +25,19 @@ def test_starts_each_gateway_only_after_preceding_identity(tmp_path):
         events.append(("identify", home.name))
         return {"served_profiles": [{"home": str(home)}]}
 
-    module.start_profiles(["imfl-test", "imfl-cases"], profiles_root=tmp_path, identify=identify, run=run)
-    assert events == [("start", "hermes-gateway-imfl-test.service"), ("identify", "imfl-test"),
-                      ("start", "hermes-gateway-imfl-cases.service"), ("identify", "imfl-cases")]
+    module.start_profiles(["colleague-test", "colleague-cases"], profiles_root=tmp_path, identify=identify, run=run)
+    assert events == [("start", "hermes-gateway-colleague-test.service"), ("identify", "colleague-test"),
+                      ("start", "hermes-gateway-colleague-cases.service"), ("identify", "colleague-cases")]
 
 
 def test_does_not_start_followers_when_previous_identity_is_unknown(tmp_path):
-    for name in ("imfl-test", "imfl-cases"):
+    for name in ("colleague-test", "colleague-cases"):
         (tmp_path / name).mkdir()
     started = []
     def run(command, **_kwargs):
         started.append(command[-1])
         return CompletedProcess(command, 0)
     with pytest.raises(RuntimeError, match="profile_identity_unconfirmed"):
-        module.start_profiles(["imfl-test", "imfl-cases"], profiles_root=tmp_path,
+        module.start_profiles(["colleague-test", "colleague-cases"], profiles_root=tmp_path,
                               identify=lambda *_args, **_kwargs: {}, run=run, timeout=0)
-    assert started == ["hermes-gateway-imfl-test.service"]
+    assert started == ["hermes-gateway-colleague-test.service"]

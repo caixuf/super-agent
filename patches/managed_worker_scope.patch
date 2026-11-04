@@ -1,0 +1,28 @@
+--- a/gateway/session_managed_worker.py
++++ b/gateway/session_managed_worker.py
+@@ -556,7 +556,24 @@
+         from gateway.session_worker_spawn import acquire_process
+         from gateway.session_managed_worker_log import worker_log_path
+         log_path = worker_log_path(authority.profile_id)
+-        process = await acquire_process(subprocess.Popen, [sys.executable, '-m', 'agent.managed_worker'],
++        # Optional host-owned scope: execution grouping only. This is not a
++        # sandbox or evidence of termination; the host must bind and verify the
++        # exact scope before it may settle work. Disabled unless explicitly set.
++        command = [sys.executable, '-m', 'agent.managed_worker']
++        scope_mode = os.environ.get('SUPERAGENT_MANAGED_WORKER_SCOPE', '0')
++        if scope_mode not in ('0', '1'):
++            raise RuntimeError('invalid_managed_worker_scope_setting')
++        if scope_mode == '1':
++            import hashlib
++            if sys.platform != 'linux':
++                raise RuntimeError('managed_worker_scope_requires_linux')
++            admission = row.get('admission_id')
++            if type(generation) is not int or generation < 1 or not isinstance(admission, str) or not admission:
++                raise RuntimeError('managed_worker_scope_requires_admission')
++            identity = hashlib.sha256((str(authority.profile_id) + '\0' + admission + '\0' + str(generation)).encode()).hexdigest()[:32]
++            command = ['systemd-run', '--user', '--scope', '--quiet',
++                       '--unit=superagent-turn-' + identity + '.scope', '--', *command]
++        process = await acquire_process(subprocess.Popen, command,
+             cwd=cwd, stdin=subprocess.PIPE, env=env, stdout=subprocess.PIPE,
+             stderr=subprocess.DEVNULL if log_path is None else subprocess.PIPE, **WORKER_POPEN)
+     except asyncio.CancelledError:

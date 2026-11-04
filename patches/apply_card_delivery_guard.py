@@ -11,7 +11,8 @@ GUARD = '''        if getattr(self, "_sa_card_update_unresolved", False):
             logger.warning("Card update outcome unknown; suppressing new-message fallback")
             return False
 '''
-SECOND = '''        from gateway.relay.egress import declined_send
+SECOND = '''
+        from gateway.relay.egress import declined_send
 
 '''
 CLASSIFY = '''        if getattr(result, "error_kind", None) == "sa_card_update_unresolved":

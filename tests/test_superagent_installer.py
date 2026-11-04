@@ -1083,42 +1083,42 @@ def test_rollback_refuses_switch_if_stopped_gateway_cgroup_remains_populated(tmp
 def test_explicit_legacy_engine_migration_preserves_business_paths():
     module = _load_installer()
     original = ("plugins:\n  entries:\n    worker:\n      settings:\n"
-                "        engine_root: /home/emily/code/agentcore\n"
-                "        allowed_roots:\n        - /home/emily/code/agentcore\n"
-                "        queue_root: /home/emily/.local/state/agentcore/analysis-queue\n"
-                "business:\n  source: /home/emily/code/agentcore\n")
-    result = module._migrate_plugin_engine_roots(original, ["/home/emily/code/agentcore"], "/managed/current")
+                "        engine_root: /home/worker/code/agentcore\n"
+                "        allowed_roots:\n        - /home/worker/code/agentcore\n"
+                "        queue_root: /home/worker/.local/state/agentcore/analysis-queue\n"
+                "business:\n  source: /home/worker/code/agentcore\n")
+    result = module._migrate_plugin_engine_roots(original, ["/home/worker/code/agentcore"], "/managed/current")
     assert "engine_root: /managed/current" in result
-    assert "- /home/emily/code/agentcore" in result
-    assert "source: /home/emily/code/agentcore" in result
-    assert "/home/emily/.local/state/agentcore/analysis-queue" in result
+    assert "- /home/worker/code/agentcore" in result
+    assert "source: /home/worker/code/agentcore" in result
+    assert "/home/worker/.local/state/agentcore/analysis-queue" in result
 
 
 def test_explicit_legacy_engine_migration_rejects_shared_yaml_alias():
     module = _load_installer()
-    original = ("business_path: &engine /home/emily/code/agentcore\n"
+    original = ("business_path: &engine /home/worker/code/agentcore\n"
                 "plugins:\n  entries:\n    worker:\n      settings:\n        engine_root: *engine\n")
     with pytest.raises(ValueError, match="aliased engine path"):
-        module._migrate_plugin_engine_roots(original, ["/home/emily/code/agentcore"], "/managed/current")
+        module._migrate_plugin_engine_roots(original, ["/home/worker/code/agentcore"], "/managed/current")
 
 
 def test_worker_engine_migration_preserves_business_pythonpath_and_is_idempotent(tmp_path, monkeypatch):
     module = _load_installer()
-    old = "/home/emily/code/agentcore"
+    old = "/home/worker/code/agentcore"
     desired = tmp_path / "managed" / "current"
-    business = "/opt/imfl/business"
+    business = "/opt/business/app"
     environment = [f"PYTHONPATH={old}:{business}"]
 
     def run(command, **kwargs):
-        assert command[:4] == ["systemctl", "--user", "show", "superagent-worker-imfl.service"]
+        assert command[:4] == ["systemctl", "--user", "show", "superagent-worker-sample.service"]
         output = "LoadState=loaded\nExecStart=python -m agentcore.pool\nEnvironment=" + environment[0] + "\n"
         return subprocess.CompletedProcess(command, 0, output, "")
 
     monkeypatch.setattr(module, "_run", run)
-    first = module._planned_worker_pythonpath("imfl", desired, [old])
+    first = module._planned_worker_pythonpath("sample", desired, [old])
     assert first["pythonpath"] == f"{desired}:{business}"
     environment[0] = f"PYTHONPATH={first['pythonpath']}"
-    assert module._planned_worker_pythonpath("imfl", desired, [old]) == first
+    assert module._planned_worker_pythonpath("sample", desired, [old]) == first
 
 
 def test_worker_engine_migration_rejects_unrelated_worker(tmp_path, monkeypatch):
@@ -1128,7 +1128,7 @@ def test_worker_engine_migration_rejects_unrelated_worker(tmp_path, monkeypatch)
             "LoadState=loaded\nExecStart=python -m other.service\nEnvironment=PYTHONPATH=/old\n", "")
     monkeypatch.setattr(module, "_run", run)
     with pytest.raises(ValueError, match="worker_unit_not_recognized"):
-        module._planned_worker_pythonpath("imfl", tmp_path / "current", ["/old"])
+        module._planned_worker_pythonpath("sample", tmp_path / "current", ["/old"])
 
 
 def test_worker_engine_detection_rejects_python_module_and_zip_shadow(tmp_path):
@@ -1273,8 +1273,8 @@ def test_doctor_recall_observation_reports_missing_and_healthy_without_query(tmp
     import time
     module = _load_installer()
     profiles = tmp_path / "profiles"
-    main = profiles / "imfl"
-    member = profiles / "imfl-architect"
+    main = profiles / "sample"
+    member = profiles / "sample-architect"
     main.mkdir(parents=True)
     member.mkdir()
     report = tmp_path / "recall.json"
@@ -1282,29 +1282,29 @@ def test_doctor_recall_observation_reports_missing_and_healthy_without_query(tmp
     report.chmod(0o600)
     main_config = {"memory": {"localvec": {"recall_cmd": ["x", "--diagnostic-file", str(report)]}},
                    "plugins": {"entries": {"colleague-team": {"settings": {"gateway_dispatch": {
-                       "enabled": True, "tool_backend": {"members": [{"profile": "imfl-architect", "home": str(member)}]}}}}}}}
+                       "enabled": True, "tool_backend": {"members": [{"profile": "sample-architect", "home": str(member)}]}}}}}}}
     (main / "config.yaml").write_text(yaml.safe_dump(main_config))
     (member / "config.yaml").write_text(yaml.safe_dump({"memory": {"localvec": {
         "recall_cmd": ["x", "--diagnostic-file", str(tmp_path / "missing.json")]}}}))
     result = module._recall_diagnostics_observation(main)
-    assert result["sources"]["imfl"]["status"] == "healthy"
-    assert result["sources"]["imfl-architect"] == {"status": "unknown", "reason": "not_observed"}
+    assert result["sources"]["sample"]["status"] == "healthy"
+    assert result["sources"]["sample-architect"] == {"status": "unknown", "reason": "not_observed"}
     assert "private text" not in repr(result)
 
 
 def test_doctor_recall_observation_refuses_foreign_profile_home(tmp_path):
     module = _load_installer()
-    main = tmp_path / "profiles" / "imfl"
+    main = tmp_path / "profiles" / "sample"
     main.mkdir(parents=True)
     config = {"plugins": {"entries": {"colleague-team": {"settings": {"gateway_dispatch": {
-        "enabled": True, "tool_backend": {"members": [{"profile": "imfl-test", "home": str(tmp_path / "elsewhere" / "imfl-test")}]}}}}}}}
+        "enabled": True, "tool_backend": {"members": [{"profile": "sample-test", "home": str(tmp_path / "elsewhere" / "sample-test")}]}}}}}}}
     (main / "config.yaml").write_text(yaml.safe_dump(config))
     assert module._recall_diagnostics_observation(main)["status"] == "unknown"
 
 
 def test_doctor_distinguishes_disk_binding_from_recall_health(tmp_path):
     module = _load_installer()
-    home = tmp_path / "profiles" / "imfl"
+    home = tmp_path / "profiles" / "sample"
     home.mkdir(parents=True)
     release = tmp_path / "releases" / "v1"
     plugin = release / "plugins" / "localvec"
@@ -1316,12 +1316,12 @@ def test_doctor_distinguishes_disk_binding_from_recall_health(tmp_path):
     config = {"memory": {"localvec": {"recall_cmd": ["/usr/bin/env", f"AGENTCORE_ROOT={current}", "python3"]}}}
     (home / "config.yaml").write_text(yaml.safe_dump(config))
     obs = module._recall_diagnostics_observation(home, current)
-    assert obs["sources"]["imfl"]["status"] == "unknown"
-    assert obs["disk_bindings"]["imfl"] == {"plugin": "matched", "engine": "matched"}
+    assert obs["sources"]["sample"]["status"] == "unknown"
+    assert obs["disk_bindings"]["sample"] == {"plugin": "matched", "engine": "matched"}
     assert obs["binding_scope"] == "configured_files_only"
     config["memory"]["localvec"]["recall_cmd"][1] = "AGENTCORE_ROOT=/old/release"
     (home / "config.yaml").write_text(yaml.safe_dump(config))
-    assert module._recall_diagnostics_observation(home, current)["disk_bindings"]["imfl"]["engine"] == "mismatched"
+    assert module._recall_diagnostics_observation(home, current)["disk_bindings"]["sample"]["engine"] == "mismatched"
 
 
 def test_doctor_queue_observation_counts_blocked_without_exposing_content(tmp_path):
