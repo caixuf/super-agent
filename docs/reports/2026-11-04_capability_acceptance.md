@@ -106,3 +106,35 @@
 5. 生成正式发布物（`publishable=true`）与版本绑定的发布说明，再逐条把结论从「未验收」改成「通过 / 失败 / 不适用」，每条注明覆盖的 commit 与目标实例。
 
 本报告未修改任何生产配置、未重启服务、未发送消息、未消费队列或记忆积压。
+
+## 6. caixuf 本机逐项验证（2026-11-04 实测）
+
+按外部缺口清单逐项在本机核对；该清单混合了远端跑测机与另一台前置机的状态，
+多处不适用于本机，下表以本机实证为准。
+
+| 项 | 本机实测结论 | 与清单说法的差异 |
+| :--- | :--- | :--- |
+| D01 完成态另路投递 | **已通**：`deliver_completions` 两处均 true；`delivery_obligations` 64 条全部 `delivered`；本次用真实 transport 完成发送→平台回读→幂等→撤回 | 清单称「false 未启用」是远端跑测机状态，不是本机 |
+| D03 卡片心跳与排水 | 受管 release 含 `cardkit2_renderer.py` / `card_stream.py`；`render_mode: card`、doctor 卡片三项检查 true | 清单里的手写轮询轮子属于另一台前置机，本机不存在 |
+| T02 / C06 停止证明 | 本次后台 job 带 `execution_state: supervised`、`supervisor_nonce`、`containment_token` | 跨机 `/stop` 断链是双机场景，本机单机不受影响 |
+| FRONTDESK 前台硬门禁 | **本轮已修复并实测**：启用 `superagent.frontdesk.enabled`，重启后工具面过滤只剩 `durable_submit/status/cancel/task_status`，`terminal` 被拒；边界与回合释放 72 项通过 | 清单称「未上线」在修复前成立，现已解除 |
+| C01–C05 同事流水线 | **已通**：名册 9 角色 / 9 成员（非 15 岗）、gateway 派工 7 成员；真实回合模型调用 `durable_submit` 成功，队列 3→4，后台 `completed` 并产出 `citation_traceability_only` 报告 | 清单称「一次都没调、模型自己硬扛」是远端旧状态 |
+| C05 受控验收 | 受管 release 含 `dev_runner.py` / `verification_gate.py`；本次报告带 `claim_count` 与引用核查结论 | 完整研发沙箱 / bubblewrap 仍未验，containment 门禁保持关闭 |
+| M01 / M02 召回 | `entity-rules-*` 下 9 个 profile 目录在位；`exit_code=2` 在错误日志仅 2 次；doctor 报 `diagnostic_unconfigured`（未配置诊断，非降级） | 清单称「频繁降级」夸大 |
+| M03 / M04 经验入库 | `personal-memory-candidate/`（含冻结快照与 spool）、`memory-spool` 目录在位 | 跨会话岗位沉淀未做运行验收，标为待验 |
+| 部署拓扑 | 本机单机：前台、后台 Worker、记忆服务同机，唯一 `current` 软链 | 清单的「双机割裂」是另外两台机器之间的问题 |
+
+### 本轮实修复
+
+1. 启用前台硬门禁（配置 + 重启 + 工具面/拦截验证），前台不再能直接执行。
+2. 修 `plugins/durable_dispatch` 的 `sources.path` 参数契约：补齐「必须绝对路径且在管理员 roots 内」说明。
+   首次真实回合因模型传相对路径被拒且 fail-closed 收场，这是清单未定位到的真因。相关测试 81 项通过。
+3. 真实闭环实测：提交 → 后台 `completed`（结构化报告）→ 真实平台投递 / 回读 / 撤回，全链路有平台侧证据。
+   自动 drain 对 `channel: local` 的 CLI 会话会 parked（会话已退出、不可寻址），属设计行为；IM 回合的 64 条投递全部成功。
+
+### 仍待验证（不因本轮实测而标通过）
+
+- 真实 IM 回合自动触发的完整闭环（需以用户身份在测试群发起，本次为 CLI 回合）。
+- 完整研发沙箱 / bubblewrap 与跨机停止信号。
+- 跨会话岗位经验沉淀与真实模型召回质量固定样本。
+- `C05` 的完整研发执行与 containment 门禁解开。

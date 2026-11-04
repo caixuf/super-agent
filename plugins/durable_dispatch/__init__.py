@@ -740,13 +740,14 @@ Use durable_submit for bounded read-only analysis of approved files, including n
     role_schema = {'type':'string','enum':list(services),
                    'description':'Administrator colleague role; use this to select the named colleague and preserve it for status/cancel. Known roles: ' + names}
     source_schema = {'type': 'object', 'additionalProperties': False, 'properties': {
-        'path': {'type': 'string'}, 'start_line': {'type': 'integer', 'minimum': 1},
+        'path': {'type': 'string', 'description': 'Absolute path to a regular file inside the administrator-approved roots; relative paths are rejected.'}, 'start_line': {'type': 'integer', 'minimum': 1},
         'end_line': {'type': 'integer', 'minimum': 1}}, 'required': ['path']}
     submit_properties = {
         'goal': {'type': 'string', 'minLength': 1, 'maxLength': 4000},
         'request_key': {'type': 'string', 'minLength': 1, 'maxLength': 128,
                         'description': 'Stable key for retries of the same request; use a new key for an intentional rerun.'},
-        'sources': {'type': 'array', 'items': source_schema, 'minItems': 1, 'maxItems': 8},
+        'sources': {'type': 'array', 'items': source_schema, 'minItems': 1, 'maxItems': 8,
+                   'description': 'Every source path must be absolute and inside the administrator-approved roots. A rejected submission ends the turn, so verify the path before calling.'},
         'role': role_schema,
     }
     entries = (
