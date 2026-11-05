@@ -1,13 +1,13 @@
 # 发版核对与剩余门禁
 
-> **历史记录说明（2026-11-04）**：本文记录 2026-11-01~11-03 的验证过程与结果。
+> **历史记录说明（2026-11-06）**：本文记录 2026-11-01~11-06 的验证过程与结果。
 > 其中 HFC / 外部卡片 sidecar 相关段落、测试名与构建记录属于当时的证据，
 > 该整合已从仓库删除，不再代表当前架构。当前源码能力面见
 > [`RELEASE_CAPABILITIES.md`](RELEASE_CAPABILITIES.md)；本文的通过 / 跳过数字
 > 也只覆盖各自记录时的提交，不能外推到当前 HEAD。
 
-更新日期：2026-11-04（Asia/Shanghai）。
-远端基线：`e0a953a`（`origin/main` 与本地 HEAD 一致，`5f5fd1a` 是其祖先）；以下修复已全部推送，但尚未发布。
+更新日期：2026-11-06（Asia/Shanghai）。
+远端基线：`2210e30`（`origin/main` 与本地 HEAD 一致）；本轮修复 `c93790f` 尚未推送。
 结论：**当前不具备正式发版证据**。源码测试、候选包安装成功与实际前台、
 Worker、记忆、真实渠道可用是不同层次，不能互相替代。
 
@@ -18,12 +18,41 @@ home 与同名 profile 目录不同，现场尚无新前台边界；现有只读
 当前功能输入已包含记忆身份路由、受管 provider 接线、同事绑定读取修复、研发
 验收命令授权、有界输出/清理，以及同事 Gateway 派工与完成回执接线。
 
-**本机完整 `verify.sh` 已退出码 0**（2026-11-04 11:25，工作树含同日修复，HEAD `e0a953a`）：
-单测块 **2754 passed / 63 skipped / 709.91 秒**，防退化靶场另 **5 passed**，
+**本机完整 `verify.sh` 已退出码 0**（2026-11-06，HEAD `2210e30` + 本轮修复 `c93790f`）：
+单测块 **2727 passed / 54 skipped / 563.87 秒**，防退化靶场另 **5 passed**，
 13 个 shell 脚本语法检查与安装 dry-run 通过，⑥.1 三项延迟门禁全部通过
-（DNS 23.2ms、本地 I/O 0.2ms、平台 OpenAPI 133.4ms），⑦ 模型上下文端点
-返回 1000000。⑥ 真实通道仍因未设置 `FEISHU_APP_ID`/`FEISHU_APP_SECRET`/
-`FEISHU_TEST_CHAT_ID` 按 `verify.sh` 规则记跳过，**不能算通过**。
+（DNS 12.0ms、本地 I/O 0.27ms、平台 OpenAPI 92.4ms），⑦ 模型上下文端点
+返回 **1441792 (source=models)** 并报出手写 pin 与目录不一致的告警。
+⑥ 真实通道仍因未设置 `FEISHU_APP_ID`/`FEISHU_APP_SECRET`/`FEISHU_TEST_CHAT_ID`
+按 `verify.sh` 规则记跳过，**不能算通过**。
+
+本轮重验同时查实两处「证据其实没落地」的问题，均已修复：
+
+- **⑦ 门禁此前是空转的。** `checks/model_context_check.sh` 只看画像配置，而安装器
+  按设计只往画像配置写 `plugins.enabled`（`install/install.sh` 的 `merge_plugin_enable`），
+  模型设置实际在顶层 `~/.hermes/config.yaml`。结果这道「窗口来自端点而非手写 pin」
+  的门禁在本机一律记 SKIP，端点契约从未被执行过。现定位顺序改为
+  「显式指定 > 能解析出 base_url 的画像配置 > 顶层主配置 > 画像配置」，规则集中在
+  `agentcore/model_context.resolve_config_path()`，脚本不再自己复刻一份 YAML/provider
+  优先级；`tests/test_model_context.py` 覆盖四条路径与脚本层接线。
+- **本机解释器缺声明的 test extra。** `pyproject.toml` 的 `test` extra 要求
+  `markdown>=3.4` 与 `ruamel.yaml==0.18.16`，系统 `python3` 只有 pytest：
+  `tests/test_arch_doc.py` 因缺 `python-markdown` 整组跳过（模块级 1 skip），
+  「文档渲染链」从未被真正验证过；`tests/test_illustrated_delivery.py` 因缺
+  `ruamel` 跳过 1 条。本轮在隔离 venv（`--system-site-packages`，不动系统 Python）
+  装齐声明依赖后重跑，上述两处分别变成 10 passed + 1 skipped（缺 chromium）与
+  6 passed。`verify.sh` 的单测块同时改为 `-rs`，跳过项逐项打印原因 ——
+  计数不能替代原因。
+
+复现方式：`PYTHON=<装有 test extra 的解释器> bash verify.sh`。
+同一份源码用未装依赖的系统 `python3` 实测为 **2716 passed / 55 skipped / 556.86 秒**
+（差 11 passed / 1 skipped：文档渲染链与 illustrated_delivery 各贡献 1 组），
+⑦ 则已能探到端点、不再记 SKIP。
+
+上表数字对应的旧记录（HEAD `e0a953a`、2754 passed / 63 skipped / 709.91 秒、
+⑦ 返回 1000000）属于 2026-11-04 11:25 那轮，**已被本轮取代**：此后
+`f5881df`、`2210e30` 改了 `agentcore/preflight.py`（224 行）与 `verify.sh`，
+`67e8969` 删除了 HFC sidecar（3556 行），那轮数字没有覆盖这些改动。
 
 该轮之前的两轮为红，根因均已在同一天定位并修复，不属代码回归：
 首轮 ⑥.1 DNS 解析 1080.4ms 超 300ms 预算 —— 本机 `/etc/resolv.conf` 首选
@@ -65,6 +94,7 @@ home 与同名 profile 目录不同，现场尚无新前台边界；现有只读
 | 记忆测试启动竞争 | socket 路径存在不代表监听就绪；测试改为真实健康握手，并覆盖延迟监听 | `tests/test_memory_recall_service.py`，专项 22 passed，过期排队两种场景重复 10 轮通过；未改生产服务语义 |
 | 前台自动复盘 | 即使允许记忆读取，前台也不能通过自动/显式/延迟恢复入口启动记忆技能复盘；损坏策略或 helper 故障同样不启动 | `tests/test_frontdesk_boundary.py`；当前宿主与固定候选均先复现原行为，修复后边界/交接/安装专项 106 passed，且已纳入下述最终全量；外部 provider 捕获不在此项冒充多用户准入 |
 | 本地 attempt 停止 | 取消只记请求；本地 runner 用 Linux subreaper 收养、杀死并回收脱离进程组/清空环境的后代，私有停止回执绑定 attempt 后才可终结/恢复 | `tests/test_cancel_request_truth.py`、Pool/Worker/watchdog 专项；含 Worker/监管器强杀与损坏回执反例。不是恶意代码沙箱，不解除研发执行门禁；见 `ATTEMPT_STOP_CONTRACT.md` |
+| ⑦ 模型上下文门禁 | 画像配置解析不出 base_url 时退回顶层主配置，门禁真正探到端点；pin 与目录不一致按设计报 warning 且不再被 pass 行吞掉；单测块 `-rs` 逐项打印跳过原因 | `tests/test_model_context.py`（+8 条，含脚本层接线）；本机实探 `1441792 (source=models)`；端点可达性取决于现场网关，非生产启用 |
 | 启动时前台可用 | 进程启动/ready 等待不持有任务数据库写事务；等待期间前台能查询和派单，取消/暂停使该次 runner 不获启动许可 | 先复现两条阻塞失败，再加入真实监管器受控延迟回归；取消/人审/Worker/恢复/交付相邻专项共 162 passed / 2 skipped |
 | 人审与主账一致 | 主账拒绝尚未停止的 attempt 恢复时，卡片不能记为已批准；主账拒绝操作时不消费待处理人审记录 | `tests/test_prefer_c1_hitl.py` 两条反例先失败，修复后纳入上述相邻专项 |
 | 监管丢失投影 | 监管器被杀且缺少停止回执时保留绑定身份，前台显示停止尚未确认，不冒充健康运行 | 真实 SIGKILL 反例先复现 `running` 误报，再修复投影；状态/取消/人审相邻专项 108 passed |
@@ -397,7 +427,7 @@ ready，完整固定宿主六项补丁均通过；导出源码专项 **219 passe
 | P3 同事配置 | 未完成 | 跨任务身份、权限撤销、实例代次；无业务平台依赖的通用执行路径 |
 | P4 记忆 | 未完成 | 身份边界、安全反例、真实模型的准入/召回固定样本评测，以及授权的生产启用 |
 | P5 真实 IM 灰度与回退 | 未开始 | 明确测试目标和窗口后验证真实消息、附件、回读、呈现、插话与回退 |
-| 当前源码全量测试 | 整轮 `verify.sh` 退出码 0；真实运行仍未验收 | HEAD `e0a953a` + 同日修复的工作树 **2754 passed / 63 skipped / 709.91 秒**，防退化另 5 passed，⑥.1 三项延迟门禁全通过，⑦ 模型端点 1000000；⑥ 真实通道缺 `FEISHU_*` 按规则跳过，**不算通过** |
+| 当前源码全量测试 | 整轮 `verify.sh` 退出码 0；真实运行仍未验收 | HEAD `2210e30` + 修复 `c93790f` 的工作树 **2727 passed / 54 skipped / 563.87 秒**（装齐声明的 `test` extra；不装则实测 2716 / 55），防退化另 5 passed，⑥.1 三项延迟门禁全通过，⑦ 模型端点 **1441792 (source=models)** 并报出 pin 漂移；⑥ 真实通道缺 `FEISHU_*` 按规则跳过，**不算通过** |
 | 干净室 | 本轮功能候选通过，非正式发布提交 | 断网容器 2474 passed / 138 skipped / 401.55 秒，安装/浏览器/幂等/离线记忆通过；不是实际宿主/IM 验收 |
 | 正式发布物 | 未生成 | 干净且包含全部新文件的提交、可复现归档、完整测试、安装/回退、对应能力的实际验收 |
 
