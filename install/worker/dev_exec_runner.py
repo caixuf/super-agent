@@ -257,6 +257,18 @@ def run_pi(goal: str, *, route: dict | None = None) -> dict:
     return payload
 
 
+def _call_engine(fn, goal: str, route: dict | None = None) -> dict:
+    import inspect
+    try:
+        sig = inspect.signature(fn)
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD or p.name == "route"
+               for p in sig.parameters.values()):
+            return fn(goal, route=route)
+    except (TypeError, ValueError):
+        pass
+    return fn(goal)
+
+
 def main() -> int:
     try:
         goal, job_payload = _read_job_envelope(sys.stdin)
@@ -269,7 +281,7 @@ def main() -> int:
     route_degraded = bool(route.get("degraded"))
     route_reason = str(route.get("degradation_reason") or "")
 
-    primary = run_hermes(goal, route=route)
+    primary = _call_engine(run_hermes, goal, route=route)
     if primary.get("ok"):
         print(json.dumps({
             "ok": True,
@@ -282,7 +294,7 @@ def main() -> int:
         }, ensure_ascii=False))
         return 0
 
-    fallback = run_pi(goal, route=route)
+    fallback = _call_engine(run_pi, goal, route=route)
     primary_err = primary.get("error", "turn_failed")
     fallback_reason = f"primary_engine_fallback:hermes->{primary_err}"
     combined_reason = "; ".join(r for r in (route_reason, fallback_reason) if r)
