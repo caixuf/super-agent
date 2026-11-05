@@ -701,3 +701,36 @@ gateway 与 15 个角色 worker 全部重启并 active；新会话日志出现
 保留并复核过成本：`imfl-capability-guard`（30 分钟、109ms、仅在能力被压低时告警）、
 `superagent-proactive`（每小时、1–2 秒、只记录不外发）、`taskdb-backup`、
 `ccp-qianfan-on/off`（配额时段开关）。系统自带 timer（snap / launchpadlib）不动。
+
+## 20. 升级后群聊实测（2026-11-05 10:56）
+
+两台都升到 3f31333 之后，在测试群 `oc_c06389…` 用**对端 app 凭据**各发一条真实任务，
+避免 self_echo；两条都 @ 了目标机器人。
+
+| 链路 | 本机 caixuf | emily
+| :--- | :--- | :--- |
+| 入群消息 | 10:56:36 | 10:56:37 |
+| durable_submit | 10:56:45，role=dev | 10:57:11，role=**backend**、`sources_ignored: 1` |
+| 后台任务 | `7f0bbbea…` completed，engine=hermes | `5913327a…` completed，engine=hermes |
+| 结果回群 | 10:56:55 `delivered`，`direct:859b9d…` | 10:57:53 `delivered`，`direct:64090255…` |
+
+这条同时验到了三件事：
+
+1. emily 前台没有被目录白名单挡住：它带了一个越界 sources，被非 analysis 角色忽略并回执
+   `sources_ignored`，而不是整轮失败。
+2. 它选的是 `backend`（不是 dev），由本次新建的 per-role worker 真正执行完成 —— 15 个角色
+   不只是配置放开，是有工人的。
+3. 完成卡片回到同一个群，outbox 的 `acknowledged=1` / `delivered` 有时间戳。
+
+### 期间的一次真实卡顿（不是逻辑问题）
+
+10:45 用户在另一个群问「在吗」，emily 长时间没回。取证：
+
+- 12+ 路 IMFL CI 容器（10:42 起）把 24 核压到 load 26，`/proc/pressure/io`
+  `full avg10≈31%`；`/mnt/nvme_ntfs` 98% 满；
+- 模型代理 litellm 主进程落在 `D`（`folio_wait_bit_common`），:4001 未监听、:4000 返 500，
+  计划任务被延迟 1:45；
+- 会话上下文 185 条 / 272k 字符，单次请求体 1.2MB。
+
+处置：临时把 gateway / litellm 的 `CPUWeight` 提到 1000（已写 drop-in 持久化）。
+10:56 代理绑定 :4001 恢复后，群聊实测两条链路全部完成。CI 未停（时序敏感，不擅自限流）。
