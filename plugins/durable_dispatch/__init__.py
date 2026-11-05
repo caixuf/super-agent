@@ -382,9 +382,15 @@ class DispatchService:
         if not isinstance(key, str) or not key.strip() or len(key) > 128:
             raise ValueError('request_key must contain 1 to 128 characters')
         # Only the read-only evidence role analyses source files. Execution roles
-        # (dev/ops) act on a goal, so requiring sources there would make every
-        # real task unsubmittable.
-        sources = self._sources(args.get('sources'), allow_empty=self.role != 'analysis')
+        # (dev/ops) act on a goal and their runner never reads source files, so a
+        # stray source list must be ignored instead of failing the submission:
+        # a frontdesk that attaches a path outside the analysis roots would
+        # otherwise lose the whole task ("source outside administrator roots").
+        if self.role == 'analysis':
+            sources = self._sources(args.get('sources'))
+        else:
+            sources = []
+        ignored_sources = len(args.get('sources') or []) if self.role != 'analysis' else 0
         payload = {'goal': goal, 'sources': sources,
                    '_dispatch_owner': owner, '_colleague_role': self.role,
                    '_colleague_name': self.display_name,
@@ -404,8 +410,11 @@ class DispatchService:
                                 label=self.display_label, state="queued")
             except Exception:
                 pass
-        return {'ok': True, 'task_id': job, 'status': self.pool.status(job)['status'],
-                'next_action': 'Return the task ID to the user and finish this turn. Do not poll.'}
+        result = {'ok': True, 'task_id': job, 'status': self.pool.status(job)['status'],
+                  'next_action': 'Return the task ID to the user and finish this turn. Do not poll.'}
+        if ignored_sources:
+            result['sources_ignored'] = ignored_sources
+        return result
 
     def drain_delivery(self, transport, *, limit=50, lease=60, not_before=None):
         """Deliver routable completions once; unaddressable receipts stay pending."""

@@ -445,3 +445,34 @@ def test_cancellation_racing_worker_finish_projects_actual_outcome(tmp_path, mon
         assert ledger.get(task)['state'] == ('done' if terminal == 'completed' else terminal)
     finally:
         os.close(fd)
+
+
+def test_execution_role_ignores_stray_sources(tmp_path):
+    """A dev task must never fail because a caller attached a file path.
+
+    Live group test: the frontdesk sent role=dev with a repository path in
+    sources and the whole submission was rejected with "source outside
+    administrator roots", so the user got no task at all.
+    """
+    sources = tmp_path / 'sources'
+    sources.mkdir()
+    dev_queue = tmp_path / 'dev-queue'
+    settings = {'enabled': True, 'queue_root': str(tmp_path / 'queue'),
+                'allowed_roots': [str(sources)],
+                'colleagues': {'dev': {'queue_root': str(dev_queue),
+                                       'allowed_roots': [str(sources)]}}}
+    context = Context(settings)
+    plugin.register(context)
+    outside = tmp_path / 'elsewhere.txt'
+    outside.write_text('x')
+    result = call(context, 'submit',
+                  {'goal': 'inspect the repository', 'request_key': 'dev-1',
+                   'role': 'dev', 'sources': [{'path': str(outside)}]},
+                  session_id='trusted-session')
+    assert result['ok'] is True and result['role'] == 'dev'
+    assert result['sources_ignored'] == 1
+    with plugin.Pool(str(dev_queue)).db() as db:
+        payload = json.loads(db.execute('SELECT payload FROM jobs').fetchone()['payload'])
+    assert payload['sources'] == []
+    assert payload['_colleague_role'] == 'dev'
+
