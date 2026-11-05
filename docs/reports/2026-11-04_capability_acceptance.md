@@ -571,3 +571,35 @@ session slot 释放均由宿主 turn 结束路径完成；`final-send NOT suppre
 - 复读回归哨兵 timer 此前 `disabled`，已 `enable --now` 接回；能力地板守护 timer、
   `superagent-proactive` 一直正常。
 - Cron 调度器在跑（8 个 profile，含目标 profile），00:01 有成功投递记录。
+
+## 16. 执行角色的双引擎兜底（2026-11-05）
+
+### 问题
+
+执行角色此前只有**一个**引擎：在 runner 里起一次受控 Hermes 回合。主引擎一旦失败、
+超时或返回空输出，整个任务就是失败；仓库里的 Pi 执行器（`toolsets/pi_executor`）
+只是代码副本，没有接进任何执行链 —— 等于没有兜底。
+
+### 改动
+
+| 项 | 内容 |
+| :--- | :--- |
+| 新入口 | `install/worker/dev_exec_runner.py`（此前只存在于 profile 的部署目录，未版本化） |
+| 引擎一 | 受控 Hermes 回合，`HERMES_SESSION_PLATFORM=api_server`，保留完整后端工具面 |
+| 引擎二 | 主引擎失败 / 超时 / 空输出时，改用 `toolsets/pi_executor` 拉起外部编码执行器（read/bash/edit/write），独立 agent dir，不写 `~/.pi` |
+| 回执 | 明文写 `engine: hermes` 或 `engine: pi`；两引擎都失败返回 `both_engines_failed`，不冒充完成 |
+| 工作目录 | `DEV_WORKDIR` 可覆盖，缺省回退到存在的目录，不再写死单一仓库 |
+| 版本跟随 | Hermes 二进制按受管 release 目录取最新，不写死版本串 |
+
+### 实测（本机，2026-11-05）
+
+| 场景 | 结果 |
+| :--- | :--- |
+| 队列端到端（主引擎） | 任务 `abc7a241…` `completed`，回执 `engine: hermes`，输出 `git log -1` 原始行 |
+| 强制兜底（`DEV_HERMES_BIN=/nonexistent`） | 回执 `engine: pi`、`primary_error: hermes_unavailable`，`tool_calls: 1`，2.4s 读完目标文件前 3 行 |
+| 单元测试 | `tests/test_dev_exec_runner.py` 12 例：主引擎成功不调兜底、主引擎失败转兜底、双失败显式报错、超时/空输出/畸形输入 |
+
+### 边界
+
+兜底不放开前台：前台仍无执行工具，只能派单；Pi 引擎按单次调用运行、无会话残留，
+只拿到 goal 与工作目录，不接管调度权威。

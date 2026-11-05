@@ -68,6 +68,7 @@
 | C04 | 工作流与签收投递 | `colleague_workflow_*.py` `colleague_queue_delivery.py` `colleague_*_delivery.py` | A | 每阶段单一所有者；签收回执可核对；不重复投递 |
 | C05 | 受控编码与验收 | `dev_runner.py` `verification_gate.py` `exec_runner.py` `colleague_containment.py` | A | 验收命令取自管理员策略并在模型前冻结；工作树锁贯穿执行与验收；不默认合并或部署 |
 | C06 | 对话、历史、插话与人审 | `colleague_dialogue*.py` `hitl_bridge.py` `follow_up_store.py` `barge_in_control.py` | C | 补充绑定任务与版本；区分收到与执行方已应用；审批超时不当同意 |
+| C07 | 执行角色双引擎兜底 | `install/worker/dev_exec_runner.py` `toolsets/pi_executor/` | A | 主引擎失败、超时或空输出时改用外部编码执行器，回执写明实际引擎；两引擎都失败须显式失败，不得冒充完成 |
 
 ## 4. 记忆
 
