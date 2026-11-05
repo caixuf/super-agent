@@ -1447,3 +1447,23 @@ def test_install_blocks_predicted_invariant_drift_before_any_mutation(tmp_path, 
     assert module.install(args, plan) == 1
     assert json.loads(capsys.readouterr().out)["reason"] == "migration_would_change_runtime_invariants"
     assert config.read_bytes() == before and not root.exists()
+
+
+def test_staged_release_carries_the_managed_worker_runner(tmp_path, monkeypatch):
+    """The dev worker must run the release's runner, not a profile-side copy."""
+    module = _load_installer()
+    source = tmp_path / "repo"
+    for rel in ("agentcore/liveness.py", "plugins/demo/__init__.py", "skills/readme.md",
+                "install/worker/dev_exec_runner.py", "install/superagent.sh"):
+        path = source / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# " + rel + chr(10), encoding="utf-8")
+    monkeypatch.setattr(module, "REPO", source)
+    monkeypatch.setattr(module, "PLUGIN_SOURCES", (source / "plugins/demo",))
+    plan = {"release": str(tmp_path / "managed/releases/test"),
+            "version": "test", "identity": "test", "external_plugins": []}
+    release = module._stage_release(plan)
+    runner = release / "install/worker/dev_exec_runner.py"
+    assert runner.is_file()
+    assert runner.read_text(encoding="utf-8") == "# install/worker/dev_exec_runner.py" + chr(10)
+

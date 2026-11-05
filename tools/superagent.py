@@ -1094,7 +1094,10 @@ def _stage_release(plan: dict[str, Any]) -> Path:
     with tempfile.TemporaryDirectory(prefix=".staging-", dir=release.parent) as work:
         staged = Path(work) / "release"
         staged.mkdir()
-        for name in ("agentcore", "skills", "toolsets", "tools", "runtime", "patches", "overlay"):
+        # install/ carries the managed worker runner (install/worker/dev_exec_runner.py).
+        # Without it the profile dev-runner.json has to point at a hand-maintained
+        # copy and upgrades can never replace the execution engine.
+        for name in ("agentcore", "skills", "toolsets", "tools", "runtime", "patches", "install", "overlay"):
             if (REPO / name).is_dir():
                 _copy_tree(REPO / name, staged / name)
         managed_sources = [*PLUGIN_SOURCES, *(Path(p) for p in plan.get("external_plugins", []))]
