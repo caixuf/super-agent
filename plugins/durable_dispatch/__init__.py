@@ -522,6 +522,25 @@ def enqueue_tab_follow_up(task_id, text, *, owner="", origin=None, inbox=None):
     return bind_follow_up_to_task(target, task_id, text, owner=owner, origin=origin)
 
 
+
+#: Deterministic safety net for a repeatedly observed misroute. The model picks
+#: role=analysis whenever a request says "investigate/analyse", but the analysis
+#: runner is read-only evidence analysis of supplied files: it cannot run git,
+#: read history or inspect a repository. These tasks must go to an execution role.
+_INVESTIGATION_TERMS = (
+    'git', 'commit', 'diff', 'branch', 'repo', 'log', 'pytest', 'status --short',
+    '提交', '改动', '更改', '变更', '最近', '历史', '仓库', '运行', '命令', '执行',
+    '测试', '版本', '改动了什么', '改了什么',
+)
+
+
+def _investigation_goal(goal) -> bool:
+    if not isinstance(goal, str):
+        return False
+    text = goal.lower()
+    return any(term in text for term in _INVESTIGATION_TERMS)
+
+
 class DispatchRouter:
     """One public entry point, administrator-owned queues and per-role policies."""
     def __init__(self,services, roster_path=None):
@@ -566,15 +585,29 @@ class DispatchRouter:
         # still be able to run. Analysis is narrower (needs sources inside the
         # administrator roots), so it stays opt-in by naming it.
         role = args.get('role') or ('dev' if 'dev' in self.services else 'analysis')
-        if (role == 'analysis' and 'dev' in self.services and args.get('sources')):
-            # A source outside the analysis roots is not an analysis task at all:
-            # inspecting a repository is execution work. Route it instead of failing
-            # the whole turn closed.
-            try:
-                self.services['analysis']._sources(args.get('sources'))
-            except (PermissionError, ValueError):
-                role = 'dev'
+        if role == 'analysis' and 'dev' in self.services:
+            # Live failure: "调查一下 super-agent 最近的更改" was submitted as
+            # analysis with two invented file paths, so the read-only evidence
+            # runner could not run git and produced a citation-only summary.
+            # Investigating changes, history, logs or a repository is execution
+            # work regardless of how the request is worded.
+            reroute = _investigation_goal(args.get('goal'))
+            if args.get('sources') and not reroute:
+                try:
+                    self.services['analysis']._sources(args.get('sources'))
+                except (PermissionError, ValueError):
+                    reroute = True
+            if reroute:
+                sources = args.get('sources') or []
+                paths = [str(s['path']) for s in sources
+                         if isinstance(s, dict) and isinstance(s.get('path'), str)][:8]
+                goal = args.get('goal')
+                if paths and isinstance(goal, str):
+                    goal = goal + '\n参考文件（用户指定）: ' + ', '.join(paths)
                 args = {k: v for k, v in args.items() if k != 'sources'}
+                if goal is not None:
+                    args['goal'] = goal
+                role = 'dev'
         if not isinstance(role,str) or role not in self.services:
             raise ValueError('unknown administrator colleague role')
         result = getattr(self.services[role],action)(session_id,
@@ -769,11 +802,12 @@ Pick the role by what the work needs, not by keywords.
 - role=analysis performs read-only evidence analysis of files inside the administrator roots. It requires sources with absolute paths inside those roots. If a task is about inspecting or running something rather than analysing a supplied file, it is a dev task.
 - If no listed role fits the work, submit it to dev as the general execution fallback instead of telling the user the work is unavailable. Report a genuine capability gap only when the returned task itself fails.
 - Every new request is a new task, even when an earlier task answered something similar: current state (today, now, again) changes, so submit again with a new request_key. durable_status only reports a task you already submitted; never answer a fresh request from an older task's result.
+- Investigating recent changes, git history, logs or any repository state is ALWAYS dev work. analysis is only for evidence about a file the user explicitly supplied; never pick analysis for an investigation.
 If the user asks to look at changes, check logs, run a command or inspect the repo, submit role=dev with no sources. Do not claim you cannot see the repository: dev exists for exactly that. Submit one task, return its ID and role, then finish the turn without waiting or polling. NEVER submit work through terminal/execute_code or a raw pool CLI. Use durable_status/cancel with the returned role and task ID. An IM frontdesk only interacts, dispatches and reports; it must not execute or delegate work itself. Unsupported work must be reported as unavailable, never silently rerouted. Never provide an owner, queue path, shell command, runner, or model adapter.""",
         # The host DROPS a section over its budget (it does not truncate), so the
         # budget must exceed the literal text below or the frontdesk never sees
         # the routing rules. tests/test_durable_dispatch.py pins this.
-        position='after_memory', max_chars=2000,
+        position='after_memory', max_chars=2400,
     )
     pool_type, delivery = _engine(ctx.get_config('engine_root'))
     require_route = ctx.get_config('require_delivery_route',ctx.get_config('deliver_completions',False))

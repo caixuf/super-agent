@@ -476,3 +476,50 @@ def test_execution_role_ignores_stray_sources(tmp_path):
     assert payload['sources'] == []
     assert payload['_colleague_role'] == 'dev'
 
+
+
+def _two_role_context(tmp_path):
+    sources = tmp_path / 'sources'
+    sources.mkdir()
+    source = sources / 'doc.md'
+    source.write_text('alpha\nbeta\n')
+    dev_queue = tmp_path / 'dev-queue'
+    settings = {'enabled': True, 'queue_root': str(tmp_path / 'queue'),
+                'allowed_roots': [str(sources)],
+                'colleagues': {'dev': {'queue_root': str(dev_queue),
+                                       'allowed_roots': [str(sources)]}}}
+    context = Context(settings)
+    plugin.register(context)
+    return context, source, dev_queue
+
+
+def test_investigation_request_reroutes_analysis_to_dev(tmp_path):
+    """Live failure: '调查一下最近的更改' went to analysis and could not run git."""
+    context, source, dev_queue = _two_role_context(tmp_path)
+    result = call(context, 'submit',
+                  {'goal': '调查一下 super-agent 最近的更改', 'request_key': 'inv-1',
+                   'role': 'analysis', 'sources': [{'path': str(source)}]},
+                  session_id='trusted-session')
+    assert result['ok'] is True and result['role'] == 'dev'
+    with plugin.Pool(str(dev_queue)).db() as db:
+        payload = json.loads(db.execute('SELECT payload FROM jobs').fetchone()['payload'])
+    assert payload['sources'] == []
+    assert payload['_colleague_role'] == 'dev'
+    assert str(source) in payload['goal']
+
+
+def test_plain_file_evidence_stays_analysis(tmp_path):
+    context, source, _ = _two_role_context(tmp_path)
+    result = call(context, 'submit',
+                  {'goal': 'Summarise the supplied file', 'request_key': 'ev-1',
+                   'role': 'analysis', 'sources': [{'path': str(source)}]},
+                  session_id='trusted-session')
+    assert result['ok'] is True and result['role'] == 'analysis'
+
+
+def test_investigation_guard_is_deterministic():
+    assert plugin._investigation_goal('看一下 git log 最近 30 条提交')
+    assert plugin._investigation_goal('调查一下最近的更改')
+    assert not plugin._investigation_goal('Summarise this file')
+    assert not plugin._investigation_goal(None)
+
