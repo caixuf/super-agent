@@ -641,7 +641,7 @@ WARNING hermes_cli.plugins: Plugin system prompt section durable-dispatch-routin
 | 主机 | 结果 |
 | :--- | :--- |
 | caixuf | Session plugin prompt section: id=durable-dispatch-routing ... chars=1476（不再 skipped） |
-| imfl（emily） | 同上，chars=1476 |
+| <business-profile>（<remote-host>） | 同上，chars=1476 |
 
 ### 说明
 
@@ -675,7 +675,7 @@ DispatchService 对 analysis 角色仍拒绝 .env / *.pem / *.key / *credential*
 凭据文件（代码内固定，不由配置移除）。这是防把密钥读进模型上下文，不是目录限制。
 要连这条也去掉，需要改代码并明确接受凭据外泄风险。
 
-## 19. emily 受管升级与鸡肋定时任务清理（2026-11-05）
+## 19. <remote-host> 受管升级与鸡肋定时任务清理（2026-11-05）
 
 ### 升级
 
@@ -684,8 +684,8 @@ DispatchService 对 analysis 角色仍拒绝 .env / *.pem / *.key / *credential*
 指向共享工作树（带过时 `card-native-markdown` 补丁），而实际运行的是受管干净候选。
 
 ```bash
-python3 tools/superagent.py --profile imfl --root /mnt/nvme_ntfs/agents/hermes/superagent \
-  --hermes-root /mnt/nvme_ntfs/agents/hermes/superagent/imfl/hermes/v0.22.5-bf0203a794a0 update
+python3 tools/superagent.py --profile <business-profile> --root <managed-root> \
+  --hermes-root <managed-root>/hermes/v0.22.5-bf0203a794a0 update
 ```
 
 结果：`blockers: []`，`current -> releases/3f31333`，`release.json` 版本一致，
@@ -696,9 +696,9 @@ gateway 与 15 个角色 worker 全部重启并 active；新会话日志出现
 
 | 单元 | 内容 | 处置 |
 | :--- | :--- | :--- |
-| `imfl-dup-guard.timer` | 每 30 分钟扫飞书复读并告警 | 已 `disable --now`，unit 文件移到 `~/backups/removed-units-20261105-103421` |
+| `<business-profile>-dup-guard.timer` | 每 30 分钟扫消息平台复读并告警 | 已 `disable --now`，unit 文件移到 `~/backups/removed-units-20261105-103421` |
 
-保留并复核过成本：`imfl-capability-guard`（30 分钟、109ms、仅在能力被压低时告警）、
+保留并复核过成本：`<business-profile>-capability-guard`（30 分钟、109ms、仅在能力被压低时告警）、
 `superagent-proactive`（每小时、1–2 秒、只记录不外发）、`taskdb-backup`、
 `ccp-qianfan-on/off`（配额时段开关）。系统自带 timer（snap / launchpadlib）不动。
 
@@ -707,7 +707,7 @@ gateway 与 15 个角色 worker 全部重启并 active；新会话日志出现
 两台都升到 3f31333 之后，在测试群 `oc_c06389…` 用**对端 app 凭据**各发一条真实任务，
 避免 self_echo；两条都 @ 了目标机器人。
 
-| 链路 | 本机 caixuf | emily
+| 链路 | 本机 caixuf | <remote-host>
 | :--- | :--- | :--- |
 | 入群消息 | 10:56:36 | 10:56:37 |
 | durable_submit | 10:56:45，role=dev | 10:57:11，role=**backend**、`sources_ignored: 1` |
@@ -716,7 +716,7 @@ gateway 与 15 个角色 worker 全部重启并 active；新会话日志出现
 
 这条同时验到了三件事：
 
-1. emily 前台没有被目录白名单挡住：它带了一个越界 sources，被非 analysis 角色忽略并回执
+1. <remote-host> 前台没有被目录白名单挡住：它带了一个越界 sources，被非 analysis 角色忽略并回执
    `sources_ignored`，而不是整轮失败。
 2. 它选的是 `backend`（不是 dev），由本次新建的 per-role worker 真正执行完成 —— 15 个角色
    不只是配置放开，是有工人的。
@@ -724,10 +724,10 @@ gateway 与 15 个角色 worker 全部重启并 active；新会话日志出现
 
 ### 期间的一次真实卡顿（不是逻辑问题）
 
-10:45 用户在另一个群问「在吗」，emily 长时间没回。取证：
+10:45 用户在另一个群问「在吗」，<remote-host> 长时间没回。取证：
 
-- 12+ 路 IMFL CI 容器（10:42 起）把 24 核压到 load 26，`/proc/pressure/io`
-  `full avg10≈31%`；`/mnt/nvme_ntfs` 98% 满；
+- 12+ 路 <业务域> CI 容器（10:42 起）把 24 核压到 load 26，`/proc/pressure/io`
+  `full avg10≈31%`；`<data-mount>` 98% 满；
 - 模型代理 litellm 主进程落在 `D`（`folio_wait_bit_common`），:4001 未监听、:4000 返 500，
   计划任务被延迟 1:45；
 - 会话上下文 185 条 / 272k 字符，单次请求体 1.2MB。
@@ -738,7 +738,7 @@ gateway 与 15 个角色 worker 全部重启并 active；新会话日志出现
 ## 21. 真实开发任务闭环验收（2026-11-05 11:10–12:10）
 
 用户指出：之前的群里实测只是 `git log`，太轻；必须用**真实开发任务**跑完闭环才算通过，
-并怀疑 emily 也有同样毛病。这一轮按此口径重做。
+并怀疑 <remote-host> 也有同样毛病。这一轮按此口径重做。
 
 ### 根因 1：调查类任务被派给只读分析角色
 
@@ -761,22 +761,22 @@ gateway 与 15 个角色 worker 全部重启并 active；新会话日志出现
 
 ### 最终闭环证据（两机各一次真实开发任务）
 
-| 项 | 本机 caixuf | emily |
+| 项 | 本机 caixuf | <remote-host> |
 | :--- | :--- | :--- |
 | 群消息 | 12:04:18 | 12:04:18 |
 | 派单 | 12:04:22，回执 200 字符 | 12:04:41/43，两条（同群两条消息） |
 | 任务 | `2d7a307…`，origin=feishu 群 | `550e317…`，origin=feishu 群 |
-| 真跑 | 12 次工具调用、20s，写 /tmp 两文件 | mkdir / write / pytest / cat，`/tmp/sa_dev_probe_imfl_v4` 文件实测存在 |
+| 真跑 | 12 次工具调用、20s，写 /tmp 两文件 | mkdir / write / pytest / cat，`/tmp/sa_dev_probe_<business-profile>_v4` 文件实测存在 |
 | 结果 | `6 passed in 0.01s`、`exit_code=0`、`git status` 空 | `6 passed in 0.02s`、`EXIT=0`，Python 3.12.3 / pytest 7.4.4 |
 | 回群 | outbox `delivered` 1793851488 | outbox `delivered` 1793851528 |
 
 原题「调查最近更改」复测：caixuf `6778e0d…` role=dev、输出含 `git log` 与 8147500、已投递；
-emily `a7b3db5…` 输出 `git log -10 --name-only` 原始清单并按模块归纳、已投递。
+<remote-host> `a7b3db5…` 输出 `git log -10 --name-only` 原始清单并按模块归纳、已投递。
 
-### 期间的 emily 基础设施故障
+### 期间的 <remote-host> 基础设施故障
 
-emily 的 `/mnt/nvme_ntfs` 被 IMFL CI 产物写到 100% 满，gateway 启动报
+<remote-host> 的 `<data-mount>` 被 <业务域> CI 产物写到 100% 满，gateway 启动报
 `OSError(28, No space left on device)` 并反复崩溃，模型代理也曾卡在 D 状态。
 处置：把 3 个旧 DB 备份（703MB）和 6 个 ccache 分片（15GB）**移动**到根盘
-`/home/emily/backups/relocated-*`（未删除，数据仍在，cache 可自行重建），磁盘回到 85%，
+`<remote-home>/backups/relocated-*`（未删除，数据仍在，cache 可自行重建），磁盘回到 85%，
 gateway 重新连上 Feishu。CI 容器本身没有停（用例时序敏感，不擅自限流）。
