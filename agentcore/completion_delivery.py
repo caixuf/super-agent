@@ -24,6 +24,7 @@ Design rules, each with the failure it prevents:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
@@ -33,9 +34,13 @@ from agentcore.pool import Pool
 
 #: How much of a task's report text one completion message carries. Long reports stay
 #: on disk; the message says where to look instead of pasting megabytes into a chat.
-MAX_SUMMARY_CHARS = 800
+MAX_SUMMARY_CHARS = 3500
 
 _TRUNCATION_MARK = '…(truncated; full report in the task result)'
+
+#: Worker-internal audit files that remain on disk in the attempt directory and
+#: should never be spammed as file attachments into human chat channels.
+_INTERNAL_AUDIT_FILES = frozenset(('manifest.json', 'report.json'))
 
 
 class Transport(Protocol):
@@ -125,7 +130,7 @@ def _summary(result: Any, *, limit: int = MAX_SUMMARY_CHARS) -> tuple[str, bool]
     """Extract a bounded, human-readable summary from a worker receipt result."""
     text = ''
     if isinstance(result, dict):
-        for key in ('summary', 'report', 'message', 'reason'):
+        for key in ('summary', 'final_text', 'report', 'message', 'output', 'reason', 'error'):
             value = result.get(key)
             if isinstance(value, str) and value.strip():
                 text = value.strip()
@@ -180,6 +185,7 @@ def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS,
     if not isinstance(artifacts, list) or len(artifacts) > 8 or any(
             not isinstance(p, str) or not p or len(p) > 4096 for p in artifacts):
         raise ValueError('invalid completion artifacts')
+    artifacts = [p for p in artifacts if os.path.basename(p) not in _INTERNAL_AUDIT_FILES]
     fields = origin_envelope_fields(origin)
     return CompletionMessage(
         task_id=receipt['job'], status=status, summary=summary,

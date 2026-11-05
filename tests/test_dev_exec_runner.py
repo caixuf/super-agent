@@ -127,3 +127,22 @@ def test_backend_environment_is_unattended(monkeypatch):
     assert env["HERMES_YOLO_MODE"] == "1"
     assert env["HERMES_SESSION_PLATFORM"] == "api_server"
 
+
+def test_clean_hermes_output_strips_cli_noise_and_resume_footer():
+    module = _module()
+    raw = (
+        "查询： 真实开发任务\n"
+        "────────────────────────────────────────\n"
+        "∴ 思考了 1 秒 · Internal monologue\n"
+        "────────────────────────────────────────\n"
+        "☤ Hermes\n"
+        "任务已执行完毕。\n"
+        "1. 创建了 fib.py\n"
+        "2. 3 passed in 0.01s\n"
+        "────────────────────────────────────────\n\n"
+        "恢复此会话：\n"
+        "  hermes --resume local-123456\n"
+    )
+    assert module._clean_hermes_output(raw) == "任务已执行完毕。\n1. 创建了 fib.py\n2. 3 passed in 0.01s"
+
+

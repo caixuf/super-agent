@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -27,6 +28,16 @@ MAX_INPUT = 131072
 MAX_GOAL = 12000
 MAX_OUTPUT = 8000
 MAX_STDERR = 1500
+
+
+def _clean_hermes_output(raw: str) -> str:
+    text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", raw or "")
+    parts = re.split(r"(?:^|\n)[─╭]*\s*[☤⚕]\s*Hermes[^\n]*\n", text)
+    if len(parts) > 1:
+        text = parts[-1]
+    text = re.split(r"\n[─]{10,}\s*\n+\s*(?:恢复此会话[：:]|Resume this session:)", text)[0]
+    text = re.split(r"\n+\s*(?:恢复此会话[：:]|Resume this session:)", text)[0]
+    return text.strip()
 
 
 def _profile_home() -> Path:
@@ -103,10 +114,18 @@ def run_hermes(goal: str) -> dict:
         return {"ok": False, "error": "runner_timeout"}
     except Exception as exc:
         return {"ok": False, "error": "runner_spawn_failed: " + type(exc).__name__}
-    out = (done.stdout or "")[-MAX_OUTPUT:]
+    full_stdout = done.stdout or ""
+    out = full_stdout[-MAX_OUTPUT:]
+    summary = _clean_hermes_output(full_stdout)[-MAX_OUTPUT:]
     err = (done.stderr or "")[-MAX_STDERR:]
-    ok = done.returncode == 0 and bool(out.strip())
-    payload = {"ok": ok, "output": out, "stderr": err, "returncode": done.returncode}
+    ok = done.returncode == 0 and bool((summary or out).strip())
+    payload = {
+        "ok": ok,
+        "summary": summary or out.strip(),
+        "output": out,
+        "stderr": err,
+        "returncode": done.returncode,
+    }
     if not ok:
         payload["error"] = "turn_failed"
     return payload
@@ -141,7 +160,7 @@ def run_pi(goal: str) -> dict:
         return {"ok": False, "error": "pi_run_failed: " + type(exc).__name__}
     text = (result.final_text or "")[-MAX_OUTPUT:]
     ok = bool(result.ok) and bool(text.strip())
-    payload = {"ok": ok, "output": text, "stderr": "", "returncode": result.exit_code,
+    payload = {"ok": ok, "summary": text.strip(), "output": text, "stderr": "", "returncode": result.exit_code,
                "stop_reason": result.stop_reason, "tool_calls": result.tool_calls,
                "duration_ms": result.duration_ms}
     if not ok:

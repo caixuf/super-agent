@@ -108,8 +108,21 @@ def create_transport(ctx, service):
     engine = Path(ctx.get_config('engine_root', ''))
     if not engine.is_absolute():
         raise ValueError('absolute engine root required')
-    transport_type = _transport_type(engine)
-    return transport_type(service.pool.root/'direct-delivery', profile=service.profile,
+    base_type = _transport_type(engine)
+
+    class _HumanCompletionTransport(base_type):
+        def deliver(self, address, message, *, idempotency_key):
+            files = message.get('artifacts')
+            if isinstance(files, list):
+                excluded = {'manifest.json', 'report.json'}
+                if self.card and not message.get('truncated'):
+                    excluded.add('report.md')
+                filtered = [p for p in files if Path(str(p)).name not in excluded]
+                if filtered != files:
+                    message = dict(message, artifacts=filtered)
+            return super().deliver(address, message, idempotency_key=idempotency_key)
+
+    return _HumanCompletionTransport(service.pool.root/'direct-delivery', profile=service.profile,
         sender=HostSender(ctx), render=_render,
         attempt_root=service.pool.root/'attempts',
         attempt_provider=lambda job: service.pool.status(job).get('attempt'),

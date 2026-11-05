@@ -279,3 +279,22 @@ def test_build_message_rejects_unbounded_colleague_labels():
     with pytest.raises(ValueError):
         build_message({'job': 'a' * 32, 'status': 'completed'},
                       colleague_name='x' * 81)
+
+
+def test_build_message_extracts_runner_output_and_filters_internal_json_artifacts():
+    msg = build_message({
+        'job': 'd' * 32,
+        'status': 'completed',
+        'result': {
+            'ok': True,
+            'engine': 'hermes',
+            'result': {
+                'ok': True,
+                'output': '3 passed in 0.01s',
+                'artifacts': ['/tmp/a/report.json', '/tmp/a/report.md', '/tmp/a/manifest.json'],
+            },
+        },
+    })
+    assert msg.summary == '3 passed in 0.01s'
+    assert msg.artifacts == ('/tmp/a/report.md',)
+
