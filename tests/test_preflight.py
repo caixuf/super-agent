@@ -14,6 +14,7 @@ from agentcore.preflight import (
     check_idempotent_store_latency,
     check_tcp_port_available,
     default_dns_budget_ms,
+    default_feishu_api_budget_ms,
     run_preflight_suite,
 )
 
@@ -83,6 +84,45 @@ def test_default_dns_budget_ms_gha_vs_deploy(monkeypatch):
     assert default_dns_budget_ms() == 300.0
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     assert default_dns_budget_ms() == 500.0
+
+
+def test_default_feishu_api_budget_ms_gha_vs_deploy(monkeypatch):
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    assert default_feishu_api_budget_ms() == 800.0
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert default_feishu_api_budget_ms() == 1200.0
+
+
+def test_check_feishu_api_retries_when_first_rtt_over_budget():
+    """第一次 RTT 超预算再采一次；第二次进预算则通过（first-under-budget）。"""
+    calls = {"n": 0}
+    # Two successful responses; latencies forced via monotonic: 900ms then 100ms.
+    times = iter([0.0, 0.900, 0.900, 1.000])
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        return FakeResponse(200)
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen), patch(
+        "time.monotonic", side_effect=lambda: next(times)
+    ):
+        res = check_feishu_api_latency(max_acceptable_ms=800.0)
+    assert res.passed is True
+    assert calls["n"] == 2
+    assert "第2/2次采样" in res.message
+
+
+def test_check_feishu_api_fails_when_all_rtt_samples_over_budget():
+    """两次 RTT 都超预算绝不能洗成通过。"""
+    times = iter([0.0, 0.900, 0.900, 1.850])  # 900ms then 950ms
+
+    with patch("urllib.request.urlopen", return_value=FakeResponse(200)), patch(
+        "time.monotonic", side_effect=lambda: next(times)
+    ):
+        res = check_feishu_api_latency(max_acceptable_ms=800.0)
+    assert res.passed is False
+    assert "严重超时" in res.message
+    assert "2次采样" in res.message
 
 
 def test_check_feishu_api_retries_transient_connection_refusal():
