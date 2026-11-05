@@ -390,6 +390,12 @@ class DispatchService:
         if self.role == 'analysis':
             sources = self._sources(args.get('sources'))
         else:
+            # Execution roles act on the goal, so source files are not needed.
+            # Still validate any supplied path against the administrator roots:
+            # ignoring a stray source must not become a way to smuggle an
+            # out-of-policy path into a durable task.
+            if args.get('sources'):
+                self._sources(args['sources'])
             sources = []
         ignored_sources = len(args.get('sources') or []) if self.role != 'analysis' else 0
         payload = {'goal': goal, 'sources': sources,

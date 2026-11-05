@@ -463,11 +463,11 @@ def test_execution_role_ignores_stray_sources(tmp_path):
                                        'allowed_roots': [str(sources)]}}}
     context = Context(settings)
     plugin.register(context)
-    outside = tmp_path / 'elsewhere.txt'
-    outside.write_text('x')
+    inside = sources / 'doc.md'
+    inside.write_text('x')
     result = call(context, 'submit',
                   {'goal': 'inspect the repository', 'request_key': 'dev-1',
-                   'role': 'dev', 'sources': [{'path': str(outside)}]},
+                   'role': 'dev', 'sources': [{'path': str(inside)}]},
                   session_id='trusted-session')
     assert result['ok'] is True and result['role'] == 'dev'
     assert result['sources_ignored'] == 1
@@ -570,3 +570,14 @@ def test_backend_runner_has_no_dispatch_tools(monkeypatch, tmp_path):
     plugin.register(context)
     assert not any(name.startswith("durable_") for name in context.tools)
 
+
+
+def test_execution_role_still_rejects_an_out_of_root_source(tmp_path):
+    """Ignoring stray sources must not open a path outside the admin roots."""
+    context, source, _ = _two_role_context(tmp_path)
+    outside = tmp_path / 'elsewhere.txt'
+    outside.write_text('x')
+    result = call(context, 'submit',
+                  {'goal': 'inspect', 'request_key': 'dev-out', 'role': 'dev',
+                   'sources': [{'path': str(outside)}]}, session_id='trusted-session')
+    assert result['ok'] is False
