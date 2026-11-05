@@ -61,6 +61,10 @@ def test_register_opt_in_and_bounded_submission(tmp_path):
     assert 'not by keywords' in routing
     assert 'must not execute or delegate work itself' in routing
     assert 'Use delegate_task' not in routing
+    # The host drops (not truncates) an oversized section, which silently removes
+    # every routing rule from the frontdesk. Keep the budget above the literal.
+    section = context.prompt_sections['durable-dispatch-routing']
+    assert len(routing) <= section['max_chars'], (len(routing), section['max_chars'])
     result = call(context, 'submit', args, session_id='trusted-session')
     assert result['ok'] and result['status'] == 'queued'
     assert 'finish this turn' in result['next_action']

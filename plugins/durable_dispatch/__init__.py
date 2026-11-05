@@ -760,7 +760,10 @@ Pick the role by what the work needs, not by keywords.
 - role=analysis performs read-only evidence analysis of files inside the administrator roots. It requires sources with absolute paths inside those roots. If a task is about inspecting or running something rather than analysing a supplied file, it is a dev task.
 - If no listed role fits the work, submit it to dev as the general execution fallback instead of telling the user the work is unavailable. Report a genuine capability gap only when the returned task itself fails.
 If the user asks to look at changes, check logs, run a command or inspect the repo, submit role=dev with no sources. Do not claim you cannot see the repository: dev exists for exactly that. Submit one task, return its ID and role, then finish the turn without waiting or polling. NEVER submit work through terminal/execute_code or a raw pool CLI. Use durable_status/cancel with the returned role and task ID. An IM frontdesk only interacts, dispatches and reports; it must not execute or delegate work itself. Unsupported work must be reported as unavailable, never silently rerouted. Never provide an owner, queue path, shell command, runner, or model adapter.""",
-        position='after_memory', max_chars=1000,
+        # The host DROPS a section over its budget (it does not truncate), so the
+        # budget must exceed the literal text below or the frontdesk never sees
+        # the routing rules. tests/test_durable_dispatch.py pins this.
+        position='after_memory', max_chars=2000,
     )
     pool_type, delivery = _engine(ctx.get_config('engine_root'))
     require_route = ctx.get_config('require_delivery_route',ctx.get_config('deliver_completions',False))
