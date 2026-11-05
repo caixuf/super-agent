@@ -390,11 +390,11 @@ class DispatchService:
         if self.role == 'analysis':
             sources = self._sources(args.get('sources'))
         else:
-            # Execution roles act on the goal, so source files are not needed.
-            # Still validate any supplied path against the administrator roots:
-            # ignoring a stray source must not become a way to smuggle an
-            # out-of-policy path into a durable task.
-            if args.get('sources'):
+            # When an administrator configures narrow allowed_roots for a role,
+            # still enforce that boundary; when full-capability root ("/") is
+            # configured, accept and ignore any stray sources (including
+            # directories, not-yet-created files, or config files).
+            if args.get('sources') and self.roots != (Path('/'),):
                 self._sources(args['sources'])
             sources = []
         ignored_sources = len(args.get('sources') or []) if self.role != 'analysis' else 0
@@ -612,7 +612,7 @@ class DispatchRouter:
             if args.get('sources') and not reroute:
                 try:
                     self.services['analysis']._sources(args.get('sources'))
-                except (PermissionError, ValueError):
+                except (PermissionError, ValueError, FileNotFoundError):
                     reroute = True
             if reroute:
                 sources = args.get('sources') or []

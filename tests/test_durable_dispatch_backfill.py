@@ -242,6 +242,8 @@ def test_completion_addressed_to_another_profile_is_never_delivered(tmp_path):
     assert pool.delivery_record(job)['acknowledged'] == 0
     assert routable(ORIGIN, profile='test-profile')
     assert not routable(dict(ORIGIN, profile='other'), profile='test-profile')
+    assert not routable(dict(ORIGIN, channel='local'), profile='test-profile')
+    assert not routable(dict(ORIGIN, channel='cli'), profile='test-profile')
 
 
 def test_plugin_transport_refuses_unaddressable_and_unaccepted_sends(tmp_path):

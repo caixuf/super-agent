@@ -448,7 +448,7 @@ def test_cancellation_racing_worker_finish_projects_actual_outcome(tmp_path, mon
 
 
 def test_execution_role_ignores_stray_sources(tmp_path):
-    """A dev task must never fail because a caller attached a file path.
+    """A dev task must never fail because a caller attached a file or directory path.
 
     Live group test: the frontdesk sent role=dev with a repository path in
     sources and the whole submission was rejected with "source outside
@@ -460,17 +460,19 @@ def test_execution_role_ignores_stray_sources(tmp_path):
     settings = {'enabled': True, 'queue_root': str(tmp_path / 'queue'),
                 'allowed_roots': [str(sources)],
                 'colleagues': {'dev': {'queue_root': str(dev_queue),
-                                       'allowed_roots': [str(sources)]}}}
+                                       'allowed_roots': ['/']}}}
     context = Context(settings)
     plugin.register(context)
-    inside = sources / 'doc.md'
-    inside.write_text('x')
+    outside = tmp_path / 'elsewhere.txt'
+    outside.write_text('x')
     result = call(context, 'submit',
                   {'goal': 'inspect the repository', 'request_key': 'dev-1',
-                   'role': 'dev', 'sources': [{'path': str(inside)}]},
+                   'role': 'dev', 'sources': [{'path': str(outside)},
+                                              {'path': str(tmp_path / 'not_created_yet.py')},
+                                              {'path': str(sources)}]},
                   session_id='trusted-session')
     assert result['ok'] is True and result['role'] == 'dev'
-    assert result['sources_ignored'] == 1
+    assert result['sources_ignored'] == 3
     with plugin.Pool(str(dev_queue)).db() as db:
         payload = json.loads(db.execute('SELECT payload FROM jobs').fetchone()['payload'])
     assert payload['sources'] == []
@@ -573,7 +575,7 @@ def test_backend_runner_has_no_dispatch_tools(monkeypatch, tmp_path):
 
 
 def test_execution_role_still_rejects_an_out_of_root_source(tmp_path):
-    """Ignoring stray sources must not open a path outside the admin roots."""
+    """When narrow allowed_roots are configured, out-of-root sources are still rejected."""
     context, source, _ = _two_role_context(tmp_path)
     outside = tmp_path / 'elsewhere.txt'
     outside.write_text('x')

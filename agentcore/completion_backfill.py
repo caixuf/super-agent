@@ -27,6 +27,7 @@ from agentcore.completion_delivery import (
 from agentcore.pool import Pool
 
 ROUTE_FIELD = 'route'
+NON_MESSAGING_CHANNELS = frozenset(('local', 'cli', 'tui'))
 #: Upper bound on how many head-of-line receipts one policy pass may examine. Kept well
 #: below the oldest SQLite host-parameter limit because each parked id becomes one
 #: ``job NOT IN (?,...)`` binding.
@@ -39,6 +40,8 @@ def routable(address: Any, *, profile: Optional[str] = None) -> bool:
         return False
     route = address.get(ROUTE_FIELD)
     if not isinstance(route, str) or not route.strip():
+        return False
+    if address.get('channel') in NON_MESSAGING_CHANNELS:
         return False
     if profile is not None and address.get('profile') != profile:
         return False
