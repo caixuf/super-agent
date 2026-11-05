@@ -60,6 +60,20 @@ def test_rendered_prompt_requires_a_checkable_verdict_and_forbids_side_effects()
     assert "最多重试 2 次" in prompt
 
 
+def test_action_mode_and_pre_hook_render_controlled_execution_contract():
+    job = _job(
+        mode="action",
+        pre_hook="/usr/bin/python3 probe.py",
+        collect={"kind": "command", "command": "/usr/bin/python3 probe.py"},
+    )
+    assert taskfile.validate(job) == []
+    prompt = taskfile.render(job)
+    assert "前置钩子检查：/usr/bin/python3 probe.py" in prompt
+    assert "执行这条前置命令并看输出：" in prompt
+    assert "仅在前置条件命中时按上述判断执行受控动作" in prompt
+    assert "不要修改代码、配置或重启服务" not in prompt
+
+
 def test_cron_adapter_keeps_name_schedule_and_prompt():
     job = taskfile.to_cron_job(_job(notify=False))
     assert set(job) == {"name", "schedule", "prompt", "notify"}

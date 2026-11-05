@@ -583,3 +583,40 @@ def test_execution_role_still_rejects_an_out_of_root_source(tmp_path):
                   {'goal': 'inspect', 'request_key': 'dev-out', 'role': 'dev',
                    'sources': [{'path': str(outside)}]}, session_id='trusted-session')
     assert result['ok'] is False
+
+
+def test_domain_colleagues_expose_duty_and_target_host_in_prompt_and_roster(tmp_path):
+    sources = tmp_path / 'sources'
+    sources.mkdir()
+    settings = {
+        'enabled': True,
+        'queue_root': str(tmp_path / 'analysis-queue'),
+        'allowed_roots': [str(sources)],
+        'colleagues': {
+            'dev': {
+                'queue_root': str(tmp_path / 'dev-queue'),
+                'allowed_roots': ['/'],
+                'display_name': '通用执行',
+                'display_label': '执行',
+            },
+            'bench': {
+                'queue_root': str(tmp_path / 'bench-queue'),
+                'allowed_roots': ['/'],
+                'display_name': '台架测试专家',
+                'display_label': '台架',
+                'duty': 'Execute hardware-in-the-loop bench pytest suites and collect HTML logs',
+                'target_host': 'bench-node-01',
+            },
+        },
+    }
+    context = Context(settings)
+    plugin.register(context)
+    section = context.prompt_sections['durable-dispatch-routing']
+    assert 'role=bench (台架测试专家) [target=bench-node-01]' in section['content']
+    assert len(section['content']) <= section['max_chars']
+    roster = call(context, 'roster', {}, session_id='trusted-session')
+    assert roster['ok'] is True
+    bench_entry = next(r for r in roster['roles'] if r['role'] == 'bench')
+    assert bench_entry['duty'].startswith('Execute hardware-in-the-loop')
+    assert bench_entry['target_host'] == 'bench-node-01'
+

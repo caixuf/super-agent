@@ -146,3 +146,37 @@ def test_clean_hermes_output_strips_cli_noise_and_resume_footer():
     assert module._clean_hermes_output(raw) == "任务已执行完毕。\n1. 创建了 fib.py\n2. 3 passed in 0.01s"
 
 
+def test_decorate_goal_injects_expert_duty_and_target_host(monkeypatch):
+    module = _module()
+    monkeypatch.setenv("DEV_EXPERT_DUTY", "Run hardware bench SIT suite")
+    monkeypatch.setenv("DEV_TARGET_HOST", "bench-host-win")
+    decorated = module._decorate_goal("Run smoke test")
+    assert "[Expert Context]" in decorated
+    assert "Duty: Run hardware bench SIT suite" in decorated
+    assert "Target Host: bench-host-win" in decorated
+    assert decorated.endswith("Run smoke test")
+
+
+def test_remote_ssh_host_executes_hermes_over_ssh(monkeypatch):
+    module = _module()
+    monkeypatch.setenv("DEV_SSH_HOST", "worker-node-01")
+    monkeypatch.setenv("DEV_REMOTE_PROFILE_HOME", "/srv/hermes/profiles/domain")
+    monkeypatch.setenv("DEV_REMOTE_WORKDIR", "/srv/code/domain")
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return type("R", (), {"returncode": 0, "stdout": "☤ Hermes\nRemote execution ok", "stderr": ""})()
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    res = module.run_hermes("check remote build")
+    assert res["ok"] is True
+    assert res["summary"] == "Remote execution ok"
+    assert captured["cmd"][:6] == ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "worker-node-01"]
+    assert "HERMES_HOME=/srv/hermes/profiles/domain" in captured["cmd"][6]
+    assert "--query-file -" in captured["cmd"][6]
+    assert captured["kwargs"]["input"] == "check remote build"
+
+
+

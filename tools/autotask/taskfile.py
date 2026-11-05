@@ -66,6 +66,12 @@ def validate(task):
     retry = task.get("retry", {})
     if retry and (not isinstance(retry.get("max"), int) or retry["max"] < 0):
         problems.append("retry.max must be a non-negative integer")
+    mode = task.get("mode", "readonly")
+    if mode not in {"readonly", "action"}:
+        problems.append("mode must be readonly | action")
+    pre_hook = task.get("pre_hook")
+    if pre_hook is not None and (not isinstance(pre_hook, str) or not pre_hook.strip()):
+        problems.append("pre_hook must be a non-empty string when provided")
     if not str(task["judge"]).strip():
         problems.append("judge must say what to decide")
     return problems
@@ -77,22 +83,29 @@ def render(task):
     if problems:
         raise ValueError("; ".join(problems))
     collect = task["collect"]
+    mode = task.get("mode", "readonly")
     if collect["kind"] == "files":
         source = "读取这些文件（只读）：" + "、".join(collect["paths"])
     elif collect["kind"] == "command":
-        source = "执行这条只读命令并看输出：" + collect["command"]
+        label = "执行这条前置命令并看输出：" if mode == "action" else "执行这条只读命令并看输出："
+        source = label + collect["command"]
     else:
         source = "输入由会话上下文提供（只读）"
     retry = task.get("retry") or {}
-    lines = [
-        "[autotask:%s]" % task["id"],
+    lines = ["[autotask:%s]" % task["id"]]
+    if task.get("pre_hook"):
+        lines.append("前置钩子检查：" + str(task["pre_hook"]).strip() + "（若返回 [SKIP] 则无需后续操作）。")
+    lines.extend([
         source + "。",
         "判断：" + str(task["judge"]).strip(),
         "把结果写入 %s（原子写，路径固定，不要写到别处）。" % task["write"]["path"],
         "回答两行：第一行严格是 `%s<一句判据>` 或 `%s<原因>`；第二行是需要人工处理时写下一步，否则写 `-`。"
         % (task["report"]["ok"], task["report"]["fail"]),
-        "不要修改代码、配置或重启服务；判断不了就写 %s不确定。" % task["report"]["fail"],
-    ]
+    ])
+    if mode == "readonly":
+        lines.append("不要修改代码、配置或重启服务；判断不了就写 %s不确定。" % task["report"]["fail"])
+    else:
+        lines.append("仅在前置条件命中时按上述判断执行受控动作；判断不了就写 %s不确定。" % task["report"]["fail"])
     if task.get("notify"):
         lines.append(
             "【静默抑制】若判定为 %s且无需人工处理（第二行为 `-`），首行严格输出 [SILENT] 以抑制向用户推送无异常噪音。"

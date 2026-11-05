@@ -21,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 
@@ -28,6 +29,22 @@ MAX_INPUT = 131072
 MAX_GOAL = 12000
 MAX_OUTPUT = 8000
 MAX_STDERR = 1500
+_SSH_HOST_RE = re.compile(r"^[A-Za-z0-9._@-]{1,128}\Z")
+
+
+def _decorate_goal(goal: str) -> str:
+    duty = (os.environ.get("DEV_EXPERT_DUTY") or "").strip()
+    target_host = (os.environ.get("DEV_TARGET_HOST") or "").strip()
+    if not duty and not target_host:
+        return goal
+    lines = ["[Expert Context]"]
+    if duty:
+        lines.append(f"- Duty: {duty}")
+    if target_host:
+        lines.append(f"- Target Host: {target_host} (execute target operations on this host via SSH/tools when applicable)")
+    lines.append("")
+    lines.append(goal)
+    return "\n".join(lines)[:MAX_GOAL]
 
 
 def _clean_hermes_output(raw: str) -> str:
@@ -100,16 +117,43 @@ def _workdir() -> Path:
 
 
 def run_hermes(goal: str) -> dict:
-    binary = _hermes_bin()
-    if not binary:
-        return {"ok": False, "error": "hermes_unavailable"}
+    effective_goal = _decorate_goal(goal)
     budget = int(os.environ.get("DEV_BUDGET", "240"))
     max_turns = int(os.environ.get("DEV_MAX_TURNS", "12"))
-    cmd = [binary, "chat", "-q", goal, "--oneshot",
-           "--run-budget", str(budget), "--max-turns", str(max_turns)]
+    ssh_host = (os.environ.get("DEV_SSH_HOST") or "").strip()
+    if ssh_host:
+        if not _SSH_HOST_RE.fullmatch(ssh_host):
+            return {"ok": False, "error": "invalid_ssh_host"}
+        remote_bin = (os.environ.get("DEV_REMOTE_HERMES_BIN") or "hermes").strip()
+        remote_home = (os.environ.get("DEV_REMOTE_PROFILE_HOME") or "").strip()
+        remote_workdir = (os.environ.get("DEV_REMOTE_WORKDIR") or "").strip()
+        env_parts = [
+            "HERMES_SESSION_SOURCE=cli",
+            "HERMES_SESSION_PLATFORM=api_server",
+            "HERMES_SESSION_CHAT_ID=dev-worker",
+            "HERMES_YOLO_MODE=1",
+            "SUPERAGENT_BACKEND_RUNNER=1",
+        ]
+        if remote_home:
+            env_parts.append("HERMES_HOME=" + shlex.quote(remote_home))
+        remote_cmd = " ".join(env_parts) + " " + " ".join([
+            shlex.quote(remote_bin), "chat", "--query-file", "-", "--oneshot",
+            "--run-budget", str(budget), "--max-turns", str(max_turns),
+        ])
+        if remote_workdir:
+            remote_cmd = f"cd {shlex.quote(remote_workdir)} && {remote_cmd}"
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ssh_host, remote_cmd]
+        run_kwargs = {"input": effective_goal, "env": _clean_env()}
+    else:
+        binary = _hermes_bin()
+        if not binary:
+            return {"ok": False, "error": "hermes_unavailable"}
+        cmd = [binary, "chat", "-q", effective_goal, "--oneshot",
+               "--run-budget", str(budget), "--max-turns", str(max_turns)]
+        run_kwargs = {"cwd": str(_workdir()), "env": _clean_env()}
     try:
-        done = subprocess.run(cmd, cwd=str(_workdir()), env=_clean_env(),
-                              capture_output=True, text=True, timeout=budget + 60)
+        done = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=budget + 60, **run_kwargs)
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "runner_timeout"}
     except Exception as exc:
