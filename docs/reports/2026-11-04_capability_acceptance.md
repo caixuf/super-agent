@@ -607,3 +607,43 @@ session slot 释放均由宿主 turn 结束路径完成；`final-send NOT suppre
 已知风险：主引擎失败前若已产生部分写入，兜底会重跑同一个 goal。对提交、部署等
 非幂等动作仍是重复执行风险；这类任务应由调用方保证幂等，或失败后转人工核对，
 不能把「有兜底」当成「可以重放」。
+
+## 17. 派单路由提示从未进入前台上下文（2026-11-05）
+
+### 现象
+
+群里让前台「看一下今晚的改动」，它连续回「没有读文件、跑命令的口子」，也不主动派单。
+
+### 根因
+
+宿主对插件系统提示段的规则是**超过 max_chars 就整段丢弃**（hermes_cli/plugins_dispatch.py：
+if len(text) > section.max_chars: _skip("exceeded max_chars ...")），不是截断。
+durable-dispatch-routing 的正文 1263 字符，预算写的是 1000，于是**每个新会话都静默丢掉
+整段路由规则** —— 前台根本看不到「Use durable_submit for every task」和角色说明。
+
+证据（本机 logs/agent.log，每次新建会话都有）：
+
+```text
+WARNING hermes_cli.plugins: Plugin system prompt section durable-dispatch-routing
+(durable-dispatch) exceeded max_chars (1263 > 1000) and was skipped
+```
+
+### 修复
+
+| 项 | 内容 |
+| :--- | :--- |
+| 预算 | durable_dispatch 的 max_chars 1000 → 2000（正文 1476 字符） |
+| 回归 | tests/test_durable_dispatch.py 断言 len(routing) <= max_chars；旧预算下该断言必失败 |
+| 部署 | 本机与远端的 current/plugins/durable_dispatch/__init__.py 已热替换并重启前台网关 |
+
+### 验证
+
+| 主机 | 结果 |
+| :--- | :--- |
+| caixuf | Session plugin prompt section: id=durable-dispatch-routing ... chars=1476（不再 skipped） |
+| imfl（emily） | 同上，chars=1476 |
+
+### 说明
+
+这次热替换让 current 与该 release 的 release.json 摘要不一致；下一次受管 update
+会以仓内已修复的代码重建 release，届时自动对齐。未经 update 前不要把它当作正式发版。
