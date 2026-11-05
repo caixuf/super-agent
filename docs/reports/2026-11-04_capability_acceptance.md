@@ -647,3 +647,30 @@ WARNING hermes_cli.plugins: Plugin system prompt section durable-dispatch-routin
 
 这次热替换让 current 与该 release 的 release.json 摘要不一致；下一次受管 update
 会以仓内已修复的代码重建 release，届时自动对齐。未经 update 前不要把它当作正式发版。
+
+## 18. 后台角色 YOLO 与目录权限放开（2026-11-05）
+
+要求：后台执行角色不该被目录白名单挡住，且必须无人值守（不能卡在审批）。
+
+### 改动
+
+| 层 | 位置 | 之前 | 现在 |
+| :--- | :--- | :--- | :--- |
+| 派单根 | config.yaml durable-dispatch.allowed_roots 与每个 colleagues.* | 各角色若干具体目录 | / |
+| 执行策略 | worker/dev-policy.json、analysis-policy.json | 具体目录 | / |
+| 执行引擎 | dev_exec_runner 的子进程环境 | 继承宿主 | 显式 HERMES_YOLO_MODE=1 |
+| 源文件 | 非 analysis 角色 | 越界即整单失败 | 已忽略（第 17 节前一版修复） |
+
+### 验证
+
+| 项 | 结果 |
+| :--- | :--- |
+| 写盘 | dev 任务在 /tmp 写入文件、cat 为 OK、删除后 ls 报不存在，任务 completed |
+| 单元测试 | tests/test_dev_exec_runner.py 13 例，新增「后台环境必须 YOLO」 |
+| 服务 | 本机与远端 gateway、dev worker 重启后均 active |
+
+### 仍然保留的唯一拒绝
+
+DispatchService 对 analysis 角色仍拒绝 .env / *.pem / *.key / *credential* / auth.json 这类
+凭据文件（代码内固定，不由配置移除）。这是防把密钥读进模型上下文，不是目录限制。
+要连这条也去掉，需要改代码并明确接受凭据外泄风险。

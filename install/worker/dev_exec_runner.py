@@ -72,6 +72,8 @@ def _clean_env() -> dict[str, str]:
     # The backend keeps the full toolset; only human chat surfaces are thin.
     env["HERMES_SESSION_PLATFORM"] = "api_server"
     env["HERMES_SESSION_CHAT_ID"] = "dev-worker"
+    # Backend execution is unattended: no approval prompts may block a job.
+    env["HERMES_YOLO_MODE"] = "1"
     for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
         env.pop(key, None)
     return env

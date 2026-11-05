@@ -117,3 +117,13 @@ def test_default_workdir_is_an_existing_directory(monkeypatch):
     module = _module()
     monkeypatch.delenv("DEV_WORKDIR", raising=False)
     assert module._workdir().is_dir()
+
+
+def test_backend_environment_is_unattended(monkeypatch):
+    """Durable jobs run without a human, so approvals must never block one."""
+    module = _module()
+    monkeypatch.setenv("HERMES_HOME", "/tmp/h")
+    env = module._clean_env()
+    assert env["HERMES_YOLO_MODE"] == "1"
+    assert env["HERMES_SESSION_PLATFORM"] == "api_server"
+
