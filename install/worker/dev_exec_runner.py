@@ -74,6 +74,9 @@ def _clean_env() -> dict[str, str]:
     env["HERMES_SESSION_CHAT_ID"] = "dev-worker"
     # Backend execution is unattended: no approval prompts may block a job.
     env["HERMES_YOLO_MODE"] = "1"
+    # Tell durable_dispatch this turn is an executor, not a frontdesk: without
+    # it the nested agent inherits the dispatch prompt and re-submits the work.
+    env["SUPERAGENT_BACKEND_RUNNER"] = "1"
     for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
         env.pop(key, None)
     return env

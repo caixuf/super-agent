@@ -16,6 +16,7 @@ import importlib
 import importlib.util
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import sys
@@ -534,6 +535,16 @@ _INVESTIGATION_TERMS = (
 )
 
 
+def _backend_execution_session() -> bool:
+    """A durable worker's nested CLI turn must execute, not dispatch again.
+
+    The runner sets this flag together with the backend platform. Without it the
+    nested turn inherits the frontdesk routing prompt and re-submits the job
+    instead of doing the work (observed live on both hosts).
+    """
+    return os.environ.get('SUPERAGENT_BACKEND_RUNNER') == '1'
+
+
 def _investigation_goal(goal) -> bool:
     if not isinstance(goal, str):
         return False
@@ -794,7 +805,11 @@ def start_backfill(ctx, service):
 def register(ctx):
     if ctx.get_config('enabled', False) is not True:
         return
-    ctx.register_system_prompt_section(
+    # A backend runner is an executor, not a frontdesk: do not inject the
+    # dispatch rules or it will submit the same work again instead of doing it.
+    backend_runner = _backend_execution_session()
+    if not backend_runner:
+        ctx.register_system_prompt_section(
         'durable-dispatch-routing',
         """Capability routing for durable dispatch. Use durable_submit for every task.
 Pick the role by what the work needs, not by keywords.
@@ -808,7 +823,7 @@ If the user asks to look at changes, check logs, run a command or inspect the re
         # budget must exceed the literal text below or the frontdesk never sees
         # the routing rules. tests/test_durable_dispatch.py pins this.
         position='after_memory', max_chars=2400,
-    )
+        )
     pool_type, delivery = _engine(ctx.get_config('engine_root'))
     require_route = ctx.get_config('require_delivery_route',ctx.get_config('deliver_completions',False))
     liveness_path = ctx.get_config('liveness_db') or None

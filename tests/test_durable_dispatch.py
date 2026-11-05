@@ -523,3 +523,34 @@ def test_investigation_guard_is_deterministic():
     assert not plugin._investigation_goal('Summarise this file')
     assert not plugin._investigation_goal(None)
 
+
+
+def test_backend_runner_flag_is_exported(monkeypatch):
+    runner_path = Path(__file__).resolve().parents[1] / "install" / "worker" / "dev_exec_runner.py"
+    spec = importlib.util.spec_from_file_location("dev_exec_runner_flag", runner_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("HERMES_HOME", "/tmp/h")
+    env = module._clean_env()
+    assert env["SUPERAGENT_BACKEND_RUNNER"] == "1"
+
+
+def test_backend_runner_skips_the_dispatch_prompt(monkeypatch, tmp_path):
+    module = __import__("importlib.util", fromlist=["util"])
+    spec = importlib.util.spec_from_file_location(
+        "dd_backend", Path(__file__).resolve().parents[1] / "plugins" / "durable_dispatch" / "__init__.py")
+    plugin = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(plugin)
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    settings = {"enabled": True, "queue_root": str(tmp_path / "q"),
+                "allowed_roots": [str(sources)]}
+    monkeypatch.setenv("SUPERAGENT_BACKEND_RUNNER", "1")
+    context = Context(settings)
+    plugin.register(context)
+    assert "durable-dispatch-routing" not in context.prompt_sections
+    monkeypatch.delenv("SUPERAGENT_BACKEND_RUNNER")
+    context2 = Context(settings)
+    plugin.register(context2)
+    assert "durable-dispatch-routing" in context2.prompt_sections
+
