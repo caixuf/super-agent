@@ -734,3 +734,49 @@ gateway 与 15 个角色 worker 全部重启并 active；新会话日志出现
 
 处置：临时把 gateway / litellm 的 `CPUWeight` 提到 1000（已写 drop-in 持久化）。
 10:56 代理绑定 :4001 恢复后，群聊实测两条链路全部完成。CI 未停（时序敏感，不擅自限流）。
+
+## 21. 真实开发任务闭环验收（2026-11-05 11:10–12:10）
+
+用户指出：之前的群里实测只是 `git log`，太轻；必须用**真实开发任务**跑完闭环才算通过，
+并怀疑 emily 也有同样毛病。这一轮按此口径重做。
+
+### 根因 1：调查类任务被派给只读分析角色
+
+群里问「调查一下 super agent 最近的更改」，caixuf 前台提交了 `role=analysis`
+（带两条自己编的文件路径），analysis runner 只能做引用可追溯的只读证据分析，
+不能跑 git，回执是 `citation_traceability_only`，用户等于什么都没查到。
+
+修复：`durable_dispatch` 增加确定性护栏 —— role=analysis 且目标涉及 git / 历史 /
+改动 / 日志 / 仓库 / 命令时，改派 dev，并把用户给的路径写进 goal；纯文件证据分析仍
+留在 analysis。提示词同步写明，预算 2400（实际 1973）。
+
+### 根因 2：后台把自己接的活又派了一次
+
+用真实开发任务（新建 calc.py + test_calc.py、跑 pytest、贴原始输出）验出更隐蔽的一层：
+后台嵌套回合继承了前台的派工提示，于是再 `durable_submit` 一次。群里的原始任务只收到
+「已排队」回执，真正的 pytest 输出落在一个 local 会话里，闭环断了。
+
+修复：runner 导出 `SUPERAGENT_BACKEND_RUNNER=1`；插件在该会话里不注入派工提示，
+并且不注册任何 `durable_*` 工具，后台只能自己执行。
+
+### 最终闭环证据（两机各一次真实开发任务）
+
+| 项 | 本机 caixuf | emily |
+| :--- | :--- | :--- |
+| 群消息 | 12:04:18 | 12:04:18 |
+| 派单 | 12:04:22，回执 200 字符 | 12:04:41/43，两条（同群两条消息） |
+| 任务 | `2d7a307…`，origin=feishu 群 | `550e317…`，origin=feishu 群 |
+| 真跑 | 12 次工具调用、20s，写 /tmp 两文件 | mkdir / write / pytest / cat，`/tmp/sa_dev_probe_imfl_v4` 文件实测存在 |
+| 结果 | `6 passed in 0.01s`、`exit_code=0`、`git status` 空 | `6 passed in 0.02s`、`EXIT=0`，Python 3.12.3 / pytest 7.4.4 |
+| 回群 | outbox `delivered` 1793851488 | outbox `delivered` 1793851528 |
+
+原题「调查最近更改」复测：caixuf `6778e0d…` role=dev、输出含 `git log` 与 8147500、已投递；
+emily `a7b3db5…` 输出 `git log -10 --name-only` 原始清单并按模块归纳、已投递。
+
+### 期间的 emily 基础设施故障
+
+emily 的 `/mnt/nvme_ntfs` 被 IMFL CI 产物写到 100% 满，gateway 启动报
+`OSError(28, No space left on device)` 并反复崩溃，模型代理也曾卡在 D 状态。
+处置：把 3 个旧 DB 备份（703MB）和 6 个 ccache 分片（15GB）**移动**到根盘
+`/home/emily/backups/relocated-*`（未删除，数据仍在，cache 可自行重建），磁盘回到 85%，
+gateway 重新连上 Feishu。CI 容器本身没有停（用例时序敏感，不擅自限流）。
