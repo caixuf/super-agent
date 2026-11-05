@@ -11,12 +11,6 @@
        因为两边各自独立入库，同一句话的 fact_id 不同；
     2. 导出 JSONL（含 tags），对方 import 即可；
     3. tags 一并带过去，否则分桶信息丢失，召回会串池。
-
-.. warning::
-   **STATUS: 未接线（NOT WIRED）。**
-   本模块在仓内没有任何调用方（代码与测试均零引用），保留为已设计但尚未接入
-   主链路的参考实现。不要按「它已在工作」来理解记忆引擎的行为；
-   接线前请先补调用方与对应测试。
 """
 
 from __future__ import annotations
@@ -27,8 +21,11 @@ import json
 import re
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
+
+from .config import get_config
 
 
 def _norm(text: str) -> str:
@@ -37,14 +34,16 @@ def _norm(text: str) -> str:
 
 def _db_path(explicit: str = "") -> Path:
     if explicit:
-        return Path(explicit)
-    import os
-    return Path(os.path.expanduser("~/.hy_memory/data/coding_memory_cv.db"))
+        return Path(explicit).expanduser().resolve()
+    return get_config().db_path()
 
 
 def _load_keys(conn: sqlite3.Connection) -> Set[Tuple[str, str]]:
-    rows = conn.execute(
-        "SELECT statement, workspace_id FROM working_fact WHERE status='active'").fetchall()
+    try:
+        rows = conn.execute(
+            "SELECT statement, workspace_id FROM working_fact WHERE status='active'").fetchall()
+    except sqlite3.Error:
+        return set()
     return {(_norm(r[0]), r[1] or "") for r in rows}
 
 
@@ -88,7 +87,7 @@ def export_missing(src_db: str, dst_db: str, out_path: str, limit: int = 0) -> D
     return {"ok": True, "scanned": len(rows), "exported": len(exported), "file": str(out)}
 
 
-def import_pack(pack_path: str) -> Dict[str, Any]:
+def import_pack(pack_path: str, dst_db: str = "", *, schedule_background_index: bool = False) -> Dict[str, Any]:
     """把导出的 JSONL 写入目标库。走 write_fact，幂等判重天然生效。"""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     try:
@@ -96,6 +95,7 @@ def import_pack(pack_path: str) -> Dict[str, Any]:
     except ImportError as exc:
         return {"ok": False, "error": str(exc)}
 
+    target_db = _db_path(dst_db) if dst_db else None
     written = skipped = failed = 0
     for line in Path(pack_path).read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -107,15 +107,54 @@ def import_pack(pack_path: str) -> Dict[str, Any]:
             failed += 1
             continue
         try:
-            res = memory_store.write_fact(
-                item["statement"],
-                ebm=item.get("ebm") or None,
-                subject=item.get("subject") or "",
-                details=item.get("details") or "",
-                tags=item.get("tags") or {},
-                source=item.get("source") or "sync",
-                user_id=item.get("user_id") or get_config().default_user,
-                resolve_conflict=False)
+            if target_db is not None and target_db != get_config().db_path():
+                # 显式指定了不同于当前默认配置的目标库路径：直接向目标库连接写入或临时切 data_dir_fn
+                prev_fn = get_config().data_dir_fn
+                prev_dir = get_config().data_dir
+                try:
+                    if target_db.name == "coding_memory_cv.db":
+                        get_config().data_dir_fn = None
+                        get_config().data_dir = target_db.parent
+                        res = memory_store.write_fact(
+                            item["statement"],
+                            ebm=item.get("ebm") or None,
+                            subject=item.get("subject") or "",
+                            details=item.get("details") or "",
+                            tags=item.get("tags") or {},
+                            source=item.get("source") or "sync",
+                            user_id=item.get("user_id") or get_config().default_user,
+                            resolve_conflict=False,
+                            schedule_background_index=schedule_background_index)
+                    else:
+                        orig_db_path = memory_store._db_path
+                        memory_store._db_path = lambda: target_db  # type: ignore[assignment]
+                        try:
+                            res = memory_store.write_fact(
+                                item["statement"],
+                                ebm=item.get("ebm") or None,
+                                subject=item.get("subject") or "",
+                                details=item.get("details") or "",
+                                tags=item.get("tags") or {},
+                                source=item.get("source") or "sync",
+                                user_id=item.get("user_id") or get_config().default_user,
+                                resolve_conflict=False,
+                                schedule_background_index=schedule_background_index)
+                        finally:
+                            memory_store._db_path = orig_db_path  # type: ignore[assignment]
+                finally:
+                    get_config().data_dir_fn = prev_fn
+                    get_config().data_dir = prev_dir
+            else:
+                res = memory_store.write_fact(
+                    item["statement"],
+                    ebm=item.get("ebm") or None,
+                    subject=item.get("subject") or "",
+                    details=item.get("details") or "",
+                    tags=item.get("tags") or {},
+                    source=item.get("source") or "sync",
+                    user_id=item.get("user_id") or get_config().default_user,
+                    resolve_conflict=False,
+                    schedule_background_index=schedule_background_index)
             if res.get("written"):
                 written += 1
             else:
@@ -124,6 +163,42 @@ def import_pack(pack_path: str) -> Dict[str, Any]:
             print("写入失败: %s" % exc, file=sys.stderr)
             failed += 1
     return {"ok": True, "written": written, "skipped": skipped, "failed": failed}
+
+
+def sync_databases(
+    src_db: str,
+    dst_db: str,
+    *,
+    limit: int = 0,
+    schedule_background_index: bool = False,
+) -> Dict[str, Any]:
+    """一站式增量同步：将 src_db 独有的 active 事实（含 tags）增量导入 dst_db。"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        exp = export_missing(src_db, dst_db, str(tmp_path), limit=limit)
+        if not exp.get("ok"):
+            return exp
+        if exp.get("exported", 0) == 0:
+            return {
+                "ok": True,
+                "scanned": exp.get("scanned", 0),
+                "exported": 0,
+                "written": 0,
+                "skipped": 0,
+                "failed": 0,
+            }
+        imp = import_pack(str(tmp_path), dst_db=dst_db, schedule_background_index=schedule_background_index)
+        return {
+            "ok": bool(imp.get("ok")),
+            "scanned": exp.get("scanned", 0),
+            "exported": exp.get("exported", 0),
+            "written": imp.get("written", 0),
+            "skipped": imp.get("skipped", 0),
+            "failed": imp.get("failed", 0),
+        }
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -138,10 +213,20 @@ def main() -> int:
 
     ip = sub.add_parser("import", help="导入导出的包")
     ip.add_argument("--pack", required=True)
+    ip.add_argument("--dst", default="", help="目标库（默认本机库）")
+
+    sp = sub.add_parser("sync", help="一站式从源库向目标库增量同步")
+    sp.add_argument("--src", required=True, help="源库路径")
+    sp.add_argument("--dst", default="", help="目标库路径（默认本机库）")
+    sp.add_argument("--limit", type=int, default=0)
 
     args = ap.parse_args()
-    res = (export_missing(args.src, args.dst, args.out, args.limit)
-           if args.cmd == "export" else import_pack(args.pack))
+    if args.cmd == "export":
+        res = export_missing(args.src, args.dst, args.out, args.limit)
+    elif args.cmd == "import":
+        res = import_pack(args.pack, dst_db=args.dst)
+    else:
+        res = sync_databases(args.src, args.dst, limit=args.limit)
     print(json.dumps(res, ensure_ascii=False))
     return 0 if res.get("ok") else 1
 

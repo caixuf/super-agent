@@ -316,6 +316,17 @@ class Pool:
             )
         if updated.rowcount == 1:
             db.execute('INSERT OR IGNORE INTO outbox(job,receipt) VALUES(?,?)', (job, receipt))
+            if status in ('completed', 'failed'):
+                try:
+                    from agentcore.memory.config import get_config
+                    if get_config().trace_db_path().is_file():
+                        from agentcore.memory.memory_plasticity import apply_task_outcome
+                        failure_text = ''
+                        if status == 'failed' and isinstance(result, dict):
+                            failure_text = str(result.get('error') or result.get('reason') or result.get('stderr') or '')
+                        apply_task_outcome(job, passed=(status == 'completed'), failure_text=failure_text)
+                except Exception:
+                    pass
         return updated.rowcount == 1
 
     def claim(self, lease=60):

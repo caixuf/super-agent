@@ -1,11 +1,28 @@
 # super-agent —— 通用智能体本体
 
+## 先进 Agent 架构与工程实践指南（核心技术导读）
+
+若希望系统学习本项目沉淀的**生产级常驻智能体（Always-on Production Agent）**核心架构、设计哲学与工程实现，请从 [`docs/guide/README.md`](docs/guide/README.md) 开始阅读：
+
+| 篇目 | 文档 | 核心技术与源码映射 |
+| :--- | :--- | :--- |
+| **第 0 篇** | [`docs/guide/00_ARCHITECTURE_OVERVIEW.md`](docs/guide/00_ARCHITECTURE_OVERVIEW.md) | **全景导览**：玩具 Agent 的六大生产死穴、十二层架构图、端到端请求生命周期、通用本体与声明式业务规格（`BusinessProfileSpec`）解耦范式 |
+| **第 1 篇** | [`docs/guide/01_COLLEAGUE_AND_ORCHESTRATION.md`](docs/guide/01_COLLEAGUE_AND_ORCHESTRATION.md) | **多智能体组织学**：同事制 vs 编排制/对等制、主同事五条铁律、8 大研发同事契约、Git Worktree + `fcntl.flock` 隔离、三级模型路由与 `ADR-S1 ~ ADR-S6` |
+| **第 2 篇** | [`docs/guide/02_DURABLE_RUNTIME_AND_LIVENESS.md`](docs/guide/02_DURABLE_RUNTIME_AND_LIVENESS.md) | **长任务运行时**：SQLite 持久任务池、Attempt Fencing 围栏、Linux Subreaper 进程树收割、活体心跳账本（`stalled` vs `lost`）、中途插话抢占（Barge-in）、双阶段零 LLM 主动探针（Proactive Hooks） |
+| **第 3 篇** | [`docs/guide/03_MEMORY_ENGINEERING.md`](docs/guide/03_MEMORY_ENGINEERING.md) | **生产级长期记忆**：为什么绕开黑盒 LLM 抽取覆写、`workspace_id` 代际分桶硬隔离、独立 `fact_tags` 表、向量与词法双路召回、常驻内存水位体检 |
+| **第 4 篇** | [`docs/guide/04_EVIDENCE_AND_VERIFICATION.md`](docs/guide/04_EVIDENCE_AND_VERIFICATION.md) | **防幻觉与确定性工程**：双轨物理证据门禁、CardKit 2.0 单在途合并与 `drain()` 屏障、服务端回读核对、零业务词棘轮门禁、死端口请求转储取证与干净室 20 项断言 |
+
+---
+
 ## 持久任务、研发同事与执行层
 
 - **持久任务池**：`agentcore.pool` 负责持久任务、依赖、租约与结果 outbox；`agentcore.worker` 通过有界 `AgentScheduler` 调用 stdlib 或真实 `flowcoro_py` 后端。支持取消、超时、输出预算和旧 attempt 隔离。
 - **只读分析运行器**：`agentcore.analysis_runner` 执行只读分析任务，产出 `citation_traceability_only` 结构化引用事实。
 - **研发同事运行器**：`agentcore.dev_runner` 提供工作树编码与测试接缝，以跨进程 `fcntl.flock` 保持执行和验收单一写者；验收命令由管理员策略固定，任务不得自行执行宿主命令。CLI 可显式注入管理员审查的生成／验收适配器，不由任务选择模块；工作树、锁和适配器本身均不是安全沙箱，完整研发执行仍受可信隔离门禁约束，见 [验收授权边界](docs/POOL_RUNTIME.md#development-verification-authority)。
 - **研发同事模型**：`agentcore.colleague_dev` 定义了 8 大官方研发岗位契约（需求架构师、用例开发大师、红队评审员、仿真测试专家、归因专家、后端开发、前端卡片交互、运维巡检），支持编排闭环与平台 SOP 流水线原生桥接。
+- **确定性模型路由与 ADR 守卫**：`agentcore.model_routing` 提供纯函数三级模型路由（`pro` / `main` / `flash`）与 6 条架构不变量（`ADR-S1` ~ `ADR-S6`），包含 `pro` 角色白名单配额护栏、长上下文压缩底线保护（严禁 `compression`/`memory` 降级至 `flash`）及显式降级回执。
+- **双阶段主动探针引擎**：`agentcore.proactive_hooks` 提供零 LLM 快速路径预检（Pre-Hook Probe）与基于 `HookLedger` 冷却去重的幂等持久队列派单。
+- **声明式业务专家规格**：`agentcore.profile_spec` 与 `install/setup_profile.py` 提供业务无关的 `BusinessProfileSpec` 校验、确定性 `systemd` 单元渲染、队列拓扑初始化与可移植专家包分发。
 
 使用与恢复边界见 [docs/POOL_RUNTIME.md](docs/POOL_RUNTIME.md) 与 [docs/DISPATCH_ANALYSIS.md](docs/DISPATCH_ANALYSIS.md)。
 

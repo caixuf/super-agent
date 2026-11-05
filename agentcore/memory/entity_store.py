@@ -229,14 +229,33 @@ def _build_seed_rules() -> List[Dict[str, Any]]:
 
 
 class EntityStore:
-    """轻量实体-规则知识库，基于 SQLite FTS5 与倒排索引。"""
+    """轻量实体-规则知识库，基于 SQLite FTS5 与倒排索引。
 
-    def __init__(self, db_path: Optional[Path | str] = None) -> None:
+    支持三种种子注入模式（优先级从高到低）：
+    1. 显式传入 ``seed_entities`` / ``seed_rules`` 列表；
+    2. 传入 ``seed_file``（或设置环境变量 ``SUPER_AGENT_ENTITY_SEED_FILE``）加载外部 JSON 种子包；
+    3. ``auto_seed=True``（默认）时回退至内置种子骨架；``auto_seed=False`` 时保持空库。
+    """
+
+    def __init__(
+        self,
+        db_path: Optional[Path | str] = None,
+        *,
+        seed_file: Optional[Path | str] = None,
+        seed_entities: Optional[Sequence[Dict[str, Any]]] = None,
+        seed_rules: Optional[Sequence[Dict[str, Any]]] = None,
+        auto_seed: bool = True,
+    ) -> None:
         if db_path:
             self.db_path = Path(db_path).resolve()
         else:
             self.db_path = get_default_entity_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        env_seed = os.getenv("SUPER_AGENT_ENTITY_SEED_FILE", "").strip()
+        self._seed_file = Path(seed_file or env_seed).expanduser() if (seed_file or env_seed) else None
+        self._seed_entities = list(seed_entities) if seed_entities is not None else None
+        self._seed_rules = list(seed_rules) if seed_rules is not None else None
+        self._auto_seed = bool(auto_seed)
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -288,16 +307,33 @@ class EntityStore:
 
             cur = conn.execute("SELECT COUNT(*) AS cnt FROM rules")
             row = cur.fetchone()
-            if not row or row["cnt"] == 0:
-                mem_file = _find_default_memory_file()
-                if mem_file and mem_file.is_file():
+            if (not row or row["cnt"] == 0) and self._auto_seed:
+                if self._seed_entities is not None or self._seed_rules is not None:
+                    self._seed_records(
+                        conn,
+                        self._seed_entities or [],
+                        self._seed_rules or [],
+                    )
+                elif self._seed_file and self._seed_file.is_file():
                     try:
-                        self.ingest_memory_markdown(mem_file.read_text(encoding="utf-8"))
+                        payload = json.loads(self._seed_file.read_text(encoding="utf-8"))
+                        self._seed_records(
+                            conn,
+                            payload.get("entities") or [],
+                            payload.get("rules") or [],
+                        )
                     except Exception as err:
-                        logger.warning("Ingest MEMORY.md exception: %s", err)
-                        self._seed_builtin_data(conn)
+                        logger.warning("Ingest entity seed file exception: %s", err)
                 else:
-                    self._seed_builtin_data(conn)
+                    mem_file = _find_default_memory_file()
+                    if mem_file and mem_file.is_file():
+                        try:
+                            self.ingest_memory_markdown(mem_file.read_text(encoding="utf-8"))
+                        except Exception as err:
+                            logger.warning("Ingest MEMORY.md exception: %s", err)
+                            self._seed_builtin_data(conn)
+                    else:
+                        self._seed_builtin_data(conn)
             conn.commit()
 
     def ingest_memory_markdown(self, content: str) -> int:
@@ -348,40 +384,168 @@ class EntityStore:
         return count
 
     def _seed_builtin_data(self, conn: sqlite3.Connection) -> None:
+        self._seed_records(conn, _build_seed_entities(), _build_seed_rules())
+
+    def _seed_records(
+        self,
+        conn: sqlite3.Connection,
+        entities: Sequence[Dict[str, Any]],
+        rules: Sequence[Dict[str, Any]],
+    ) -> None:
         now = time.time()
-        for ent in _build_seed_entities():
+        for ent in entities:
             aliases_json = json.dumps(ent.get("aliases", []), ensure_ascii=False)
             conn.execute(
                 """
                 INSERT OR REPLACE INTO entities (entity_id, name, aliases, category, summary, details, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (ent["entity_id"], ent["name"], aliases_json, ent["category"], ent["summary"], ent.get("details", ""), now)
+                (
+                    ent["entity_id"],
+                    ent["name"],
+                    aliases_json,
+                    ent.get("category") or ent.get("entity_type") or "general",
+                    ent.get("summary") or ent.get("description") or "",
+                    ent.get("details", ""),
+                    now,
+                ),
             )
 
-        for rule in _build_seed_rules():
-            kw_str = " ".join(rule.get("keywords", []))
+        for rule in rules:
+            stmt = str(rule.get("statement") or rule.get("action_stmt") or "").strip()
+            title = str(rule.get("title") or rule.get("condition_expr") or "").strip()
+            kw_raw = rule.get("keywords") or []
+            kw_str = " ".join(kw_raw) if isinstance(kw_raw, (list, tuple)) else str(kw_raw)
+            if not kw_str:
+                kw_str = " ".join(self._extract_distinctive_tokens(f"{title} {stmt}"))
             conn.execute(
                 """
                 INSERT OR REPLACE INTO rules (rule_id, entity_id, title, statement, polarity, keywords, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (rule["rule_id"], rule["entity_id"], rule["title"], rule["statement"], rule["polarity"], kw_str, now)
+                (
+                    rule["rule_id"],
+                    rule["entity_id"],
+                    title,
+                    stmt,
+                    rule.get("polarity", "constraint"),
+                    kw_str,
+                    now,
+                ),
             )
             ent_cur = conn.execute("SELECT name, aliases FROM entities WHERE entity_id = ?", (rule["entity_id"],))
             ent_row = ent_cur.fetchone()
             ent_name = ent_row["name"] if ent_row else ""
             ent_aliases = ent_row["aliases"] if ent_row else ""
             try:
+                conn.execute("DELETE FROM entity_rules_fts WHERE rule_id = ?", (rule["rule_id"],))
                 conn.execute(
                     """
                     INSERT INTO entity_rules_fts (rule_id, entity_name, aliases, title, statement, keywords)
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (rule["rule_id"], ent_name, ent_aliases, rule["title"], rule["statement"], kw_str)
+                    (rule["rule_id"], ent_name, ent_aliases, title, stmt, kw_str),
                 )
             except Exception:
                 pass
+
+    def export_seed_pack(self, out_path: Optional[Path | str] = None) -> Dict[str, Any]:
+        """导出当前实体与规则知识库为可移植的 JSON 种子包。"""
+        with self._get_connection() as conn:
+            ent_rows = conn.execute(
+                "SELECT entity_id, name, aliases, category, summary, details FROM entities ORDER BY entity_id"
+            ).fetchall()
+            rule_rows = conn.execute(
+                "SELECT rule_id, entity_id, title, statement, polarity, keywords FROM rules ORDER BY rule_id"
+            ).fetchall()
+
+        entities = []
+        for r in ent_rows:
+            try:
+                aliases = json.loads(r["aliases"] or "[]")
+            except Exception:
+                aliases = []
+            entities.append({
+                "entity_id": r["entity_id"],
+                "name": r["name"],
+                "aliases": aliases if isinstance(aliases, list) else [],
+                "category": r["category"],
+                "summary": r["summary"],
+                "details": r["details"],
+            })
+
+        rules = []
+        for r in rule_rows:
+            kw_str = str(r["keywords"] or "").strip()
+            rules.append({
+                "rule_id": r["rule_id"],
+                "entity_id": r["entity_id"],
+                "title": r["title"],
+                "statement": r["statement"],
+                "polarity": r["polarity"],
+                "keywords": kw_str.split() if kw_str else [],
+            })
+
+        payload = {
+            "schema": "agentcore.entity_seed_pack.v1",
+            "entities": entities,
+            "rules": rules,
+        }
+        if out_path is not None:
+            target = Path(out_path).expanduser().resolve()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return payload
+
+    def import_seed_pack(self, seed_path: Path | str, *, replace: bool = False) -> Dict[str, Any]:
+        """从外部 JSON 种子包导入实体与规则。replace=True 时先清空既有表。"""
+        source = Path(seed_path).expanduser().resolve(strict=True)
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("invalid entity seed pack")
+        entities = payload.get("entities") or []
+        rules = payload.get("rules") or []
+        with self._get_connection() as conn:
+            if replace:
+                conn.execute("DELETE FROM rules")
+                conn.execute("DELETE FROM entities")
+                try:
+                    conn.execute("DELETE FROM entity_rules_fts")
+                except Exception:
+                    pass
+            self._seed_records(conn, entities, rules)
+            conn.commit()
+        return {
+            "ok": True,
+            "entities_imported": len(entities),
+            "rules_imported": len(rules),
+            "replaced": bool(replace),
+        }
+
+    def _load_dynamic_anchor_keywords(self) -> List[str]:
+        """动态加载库内已注册实体的名称与别名作为分词锚点，避免只认硬编码列表。"""
+        anchors = [
+            "灌灌", "3090", "掉卡", "重启", "软重启", "硬重启", "电源", "Nuvo",
+            _TAG_EM, "跑测机", "跳板机", _IP_EM, _IP_GG,
+            "代理", "7899", "7897", "7892", "proxy", "本机", "5060", "开发本",
+            "FIFO", "调度", "队列", "凭据", "token", "secret", "master_key",
+            "emoji", "零emoji", "PASS", "FAIL",
+        ]
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute("SELECT name, aliases FROM entities").fetchall()
+            for r in rows:
+                if r["name"] and len(r["name"]) >= 2:
+                    anchors.append(r["name"])
+                try:
+                    for al in json.loads(r["aliases"] or "[]"):
+                        if isinstance(al, str) and len(al.strip()) >= 2:
+                            anchors.append(al.strip())
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return list(dict.fromkeys(anchors))
 
     def add_entity(
         self,
@@ -569,14 +733,8 @@ class EntityStore:
                 tokens.add(w.lower())
                 tokens.add(w)
 
-        # 2. 实体锚点词（与查询侧共用同一份白名单，保证两侧口径一致）
-        known = [
-            "灌灌", "3090", "掉卡", "重启", "软重启", "硬重启", "电源", "Nuvo",
-            _TAG_EM, "跑测机", "跳板机", _IP_EM, _IP_GG,
-            "代理", "7899", "7897", "7892", "proxy", "本机", "5060", "开发本",
-            "FIFO", "调度", "队列", "凭据", "token", "secret", "master_key",
-            "emoji", "零emoji", "PASS", "FAIL",
-        ]
+        # 2. 实体锚点词（动态合并库内已注册实体名与别名，与查询侧共用同一份口径）
+        known = self._load_dynamic_anchor_keywords()
         low = text.lower()
         for kw in known:
             if kw.lower() in low:
@@ -602,13 +760,7 @@ class EntityStore:
                 tokens.add(w.lower())
                 tokens.add(w)
 
-        known_keywords = [
-            "灌灌", "3090", "掉卡", "重启", "软重启", "硬重启", "电源", "Nuvo",
-            _TAG_EM, "跑测机", "跳板机", _IP_EM, _IP_GG,
-            "代理", "7899", "7897", "7892", "proxy", "本机", "5060", "开发本",
-            "FIFO", "调度", "队列", "凭据", "token", "secret", "master_key",
-            "emoji", "零emoji", "PASS", "FAIL"
-        ]
+        known_keywords = self._load_dynamic_anchor_keywords()
         for kw in known_keywords:
             if kw.lower() in text.lower():
                 tokens.add(kw)

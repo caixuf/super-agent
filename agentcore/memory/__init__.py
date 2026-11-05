@@ -15,11 +15,15 @@ from .config import (
 )
 from . import progressive
 from . import monthly_log
+from .hybrid_recall import recall_hybrid, rrf_fuse
+from .memory_plasticity import apply_task_outcome
+from .memory_sync import sync_databases
 from .memory_store import (
     drop_fact,
     flush_background,
     list_tags,
     normalize_ebm,
+    prune_dormant_vectors,
     recall_facts,
     get_facts_by_ids,
     reindex_embeddings,
@@ -34,9 +38,14 @@ __all__ = [
     "get_config",
     "reset_config",
     "logger_name",
-    # 写入 / 召回
+    # 写入 / 召回 / 混合融合 / 可塑性 / 同步 / 向量回收
     "write_fact",
     "recall_facts",
+    "recall_hybrid",
+    "rrf_fuse",
+    "apply_task_outcome",
+    "sync_databases",
+    "prune_dormant_vectors",
     "get_facts_by_ids",
     "progressive",
     "monthly_log",

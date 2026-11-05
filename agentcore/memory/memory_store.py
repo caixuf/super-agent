@@ -46,31 +46,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .config import get_config, logger_name
+from .vector_codec import (
+    cosine_similarity as _cosine,
+    delete_vectors_for_facts as _delete_vectors_for_facts,
+    pack_vector as _pack_vector,
+    text_hash as _text_hash,
+    unpack_vector as _unpack_vector,
+    valid_embedding as _valid_embedding,
+)
 
 EBM_UNKNOWN = "unknown"
-
-
-def _pack_vector(vec: Sequence[float]) -> bytes:
-    """浮点列表打包为二进制 float32 字节流（小端存储）。"""
-    return struct.pack(f"<{len(vec)}f", *vec)
-
-
-
-def _valid_embedding(vec: Sequence[float]) -> bool:
-    """Reject malformed vectors before they can enter the cache or database."""
-    try:
-        return (len(vec) == get_config().embed_dim
-                and all(math.isfinite(float(value)) for value in vec)
-                and len(_pack_vector(vec)) == get_config().embed_dim * 4)
-    except (TypeError, ValueError, OverflowError, struct.error):
-        return False
-
-
-def _unpack_vector(blob: bytes) -> List[float]:
-    """二进制字节流解包为 float 列表。"""
-    n = len(blob) // 4
-    return list(struct.unpack(f"<{n}f", blob))
-
 
 #: 无代际信息的经验一律进这个桶，不臆造代际。
 UNKNOWN_BUCKET = "_unknown"
@@ -238,6 +223,7 @@ def write_fact(
     branch: Optional[str] = None,
     fact_id: Optional[str] = None,
     resolve_conflict: bool = False,
+    enforce_gate: bool = False,
     initial_status: str = 'active',
     dedupe_by_statement: bool = False,
     schedule_background_index: bool = True,
@@ -259,6 +245,25 @@ def write_fact(
         raise ValueError('candidate publishers require source-scoped identity')
     if not stmt:
         return {"ok": False, "error": "statement 为空"}
+
+    if enforce_gate:
+        from . import memory_gate
+        gate_verdict = memory_gate.validate({
+            "statement": stmt,
+            "subject": subject,
+            "workspace_id": normalize_ebm(ebm),
+            "ebm": ebm or "",
+            "tags": tags or {},
+            "source": source or "manual",
+        })
+        if not gate_verdict.get("ok"):
+            return {
+                "ok": True,
+                "written": False,
+                "reason": "rejected_by_gate",
+                "gate": gate_verdict,
+                "workspace_id": normalize_ebm(ebm),
+            }
 
     # A deterministic candidate ID is the replay/identity boundary. Check it
     # before activation, background indexing or monthly reporting so a later
@@ -415,6 +420,8 @@ def write_fact(
                     ("superseded_by:%s %s" % (fid, verdict.get("reason") or ""), old_id))
                 if cur.rowcount > 0:
                     superseded.append(old_id)
+            if superseded:
+                _delete_vectors_for_facts(conn, superseded)
         conn.commit()
         out = {"ok": True, "written": True, "fact_id": fid,
                "workspace_id": bucket, "tags": tag_map}
@@ -1034,6 +1041,8 @@ def activate_candidate_fact(*, fact_id: str, user_id: str, agent_id: str,
                         "reason": "recall_verification_failed",
                         "workspace_id": bucket, "status": "candidate",
                         "fact_id": fact_id}
+        if superseded:
+            _delete_vectors_for_facts(conn, superseded)
         conn.commit()
         out = {"ok": True, "written": True, "fact_id": fact_id,
                "workspace_id": bucket, "conflict": verdict,
@@ -1116,6 +1125,7 @@ def recall_facts(
     scopes: Optional[Sequence[str]] = None,
     domains: Optional[Sequence[str]] = None,
     genres: Optional[Sequence[str]] = None,
+    task_id: Optional[str] = None,
     _connection: Optional[sqlite3.Connection] = None,
 ) -> Dict[str, Any]:
     """按代际 + 任意 KV 标签召回。空结果给出 reason，不返回假的成功。
@@ -1300,6 +1310,18 @@ def recall_facts(
                                            else 'exact_ebm' if buckets and item['workspace_id'] == buckets[0]
                                            else 'unscoped_ebm')
                     entries.append(item)
+                if task_id and entries:
+                    try:
+                        from . import memory_trace
+                        memory_trace.record(
+                            [str(e.get("fact_id") or "") for e in entries if e.get("fact_id")],
+                            task_id=task_id,
+                            channel="recall",
+                            query=query or "",
+                            ebm=ebm or "",
+                        )
+                    except Exception:
+                        pass
                 return {'ok': True, 'results': entries, 'total': len(entries),
                         'searched_buckets': buckets, 'searched_tags': want}
 
@@ -1394,6 +1416,18 @@ def recall_facts(
         # 没有分数（向量不可用、退回关键词排序）时不套用门限：那种情况本来就没有
         # 可比的相似度，硬套会把关键词命中的结果也挡掉。
         results = [it for it in ranked if _passes_floor(it, floor, query)][: max(1, int(limit))]
+        if task_id and results:
+            try:
+                from . import memory_trace
+                memory_trace.record(
+                    [str(it.get("fact_id") or "") for it in results if it.get("fact_id")],
+                    task_id=task_id,
+                    channel="recall",
+                    query=query or "",
+                    ebm=ebm or "",
+                )
+            except Exception:
+                pass
         payload = {"ok": True, "results": results, "total": len(results),
                    "searched_buckets": buckets, "searched_tags": want}
         if not results and not ranked:
@@ -2080,6 +2114,8 @@ def drop_fact(fact_id: str, reason: str = "manual") -> Dict[str, Any]:
         cur = conn.execute(
             "UPDATE working_fact SET status='deprecated', fact_chain_summary=? WHERE fact_id=?",
             (reason, fact_id))
+        if cur.rowcount > 0:
+            _delete_vectors_for_facts(conn, [fact_id])
         conn.commit()
         return {"ok": cur.rowcount > 0, "fact_id": fact_id, "reason": reason}
     finally:
@@ -2100,11 +2136,77 @@ def supersede(old_fact_id: str, new_fact_id: str, reason: str = "") -> Dict[str,
             " WHERE fact_id=? AND status='active'",
             ("superseded_by:%s%s" % (new_fact_id, (" " + reason) if reason else ""),
              old_fact_id))
+        if cur.rowcount > 0:
+            _delete_vectors_for_facts(conn, [old_fact_id])
         conn.commit()
         return {"ok": cur.rowcount > 0, "fact_id": old_fact_id,
                 "superseded_by": new_fact_id, "reason": reason}
     finally:
         conn.close()
+
+
+def prune_dormant_vectors(
+    *,
+    dry_run: bool = False,
+    vacuum: bool = False,
+    _connection: Optional[sqlite3.Connection] = None,
+) -> Dict[str, Any]:
+    """清理已退役（deprecated / superseded）或孤儿事实的持久化向量与 KNN 索引。
+
+    保留 working_fact 的时间线行（满足可追溯性），但回收它们在 fact_embeddings
+    与 vec_facts 中占用的 4KB/条 float32 向量空间，防止 KNN 被 99% 休眠向量稀释。
+    status IN ('active', 'candidate') 的事实向量完整保留。
+    """
+    conn = _connection if _connection is not None else _connect()
+    try:
+        dormant_emb_rows = conn.execute(
+            "SELECT e.fact_id FROM fact_embeddings e"
+            " LEFT JOIN working_fact f ON f.fact_id = e.fact_id"
+            " WHERE f.fact_id IS NULL OR f.status NOT IN ('active', 'candidate')"
+        ).fetchall()
+        dormant_emb_ids = [str(r[0]) for r in dormant_emb_rows if r[0]]
+
+        dormant_vec_ids: List[str] = []
+        try:
+            dormant_vec_rows = conn.execute(
+                "SELECT v.fact_id FROM vec_facts v"
+                " LEFT JOIN working_fact f ON f.fact_id = v.fact_id"
+                " WHERE f.fact_id IS NULL OR f.status NOT IN ('active', 'candidate')"
+            ).fetchall()
+            dormant_vec_ids = [str(r[0]) for r in dormant_vec_rows if r[0]]
+        except sqlite3.Error:
+            dormant_vec_ids = []
+
+        all_dormant_ids = list(dict.fromkeys(dormant_emb_ids + dormant_vec_ids))
+        if dry_run or not all_dormant_ids:
+            return {
+                "ok": True,
+                "dry_run": dry_run,
+                "dormant_embeddings": len(dormant_emb_ids),
+                "dormant_vec_index": len(dormant_vec_ids),
+                "embeddings_deleted": 0,
+                "vec_deleted": 0,
+            }
+
+        deleted = _delete_vectors_for_facts(conn, all_dormant_ids)
+        conn.commit()
+        if vacuum and _connection is None:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                conn.execute("VACUUM;")
+            except sqlite3.Error:
+                pass
+        return {
+            "ok": True,
+            "dry_run": False,
+            "dormant_embeddings": len(dormant_emb_ids),
+            "dormant_vec_index": len(dormant_vec_ids),
+            "embeddings_deleted": deleted["embeddings_deleted"],
+            "vec_deleted": deleted["vec_deleted"],
+        }
+    finally:
+        if _connection is None:
+            conn.close()
 
 
 def list_tags(user_id: Optional[str] = None) -> Dict[str, List[str]]:

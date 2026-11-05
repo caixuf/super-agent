@@ -1,6 +1,17 @@
 # 文档索引
 
-先读这五份，其余按需。
+先读架构实践指南与核心活文档，其余按需。
+
+## 先进 Agent 架构与工程实践指南（推荐学习入口）
+
+面向希望深入理解本项目核心设计思想、架构取舍与生产级 Agent 工程技术的开发者：
+
+- [`guide/README.md`](guide/README.md)：**指南总目录与伴读验证命令**
+- [`guide/00_ARCHITECTURE_OVERVIEW.md`](guide/00_ARCHITECTURE_OVERVIEW.md)：**第 0 篇：全景导览 —— 从玩具 Agent 到生产级常驻智能体**
+- [`guide/01_COLLEAGUE_AND_ORCHESTRATION.md`](guide/01_COLLEAGUE_AND_ORCHESTRATION.md)：**第 1 篇：多智能体组织学 —— 同事制、模型路由与工作区隔离**
+- [`guide/02_DURABLE_RUNTIME_AND_LIVENESS.md`](guide/02_DURABLE_RUNTIME_AND_LIVENESS.md)：**第 2 篇：长任务运行时 —— 持久队列、插话抢占与主动探针**
+- [`guide/03_MEMORY_ENGINEERING.md`](guide/03_MEMORY_ENGINEERING.md)：**第 3 篇：生产级长期记忆 —— 双路召回、代际硬隔离与容量治理**
+- [`guide/04_EVIDENCE_AND_VERIFICATION.md`](guide/04_EVIDENCE_AND_VERIFICATION.md)：**第 4 篇：防幻觉与确定性工程 —— 证据门禁、流式屏障与干净室验证**
 
 ## 活文档（描述当前架构，跟着代码一起改）
 
@@ -49,13 +60,11 @@
 
 | 模块 | 作用 | 状态 |
 | :--- | :--- | :--- |
-| `agentcore/memory/memory_gate.py` | 提炼结果入库门禁（三道校验） | 未接线 |
-| `agentcore/memory/memory_plasticity.py` | 突触可塑性反馈（按任务终态强化/抑制） | 未接线 |
-| `agentcore/memory/memory_sync.py` | 记忆库增量同步（导出 A 有 B 无的事实） | 未接线 |
+| `agentcore/memory/memory_gate.py` | 提炼结果入库门禁（三道校验） | 已接线（`write_fact(enforce_gate=True)`） |
+| `agentcore/memory/memory_plasticity.py` | 突触可塑性反馈（按任务终态强化/抑制） | 已接线（`recall_facts(task_id=...)` -> `memory_trace` -> `Pool._terminal` / `apply_task_outcome`） |
+| `agentcore/memory/memory_sync.py` | 记忆库增量同步（导出 A 有 B 无的事实并一站式同步） | 已接线（`sync_databases()` + `memory_sync.py sync` CLI） |
 | `agentcore/feishu_transport.py` 的 `FeishuCardKitAdapter` | 用卡片实体做流式进度更新 | 未接线（且三处请求体与官方契约不符，接线前须重写） |
 | `agentcore/cardkit2_renderer.py` 的 `CardStreamRenderer` | 原生 CardKit 2.0 渲染与单在途更新 | 作为库提供；宿主接线见 `patches/feishu_card_lifecycle.patch` |
 
-前三个记忆模块都在 docstring 顶部标了 `STATUS: 未接线`。
-**不要按「记忆引擎已具备这些能力」来理解它**——接线前需要先补调用方和对应测试。
 卡片与完成态投递由 `agentcore/` 原生链路承担，仓库不再维护外部卡片 sidecar 集成；
 一个交互只能有一个生产者，替换发送者须在同一次变更里完成迁移与真实渠道验收。

@@ -23,7 +23,7 @@ class ViewInvalid(RuntimeError):
 
 class MemoryReadView:
     def __init__(self,source=None,*,max_bytes=256*1024*1024,lease_seconds=300,progress=None,
-                 max_delta_bytes=64*1024*1024,checkpoint=None):
+                 max_delta_bytes=64*1024*1024,checkpoint=None,compact_dormant=False):
         if type(max_bytes) is not int or max_bytes<16384:raise ValueError('invalid view memory budget')
         if type(max_delta_bytes) is not int or max_delta_bytes<1024:raise ValueError('invalid delta payload budget')
         self.source=source if source is not None else memory_store._connect()
@@ -31,6 +31,7 @@ class MemoryReadView:
         self.conn=None;self.consumer=None;self.ready=False;self.invalid=False
         self.max_bytes=max_bytes;self.lease_seconds=lease_seconds
         self.max_delta_bytes=max_delta_bytes;self.checkpoint=checkpoint
+        self.compact_dormant=bool(compact_dormant)
         self.binding=self._binding()
         self._renew_at=0
         try:
@@ -54,6 +55,8 @@ class MemoryReadView:
             finally:
                 if heartbeat is not None:heartbeat.close()
             self.page_size=self.conn.execute('PRAGMA page_size').fetchone()[0]
+            if self.compact_dormant:
+                self.evict_dormant_vectors()
             if self.bytes()>max_bytes:raise ViewInvalid('memory_view_snapshot_budget')
             self.conn.execute('PRAGMA max_page_count='+str(max_bytes//self.page_size))
             # Copied capture triggers must not create an independent journal.
@@ -65,6 +68,26 @@ class MemoryReadView:
             self.refresh()
         except Exception:
             self.invalid=True;self.close();raise
+
+    def evict_dormant_vectors(self):
+        """Remove vectors for retired or absent facts from the in-memory replica."""
+        if self.conn is None:
+            return {'evicted_embeddings':0,'evicted_vec_index':0}
+        active={row[0] for row in self.conn.execute("SELECT fact_id FROM working_fact WHERE status='active'")}
+        evicted_emb=0;evicted_vec=0
+        with self.conn:
+            if self.conn.execute("SELECT 1 FROM sqlite_master WHERE name='fact_embeddings'").fetchone():
+                emb_ids=[r[0] for r in self.conn.execute('SELECT fact_id FROM fact_embeddings') if r[0] not in active]
+                for offset in range(0,len(emb_ids),400):
+                    chunk=emb_ids[offset:offset+400]
+                    cur=self.conn.execute('DELETE FROM fact_embeddings WHERE fact_id IN ('+','.join('?' for _ in chunk)+')',chunk)
+                    evicted_emb+=max(0,cur.rowcount)
+            if self.conn.execute("SELECT 1 FROM sqlite_master WHERE name='vec_facts'").fetchone():
+                vec_ids=[r[0] for r in self.conn.execute('SELECT fact_id FROM vec_facts') if r[0] not in active]
+                for fid in vec_ids:
+                    cur=self.conn.execute('DELETE FROM vec_facts WHERE fact_id=?',(fid,))
+                    evicted_vec+=max(0,cur.rowcount)
+        return {'evicted_embeddings':evicted_emb,'evicted_vec_index':evicted_vec}
 
     def bytes(self):
         return self.conn.execute('PRAGMA page_count').fetchone()[0]*self.conn.execute('PRAGMA page_size').fetchone()[0]
@@ -110,22 +133,24 @@ class MemoryReadView:
                     or embedding['model']!=memory_store.DEFAULT_EMBED_MODEL):
                 raise ViewPending('memory_view_embedding_pending')
         indexed=bool(self.conn.execute("SELECT 1 FROM sqlite_master WHERE name='vec_facts'").fetchone())
+        existing_active={row['fact_id'] for row in records['working_fact'] if row.get('status')=='active'}
         with self.conn:
             for offset in range(0,len(ids),400):
                 chunk=ids[offset:offset+400];marks=','.join('?' for _ in chunk)
                 for table in journal.TABLES:self.conn.execute('DELETE FROM '+table+' WHERE fact_id IN ('+marks+')',chunk)
             for table,rows in records.items():
+                if self.compact_dormant and table=='fact_embeddings':
+                    rows=[r for r in rows if r['fact_id'] in existing_active]
                 if not rows:continue
                 columns=list(rows[0]);names=['rowid' if key=='_view_rowid' else key for key in columns]
                 quoted=','.join('"'+key.replace('"','""')+'"' for key in names)
                 self.conn.executemany('INSERT INTO '+table+' ('+quoted+') VALUES ('+','.join('?' for _ in columns)+')',
                                       [tuple(row[key] for key in columns) for row in rows])
             if indexed:
-                existing={row['fact_id'] for row in records['working_fact']}
                 for fid in ids:
                     self.conn.execute('DELETE FROM vec_facts WHERE fact_id=?',(fid,))
                     embedding=embeds.get(fid)
-                    if fid in existing and embedding and embedding['dim']==get_config().embed_dim:
+                    if fid in existing_active and embedding and embedding['dim']==get_config().embed_dim:
                         vector=embedding['vector']
                         if len(vector)!=embedding['dim']*4:raise ViewInvalid('memory_view_vector_corrupt')
                         self.conn.execute('INSERT INTO vec_facts(fact_id,embedding) VALUES (?,?)',(fid,vector))
