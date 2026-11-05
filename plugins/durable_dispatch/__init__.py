@@ -887,11 +887,15 @@ If the user asks to look at changes, check logs, run a command or inspect the re
         ('roster', 'Read-only: list the administrator-configured colleague roles and, when a roster registry is configured, the count of active members. Answer roster/status questions with this instead of durable_submit; it creates no task and requires no source files.',
          {}, []),
     )
-    for action, description, properties, required in entries:
-        name = 'durable_' + action
-        ctx.register_tool(name=name, toolset='durable_dispatch', description=description,
-                          schema={'name': name, 'description': description, 'parameters': {
-                              'type': 'object', 'additionalProperties': False,
-                              'properties': properties, 'required': required}},
-                          handler=_handler(router, action))
+    # A backend executor must not be able to dispatch again: without this the
+    # nested turn re-submits the same work and the real result lands in a local
+    # session instead of the conversation that asked for it.
+    if not backend_runner:
+        for action, description, properties, required in entries:
+            name = 'durable_' + action
+            ctx.register_tool(name=name, toolset='durable_dispatch', description=description,
+                              schema={'name': name, 'description': description, 'parameters': {
+                                  'type': 'object', 'additionalProperties': False,
+                                  'properties': properties, 'required': required}},
+                              handler=_handler(router, action))
     for colleague in services.values(): start_backfill(ctx,colleague)

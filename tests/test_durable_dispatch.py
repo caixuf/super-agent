@@ -554,3 +554,19 @@ def test_backend_runner_skips_the_dispatch_prompt(monkeypatch, tmp_path):
     plugin.register(context2)
     assert "durable-dispatch-routing" in context2.prompt_sections
 
+
+
+def test_backend_runner_has_no_dispatch_tools(monkeypatch, tmp_path):
+    spec = importlib.util.spec_from_file_location(
+        "dd_backend_tools", Path(__file__).resolve().parents[1] / "plugins" / "durable_dispatch" / "__init__.py")
+    plugin = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(plugin)
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    settings = {"enabled": True, "queue_root": str(tmp_path / "q"),
+                "allowed_roots": [str(sources)]}
+    monkeypatch.setenv("SUPERAGENT_BACKEND_RUNNER", "1")
+    context = Context(settings)
+    plugin.register(context)
+    assert not any(name.startswith("durable_") for name in context.tools)
+
