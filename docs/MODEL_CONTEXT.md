@@ -54,7 +54,27 @@ bash checks/model_context_check.sh \
 
 # 机器可读
 python3 -m agentcore.model_context --config <profile>/config.yaml --json
+
+# 只看它会挑哪个配置，不探端点
+python3 -m agentcore.model_context --resolve-config --home ~ --profile default
 ```
+
+### 配置定位顺序
+
+脚本**不认死画像配置**：画像配置常常只有插件启用清单（安装器就是这么写的），
+本身没有 `model.base_url` / `model.provider → providers.<name>.base_url`，
+拿它当唯一来源会让体检永远退化成 SKIP，端点契约从未被真正验证过。
+定位顺序是：
+
+| 顺序 | 来源 | 说明 |
+| --- | --- | --- |
+| 1 | `MODEL_CONTEXT_CONFIG` | 显式指定，不做回退 |
+| 2 | `~/.hermes/profiles/<画像>/config.yaml` | **仅当它能解析出 base_url** |
+| 3 | `~/.hermes/config.yaml` | 顶层主配置；模型设置实际在这里 |
+| 4 | 画像配置 | 兜底：两者都没有时保持原路径，由体检报「没有配置」→ SKIP |
+
+「能解析出 base_url」用的是 `agentcore.model_context.resolve_base_url()`，
+和体检本身同一套优先级，不在脚本里复刻第二份语义。
 
 输出示例：
 
@@ -97,3 +117,16 @@ warning:  manual model.context_length=922000 differs from catalog 1048000; remov
 - 网关 `/v1/models`：原本没有窗口，客户端回退 256,000；压缩在约 220,000 tokens 触发。
 - 网关侧把 `/v1/model/info` 合并进 `/v1/models` 后，`agentcore.model_context` 读到 1,048,000。
 - 手写 `model.context_length: 922000` 已删除；它既不等于目录值，也不是运行时路由的 pin。
+
+## 7. 2026-11-06 的现场
+
+- 画像配置 `~/.hermes/profiles/default/config.yaml` 只有插件启用清单，**没有** 模型设置；
+  模型设置在顶层 `~/.hermes/config.yaml`（`model.provider: custom:ccp` →
+  `providers.ccp.base_url`）。体检此前只看画像配置，因此在本机一律记 SKIP ——
+  「窗口来自端点」这条契约实际从未被执行过。
+- 定位规则改为「画像配置解析不出 base_url 就退回顶层主配置」后，体检实际探到：
+  `context: 1441792 (source=models)`、`output: 393216`。目录值已不是 1,048,000，
+  本节第 6 节是 2026-10-29 的历史读数，不能外推到当前端点。
+- 现场配置里仍留着手写 `model.context_length: 1048000`，与目录值 1441792 不一致，
+  体检按设计报 warning（不阻断）。要消除这条告警应删掉该 pin —— 那是
+  `~/.hermes/config.yaml` 的运行时改动，不在本仓验证范围内，需单独授权后处理。

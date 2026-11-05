@@ -310,6 +310,39 @@ def resolve_base_url(config: Dict[str, Any]) -> str:
     return url.strip() if isinstance(url, str) else ""
 
 
+def _config_has_base_url(path: Union[str, Path]) -> bool:
+    """这个配置里能不能解析出 base_url？读不动就当没有。"""
+    try:
+        return bool(resolve_base_url(load_config_subset(path)))
+    except OSError:
+        return False
+
+
+def resolve_config_path(
+    home: Union[str, Path],
+    profile: str = "",
+    override: str = "",
+) -> str:
+    """定位真正带着模型设置的配置路径。
+
+    顺序：显式 override > 画像配置（能解析出 base_url 时）> 顶层主配置 > 画像配置。
+    画像配置常常只有插件启用清单（安装器就是这么写的），本身没有 model/provider
+    的 base_url；只看画像配置会让「窗口来自端点而非手写 pin」这道门禁永远退化成
+    SKIP，端点契约从未被真正验证过。
+    """
+    if override:
+        return str(override)
+    root = Path(home) / ".hermes"
+    profile_name = profile.strip() or "default"
+    profile_config = root / "profiles" / profile_name / "config.yaml"
+    main_config = root / "config.yaml"
+    if profile_config.is_file() and _config_has_base_url(profile_config):
+        return str(profile_config)
+    if main_config.is_file():
+        return str(main_config)
+    return str(profile_config)
+
+
 def check_config(catalog: Catalog, config: Dict[str, Any], model: str) -> List[str]:
     """Return human-readable inconsistencies between the catalog and config."""
     warnings: List[str] = []
@@ -477,7 +510,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--performance-budget-tokens", type=int, default=None,
                         help="optional workload budget to compare with compression trigger")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--resolve-config", action="store_true",
+                        help="print the config path that would be used, then exit")
+    parser.add_argument("--home", default="", help="user home holding .hermes/ (config lookup)")
+    parser.add_argument("--profile", default="", help="active profile name (config lookup)")
     args = parser.parse_args(argv)
+
+    if args.resolve_config:
+        print(resolve_config_path(args.home or str(Path.home()), args.profile, args.config))
+        return 0
 
     config: Dict[str, Any] = {}
     if args.config:

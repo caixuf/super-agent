@@ -31,13 +31,16 @@ if [ -z "$PY" ]; then
 fi
 
 CONFIG="${MODEL_CONTEXT_CONFIG:-}"
+PROFILE="${HERMES_PROFILE:-$(cat "$HOME/.hermes/active_profile" 2>/dev/null | tr -d '\n' || true)}"
 if [ -z "$CONFIG" ]; then
-  PROFILE="${HERMES_PROFILE:-$(cat "$HOME/.hermes/active_profile" 2>/dev/null | tr -d '\n' || true)}"
-  [ -n "$PROFILE" ] || PROFILE="default"
-  CONFIG="$HOME/.hermes/profiles/$PROFILE/config.yaml"
+  # 定位规则交给 agentcore.model_context（它才知道 model.base_url 与
+  # model.provider → providers.<name>.base_url 的优先级），本脚本不复刻一份。
+  # 画像配置常常只有插件启用清单、解析不出 base_url，这时要退回顶层主配置 ——
+  # 否则本门禁永远退化成 SKIP，端点窗口从未被真正验证过。
+  CONFIG="$("$PY" -m agentcore.model_context --resolve-config --home "$HOME" --profile "$PROFILE")"
 fi
 if [ ! -f "$CONFIG" ]; then
-  echo "[SKIP] 没有找到 profile 配置：$CONFIG" >&2
+  echo "[SKIP] 没有找到配置：$CONFIG" >&2
   exit 2
 fi
 

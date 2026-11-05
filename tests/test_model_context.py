@@ -1,8 +1,15 @@
 import json
+import os
+import subprocess
+from pathlib import Path
 
 import pytest
 
 from agentcore import model_context as mc
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CHECK_SCRIPT = REPO_ROOT / 'checks' / 'model_context_check.sh'
 
 
 CONFIG = """
@@ -51,6 +58,83 @@ def test_resolve_base_url_prefers_model_then_provider(tmp_path):
 
     config['model']['base_url'] = 'http://example.test/v1'
     assert mc.resolve_base_url(config) == 'http://example.test/v1'
+
+
+def _hermes_home(tmp_path, profile_config, main_config=None):
+    """搭一个 ~/.hermes 布局；profile_config / main_config 为 None 表示不放该文件。"""
+    home = tmp_path / '.hermes'
+    (home / 'profiles' / 'default').mkdir(parents=True, exist_ok=True)
+    if profile_config is not None:
+        (home / 'profiles' / 'default' / 'config.yaml').write_text(profile_config, encoding='utf-8')
+    if main_config is not None:
+        (home / 'config.yaml').write_text(main_config, encoding='utf-8')
+    return home
+
+
+def test_resolve_config_path_prefers_the_profile_that_carries_a_base_url(tmp_path):
+    home = _hermes_home(tmp_path, CONFIG, 'model:\n  default: other\n')
+    assert mc.resolve_config_path(tmp_path, 'default') == str(home / 'profiles' / 'default' / 'config.yaml')
+
+
+def test_resolve_config_path_falls_back_to_the_main_config(tmp_path):
+    # 安装器写出的画像配置只有插件启用清单 —— 解析不出 base_url，必须退回主配置，
+    # 否则「窗口来自端点而非手写 pin」这道门禁永远退化成 SKIP。
+    home = _hermes_home(tmp_path, 'plugins:\n  enabled:\n  - longtask-guard\n', CONFIG)
+    assert mc.resolve_config_path(tmp_path, 'default') == str(home / 'config.yaml')
+
+
+def test_resolve_config_path_falls_back_to_the_main_config_when_the_profile_is_missing(tmp_path):
+    home = _hermes_home(tmp_path, None, CONFIG)
+    assert mc.resolve_config_path(tmp_path, 'default') == str(home / 'config.yaml')
+
+
+def test_resolve_config_path_keeps_the_profile_when_there_is_nothing_else(tmp_path):
+    home = _hermes_home(tmp_path, 'plugins:\n  enabled: []\n')
+    assert mc.resolve_config_path(tmp_path, 'default') == str(home / 'profiles' / 'default' / 'config.yaml')
+
+
+def test_resolve_config_path_honours_an_explicit_override(tmp_path):
+    override = tmp_path / 'custom.yaml'
+    override.write_text(CONFIG, encoding='utf-8')
+    _hermes_home(tmp_path, CONFIG, CONFIG)
+    assert mc.resolve_config_path(tmp_path, 'default', str(override)) == str(override)
+
+
+def test_cli_resolve_config_prints_the_path_it_would_use(tmp_path, capsys):
+    home = _hermes_home(tmp_path, 'plugins:\n  enabled: []\n', CONFIG)
+
+    code = mc.main(['--resolve-config', '--home', str(tmp_path), '--profile', 'default'])
+
+    assert code == 0
+    assert capsys.readouterr().out.strip() == str(home / 'config.yaml')
+
+
+def _script_config_path(tmp_path, home):
+    """跑一遍 checks/model_context_check.sh，看它最终会用哪个配置。
+
+    脚本把定位结果作为 ``--config`` 传给模块；再叠一个 ``--resolve-config``，
+    模块就会把「被显式指定的那个路径」原样打印出来 —— 于是能从脚本外部
+    观察到它自己的定位选择，不需要真的探端点。
+    """
+    env = dict(os.environ, HOME=str(tmp_path))
+    env.pop('MODEL_CONTEXT_CONFIG', None)
+    env.pop('HERMES_PROFILE', None)
+    result = subprocess.run(
+        ['bash', str(CHECK_SCRIPT), '--resolve-config'],
+        cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def test_check_script_falls_back_to_the_main_config(tmp_path):
+    home = _hermes_home(tmp_path, 'plugins:\n  enabled: []\n', CONFIG)
+    assert _script_config_path(tmp_path, home) == str(home / 'config.yaml')
+
+
+def test_check_script_uses_the_profile_when_it_carries_the_base_url(tmp_path):
+    home = _hermes_home(tmp_path, CONFIG, 'model:\n  default: other\n')
+    assert _script_config_path(tmp_path, home) == str(home / 'profiles' / 'default' / 'config.yaml')
 
 
 def test_parse_models_and_model_info():

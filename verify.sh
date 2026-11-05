@@ -64,9 +64,12 @@ done < <(find . -name '*.sh' -not -path './.git/*' | sort)
 [ "$n_shell" -gt 0 ] && pass "$n_shell 个 shell 脚本语法正确"
 
 # ── ② 单元测试（含业务无关门禁；这是"仓自检"的本地版）
-section "② 单元测试（$PY -m pytest tests -q）"
-if "$PY" -m pytest tests -q >/tmp/verify_unit.log 2>&1; then
+section "② 单元测试（$PY -m pytest tests -q -rs）"
+if "$PY" -m pytest tests -q -rs >/tmp/verify_unit.log 2>&1; then
   pass "$(tail -n 1 /tmp/verify_unit.log | tr -d '\n')"
+  # 跳过的用例要逐项说明原因 ——「缺可选依赖」和「这条能力从没被验证过」不是一回事，
+  # 计数本身不能替代原因。
+  grep -E "^SKIPPED" /tmp/verify_unit.log | sed 's/^SKIPPED \[\([0-9]*\)\] /  [跳过 \1] /' | head -n 20
 else
   tail -n 20 /tmp/verify_unit.log | sed 's/^/    /'
   fail "单元测试未全过（完整输出：/tmp/verify_unit.log）"
@@ -163,6 +166,9 @@ if [ -f checks/model_context_check.sh ]; then
   rc=$?
   if [ "$rc" -eq 0 ]; then
     pass "$(awk '/^context:/{print; exit}' /tmp/verify_model_context.log | sed 's/^context:  //')"
+    # 「手写 pin 与端点目录不一致」正是本门禁要抓的东西，不能被 pass 行吞掉。
+    awk '/^warning:/{print; exit}' /tmp/verify_model_context.log \
+      | sed 's/^warning:  /[WARN] /' | sed 's/^/  /'
   elif [ "$rc" -eq 2 ]; then
     skipped+=("模型上下文体检（无 profile 配置或端点不可达）")
   else
