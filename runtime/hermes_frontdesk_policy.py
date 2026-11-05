@@ -32,7 +32,8 @@ _MAX_CONFIG_BYTES = 1024 * 1024
 #: ordinary question that needs a real tool, so they keep their full toolset.
 #: Only messaging surfaces get the thin-frontdesk restriction; an unknown or
 #: unreadable platform stays restricted (fail-closed).
-_BACKEND_PLATFORMS = frozenset({"api_server", "local"})
+_BACKEND_PLATFORMS = frozenset({"api_server", "local", "cli"})
+BACKEND_BLOCKED_TOOLS = frozenset({"durable_submit"})
 
 
 def _backend_session() -> bool:
@@ -111,8 +112,10 @@ def _settings(home: Path | str | None = None) -> dict[str, bool]:
 def tool_block_message(tool_name: str, *, home: Path | str | None = None) -> str | None:
     try:
         policy = _settings(home)
-        if not policy["enabled"] or _backend_session():
+        if not policy["enabled"]:
             return None
+        if _backend_session():
+            return TOOL_DENIED if isinstance(tool_name, str) and tool_name in BACKEND_BLOCKED_TOOLS else None
         allowed = TASK_TOOLS | (MEMORY_READ_TOOLS if policy["memory_read_enabled"] else frozenset())
         return None if isinstance(tool_name, str) and tool_name in allowed else TOOL_DENIED
     except Exception:
@@ -130,8 +133,13 @@ def filter_tool_definitions(
 ) -> list[dict[str, Any]]:
     try:
         policy = _settings(home)
-        if not policy["enabled"] or _backend_session():
+        if not policy["enabled"]:
             return definitions
+        if _backend_session():
+            return [
+                item for item in definitions
+                if item.get("function", {}).get("name") not in BACKEND_BLOCKED_TOOLS
+            ]
         allowed = TASK_TOOLS | (MEMORY_READ_TOOLS if policy["memory_read_enabled"] else frozenset())
         return [item for item in definitions if item.get("function", {}).get("name") in allowed]
     except Exception:

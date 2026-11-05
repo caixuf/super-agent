@@ -135,6 +135,23 @@ def test_commands_cannot_escape_through_quick_aliases_or_skill_commands(policy, 
         assert policy.command_block_message(command, home=tmp_path) == policy.COMMAND_DENIED
 
 
+@pytest.mark.parametrize("platform", ["api_server", "local", "cli"])
+def test_backend_session_allows_execution_tools_and_blocks_recursive_durable_submit(
+    policy, tmp_path, monkeypatch, platform,
+):
+    _enable(tmp_path)
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", platform)
+    assert policy.tool_block_message("terminal", home=tmp_path) is None
+    assert policy.tool_block_message("durable_submit", home=tmp_path) == policy.TOOL_DENIED
+    definitions = [
+        {"type": "function", "function": {"name": "terminal"}},
+        {"type": "function", "function": {"name": "durable_submit"}},
+        {"type": "function", "function": {"name": "durable_status"}},
+    ]
+    filtered = policy.filter_tool_definitions(definitions, home=tmp_path)
+    assert [item["function"]["name"] for item in filtered] == ["terminal", "durable_status"]
+
+
 def _stage_host(tmp_path, revision=None):
     if not all((HOST / name).is_file() for name in HOST_FILES):
         pytest.skip("Hermes source unavailable for frontdesk integration")

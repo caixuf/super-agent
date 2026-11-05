@@ -37,7 +37,10 @@ def _decorate_goal(goal: str) -> str:
     target_host = (os.environ.get("DEV_TARGET_HOST") or "").strip()
     if not duty and not target_host:
         return goal
-    lines = ["[Expert Context]"]
+    lines = [
+        "[Expert Context]",
+        "- Mode: Backend executor (execute directly with terminal/file/MCP tools and return concrete evidence; do NOT call durable_submit).",
+    ]
     if duty:
         lines.append(f"- Duty: {duty}")
     if target_host:
