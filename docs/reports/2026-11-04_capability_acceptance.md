@@ -674,3 +674,30 @@ WARNING hermes_cli.plugins: Plugin system prompt section durable-dispatch-routin
 DispatchService 对 analysis 角色仍拒绝 .env / *.pem / *.key / *credential* / auth.json 这类
 凭据文件（代码内固定，不由配置移除）。这是防把密钥读进模型上下文，不是目录限制。
 要连这条也去掉，需要改代码并明确接受凭据外泄风险。
+
+## 19. emily 受管升级与鸡肋定时任务清理（2026-11-05）
+
+### 升级
+
+直接 `plan` 报 `legacy_card_patches_require_clean_candidate` /
+`feishu_card_implementation_unverified`。与 2026-11-04 同一根因：默认 `--hermes-root`
+指向共享工作树（带过时 `card-native-markdown` 补丁），而实际运行的是受管干净候选。
+
+```bash
+python3 tools/superagent.py --profile imfl --root /mnt/nvme_ntfs/agents/hermes/superagent \
+  --hermes-root /mnt/nvme_ntfs/agents/hermes/superagent/imfl/hermes/v0.22.5-bf0203a794a0 update
+```
+
+结果：`blockers: []`，`current -> releases/3f31333`，`release.json` 版本一致，
+gateway 与 15 个角色 worker 全部重启并 active；新会话日志出现
+`Session plugin prompt section: id=durable-dispatch-routing`（不再 skipped）。
+
+### 删除的定时任务
+
+| 单元 | 内容 | 处置 |
+| :--- | :--- | :--- |
+| `imfl-dup-guard.timer` | 每 30 分钟扫飞书复读并告警 | 已 `disable --now`，unit 文件移到 `~/backups/removed-units-20261105-103421` |
+
+保留并复核过成本：`imfl-capability-guard`（30 分钟、109ms、仅在能力被压低时告警）、
+`superagent-proactive`（每小时、1–2 秒、只记录不外发）、`taskdb-backup`、
+`ccp-qianfan-on/off`（配额时段开关）。系统自带 timer（snap / launchpadlib）不动。
