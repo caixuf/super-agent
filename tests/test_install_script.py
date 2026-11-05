@@ -20,9 +20,9 @@ PLUGIN_NAMES = ("capability-alert-outbox", "colleague-catalog", "colleague-team"
 
 #: 带 plugin.yaml 的插件才写启用记录；localvec 没有 manifest，是 memory provider。
 ENABLE_NAMES = ("capability-alert-outbox", "colleague-catalog", "colleague-team",
-                "durable-dispatch", "illustrated-delivery", "local-model-grounding",
-                "longtask-guard", "markdown-delivery", "memory-bridge", "task-progress",
-                "task-status", "write-guard")
+                "durable-dispatch", "illustrated-delivery", "lan-cluster",
+                "local-model-grounding", "longtask-guard", "markdown-delivery",
+                "memory-bridge", "task-progress", "task-status", "write-guard")
 
 
 def _run(home: Path, *extra: str, path_prefix: Path | None = None,

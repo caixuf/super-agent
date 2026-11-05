@@ -354,8 +354,10 @@ def test_backend_api_server_sessions_keep_their_full_toolset(tmp_path, monkeypat
         'superagent': {'frontdesk': {'enabled': True, 'memory_read_enabled': False}}}))
     defs = [{'function': {'name': n}} for n in ('terminal', 'read_file', 'durable_submit')]
     monkeypatch.setenv('HERMES_SESSION_PLATFORM', 'api_server')
-    assert policy.filter_tool_definitions(defs, home=home) == defs
+    filtered = policy.filter_tool_definitions(defs, home=home)
+    assert [d['function']['name'] for d in filtered] == ['terminal', 'read_file']
     assert policy.tool_block_message('terminal', home=home) is None
+    assert policy.tool_block_message('durable_submit', home=home) == policy.TOOL_DENIED
 
 
 def test_messaging_sessions_stay_restricted(tmp_path, monkeypatch):

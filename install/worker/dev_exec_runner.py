@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -68,15 +69,28 @@ def _profile_home() -> Path:
 
 def _hermes_bin() -> str | None:
     explicit = os.environ.get("DEV_HERMES_BIN")
-    if explicit:
-        return explicit if Path(explicit).is_file() else None
-    # Follow the newest managed release instead of pinning one version string.
+    if explicit and Path(explicit).is_file():
+        return explicit
+
+    # 1. Search PATH
+    on_path = shutil.which("hermes")
+    if on_path and Path(on_path).is_file():
+        return on_path
+
+    # 2. Search user local bin
+    local_bin = Path.home() / ".local" / "bin" / "hermes"
+    if local_bin.is_file():
+        return str(local_bin)
+
+    # 3. Follow the newest managed release instead of pinning one version string.
     home = _profile_home().parent.parent
-    candidates = sorted(
-        (home / "superagent").glob("*/hermes/*/.hermes/bin/hermes"),
-        key=lambda p: p.stat().st_mtime, reverse=True,
-    )
-    return str(candidates[0]) if candidates else None
+    raw_candidates = list((home / "superagent").glob("*/hermes/*/.hermes/bin/hermes"))
+    valid_candidates = [p for p in raw_candidates if p.is_file()]
+    if valid_candidates:
+        valid_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return str(valid_candidates[0])
+
+    return None
 
 
 def _engine_root() -> Path:
