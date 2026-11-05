@@ -50,7 +50,9 @@ def test_frontdesk_denies_execution_and_indirect_entries(policy, tmp_path, name)
 def test_frontdesk_exposes_task_apis_without_creating_extra_capabilities(policy, tmp_path):
     _enable(tmp_path)
     names = {"durable_submit", "durable_status", "durable_cancel", "durable_roster",
-             "task_status", "colleague_list", "terminal", "memory_search_l1", "not_registered"}
+             "task_status", "colleague_list", "colleague_assign", "colleague_task_status",
+             "lan_node_list", "lan_node_probe",
+             "terminal", "memory_search_l1", "not_registered"}
     definitions = [{"type": "function", "function": {"name": name}} for name in names]
     filtered = policy.filter_tool_definitions(definitions, home=tmp_path)
     assert {item["function"]["name"] for item in filtered} == policy.TASK_TOOLS

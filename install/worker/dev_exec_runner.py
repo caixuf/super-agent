@@ -40,6 +40,7 @@ def _decorate_goal(goal: str) -> str:
     lines = [
         "[Expert Context]",
         "- Mode: Backend executor (execute directly with terminal/file/MCP tools and return concrete evidence; do NOT call durable_submit).",
+        "- Colleague Collaboration & Fault Tolerance: You can inspect the team roster (`colleague_list`), assign/consult specialist colleagues (`colleague_assign` / `colleague_task_status` for architect/cases/reviewer/test/triage/ops/backend/frontend), or spawn parallel subagents (`delegate_task`) when cross-role collaboration or failover speeds up or recovers a task.",
     ]
     if duty:
         lines.append(f"- Duty: {duty}")

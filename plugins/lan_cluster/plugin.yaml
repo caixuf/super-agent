@@ -1,0 +1,11 @@
+name: lan-cluster
+version: "0.1.0"
+kind: standalone
+description: "Distributed LAN node registry, health probing, and resumable remote agent RPC."
+author: agentcore
+provides_tools:
+  - lan_node_list
+  - lan_node_probe
+  - lan_node_rpc
+provides_hooks: []
+
