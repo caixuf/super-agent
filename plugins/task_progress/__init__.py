@@ -468,6 +468,25 @@ def _entry_key(turn_id: str, session_id: str, task_id: str) -> str:
     return "task:%s" % task_id
 
 
+def _single_card_producer_conflict(ctx) -> bool:
+    """Enforce single Feishu card producer per profile (ADR-S6).
+
+    When durable-dispatch already owns completion card delivery on this profile,
+    task-progress must yield card emission unless allow_coexisting_card_producer
+    is explicitly enabled.
+    """
+    if ctx.get_config("allow_coexisting_card_producer", False) is True:
+        return False
+    if ctx.get_config("yield_to_durable_dispatch_cards", False) is True:
+        return True
+    profile = getattr(ctx, "profile_name", None)
+    active_producers = getattr(sys, "_superagent_active_card_producers", None)
+    if isinstance(profile, str) and profile and isinstance(active_producers, set):
+        if profile in active_producers:
+            return True
+    return False
+
+
 # --------------------------------------------------------------------------- #
 # Registration
 # --------------------------------------------------------------------------- #
@@ -476,6 +495,12 @@ def register(ctx) -> None:
     global _CTX
     settings = _settings(ctx)
     if not settings["enabled"]:
+        return
+    if _single_card_producer_conflict(ctx):
+        logger.info(
+            "task-progress: yielding card producer role to durable-dispatch on profile=%s (ADR-S6)",
+            getattr(ctx, "profile_name", "unknown"),
+        )
         return
     modules = _engine_modules(settings["engine_root"])
     store = _store(ctx, modules, settings)

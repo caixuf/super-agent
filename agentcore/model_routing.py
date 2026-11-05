@@ -17,7 +17,7 @@ TIER_MAIN: Final[str] = "main"
 TIER_FLASH: Final[str] = "flash"
 MODEL_TIERS: Final[Tuple[str, ...]] = (TIER_PRO, TIER_MAIN, TIER_FLASH)
 
-# Strict whitelist for expensive 'pro' model tier (planning & deep diagnosis only)
+# Strict whitelist for expensive 'pro' model tier (planning, architecture, review & deep diagnosis)
 PRO_ALLOWED_ROLES: Final[frozenset[str]] = frozenset({
     "architect",
     "brain",
@@ -25,9 +25,14 @@ PRO_ALLOWED_ROLES: Final[frozenset[str]] = frozenset({
     "plan_gate",
     "plan_generator",
     "deep_diagnosis",
+    "reviewer",
+    "triage",
 })
 
-# Roles strictly forbidden from accessing 'pro' tier (forced to flash to prevent overdraft)
+# Roles strictly forbidden from accessing 'pro' tier (forced to flash to prevent overdraft).
+# NOTE (ADR-S3): 'compression' / 'memory' / 'context_compaction' must NEVER be placed in
+# EXECUTION_ROLES because forcing long-context compaction onto the lowest 'flash' tier
+# irreversibly corrupts session memory and architectural state.
 EXECUTION_ROLES: Final[frozenset[str]] = frozenset({
     "dev_runner",
     "pi_executor",
@@ -40,11 +45,51 @@ EXECUTION_ROLES: Final[frozenset[str]] = frozenset({
     "runner",
     "tool_loop",
     "executor",
-    "compression",
     "background_review",
 })
 
+# Roles protected against lowest-tier ('flash') degradation to preserve long-context fidelity (S3)
+COMPRESSION_PROTECTED_ROLES: Final[frozenset[str]] = frozenset({
+    "compression",
+    "memory",
+    "context_compaction",
+})
+
 DEFAULT_MAX_PRO_CALLS_PER_TASK: Final[int] = 2
+
+# Machine-verifiable Architectural Decision Records (S5: prevent context loss & arbitrary edits)
+ARCHITECTURAL_DECISION_RECORDS: Final[Dict[str, Dict[str, Any]]] = {
+    "ADR-S1": {
+        "title": "Single Source of Truth for Model Identity & Routing",
+        "decision": "All runners (dev_exec_runner, dev_runner, durable_dispatch, ccp_config) must resolve model tier via agentcore.model_routing.",
+        "invariant": "No runner may hardcode model='flash' or silently rewrite 'pro' outside enforce_model_tier_budget.",
+    },
+    "ADR-S2": {
+        "title": "Explicit Visibility for Model & Engine Degradation",
+        "decision": "Every tier downgrade (pro->main/flash) or engine fallback (hermes->pi) must emit degraded=True and degradation_reason.",
+        "invariant": "Completion receipts must surface degradation notices instead of masking quality drops.",
+    },
+    "ADR-S3": {
+        "title": "Long-Context Compaction Floor Protection",
+        "decision": "Compression and memory synthesis roles are pinned to >= 'main' tier (medium effort) and excluded from EXECUTION_ROLES.",
+        "invariant": "COMPRESSION_PROTECTED_ROLES must remain disjoint from EXECUTION_ROLES and never route to 'flash'.",
+    },
+    "ADR-S4": {
+        "title": "Acyclic Package Boundary Between agentcore and toolsets.pi_executor",
+        "decision": "agentcore modules must never import toolsets.pi_executor or hermes_bridge.pi_executor; dependency flows strictly toolsets -> agentcore.",
+        "invariant": "AST import graph of agentcore/* contains zero edges to toolsets/* or hermes_bridge/*.",
+    },
+    "ADR-S5": {
+        "title": "Pro Tier Whitelist and Per-Task Quota Guardrail",
+        "decision": "Only cognitive/planning/review roles in PRO_ALLOWED_ROLES may use 'pro', capped at DEFAULT_MAX_PRO_CALLS_PER_TASK per task.",
+        "invariant": "PRO_ALLOWED_ROLES and EXECUTION_ROLES must be strictly disjoint; quota defaults to 2.",
+    },
+    "ADR-S6": {
+        "title": "Single Completion Card Producer Mutual Exclusion",
+        "decision": "When durable-dispatch completion_card_enabled is active, task-progress must yield card emission.",
+        "invariant": "At most one plugin emits Feishu completion cards per profile.",
+    },
+}
 
 # Canonical weakest-to-strongest reasoning effort ladder
 REASONING_EFFORT_LADDER: Final[Tuple[str, ...]] = (
@@ -66,12 +111,16 @@ MODEL_ROLES: Final[Tuple[str, ...]] = (
     "brain",
     "planning",
     "plan_gate",
+    "plan_generator",
     "deep_diagnosis",
     "implementation",
     "design_visual",
     "docs",
     "dev_runner",
     "ops",
+    "compression",
+    "memory",
+    "context_compaction",
 )
 
 # Explicit reasoning depth dials
@@ -110,9 +159,13 @@ ROLE_PROFILE_DEFAULTS: Final[Dict[str, Dict[str, str]]] = {
     "brain": {"depth": "ultrabrain", "effort": "high", "tier": "ultrabrain"},
     "planning": {"depth": "ultrabrain", "effort": "high", "tier": "ultrabrain"},
     "plan_gate": {"depth": "ultrabrain", "effort": "high", "tier": "ultrabrain"},
+    "plan_generator": {"depth": "ultrabrain", "effort": "high", "tier": "ultrabrain"},
     "deep_diagnosis": {"depth": "ultrabrain", "effort": "high", "tier": "ultrabrain"},
     "reviewer": {"depth": "deep", "effort": "high", "tier": "deep"},
     "triage": {"depth": "deep", "effort": "high", "tier": "deep"},
+    "compression": {"depth": "deep", "effort": "medium", "tier": "deep"},
+    "memory": {"depth": "deep", "effort": "medium", "tier": "deep"},
+    "context_compaction": {"depth": "deep", "effort": "medium", "tier": "deep"},
     "cases": {"depth": "standard", "effort": "medium", "tier": "standard"},
     "implementation": {"depth": "standard", "effort": "medium", "tier": "standard"},
     "research": {"depth": "standard", "effort": "medium", "tier": "standard"},
@@ -141,6 +194,10 @@ BUILTIN_ROLE_CHAINS: Final[Dict[str, Dict[str, Tuple[Dict[str, str], ...]]]] = {
             {"model": "pro", "effort": "high"},
             {"model": "main", "effort": "high"},
         ),
+        "plan_generator": (
+            {"model": "pro", "effort": "high"},
+            {"model": "main", "effort": "high"},
+        ),
         "deep_diagnosis": (
             {"model": "pro", "effort": "high"},
             {"model": "main", "effort": "high"},
@@ -152,6 +209,15 @@ BUILTIN_ROLE_CHAINS: Final[Dict[str, Dict[str, Tuple[Dict[str, str], ...]]]] = {
         "triage": (
             {"model": "main", "effort": "high"},
             {"model": "flash", "effort": "medium"},
+        ),
+        "compression": (
+            {"model": "main", "effort": "medium"},
+        ),
+        "memory": (
+            {"model": "main", "effort": "medium"},
+        ),
+        "context_compaction": (
+            {"model": "main", "effort": "medium"},
         ),
         "cases": (
             {"model": "flash", "effort": "medium"},
@@ -313,19 +379,31 @@ def enforce_model_tier_budget(
     task_pro_calls: int = 0,
     max_pro_calls: int = DEFAULT_MAX_PRO_CALLS_PER_TASK,
 ) -> Tuple[str, Optional[Dict[str, str]]]:
-    """Intercept and guard calls to the expensive 'pro' model tier.
+    """Intercept and guard calls to the expensive 'pro' model tier, and protect compression floor.
 
-    Financial circuit breaker rules:
+    Financial & quality circuit breaker rules:
+    0. Compression/memory roles (ADR-S3) must never drop to 'flash' -> floor at 'main'.
     1. Execution roles (dev_runner, test, cases, implementation, etc.) are strictly
        prohibited from using 'pro' and are forced to downgrade to 'flash'.
     2. Non-whitelisted roles requesting 'pro' are downgraded to 'main'.
     3. Tasks exceeding the maximum allowed 'pro' quota (default: 2) are downgraded to 'main'.
     """
     clean_model = (model or "").strip()
+    clean_role = (role or "").strip().lower()
+
+    if clean_role in COMPRESSION_PROTECTED_ROLES and clean_model.lower() == TIER_FLASH:
+        return TIER_MAIN, {
+            "stage": "compression_floor_guard",
+            "outcome": "upgraded_to_floor",
+            "reason": (
+                f"[COMPRESSION_GUARD] Role '{clean_role}' is protected from lowest tier "
+                f"'{TIER_FLASH}' to prevent long-context pollution (ADR-S3). "
+                f"Floor enforced at '{TIER_MAIN}'."
+            ),
+        }
+
     if clean_model.lower() != TIER_PRO:
         return clean_model, None
-
-    clean_role = (role or "").strip().lower()
 
     # Rule 1: Execution roles strictly cannot use pro -> forced downgrade to flash
     if clean_role in EXECUTION_ROLES:
@@ -371,6 +449,22 @@ def enforce_model_tier_budget(
             f"({task_pro_calls + 1}/{max_pro_calls} calls used)."
         ),
     }
+
+
+def _extract_degradation(attempted: Sequence[Mapping[str, str]], *, fallback_used: bool = False) -> Tuple[bool, str]:
+    """Derive explicit degradation status and reason from route attempt records (ADR-S2)."""
+    reasons: List[str] = []
+    for rec in attempted:
+        outcome = rec.get("outcome", "")
+        if outcome in ("intercepted_and_downgraded", "quota_exceeded_downgraded"):
+            reasons.append(rec.get("reason", outcome))
+        elif rec.get("stage") == "role_chain" and outcome == "candidate_unavailable":
+            reasons.append(rec.get("reason", "primary role candidate unavailable"))
+    if fallback_used and not reasons:
+        for rec in attempted:
+            if rec.get("stage") == "role_chain" and rec.get("outcome") == "unavailable":
+                reasons.append(rec.get("reason", "role chain unavailable; used executor default"))
+    return (bool(reasons), "; ".join(reasons))
 
 
 def resolve_model_route(
@@ -424,6 +518,8 @@ def resolve_model_route(
                 "depth": clean_depth,
                 "scale": clean_scale,
                 "provenance": "request_named_model",
+                "degraded": True,
+                "degradation_reason": f"Model `{req_model}` is non-generative",
                 "attempted": attempted,
             }
 
@@ -451,6 +547,7 @@ def resolve_model_route(
             if req_model == TIER_PRO or effective_effort == "high"
             else ("deep" if req_model == TIER_MAIN or effective_effort == "medium" else "quick")
         )
+        degraded, degradation_reason = _extract_degradation(attempted)
         return {
             "schema_version": CODING_MODEL_ROUTE_SCHEMA_VERSION,
             "status": "routed",
@@ -461,6 +558,8 @@ def resolve_model_route(
             "depth": clean_depth,
             "scale": clean_scale,
             "provenance": "request_named_model",
+            "degraded": degraded,
+            "degradation_reason": degradation_reason,
             "attempted": attempted,
         }
 
@@ -491,7 +590,7 @@ def resolve_model_route(
 
     # Filter candidate chain against available_models and budget guardrail
     selected_candidate: Optional[Mapping[str, str]] = None
-    for cand in role_chain:
+    for idx, cand in enumerate(role_chain):
         cand_model = cand.get("model", "")
         guarded_cand, guard_rec = enforce_model_tier_budget(
             cand_model,
@@ -506,6 +605,11 @@ def resolve_model_route(
             selected_candidate = dict(cand)
             selected_candidate["model"] = guarded_cand
             break
+        attempted.append({
+            "stage": "role_chain",
+            "outcome": "candidate_unavailable",
+            "reason": f"Candidate `{guarded_cand}` (index {idx}) unavailable in catalog",
+        })
 
     if selected_candidate:
         cand_model = selected_candidate.get("model", "")
@@ -520,6 +624,7 @@ def resolve_model_route(
             eff = "low" if eff in ("high", "medium") else eff
             tier = "quick"
 
+        degraded, degradation_reason = _extract_degradation(attempted)
         return {
             "schema_version": CODING_MODEL_ROUTE_SCHEMA_VERSION,
             "status": "routed",
@@ -530,6 +635,8 @@ def resolve_model_route(
             "depth": effective_depth,
             "scale": clean_scale,
             "provenance": provenance,
+            "degraded": degraded,
+            "degradation_reason": degradation_reason,
             "attempted": attempted,
         }
 
@@ -562,6 +669,7 @@ def resolve_model_route(
         eff = "low"
         tier = "quick"
 
+    degraded, degradation_reason = _extract_degradation(attempted, fallback_used=bool(clean_role))
     return {
         "schema_version": CODING_MODEL_ROUTE_SCHEMA_VERSION,
         "status": "routed",
@@ -572,6 +680,25 @@ def resolve_model_route(
         "depth": effective_depth,
         "scale": clean_scale,
         "provenance": "executor_default",
+        "degraded": degraded,
+        "degradation_reason": degradation_reason,
         "attempted": attempted,
     }
+
+
+def resolve_colleague_model(
+    role: str,
+    requested_model: str = "",
+    *,
+    task_pro_calls: int = 0,
+    max_pro_calls: int = DEFAULT_MAX_PRO_CALLS_PER_TASK,
+) -> Dict[str, Any]:
+    """Canonical single-source-of-truth model resolver for colleagues and workers (ADR-S1)."""
+    return resolve_model_route(
+        "super-agent",
+        role=role,
+        requested_model=requested_model,
+        task_pro_calls=task_pro_calls,
+        max_pro_calls=max_pro_calls,
+    )
 

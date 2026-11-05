@@ -82,29 +82,71 @@ def _engine_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _read_job(stream) -> str:
+def _read_job_envelope(stream) -> tuple[str, dict]:
     raw = stream.read(MAX_INPUT + 1)
     if len(raw) > MAX_INPUT:
         raise ValueError("job_input_budget")
     job = json.loads(raw)
-    goal = (job.get("payload") or {}).get("goal")
+    payload = job.get("payload") or {}
+    goal = payload.get("goal")
     if not isinstance(goal, str) or not goal.strip() or len(goal) > MAX_GOAL:
         raise ValueError("invalid_goal")
-    return goal.strip()
+    return goal.strip(), payload
 
 
-def _clean_env() -> dict[str, str]:
+def _read_job(stream) -> str:
+    goal, _ = _read_job_envelope(stream)
+    return goal
+
+
+def _resolve_job_model_route(payload: dict | None = None) -> dict:
+    engine = _engine_root()
+    if str(engine) not in sys.path:
+        sys.path.insert(0, str(engine))
+    payload = payload or {}
+    role = (
+        os.environ.get("DEV_MODEL_ROLE")
+        or payload.get("_colleague_role")
+        or payload.get("role")
+        or "dev_runner"
+    )
+    requested_model = (
+        os.environ.get("DEV_MODEL_TIER")
+        or payload.get("_model_tier")
+        or os.environ.get("DEV_PI_MODEL")
+        or ""
+    )
+    try:
+        from agentcore.model_routing import resolve_colleague_model
+        return resolve_colleague_model(str(role), str(requested_model))
+    except Exception:
+        return {
+            "selected_model": str(requested_model or "flash"),
+            "selected_reasoning_effort": "medium",
+            "selected_tier": "quick",
+            "role": str(role),
+            "degraded": False,
+            "degradation_reason": "",
+        }
+
+
+def _clean_env(route: dict | None = None) -> dict[str, str]:
     env = dict(os.environ)
     env["HERMES_HOME"] = str(_profile_home())
     env["HERMES_SESSION_SOURCE"] = "cli"
     # The backend keeps the full toolset; only human chat surfaces are thin.
     env["HERMES_SESSION_PLATFORM"] = "api_server"
-    env["HERMES_SESSION_CHAT_ID"] = "dev-worker"
+    env["HERMES_SESSION_CHAT_ID"] = f"dev-worker-{os.getpid()}"
     # Backend execution is unattended: no approval prompts may block a job.
     env["HERMES_YOLO_MODE"] = "1"
     # Tell durable_dispatch this turn is an executor, not a frontdesk: without
     # it the nested agent inherits the dispatch prompt and re-submits the work.
     env["SUPERAGENT_BACKEND_RUNNER"] = "1"
+    if route:
+        if route.get("selected_model"):
+            env["SUPERAGENT_MODEL_TIER"] = str(route["selected_model"])
+        if route.get("selected_reasoning_effort"):
+            env["SUPERAGENT_REASONING_EFFORT"] = str(route["selected_reasoning_effort"])
     for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
         env.pop(key, None)
     return env
@@ -116,10 +158,10 @@ def _workdir() -> Path:
     return path if path.is_dir() else Path.home()
 
 
-def run_hermes(goal: str) -> dict:
+def run_hermes(goal: str, *, route: dict | None = None) -> dict:
     effective_goal = _decorate_goal(goal)
-    budget = int(os.environ.get("DEV_BUDGET", "240"))
-    max_turns = int(os.environ.get("DEV_MAX_TURNS", "12"))
+    budget = int(os.environ.get("DEV_BUDGET", "480"))
+    max_turns = int(os.environ.get("DEV_MAX_TURNS", "40"))
     ssh_host = (os.environ.get("DEV_SSH_HOST") or "").strip()
     if ssh_host:
         if not _SSH_HOST_RE.fullmatch(ssh_host):
@@ -130,10 +172,12 @@ def run_hermes(goal: str) -> dict:
         env_parts = [
             "HERMES_SESSION_SOURCE=cli",
             "HERMES_SESSION_PLATFORM=api_server",
-            "HERMES_SESSION_CHAT_ID=dev-worker",
+            f"HERMES_SESSION_CHAT_ID=dev-worker-{os.getpid()}",
             "HERMES_YOLO_MODE=1",
             "SUPERAGENT_BACKEND_RUNNER=1",
         ]
+        if route and route.get("selected_model"):
+            env_parts.append("SUPERAGENT_MODEL_TIER=" + shlex.quote(str(route["selected_model"])))
         if remote_home:
             env_parts.append("HERMES_HOME=" + shlex.quote(remote_home))
         remote_cmd = " ".join(env_parts) + " " + " ".join([
@@ -143,14 +187,14 @@ def run_hermes(goal: str) -> dict:
         if remote_workdir:
             remote_cmd = f"cd {shlex.quote(remote_workdir)} && {remote_cmd}"
         cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ssh_host, remote_cmd]
-        run_kwargs = {"input": effective_goal, "env": _clean_env()}
+        run_kwargs = {"input": effective_goal, "env": _clean_env(route)}
     else:
         binary = _hermes_bin()
         if not binary:
             return {"ok": False, "error": "hermes_unavailable"}
         cmd = [binary, "chat", "-q", effective_goal, "--oneshot",
                "--run-budget", str(budget), "--max-turns", str(max_turns)]
-        run_kwargs = {"cwd": str(_workdir()), "env": _clean_env()}
+        run_kwargs = {"cwd": str(_workdir()), "env": _clean_env(route)}
     try:
         done = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=budget + 60, **run_kwargs)
@@ -175,7 +219,7 @@ def run_hermes(goal: str) -> dict:
     return payload
 
 
-def run_pi(goal: str) -> dict:
+def run_pi(goal: str, *, route: dict | None = None) -> dict:
     engine = _engine_root()
     if str(engine) not in sys.path:
         sys.path.insert(0, str(engine))
@@ -186,7 +230,8 @@ def run_pi(goal: str) -> dict:
     except Exception as exc:
         return {"ok": False, "error": "pi_executor_unavailable: " + type(exc).__name__}
 
-    model = os.environ.get("DEV_PI_MODEL", "flash")
+    resolved_route = route or _resolve_job_model_route()
+    model = str(resolved_route.get("selected_model") or "flash")
     provider = os.environ.get("DEV_PI_PROVIDER", "ccp")
     timeout = int(os.environ.get("DEV_PI_TIMEOUT", os.environ.get("DEV_BUDGET", "300")))
     agent_dir = _profile_home() / "cache" / "scratch" / "dev-runner-pi"
@@ -206,7 +251,7 @@ def run_pi(goal: str) -> dict:
     ok = bool(result.ok) and bool(text.strip())
     payload = {"ok": ok, "summary": text.strip(), "output": text, "stderr": "", "returncode": result.exit_code,
                "stop_reason": result.stop_reason, "tool_calls": result.tool_calls,
-               "duration_ms": result.duration_ms}
+               "duration_ms": result.duration_ms, "model": model}
     if not ok:
         payload["error"] = result.error_message or result.stop_reason or "pi_failed"
     return payload
@@ -214,26 +259,57 @@ def run_pi(goal: str) -> dict:
 
 def main() -> int:
     try:
-        goal = _read_job(sys.stdin)
+        goal, job_payload = _read_job_envelope(sys.stdin)
     except Exception as exc:
         print(json.dumps({"ok": False, "error": "invalid_job: " + type(exc).__name__}))
         return 1
 
-    primary = run_hermes(goal)
+    route = _resolve_job_model_route(job_payload)
+    model_tier = str(route.get("selected_model") or "flash")
+    route_degraded = bool(route.get("degraded"))
+    route_reason = str(route.get("degradation_reason") or "")
+
+    primary = run_hermes(goal, route=route)
     if primary.get("ok"):
-        print(json.dumps({"ok": True, "engine": "hermes", "result": primary}, ensure_ascii=False))
+        print(json.dumps({
+            "ok": True,
+            "engine": "hermes",
+            "model_tier": model_tier,
+            "degraded": route_degraded,
+            "engine_degraded": False,
+            "degradation_reason": route_reason,
+            "result": primary,
+        }, ensure_ascii=False))
         return 0
 
-    fallback = run_pi(goal)
+    fallback = run_pi(goal, route=route)
+    primary_err = primary.get("error", "turn_failed")
+    fallback_reason = f"primary_engine_fallback:hermes->{primary_err}"
+    combined_reason = "; ".join(r for r in (route_reason, fallback_reason) if r)
     if fallback.get("ok"):
-        print(json.dumps({"ok": True, "engine": "pi", "result": fallback,
-                          "primary_error": primary.get("error", "turn_failed")},
-                         ensure_ascii=False))
+        print(json.dumps({
+            "ok": True,
+            "engine": "pi",
+            "model_tier": model_tier,
+            "degraded": True,
+            "engine_degraded": True,
+            "degradation_reason": combined_reason,
+            "result": fallback,
+            "primary_error": primary_err,
+        }, ensure_ascii=False))
         return 0
 
-    print(json.dumps({"ok": False, "engine": "none", "result": fallback,
-                      "primary_error": primary.get("error", "turn_failed"),
-                      "error": "both_engines_failed"}, ensure_ascii=False))
+    print(json.dumps({
+        "ok": False,
+        "engine": "none",
+        "model_tier": model_tier,
+        "degraded": True,
+        "engine_degraded": True,
+        "degradation_reason": combined_reason,
+        "result": fallback,
+        "primary_error": primary_err,
+        "error": "both_engines_failed",
+    }, ensure_ascii=False))
     return 0
 
 

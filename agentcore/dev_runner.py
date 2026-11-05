@@ -179,15 +179,18 @@ def run_dev_job(
         # Never silently run a sandboxed task's verification on the host.
         raise RuntimeError("sandbox_verification_executor_required")
 
-    # Financial Overdraft Guard: dev_runner is strictly for execution and tool calling.
-    # Pro model tier is forbidden to prevent bankruptcy from heavy execution loops.
-    clean_model = (model or "").strip()
-    if clean_model.lower() == "pro":
-        sys.stderr.write(
-            "[BUDGET_GUARD] dev_runner received forbidden model tier 'pro'. "
-            "Forced downgrade to 'flash' to prevent financial overdraft.\n"
-        )
-        model = "flash"
+    # Single source of truth for model routing & financial overdraft guard (ADR-S1, ADR-S2):
+    # Resolve via agentcore.model_routing instead of duplicating ad-hoc 'pro' -> 'flash' rules.
+    from agentcore.model_routing import EXECUTION_ROLES, resolve_model_route
+    raw_role = str(job["payload"].get("role") or "dev_runner").strip().lower()
+    routing_role = raw_role if raw_role in EXECUTION_ROLES else "dev_runner"
+    clean_model = (model or "").strip() or "flash"
+    route = resolve_model_route("super-agent", role=routing_role, requested_model=clean_model)
+    model = route["selected_model"] or "flash"
+    degraded = bool(route.get("degraded"))
+    degradation_reason = str(route.get("degradation_reason") or "")
+    if degraded and degradation_reason:
+        sys.stderr.write(degradation_reason + "\n")
 
     memory = ""
     if memory_file:
@@ -201,67 +204,18 @@ def run_dev_job(
 
     verification_receipt = None
     with worktree_lock(workdir, lock_root=lock_root):
-        if runner_callable is not None:
-            raw_result = runner_callable(prompt, {
-                "workdir": workdir,
-                "agent_dir": agent_dir,
-                "model": model,
-                "provider": provider,
-                "tools": tools,
-                "timeout": timeout,
-                "sandbox": sandbox,
-            })
-            payload = raw_result if isinstance(raw_result, dict) else raw_result.to_dict()
-        else:
-            _ensure_platform_importable()
-            import importlib
-            try:
-                pi_mod = importlib.import_module("hermes_bridge.pi_executor")
-                ccp_mod = importlib.import_module("hermes_bridge.pi_executor.ccp_config")
-                build_argv = getattr(pi_mod, "build_argv")
-                copy_user_catalog = getattr(pi_mod, "copy_user_catalog")
-                resolve_ccp_credentials = getattr(pi_mod, "resolve_ccp_credentials")
-                resolve_cli_path = getattr(pi_mod, "resolve_cli_path")
-                resolve_node = getattr(pi_mod, "resolve_node")
-                run_pi = getattr(pi_mod, "run_pi")
-                write_models_json = getattr(pi_mod, "write_models_json")
-                CCP_KEY_ENV_VAR = getattr(ccp_mod, "CCP_KEY_ENV_VAR")
-            except (ImportError, AttributeError) as err:
-                raise RuntimeError(f"pi_executor_unavailable: {err}") from err
-
-            env_extra: dict[str, str] = {}
-            if provider == "ccp":
-                credentials = resolve_ccp_credentials(alias=model)
-                write_models_json(agent_dir, base_url=credentials.base_url, alias=credentials.alias)
-                env_extra[CCP_KEY_ENV_VAR] = credentials.api_key
-            else:
-                copy_user_catalog(agent_dir)
-
-            kwargs: dict[str, Any] = dict(
-                workdir=workdir,
-                agent_dir=agent_dir,
-                model=model,
-                provider=provider,
-                tools=tools,
-                timeout_s=timeout,
-                env_extra=env_extra,
-            )
-            if sandbox:
-                cli = resolve_cli_path(os.environ.get("PI_EXECUTOR_CLI"))
-                node = resolve_node(os.environ.get("PI_NODE_BIN"))
-                inner = [node, *build_argv(prompt, cli_path=cli, model=model,
-                                           provider=provider, tools=tools)]
-                kwargs["command_override"] = [
-                    "/usr/bin/bwrap", "--die-with-parent",
-                    "--ro-bind", "/", "/",
-                    "--tmpfs", "/tmp", "--dev", "/dev", "--proc", "/proc",
-                    "--bind", str(workdir), str(workdir),
-                    "--bind", str(agent_dir), str(agent_dir),
-                    "--chdir", str(workdir),
-                    *inner,
-                ]
-            pi_res = run_pi(prompt, **kwargs)
-            payload = pi_res.to_dict()
+        if runner_callable is None:
+            raise RuntimeError("runner_adapter_required")
+        raw_result = runner_callable(prompt, {
+            "workdir": workdir,
+            "agent_dir": agent_dir,
+            "model": model,
+            "provider": provider,
+            "tools": tools,
+            "timeout": timeout,
+            "sandbox": sandbox,
+        })
+        payload = raw_result if isinstance(raw_result, dict) else raw_result.to_dict()
 
         ok = bool(payload.get("ok"))
         if ok and verification_checks:
@@ -290,6 +244,8 @@ def run_dev_job(
         "attempt": job.get("attempt"),
         "workdir": str(workdir),
         "model": payload.get("model") or model,
+        "degraded": degraded,
+        "degradation_reason": degradation_reason,
         "provider": provider,
         "tool_calls": payload.get("tool_calls") or [],
         "final_text": payload.get("final_text") or "",
@@ -307,6 +263,8 @@ def run_dev_job(
         "role": job["payload"].get("role"),
         "workdir": str(workdir),
         "model": payload.get("model") or model,
+        "degraded": degraded,
+        "degradation_reason": degradation_reason,
         "provider": provider,
         "tool_calls": payload.get("tool_calls") or [],
     }, ensure_ascii=False, indent=2))
@@ -316,6 +274,8 @@ def run_dev_job(
         ret = {
             "ok": False,
             "error": err or "execution_failed",
+            "degraded": degraded,
+            "degradation_reason": degradation_reason,
             "result": {"artifacts": artifact_paths},
         }
         if failure_decision:
@@ -326,12 +286,16 @@ def run_dev_job(
 
     ret = {
         "ok": True,
+        "degraded": degraded,
+        "degradation_reason": degradation_reason,
         "result": {
             "role": job["payload"].get("role"),
             "job": job.get("job"),
             "attempt": job.get("attempt"),
             "summary": (payload.get("final_text") or "")[:2000],
             "model": payload.get("model") or model,
+            "degraded": degraded,
+            "degradation_reason": degradation_reason,
             "tool_calls": payload.get("tool_calls") or [],
             "artifacts": artifact_paths,
         },
@@ -360,14 +324,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--verification-adapter", default=None,
                         help="Administrator-owned module:callable(argv, timeout_s, workdir, *, env)")
     args = parser.parse_args(argv)
-
-    # Financial Overdraft Guard: dev_runner CLI intercept
-    if args.model and args.model.strip().lower() == "pro":
-        sys.stderr.write(
-            "[BUDGET_GUARD] dev_runner CLI requested forbidden 'pro' model tier. "
-            "Forced downgrade to 'flash' to prevent financial overdraft.\n"
-        )
-        args.model = "flash"
 
     try:
         job = _load_job(sys.stdin)

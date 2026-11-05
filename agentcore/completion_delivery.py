@@ -89,6 +89,11 @@ class CompletionMessage:
     channel: str | None = None
     role_id: str | None = None
     display_name: str | None = None
+    # S2: Explicit degradation & engine provenance visibility (ADR-S2)
+    degraded: bool = False
+    degradation_reason: str | None = None
+    engine: str | None = None
+    model_tier: str | None = None
 
     def render(self) -> dict[str, Any]:
         result = {
@@ -123,6 +128,14 @@ class CompletionMessage:
             result["role_id"] = self.role_id
         if self.display_name:
             result["display_name"] = self.display_name
+        if self.degraded:
+            result["degraded"] = True
+        if self.degradation_reason:
+            result["degradation_reason"] = self.degradation_reason
+        if self.engine:
+            result["engine"] = self.engine
+        if self.model_tier:
+            result["model_tier"] = self.model_tier
         return result
 
 
@@ -176,10 +189,41 @@ def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS,
         raise ValueError('invalid display_name')
     status = str(receipt.get('status') or 'unknown')
     result = receipt.get('result')
+    degraded = False
+    degradation_reason: str | None = None
+    engine: str | None = None
+    model_tier: str | None = None
+    if isinstance(result, dict):
+        raw_engine = result.get('engine')
+        if isinstance(raw_engine, str) and raw_engine.strip():
+            engine = raw_engine.strip()[:32]
+        raw_tier = result.get('model_tier') or result.get('model')
+        if isinstance(raw_tier, str) and raw_tier.strip():
+            model_tier = raw_tier.strip()[:64]
+        if result.get('degraded') is True or result.get('engine_degraded') is True or engine == 'pi':
+            degraded = True
+        raw_reason = result.get('degradation_reason') or result.get('primary_error')
+        if isinstance(raw_reason, str) and raw_reason.strip():
+            degradation_reason = raw_reason.strip()[:512]
+        elif degraded and engine == 'pi':
+            degradation_reason = 'primary_engine_fallback:hermes->pi'
+
     # Worker protocol envelopes persist intact in the queue. Unwrap only an
     # explicit successful envelope, never arbitrary nested model fields.
     if isinstance(result, dict) and result.get('ok') is True and isinstance(result.get('result'), dict):
-        result = result['result']
+        inner = result['result']
+        if not model_tier and isinstance(inner.get('model'), str) and inner.get('model').strip():
+            model_tier = inner['model'].strip()[:64]
+        if inner.get('degraded') is True:
+            degraded = True
+            if not degradation_reason and isinstance(inner.get('degradation_reason'), str):
+                degradation_reason = inner['degradation_reason'].strip()[:512]
+        result = inner
+    elif isinstance(result, dict) and result.get('ok') is False and isinstance(result.get('result'), dict):
+        inner = result['result']
+        if any(isinstance(inner.get(k), str) and inner.get(k).strip()
+               for k in ('summary', 'final_text', 'report', 'message', 'output')):
+            result = inner
     summary, truncated = _summary(result, limit=limit)
     artifacts = result.get('artifacts', []) if isinstance(result, dict) else []
     if not isinstance(artifacts, list) or len(artifacts) > 8 or any(
@@ -197,6 +241,10 @@ def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS,
         route=fields.get('route'), channel=fields.get('channel'),
         role_id=role_id or colleague_role,
         display_name=display_name or colleague_name,
+        degraded=degraded,
+        degradation_reason=degradation_reason,
+        engine=engine,
+        model_tier=model_tier,
     )
 
 

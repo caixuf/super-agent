@@ -269,7 +269,7 @@ class DispatchService:
     def __init__(self, root, profile, allowed_roots, *, max_sources=8, max_lines=400,
                  denied_globs=None, pool_type=None, delivery=None, route_provider=None,
                  require_delivery_route=False, role='analysis', display_name=None,
-                 display_label=None, duty=None, target_host=None,
+                 display_label=None, duty=None, target_host=None, model_tier=None,
                  liveness_ledger=None, liveness_path=None, engine_root=None):
         if not isinstance(profile, str) or not profile:
             raise ValueError('profile identity required')
@@ -290,6 +290,9 @@ class DispatchService:
         if target_host is not None and (not isinstance(target_host, str)
                                         or not re.fullmatch(r'[A-Za-z0-9._@-]{1,128}', target_host)):
             raise ValueError('invalid colleague target_host')
+        if model_tier is not None and (not isinstance(model_tier, str)
+                                       or model_tier not in ('pro', 'main', 'flash')):
+            raise ValueError('invalid colleague model_tier')
         if not isinstance(allowed_roots, list) or not allowed_roots:
             raise ValueError('allowed_roots must be a nonempty administrator list')
         self.roots = tuple(Path(value).resolve(strict=True) for value in allowed_roots)
@@ -300,6 +303,17 @@ class DispatchService:
         self.display_label = display_label
         self.duty = duty.strip() if isinstance(duty, str) else None
         self.target_host = target_host
+        self.configured_model_tier = model_tier
+        try:
+            from agentcore.model_routing import resolve_colleague_model
+            route = resolve_colleague_model(role, model_tier or '')
+            self.model_tier = str(route.get('selected_model') or model_tier or 'main')
+            self.model_degraded = bool(route.get('degraded'))
+            self.model_degradation_reason = str(route.get('degradation_reason') or '')
+        except Exception:
+            self.model_tier = model_tier or ('pro' if role in ('architect', 'planning', 'brain', 'plan_gate') else 'main')
+            self.model_degraded = False
+            self.model_degradation_reason = ''
         self.pool = (pool_type or Pool)(root)
         self.delivery = delivery or importlib.import_module('agentcore.completion_backfill')
         self.route_provider = route_provider or _bound_route
@@ -409,6 +423,8 @@ class DispatchService:
                    '_dispatch_owner': owner, '_colleague_role': self.role,
                    '_colleague_name': self.display_name,
                    '_colleague_label': self.display_label}
+        if self.configured_model_tier is not None:
+            payload['_model_tier'] = self.model_tier
         dedupe = owner + ':' + hashlib.sha256(key.encode()).hexdigest()
         # ``_dispatch_owner`` is an ownership *proof* (one-way), never an address:
         # persist profile + session + route alongside it so a completion can be routed
@@ -589,9 +605,11 @@ class DispatchRouter:
                 item['duty']=svc.duty
             if getattr(svc,'target_host',None):
                 item['target_host']=svc.target_host
+            if getattr(svc,'model_tier',None):
+                item['model_tier']=svc.model_tier
             entries.append(item)
         result={'ok':True,'source':'dispatcher_roles','count':len(entries),
-                'roles':entries[:16]}
+                'roles':entries[:24]}
         path=self._roster_path
         if path is not None and Path(path).is_file():
             import sqlite3
@@ -865,12 +883,12 @@ def register(ctx):
                               liveness_path=liveness_path, engine_root=ctx.get_config('engine_root'))
     services = {'analysis':service}
     colleagues = ctx.get_config('colleagues',{})
-    if not isinstance(colleagues,dict) or len(colleagues)>15:
+    if not isinstance(colleagues,dict) or len(colleagues)>24:
         raise ValueError('colleagues must be a bounded administrator mapping')
     seen_roots = {service.pool.root.resolve()}
     allowed_colleague_keys = {
         'queue_root', 'allowed_roots', 'denied_globs',
-        'display_name', 'display_label', 'duty', 'target_host',
+        'display_name', 'display_label', 'duty', 'target_host', 'model_tier',
     }
     for role,settings in colleagues.items():
         if (not isinstance(role,str) or not re.fullmatch('[a-z][a-z0-9_]{0,31}',role)
@@ -884,6 +902,7 @@ def register(ctx):
             display_label=settings.get('display_label', role),
             duty=settings.get('duty'),
             target_host=settings.get('target_host'),
+            model_tier=settings.get('model_tier'),
             liveness_path=liveness_path,
             engine_root=ctx.get_config('engine_root'))
         if candidate.pool.root.resolve() in seen_roots:
@@ -944,4 +963,17 @@ def register(ctx):
                                   'type': 'object', 'additionalProperties': False,
                                   'properties': properties, 'required': required}},
                               handler=_handler(router, action))
+    if (ctx.get_config('deliver_completions', False) is True
+            and ctx.get_config('completion_card_enabled', False) is True):
+        producers = getattr(sys, '_superagent_active_card_producers', None)
+        if not isinstance(producers, set):
+            producers = set()
+            setattr(sys, '_superagent_active_card_producers', producers)
+        producers.add(ctx.profile_name)
+        on_unload = getattr(ctx, 'on_unload', None)
+        if callable(on_unload):
+            try:
+                on_unload(lambda: producers.discard(ctx.profile_name))
+            except TypeError:
+                pass
     for colleague in services.values(): start_backfill(ctx,colleague)
