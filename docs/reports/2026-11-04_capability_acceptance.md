@@ -780,3 +780,58 @@ gateway 与 15 个角色 worker 全部重启并 active；新会话日志出现
 处置：把 3 个旧 DB 备份（703MB）和 6 个 ccache 分片（15GB）**移动**到根盘
 `<remote-home>/backups/relocated-*`（未删除，数据仍在，cache 可自行重建），磁盘回到 85%，
 gateway 重新连上 Feishu。CI 容器本身没有停（用例时序敏感，不擅自限流）。
+
+## 22. 受管归管与规划核实（2026-11-05 13:00–13:20）
+
+按一份外部 P0–P3 生产级规划执行，先逐条核实再动手。
+
+### 核实出的规划偏差（4 条）
+
+| 规划断言 | 实测 | 处置 |
+| :--- | :--- | :--- |
+| `update --apply` / `rollback --apply` | 两个子命令只有 `--keep-data`，没有 `--apply` | 去掉该参数 |
+| 把 dev-runner.json 指向 `current/install/worker/` | 该路径当时**不存在**：`_stage_release` 的目录元组漏了 `install/` | 先修打包器再指向 |
+| `recall_diagnostics.py`（P3 引用） | 文件不存在 | P3 该子项无实现可接，需先补模块 |
+| backlog 噪声全是历史 local 回执 | 部分是；但持续告警来自**每轮重新 lease** 的 `delivery_deferred`，ack 会与巡检竞态失效 | 归档 + 需代码级降噪 |
+| timer 未闭环 | 本机 `agentcore-liveness-sweep` 与 `superagent-proactive` 均按周期触发、退出码正常 | 无需改动 |
+
+### P0 已完成（双机一致）
+
+1. 中立门禁：§17–21 写入 20 处环境指纹导致 `test_repo_neutrality.py` 破红、阻断打包；
+   已替换为 `<remote-host>` / `<business-profile>` / `<managed-root>` / `<data-mount>` /
+   `<remote-home>` / `消息平台`，17 例全绿。
+2. Runner 归管：`tools/superagent.py::_stage_release` 的目录元组补 `install`，受管 release 现在
+   携带 `install/worker/dev_exec_runner.py`；两机 `dev-runner.json` 均指向 `current/install/worker/`，
+   两机各投一条冒烟任务，均 `engine=hermes` / `completed`。
+3. 受管入口对齐：`install-manifest.json` 的 `hermes_root` 从共享工作树修正为受管候选；
+   `doctor` 的 `runtime_observation.configured_launcher_matches` 与 `process_command_matches`
+   由 `false` 变 `true`，`status: ready` / `release_valid: true`。
+
+### 全量门禁暴露的回归（已修）
+
+`verify.sh` 首次跑出 1 项 FAIL：`test_colleague_dispatch_router` 要求越界源路径必须被拒，
+而上一轮「执行角色忽略 stray sources」把校验一起去掉了。改为**先校验、再丢弃**：
+非 analysis 角色仍调用 `_sources()` 校验路径合法性，通过后 `sources=[]` 并回执
+`sources_ignored`。补了越界反例用例。这印证了「闭环验收必须自动化」——只跑改动文件附近的
+单测会漏掉跨模块契约。
+
+### P1 进展与未决
+
+- 已归档 130 条不可寻址历史回执（两机，均先备份 `pool.db` 到 `backups/outbox-archive-*`）。
+- 但巡检每 60s 重新 lease，运维侧「读 token → ack」会失效（`lease token invalid`）；
+  规划要求的「10 分钟内 parked=0」需要插件层对不可寻址回执做自动归档或告警分级，属契约改动。
+- `deployment_readiness.py` 的 `task-progress` / `colleague-catalog` 两项 `[OPEN]` 属实，但
+  二者会注册 system prompt section / 工具到前台会话，不是零风险配置补齐，需先确认影响面。
+
+### 回滚风险（重要）
+
+`dev-runner.json` 现在指向 `current/install/worker/dev_exec_runner.py`。若 `rollback` 到早于
+`install/` 进入 release 的版本（例如 `db23393`），`current` 切换后该路径消失，dev worker 会起不来。
+回滚时必须同时把 `dev-runner.json` 指回 profile 副本，或只回滚到 `>= 5d147c4` 的 release。
+
+### P2 待确认
+
+规划 P2 提出把 `allowed_roots` 从 `/` 收紧为工作区子集并去掉 `HERMES_YOLO_MODE=1`。
+这与本轮之前明确设定的「后台角色完全权限、每个后台角色都要 YOLO」直接冲突，
+未擅自改动。P2 中不冲突的部分（worktree 隔离、双引擎切换前清理、verification_gate 接入）可独立推进。
+
