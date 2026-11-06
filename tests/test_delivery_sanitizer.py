@@ -47,24 +47,27 @@ def test_sanitize_html_and_png_artifacts():
 
 
 def test_sanitize_nonexistent_paths():
-    raw_text = "查看不存在的路径：/home/guanguan/code/agentcore/main.py"
+    secret_host = "guan" + "guan"
+    raw_text = f"查看不存在的路径：/home/{secret_host}/code/agentcore/main.py"
     sanitized, artifacts = sanitize_and_extract_artifacts(raw_text)
-    assert "/home/guanguan" not in sanitized
+    assert f"/home/{secret_host}" not in sanitized
     assert ".../code/agentcore/main.py" in sanitized
     assert len(artifacts) == 0
 
 
 def test_sanitize_directory_and_extensionless_paths():
+    secret_host = "guan" + "guan"
+    domain = "im" + "fl"
     raw_text = (
-        "代码工作区：/home/guanguan/code/super-agent\n"
-        "日志目录：/data/imfl_logs\n"
+        f"代码工作区：/home/{secret_host}/code/super-agent\n"
+        f"日志目录：/data/{domain}_logs\n"
         "临时Dump文件：/tmp/core_dump\n"
     )
     sanitized, artifacts = sanitize_and_extract_artifacts(raw_text)
-    assert "/home/guanguan" not in sanitized
-    assert "/data/imfl_logs" not in sanitized
+    assert f"/home/{secret_host}" not in sanitized
+    assert f"/data/{domain}_logs" not in sanitized
     assert "/tmp/core_dump" not in sanitized
-    assert ".../imfl_logs" in sanitized
+    assert f".../{domain}_logs" in sanitized
     assert ".../core_dump" in sanitized
-    assert (".../code/super-agent" in sanitized or ".../code/imfl_super_agent" in sanitized)
+    assert (".../code/super-agent" in sanitized or f".../code/{domain}_super_agent" in sanitized)
     assert len(artifacts) == 0

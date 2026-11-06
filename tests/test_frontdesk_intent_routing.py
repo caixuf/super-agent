@@ -17,7 +17,7 @@ import pytest
 
 LOCAL_LLM_URL = "http://127.0.0.1:4000/v1/chat/completions"
 
-SYSTEM_PROMPT = """你是智己汽车 MFF 自动化团队的仿真测试小助手（前台接待、超级参谋与敏捷协调中枢）。
+SYSTEM_PROMPT = """你是智能驾驶仿真测试团队的小助手（前台接待、超级参谋与敏捷协调中枢）。
 你必须依据用户的真实语义意图进行准确决策：
 1. 若用户意图是取消/撤回任务：调用 durable_cancel(task_id=...)，绝对不提交新任务；
 2. 若用户意图是查询任务进度/状态：调用 durable_status(task_id=...)，绝对不提交新任务；
@@ -82,7 +82,7 @@ def test_llm_semantic_clarification_gate():
 
 @pytest.mark.skipif(not is_llm_service_available(), reason="Local LLM endpoint not available")
 def test_llm_semantic_infrastructure_intent():
-    decision = query_llm_intent("Emily机器上的Docker容器退出码127，帮我排查下挂载问题")
+    decision = query_llm_intent("远程跑测宿主机上的Docker容器退出码127，帮我排查下挂载问题")
     assert decision["tool_name"] == "durable_submit"
     assert decision["role"] == "maintainer"
 

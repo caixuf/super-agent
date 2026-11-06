@@ -1,7 +1,7 @@
 """Delivery Sanitizer and Artifact Extractor for ChatOps Deliverables.
 
-Guards against leaking internal server absolute paths (e.g. /home/guanguan/...)
-to user chats (Feishu/Lark). Automatically resolves and extracts referenced
+Guards against leaking internal server absolute paths (e.g. /home/<user>/...)
+to user chats (IM platforms). Automatically resolves and extracts referenced
 output artifacts (HTML reports, images, archives) so they can be delivered as
 first-class chat attachments (file/image keys) instead of dead local paths.
 """
