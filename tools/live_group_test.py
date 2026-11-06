@@ -19,8 +19,8 @@ from pathlib import Path
 # Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-CHAT_ID = "oc_c06389ec97acfce211a3fbbbe37a467c"
-HERMES_ENV_PATH = "/home/caixuf/.hermes/profiles/caixuf/.env"
+CHAT_ID = os.environ.get("LIVE_TEST_CHAT_ID", "oc_c06389ec97acfce211a3fbbbe37a467c")
+HERMES_ENV_PATH = os.environ.get("HERMES_ENV_PATH", os.path.expanduser("~/.hermes/profiles/caixuf/.env"))
 
 def load_feishu_credentials():
     env = {}
@@ -126,7 +126,7 @@ def test_2_colleague_pool_100_concurrency():
 def test_3_reviewer_rule_audit():
     print("--> [Test 3] 验证专职主管轻量规则判定 (Reviewer 反模式快速审查)...")
     from agentcore.colleague_pool import MorphedColleagueContext
-    # 模拟一段有反模式风险的 IMFL 语句（300ms 短脉冲插 sleep）
+    # 模拟一段有反模式风险的 DSL 语句（300ms 短脉冲插 sleep）
     code_snippet = """
     process test_anti_pattern {
         when signal_pulse_300ms == 1
@@ -163,7 +163,7 @@ def test_4_illustrated_delivery():
 def main():
     app_id, app_secret = load_feishu_credentials()
     token = get_tenant_access_token(app_id, app_secret)
-    print(f"[*] 飞书 Token 获取成功 (App ID: {app_id})")
+    print(f"[*] Gateway Token 获取成功 (App ID: {app_id})")
 
     # 执行各项测试
     t1 = test_1_directory_routing()
@@ -175,7 +175,7 @@ def main():
     report_text = f"""🚀 【caixuf 高手本地部署完成 · 核心能力闭环实测报告】
 
 📌 部署版本: Release e80bd09 (不可变产物覆盖)
-📌 宿主节点: WSL2 caixuf (对齐远端 guanguan)
+📌 宿主节点: WSL2 caixuf (与远端集群对齐)
 
 ✅ [能力1: 前台接待薄网关与主管路由]
 • 状态: {t1['status']}
