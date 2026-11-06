@@ -23,12 +23,15 @@ def render_dashboard_service(
     host: str = "127.0.0.1",
     skip_build: bool = True,
     no_open: bool = True,
+    isolated: bool = False,
 ) -> str:
     args = [str(launcher), "dashboard", "--port", str(port), "--host", str(host)]
     if skip_build:
         args.append("--skip-build")
     if no_open:
         args.append("--no-open")
+    if isolated:
+        args.append("--isolated")
 
     exec_start = " ".join(map(quote_systemd, args))
     env_home = quote_systemd("HERMES_HOME=" + str(hermes_home))
@@ -68,6 +71,7 @@ def main() -> int:
     p.add_argument("--unit-name", default="hermes-dashboard.service", help="systemd service unit name")
     p.add_argument("--port", type=int, default=9119, help="Dashboard port (default 9119)")
     p.add_argument("--host", default="127.0.0.1", help="Dashboard listen host (default 127.0.0.1 loopback)")
+    p.add_argument("--isolated", action="store_true", help="Run dedicated server scoped to hermes-home profile")
     p.add_argument("--apply", action="store_true", help="Write service unit file")
     p.add_argument("--enable-now", action="store_true", help="Enable and start service immediately after writing")
     a = p.parse_args()
@@ -96,6 +100,7 @@ def main() -> int:
         host=a.host,
         skip_build=True,
         no_open=True,
+        isolated=a.isolated,
     )
 
     target = a.unit_dir / a.unit_name
