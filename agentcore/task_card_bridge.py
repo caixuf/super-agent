@@ -47,6 +47,60 @@ def _render_progress_bar(progress: float, width: int = 12) -> str:
     return f"[{'■' * filled}{'□' * empty}]"
 
 
+def _sanitize_card_text(text: Any) -> str:
+    """Ensure user-facing text is cleanly decoded, unescaped, and unwrapped from raw JSON."""
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        if isinstance(text, dict):
+            for key in ("summary", "final_text", "report", "output"):
+                val = text.get(key)
+                if isinstance(val, str) and val.strip():
+                    return _sanitize_card_text(val)
+            if isinstance(text.get("result"), dict):
+                return _sanitize_card_text(text["result"])
+        try:
+            text = json.dumps(text, ensure_ascii=False)
+        except Exception:
+            text = str(text)
+
+    # 1. Unescape \uXXXX unicode escape sequences
+    if "\\u" in text or "\\U" in text:
+        try:
+            text = re.sub(
+                r'\\u([0-9a-fA-F]{4})',
+                lambda m: chr(int(m.group(1), 16)),
+                text
+            )
+        except Exception:
+            pass
+
+    # 2. If it's a JSON string representing a dict, unwrap human-readable content
+    stripped = text.strip()
+    # Check if string starts with prefix like "结果: {"
+    json_start = stripped.find("{")
+    if json_start != -1 and stripped.endswith("}"):
+        candidate_json = stripped[json_start:]
+        try:
+            parsed = json.loads(candidate_json)
+            if isinstance(parsed, dict):
+                for _ in range(3):
+                    if isinstance(parsed.get("result"), dict):
+                        parsed = parsed["result"]
+                    elif isinstance(parsed.get("checkpoint"), dict):
+                        parsed = parsed["checkpoint"]
+                for key in ("summary", "final_text", "report", "output"):
+                    val = parsed.get(key)
+                    if isinstance(val, str) and val.strip():
+                        prefix = stripped[:json_start].strip()
+                        human_val = _sanitize_card_text(val)
+                        return f"{prefix}\n{human_val}".strip() if prefix else human_val
+        except Exception:
+            pass
+
+    return text.strip()
+
+
 class TaskCardBridge:
     """Manages the decoupled lifecycle of task-bound cards."""
 
@@ -116,7 +170,7 @@ class TaskCardBridge:
         now_str = time.strftime("%Y-%m-%d %H:%M:%S")
 
         # Trim goal for clean card presentation
-        clean_goal = (goal or "").strip().replace("\r\n", "\n")
+        clean_goal = _sanitize_card_text(goal or "").replace("\r\n", "\n")
         if len(clean_goal) > 280:
             clean_goal = clean_goal[:277] + "..."
 
@@ -129,7 +183,7 @@ class TaskCardBridge:
         if status in ("queued", "running", "progressive"):
             body_lines.append("────────────────")
             if phase:
-                body_lines.append(f"**当前阶段**：{phase}")
+                body_lines.append(f"**当前阶段**：{_sanitize_card_text(phase)}")
             if progress > 0.0:
                 bar = _render_progress_bar(progress)
                 body_lines.append(f"**阶段进度**：{bar} {int(progress * 100)}%")
@@ -145,7 +199,8 @@ class TaskCardBridge:
             if elapsed > 0.0:
                 body_lines.append(f"**执行耗时**：{elapsed:.1f} 秒")
             if summary:
-                body_lines.append(f"**核心结论（Phase 1 直达）**：\n{summary.strip()}")
+                clean_sum = _sanitize_card_text(summary)
+                body_lines.append(f"**核心结论（Phase 1 直达）**：\n{clean_sum}")
             if artifacts:
                 body_lines.append("**产出制品（Phase 2）**：")
                 for art in artifacts:
@@ -155,7 +210,7 @@ class TaskCardBridge:
             body_lines.append("────────────────")
             if elapsed > 0.0:
                 body_lines.append(f"**执行耗时**：{elapsed:.1f} 秒")
-            fail_desc = error_msg or summary or "任务未达到预期终态或已取消"
+            fail_desc = _sanitize_card_text(error_msg or summary or "任务未达到预期终态或已取消")
             body_lines.append(f"**未完成说明**：\n{fail_desc}")
 
         body_lines.append("")

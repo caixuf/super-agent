@@ -151,6 +151,17 @@ class CompletionMessage:
 
 def _summary(result: Any, *, limit: int = MAX_SUMMARY_CHARS) -> tuple[str, bool]:
     """Extract a bounded, human-readable summary from a worker receipt result."""
+    import re
+    if isinstance(result, str) and result.strip():
+        stripped = result.strip()
+        if (stripped.startswith("{") and stripped.endswith("}")) or (stripped.startswith('{"') and stripped.endswith('"}')):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, dict):
+                    result = parsed
+            except Exception:
+                pass
+
     text = ''
     if isinstance(result, dict):
         checkpoint = result.get('checkpoint')
@@ -172,6 +183,14 @@ def _summary(result: Any, *, limit: int = MAX_SUMMARY_CHARS) -> tuple[str, bool]
         text = result.strip()
     if not text:
         text = 'completed'
+
+    # Unescape any leaked unicode escape sequences (e.g. \u6838\u9a8c)
+    if "\\u" in text or "\\U" in text:
+        try:
+            text = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), text)
+        except Exception:
+            pass
+
     if len(text) <= limit:
         return text, False
     return text[:limit].rstrip() + _TRUNCATION_MARK, True
@@ -207,6 +226,15 @@ def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS,
         raise ValueError('invalid display_name')
     status = str(receipt.get('status') or 'unknown')
     result = receipt.get('result')
+    if isinstance(result, str):
+        stripped = result.strip()
+        if (stripped.startswith("{") and stripped.endswith("}")) or (stripped.startswith('{"') and stripped.endswith('"}')):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, dict):
+                    result = parsed
+            except Exception:
+                pass
     degraded = False
     degradation_reason: str | None = None
     engine: str | None = None

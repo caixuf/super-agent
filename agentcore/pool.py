@@ -301,18 +301,18 @@ class Pool:
         clobber a live claimer. Outbox uses INSERT OR IGNORE so the first receipt wins.
         Returns True when the jobs row was updated.
         """
-        receipt = json.dumps({'job': job, 'status': status, 'result': result})
+        receipt = json.dumps({'job': job, 'status': status, 'result': result}, ensure_ascii=False)
         if attempt is None:
             updated = db.execute(
                 "UPDATE jobs SET status=?,result=?,heartbeat=NULL "
                 "WHERE id=? AND status NOT IN ('completed','failed','cancelled')",
-                (status, json.dumps(result), job),
+                (status, json.dumps(result, ensure_ascii=False), job),
             )
         else:
             updated = db.execute(
                 "UPDATE jobs SET status=?,result=?,heartbeat=NULL "
                 "WHERE id=? AND attempt=? AND status NOT IN ('completed','failed','cancelled')",
-                (status, json.dumps(result), job, attempt),
+                (status, json.dumps(result, ensure_ascii=False), job, attempt),
             )
         if updated.rowcount == 1:
             db.execute('INSERT OR IGNORE INTO outbox(job,receipt) VALUES(?,?)', (job, receipt))
@@ -797,7 +797,7 @@ class Pool:
                 # Stop acknowledgement may arrive after a pause. Keep the human
                 # gate parked, but let a later resume verify this attempt stopped.
                 db.execute("UPDATE jobs SET result=? WHERE id=? AND attempt=?",
-                           (json.dumps(result), job, attempt))
+                           (json.dumps(result, ensure_ascii=False), job, attempt))
             elif not ok and row['replay_safe'] and row['tries'] < row['max_tries']:
                 db.execute("UPDATE jobs SET status='queued',heartbeat=NULL WHERE id=?", (job,))
             else:

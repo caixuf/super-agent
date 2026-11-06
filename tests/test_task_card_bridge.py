@@ -87,3 +87,17 @@ def test_task_card_bridge_sender_fault_tolerance(tmp_path: Path):
     assert res["ok"] is True
     assert res["patch_result"]["ok"] is False
     assert "network disconnected" in res["patch_result"]["error"]
+
+def test_sanitize_card_text_unescapes_unicode_and_unwraps_json():
+    from agentcore.task_card_bridge import _sanitize_card_text
+
+    # Case 1: Raw escaped unicode
+    assert _sanitize_card_text("核验：\\u6838\\u9a8c") == "核验：核验"
+
+    # Case 2: JSON string containing unicode escape
+    raw_json = '{"ok": true, "result": {"summary": "host-node \\u6838\\u9a8c\\uff1a\\u901a\\u8fc7"}}'
+    assert _sanitize_card_text(raw_json) == "host-node 核验：通过"
+
+    # Case 3: Prefix with JSON string
+    mixed = '结果: {"ok": true, "result": {"summary": "\\u6210\\u529f"}}'
+    assert _sanitize_card_text(mixed) == "结果:\n成功"
