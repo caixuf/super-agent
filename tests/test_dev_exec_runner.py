@@ -179,4 +179,33 @@ def test_remote_ssh_host_executes_hermes_over_ssh(monkeypatch):
     assert captured["kwargs"]["input"] == "check remote build"
 
 
+def test_clean_env_routes_to_colleague_profile_when_present(monkeypatch, tmp_path):
+    module = _module()
+    colleague_dir = tmp_path / "profiles" / "architect"
+    colleague_dir.mkdir(parents=True)
+    monkeypatch.setattr(module, "_profile_home", lambda: tmp_path)
+
+    env = module._clean_env(route={"role": "architect"})
+    assert env["HERMES_HOME"] == str(colleague_dir)
+    assert env["HERMES_SESSION_CHAT_ID"].startswith("colleague-architect-")
+
+
+def test_remote_ssh_host_routes_to_colleague_profile(monkeypatch):
+    module = _module()
+    monkeypatch.setenv("DEV_SSH_HOST", "worker-node-01")
+    monkeypatch.setenv("DEV_REMOTE_PROFILE_HOME", "/srv/hermes")
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return type("R", (), {"returncode": 0, "stdout": "☤ Hermes\nRemote execution ok", "stderr": ""})()
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    res = module.run_hermes("review code", route={"role": "reviewer"})
+    assert res["ok"] is True
+    assert "HERMES_HOME=/srv/hermes/profiles/reviewer" in captured["cmd"][6]
+    assert "HERMES_SESSION_CHAT_ID=colleague-reviewer-" in captured["cmd"][6]
+
+
+
 

@@ -148,13 +148,34 @@ def _resolve_job_model_route(payload: dict | None = None) -> dict:
         }
 
 
+def _colleague_profile_home(role: str | None) -> Path | None:
+    if not role or role in ("dev_runner", "default"):
+        return None
+    base = _profile_home()
+    candidates = [
+        base / "profiles" / role,
+        base.parent / role if base.parent.name == "profiles" else None,
+        Path.home() / ".hermes" / "profiles" / role,
+    ]
+    for c in candidates:
+        if c and c.is_dir():
+            return c
+    return None
+
+
 def _clean_env(route: dict | None = None) -> dict[str, str]:
     env = dict(os.environ)
-    env["HERMES_HOME"] = str(_profile_home())
+    role = str(route.get("role") or "") if route else ""
+    colleague_home = _colleague_profile_home(role)
+    if colleague_home:
+        env["HERMES_HOME"] = str(colleague_home)
+        env["HERMES_SESSION_CHAT_ID"] = f"colleague-{role}-{os.getpid()}"
+    else:
+        env["HERMES_HOME"] = str(_profile_home())
+        env["HERMES_SESSION_CHAT_ID"] = f"dev-worker-{os.getpid()}"
     env["HERMES_SESSION_SOURCE"] = "cli"
     # The backend keeps the full toolset; only human chat surfaces are thin.
     env["HERMES_SESSION_PLATFORM"] = "api_server"
-    env["HERMES_SESSION_CHAT_ID"] = f"dev-worker-{os.getpid()}"
     # Backend execution is unattended: no approval prompts may block a job.
     env["HERMES_YOLO_MODE"] = "1"
     # Tell durable_dispatch this turn is an executor, not a frontdesk: without
@@ -187,16 +208,24 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
         remote_bin = (os.environ.get("DEV_REMOTE_HERMES_BIN") or "hermes").strip()
         remote_home = (os.environ.get("DEV_REMOTE_PROFILE_HOME") or "").strip()
         remote_workdir = (os.environ.get("DEV_REMOTE_WORKDIR") or "").strip()
+        role = str(route.get("role") or "") if route else ""
+        has_colleague = bool(role and role not in ("dev_runner", "default"))
+        colleague_id = f"colleague-{role}-{os.getpid()}" if has_colleague else f"dev-worker-{os.getpid()}"
         env_parts = [
             "HERMES_SESSION_SOURCE=cli",
             "HERMES_SESSION_PLATFORM=api_server",
-            f"HERMES_SESSION_CHAT_ID=dev-worker-{os.getpid()}",
+            f"HERMES_SESSION_CHAT_ID={colleague_id}",
             "HERMES_YOLO_MODE=1",
             "SUPERAGENT_BACKEND_RUNNER=1",
         ]
         if route and route.get("selected_model"):
             env_parts.append("SUPERAGENT_MODEL_TIER=" + shlex.quote(str(route["selected_model"])))
-        if remote_home:
+        if has_colleague:
+            if remote_home:
+                env_parts.append("HERMES_HOME=" + shlex.quote(f"{remote_home}/profiles/{role}"))
+            else:
+                env_parts.append(f'HERMES_HOME="$HOME/.hermes/profiles/{role}"')
+        elif remote_home:
             env_parts.append("HERMES_HOME=" + shlex.quote(remote_home))
         remote_cmd = " ".join(env_parts) + " " + " ".join([
             shlex.quote(remote_bin), "chat", "--query-file", "-", "--oneshot",
