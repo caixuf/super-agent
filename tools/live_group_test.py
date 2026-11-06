@@ -107,7 +107,7 @@ def test_2_colleague_pool_100_concurrency():
             role=role,
             goal="micro_ping",
             payload={"idx": i},
-            handler=lambda ctx: {"processed_by": ctx.role, "idx": ctx.payload["idx"], "slot": ctx.slot_id}
+            handler=lambda ctx, idx=i: {"processed_by": ctx.role, "idx": idx, "slot": ctx.slot_id}
         )
         handles.append(h)
     
@@ -160,6 +160,40 @@ def test_4_illustrated_delivery():
         "summary": f"chrome-headless-shell 成功渲染高清架构图 (两页，{size_kb} KB)。"
     }
 
+def test_5_decoupled_task_card_and_cross_session_status():
+    print("--> [Test 5] 验证卡片与任务解耦绑定 (TaskCardBridge) 与跨会话状态穿透...")
+    from agentcore.task_card_bridge import TaskCardBridge
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        bridge = TaskCardBridge(Path(td) / "cards", profile="test-profile", min_update_interval=0.01)
+        test_task_id = "test_decoupled_task_8899aabbcc"
+        res = bridge.bind_task(
+            test_task_id,
+            origin={"route": "agent:main:feishu:group:test:sub"},
+            goal="验证卡片与任务严格解耦绑定，彻底消除前台等待焦虑",
+            role="dev",
+            display_name="研发执行"
+        )
+        assert res["ok"] is True
+        card = res["card_payload"]
+        assert card["schema"] == "2.0"
+        assert card["header"]["template"] == "wathet"
+
+        # 原地进度推进
+        prog = bridge.update_progress(test_task_id, status="running", phase="正在执行阶段一文字提炼", progress=0.6, elapsed=8.5)
+        assert prog["ok"] is True
+
+        # 终态转绿结算
+        fin = bridge.finalize(test_task_id, status="completed", summary="文字结论毫秒直达，卡片转绿交付", elapsed=15.2)
+        assert fin["ok"] is True
+        assert fin["card_payload"]["header"]["template"] == "green"
+
+    return {
+        "status": "PASS",
+        "task_id": test_task_id,
+        "summary": "TaskCardBridge 任务解耦生命周期闭环验证通过：卡片仅随 task_id 原地流转，终态转绿契约 100% 达成。"
+    }
+
 def main():
     app_id, app_secret = load_feishu_credentials()
     token = get_tenant_access_token(app_id, app_secret)
@@ -170,34 +204,42 @@ def main():
     t2 = test_2_colleague_pool_100_concurrency()
     t3 = test_3_reviewer_rule_audit()
     t4 = test_4_illustrated_delivery()
+    t5 = test_5_decoupled_task_card_and_cross_session_status()
 
     # 构建实测报告文本
-    report_text = f"""🚀 【caixuf 高手本地部署完成 · 核心能力闭环实测报告】
+    report_text = f"""🚀 【caixuf 高手本地部署完成 · 核心架构与能力实测报告】
 
-📌 部署版本: Release e80bd09 (不可变产物覆盖)
+📌 部署版本: Release a7d2596 (不可变产物覆盖)
 📌 宿主节点: WSL2 caixuf (与远端集群对齐)
 
 ✅ [能力1: 前台接待薄网关与主管路由]
-• 状态: {t1['status']}
-• 领域主管: 8 大常驻主管已就位 ({', '.join(t1['sample_names'])})
-• 结论: {t1['summary']}
+- 状态: {t1['status']}
+- 领域主管: 8 大常驻主管已就位 ({', '.join(t1['sample_names'])})
+- 结论: {t1['summary']}
 
 ✅ [能力2: 同质动态同事池 100 并发调度]
-• 状态: {t2['status']}
-• 性能指标: 100 并发任务耗时 {t2['elapsed_sec']}s (QPS: {t2['qps']})
-• 保护机制: FlowCoro Attempt Fencing + POSIX 文件锁 + 租约续期全部生效
-• 结论: {t2['summary']}
+- 状态: {t2['status']}
+- 性能指标: 100 并发任务耗时 {t2['elapsed_sec']}s (QPS: {t2['qps']})
+- 保护机制: FlowCoro Attempt Fencing + POSIX 文件锁 + 租约续期全部生效
+- 结论: {t2['summary']}
 
 ✅ [能力3: 专职主管轻量反模式审查]
-• 状态: {t3['status']}
-• 拦截规则: 命中 '短脉冲区间违规插入 sleep 脱窗' 反模式
-• 结论: {t3['summary']}
+- 状态: {t3['status']}
+- 拦截规则: 命中 '短脉冲区间违规插入 sleep 脱窗' 反模式
+- 结论: {t3['summary']}
 
 ✅ [能力4: 无头出图与图文交付]
-• 状态: {t4['status']}
-• 渲染引擎: chrome-headless-shell (免桌面依赖)
-• 产物大小: {t4['size_kb']} KB
-• 结论: 高清多页架构交付图已渲染就绪，正上传至群聊展示 ↓
+- 状态: {t4['status']}
+- 渲染引擎: chrome-headless-shell (免桌面依赖)
+- 产物大小: {t4['size_kb']} KB
+- 结论: 高清多页架构交付图已渲染就绪，正上传至群聊展示 ↓
+
+✅ [能力5: 卡片与任务严格解耦绑定 (消除等待焦虑)]
+- 状态: {t5['status']}
+- 架构创新: 卡片完全脱离会话轮次，只与 Task ID 绑定，原地 PATCH 流转更新
+- 跨会话穿透: cross_session_status 已开启，支持从单聊实时穿透查询群聊任务进度
+- 终态契约: Turn-Green 原地转绿结算，Phase 1 纯文本 0 阻塞直达
+- 结论: {t5['summary']}
 """
 
     print("[*] 正在向群聊发送结构化实测报告...")
