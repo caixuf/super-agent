@@ -620,3 +620,42 @@ def test_domain_colleagues_expose_duty_and_target_host_in_prompt_and_roster(tmp_
     assert bench_entry['duty'].startswith('Execute hardware-in-the-loop')
     assert bench_entry['target_host'] == 'bench-node-01'
 
+
+def test_cross_session_status_permission(tmp_path):
+    sources = tmp_path / 'sources'
+    sources.mkdir()
+    source = sources / 'sample.log'
+    source.write_text('content\n')
+
+    # 1. cross_session_status=False: isolated across sessions
+    iso_dir = tmp_path / 'iso'
+    iso_dir.mkdir()
+    ctx_isolated, args1 = make_context(iso_dir)
+    submitted = call(ctx_isolated, 'submit', args1, session_id='session-alpha')
+    assert submitted['ok'] is True
+    task_id = submitted['task_id']
+    denied = call(ctx_isolated, 'status', {'task_id': task_id}, session_id='session-beta')
+    assert denied['ok'] is False
+    assert 'task unavailable in this session' in denied.get('error', '')
+
+    # 2. cross_session_status=True: accessible across sessions in same profile
+    settings_shared = {
+        'enabled': True,
+        'queue_root': str(tmp_path / 'shared' / 'queue'),
+        'allowed_roots': [str(sources)],
+        'cross_session_status': True,
+    }
+    ctx_shared = Context(settings_shared)
+    plugin.register(ctx_shared)
+    args2 = {'goal': 'Read evidence', 'request_key': 'req-cross', 'sources': [{'path': str(source)}]}
+    submitted_shared = call(ctx_shared, 'submit', args2, session_id='session-gamma')
+    assert submitted_shared['ok'] is True
+    task_id_shared = submitted_shared['task_id']
+
+    # Queried from another session in the same profile
+    status_cross = call(ctx_shared, 'status', {'task_id': task_id_shared}, session_id='session-delta')
+    assert status_cross['ok'] is True
+    assert status_cross['task_id'] == task_id_shared
+    assert status_cross['status'] == 'queued'
+
+

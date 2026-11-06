@@ -66,6 +66,32 @@ class HostSender:
             return dict(ok=True, message_id=str(result.message_id))
         return dict(ok=False, error='adapter_result_unknown')
 
+    def patch_card(self, address, message_id, card_payload):
+        from hermes_cli.plugin_messages import _gateway_loop
+        import json
+        runner, loop = _gateway_loop()
+        if runner is None or loop is None:
+            return dict(ok=False, not_sent=True, error='gateway_unavailable')
+        async def _do_patch():
+            from gateway import plugin_messages
+            target, refusal = plugin_messages.resolve(runner, session_key=address['route'], route=None,
+                plugin_home=self.ctx._manager.home_path, plugin_id=self.ctx.plugin_id)
+            if target is None or target.adapter is None:
+                return dict(ok=False, not_sent=True, error=(refusal or {}).get('error', 'no_conversation'))
+            edit = getattr(target.adapter, 'edit_message', None)
+            if not callable(edit):
+                return dict(ok=False, error='edit_unsupported')
+            content = json.dumps(card_payload, ensure_ascii=False) if isinstance(card_payload, dict) else str(card_payload)
+            res = await edit(target.chat_id, message_id, content)
+            if getattr(res, 'success', False):
+                return dict(ok=True, message_id=message_id)
+            return dict(ok=False, error='edit_failed')
+        future = asyncio.run_coroutine_threadsafe(_do_patch(), loop)
+        try:
+            return future.result(timeout=10)
+        except Exception as e:
+            return dict(ok=False, error=str(e))
+
     def __call__(self, address, item, *, idempotency_key):
         from hermes_cli.plugin_messages import _gateway_loop
         runner, loop = _gateway_loop()
@@ -120,10 +146,34 @@ def create_transport(ctx, service):
                 filtered = [p for p in files if Path(str(p)).name not in excluded]
                 if filtered != files:
                     message = dict(message, artifacts=filtered)
-            return super().deliver(address, message, idempotency_key=idempotency_key)
+            result = super().deliver(address, message, idempotency_key=idempotency_key)
+            if result and result.get('accepted') and getattr(self, 'card_bridge', None):
+                try:
+                    self.card_bridge.finalize(
+                        idempotency_key,
+                        status=message.get('status', 'completed'),
+                        summary=message.get('summary', ''),
+                        artifacts=message.get('artifacts'),
+                        elapsed=message.get('elapsed', 0.0),
+                    )
+                except Exception:
+                    pass
+            return result
 
-    return _HumanCompletionTransport(service.pool.root/'direct-delivery', profile=service.profile,
-        sender=HostSender(ctx), render=_render,
+    sender = HostSender(ctx)
+    card_bridge = None
+    try:
+        from agentcore.task_card_bridge import TaskCardBridge
+        card_bridge = TaskCardBridge(service.pool.root.parent / 'cards',
+                                     profile=service.profile,
+                                     sender=lambda address, message_id, card_payload: sender.patch_card(address, message_id, card_payload))
+    except Exception:
+        pass
+
+    transport = _HumanCompletionTransport(service.pool.root/'direct-delivery', profile=service.profile,
+        sender=sender, render=_render,
         attempt_root=service.pool.root/'attempts',
         attempt_provider=lambda job: service.pool.status(job).get('attempt'),
         card=ctx.get_config('completion_card_enabled', False) is True)
+    transport.card_bridge = card_bridge
+    return transport

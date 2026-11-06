@@ -270,7 +270,8 @@ class DispatchService:
                  denied_globs=None, pool_type=None, delivery=None, route_provider=None,
                  require_delivery_route=False, role='analysis', display_name=None,
                  display_label=None, duty=None, target_host=None, model_tier=None,
-                 liveness_ledger=None, liveness_path=None, engine_root=None):
+                 liveness_ledger=None, liveness_path=None, engine_root=None,
+                 cross_session_status=False):
         if not isinstance(profile, str) or not profile:
             raise ValueError('profile identity required')
         if not isinstance(root, str) or not Path(root).is_absolute():
@@ -328,6 +329,7 @@ class DispatchService:
         self._liveness_ledger = liveness_ledger
         self._liveness_path = liveness_path
         self._engine_root = engine_root
+        self.cross_session_status = bool(cross_session_status)
 
     def _resolve_liveness(self):
         if self._liveness_ledger is not None:
@@ -451,7 +453,7 @@ class DispatchService:
         return self.delivery.drain(self.pool, transport, profile=self.profile,
                                    limit=limit, lease=lease, not_before=not_before)
 
-    def _owned(self, session_id, job):
+    def _owned(self, session_id, job, *, allow_cross_session=False):
         owner = self._owner(session_id)
         if not isinstance(job, str) or not re.fullmatch('[0-9a-f]{32}', job):
             raise PermissionError('task unavailable in this session')
@@ -466,13 +468,20 @@ class DispatchService:
         if proof is None and repaired is not None and repaired['origin']==row['origin']:
             origin = json.loads(row['origin'])
             if origin.get('profile')==self.profile and origin.get('session')==session_id:return
+        if allow_cross_session:
+            try:
+                origin = json.loads(row['origin']) if row['origin'] else {}
+                if origin.get('profile') == self.profile or not origin.get('profile'):
+                    return
+            except Exception:
+                pass
         raise PermissionError('task unavailable in this session')
 
     def status(self, session_id, args):
         if not isinstance(args, dict) or set(args) != {'task_id'}:
             raise ValueError('task_id required')
         job = args['task_id']
-        self._owned(session_id, job)
+        self._owned(session_id, job, allow_cross_session=self.cross_session_status)
         status = self.pool.status(job)
         # Internal attempt tokens are not needed by a user-facing status tool.
         result = {'ok': True, 'task_id': job, 'status': status['status'],
@@ -846,6 +855,11 @@ Pick the role by what the work needs, not by keywords.
 - role=analysis performs read-only evidence analysis of files inside the administrator roots. It requires sources with absolute paths inside those roots. If a task is about inspecting or running something rather than analysing a supplied file, it is a dev task.
 - If no listed role fits the work, submit it to dev as the general execution fallback instead of telling the user the work is unavailable. Report a genuine capability gap only when the returned task itself fails.
 - Every new request is a new task, even when an earlier task answered something similar: current state (today, now, again) changes, so submit again with a new request_key. durable_status only reports a task you already submitted; never answer a fresh request from an older task's result.
+- Task status inquiry vs new task:
+  * When user asks about task status, progress, or state (e.g. "这个还在做吗", "任务状态", "还在跑吗", "好了吗", "进度如何"), OR provides a 32-hex task ID:
+    NEVER call durable_submit! You MUST call durable_status with that task_id. Report the live status (queued, running, completed, failed) and details (phase, progress, verdict, summary) directly to the user.
+    If running or queued, reassure the user the worker is actively executing. NEVER claim a role has no worker or that the task disappeared.
+  * Only call durable_submit when the user is explicitly requesting a NEW piece of work, test, or investigation to be performed.
 - Investigating recent changes, git history, logs or any repository state is ALWAYS dev work. analysis is only for evidence about a file the user explicitly supplied; never pick analysis for an investigation.
 If the user asks to look at changes, check logs, run a command or inspect the repo, submit role=dev with no sources. Do not claim you cannot see the repository: dev exists for exactly that. Submit one task, return its ID and role, then finish the turn without waiting or polling. NEVER submit work through terminal/execute_code or a raw pool CLI. Use durable_status/cancel with the returned role and task ID. An IM frontdesk only interacts, dispatches and reports; it must not execute or delegate work itself. Unsupported work must be reported as unavailable, never silently rerouted. Never provide an owner, queue path, shell command, runner, or model adapter."""
     domain_lines = []
@@ -875,12 +889,14 @@ def register(ctx):
     pool_type, delivery = _engine(ctx.get_config('engine_root'))
     require_route = ctx.get_config('require_delivery_route',ctx.get_config('deliver_completions',False))
     liveness_path = ctx.get_config('liveness_db') or None
+    cross_session = ctx.get_config('cross_session_status', ctx.get_config('allow_cross_session_status', False))
     service = DispatchService(ctx.get_config('queue_root'), ctx.profile_name,
                               ctx.get_config('allowed_roots'),
                               denied_globs=ctx.get_config('denied_globs', []),
                               pool_type=pool_type, delivery=delivery,require_delivery_route=require_route,
                               role='analysis', display_name='主 Bot 汇总', display_label='汇总',
-                              liveness_path=liveness_path, engine_root=ctx.get_config('engine_root'))
+                              liveness_path=liveness_path, engine_root=ctx.get_config('engine_root'),
+                              cross_session_status=cross_session)
     services = {'analysis':service}
     colleagues = ctx.get_config('colleagues',{})
     if not isinstance(colleagues,dict) or len(colleagues)>24:
@@ -904,7 +920,8 @@ def register(ctx):
             target_host=settings.get('target_host'),
             model_tier=settings.get('model_tier'),
             liveness_path=liveness_path,
-            engine_root=ctx.get_config('engine_root'))
+            engine_root=ctx.get_config('engine_root'),
+            cross_session_status=cross_session)
         if candidate.pool.root.resolve() in seen_roots:
             raise ValueError('colleague queues must be distinct')
         seen_roots.add(candidate.pool.root.resolve()); services[role]=candidate
@@ -915,7 +932,7 @@ def register(ctx):
             # The host DROPS a section over its budget (it does not truncate), so the
             # budget must exceed the literal text below or the frontdesk never sees
             # the routing rules. tests/test_durable_dispatch.py pins this.
-            position='after_memory', max_chars=3200,
+            position='after_memory', max_chars=3600,
         )
     roster_path = ctx.get_config('roster_registry_path')
     if (not isinstance(roster_path, str) or not roster_path
