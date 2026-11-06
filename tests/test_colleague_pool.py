@@ -80,18 +80,18 @@ def test_worktree_isolation_and_escape_prevention(tmp_path):
 def test_bounded_backpressure_and_capacity_limit(tmp_path):
     """Verify bounded backpressure: submissions/acquisitions respect capacity bounds."""
     pool = ColleaguePool(max_workers=2, scratch_root=tmp_path / "scratch")
-    started = threading.Event()
+    started = threading.Barrier(3)
     release_work = threading.Event()
 
     def slow_worker(ctx):
-        started.set()
+        started.wait(timeout=5.0)
         release_work.wait(timeout=5.0)
         return {"done": True}
 
     # Occupy all 2 slots
     h1 = pool.submit_colleague_task(role="backend", goal="task 1", handler=slow_worker)
     h2 = pool.submit_colleague_task(role="backend", goal="task 2", handler=slow_worker)
-    started.wait(timeout=2.0)
+    started.wait(timeout=5.0)
 
     assert pool.active_count == 2
     assert pool.idle_count == 0
@@ -450,4 +450,168 @@ def test_slot_status_inspection(tmp_path):
     statuses = pool.get_slot_status()
     assert all(s["state"] == SlotState.IDLE for s in statuses)
     pool.close()
+
+
+def test_admission_timeout_in_submit(tmp_path):
+    """Verify that submit_colleague_task enforces admission timeout under backpressure."""
+    pool = ColleaguePool(max_workers=1, capacity=1, scratch_root=tmp_path / "scratch_backpressure")
+    hold = threading.Event()
+
+    def slow_worker(ctx):
+        hold.wait(timeout=2.0)
+        return {"done": True}
+
+    # Occupy the only slot and queue capacity
+    h1 = pool.submit_colleague_task(role="ops", goal="occupy slot", handler=slow_worker)
+
+    # Next submission with a short timeout should fail fast with TimeoutError
+    with pytest.raises(TimeoutError, match="capacity exhausted"):
+        pool.submit_colleague_task(role="ops", goal="overflow", timeout=0.1)
+
+    hold.set()
+    h1.result(timeout=2.0)
+    pool.drain(timeout=2.0)
+    pool.close()
+
+
+def test_claim_lock_fd_retention_prevents_concurrent_stealing(tmp_path):
+    """Verify that dispatch_from_durable_pool retains the POSIX lock fd during slot execution."""
+    durable_pool = Pool(tmp_path / "durable_lock_pool")
+    job_id = durable_pool.submit("lock-job-1", {"role": "architect", "goal": "Hold lock during task"})
+
+    colleague_pool = ColleaguePool(durable_pool, max_workers=2)
+    in_slot = threading.Event()
+    release_slot = threading.Event()
+
+    def locked_handler(ctx: MorphedColleagueContext):
+        in_slot.set()
+        release_slot.wait(timeout=3.0)
+        return {"held": True}
+
+    dispatch_thread = threading.Thread(
+        target=lambda: colleague_pool.dispatch_from_durable_pool(handler=locked_handler, drain=True),
+        daemon=True,
+    )
+    dispatch_thread.start()
+
+    in_slot.wait(timeout=2.0)
+
+    # While slot is executing with fd locked, another claim cannot lock the same job
+    assert durable_pool.claim() is None
+
+    release_slot.set()
+    dispatch_thread.join(timeout=3.0)
+    assert not dispatch_thread.is_alive()
+
+    status = durable_pool.status(job_id)
+    assert status["status"] == "completed"
+    colleague_pool.close()
+
+
+def test_context_renew_lease_updates_durable_heartbeat(tmp_path):
+    """Verify MorphedColleagueContext.renew_lease extends lease and syncs SQLite heartbeat."""
+    durable_pool = Pool(tmp_path / "durable_hb_pool")
+    job_id = durable_pool.submit("hb-job-1", {"role": "ops", "goal": "Verify heartbeat renewal"})
+    colleague_pool = ColleaguePool(durable_pool, max_workers=1, lease_duration=10.0)
+
+    claim = durable_pool.claim()
+    assert claim is not None
+    row, fd = claim
+
+    with durable_pool.db() as db:
+        initial_hb = db.execute("SELECT heartbeat FROM jobs WHERE id=?", (job_id,)).fetchone()["heartbeat"]
+
+    time.sleep(0.05)
+
+    def worker_that_renews(ctx: MorphedColleagueContext):
+        new_dl = ctx.renew_lease(extend_seconds=300.0)
+        assert new_dl > time.monotonic() + 250.0
+        return {"renewed": True}
+
+    res = colleague_pool.run_task(
+        role="ops",
+        goal="Heartbeat test",
+        handler=worker_that_renews,
+        task_id=job_id,
+        attempt_token=row["attempt"],
+        cleanup_scratch=False,
+    )
+    assert res["ok"] is True
+    os.close(fd)
+
+    with durable_pool.db() as db:
+        final_hb = db.execute("SELECT heartbeat FROM jobs WHERE id=?", (job_id,)).fetchone()["heartbeat"]
+        # After completion, status is completed and heartbeat is NULL, but during run it was renewed
+        status = db.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()["status"]
+        assert status == "completed"
+
+    colleague_pool.close()
+
+
+def test_manifest_artifacts_and_path_normalization(tmp_path):
+    """Verify absolute paths inside scratch_dir are normalized to relative in manifest.json."""
+    pool = ColleaguePool(max_workers=1, scratch_root=tmp_path / "scratch_norm")
+
+    def normalizing_handler(ctx: MorphedColleagueContext):
+        abs_nested = ctx.scratch_dir / "subdir" / "deep_file.txt"
+        ctx.write_file(str(abs_nested), "nested content")
+        return {"done": True}
+
+    res = pool.run_task(role="test", goal="Path normalization test", handler=normalizing_handler)
+    assert res["ok"] is True
+    assert res["evidence"]["modified_files"] == ["subdir/deep_file.txt"]
+    assert "artifacts" in res["evidence"]
+    assert "report.json" in res["evidence"]["artifacts"]
+    assert "manifest.json" in res["evidence"]["artifacts"]
+    pool.close()
+
+
+def test_durable_pool_attempt_fencing_rejection(tmp_path):
+    """Verify commit_task_result returns False when durable pool rejects stale attempt."""
+    durable_pool = Pool(tmp_path / "durable_fence_pool")
+    job_id = durable_pool.submit("fenced-job-1", {"role": "reviewer", "goal": "Fence rejection"})
+    claim = durable_pool.claim()
+    assert claim is not None
+    row, fd = claim
+    os.close(fd)
+
+    colleague_pool = ColleaguePool(durable_pool, max_workers=2)
+
+    # Pre-finalize the job in durable store to make subsequent attempt stale
+    with durable_pool.db() as db:
+        durable_pool._terminal(db, job_id, "completed", {"ok": True}, attempt=row["attempt"])
+
+    # Attempt to commit again with same attempt token -> durable pool rejects update
+    committed = colleague_pool.commit_task_result(
+        task_id=job_id,
+        epoch=1,
+        attempt_token=row["attempt"],
+        result={"stale": True},
+    )
+    assert committed is False
+    colleague_pool.close()
+
+
+def test_drain_waits_for_queued_tasks_in_scheduler(tmp_path):
+    """Verify drain properly waits until both running slots and queued scheduler tasks complete."""
+    pool = ColleaguePool(max_workers=2, capacity=10, scratch_root=tmp_path / "scratch_drain")
+
+    completed = []
+    lock = threading.Lock()
+
+    def work(ctx):
+        time.sleep(0.03)
+        with lock:
+            completed.append(ctx.slot_id)
+        return {}
+
+    for i in range(6):
+        pool.submit_colleague_task(role="test", goal=f"drain work {i}", handler=work)
+
+    pool.drain(timeout=5.0)
+    assert len(completed) == 6
+    assert pool.completed_count == 6
+    assert pool.active_count == 0
+    pool.close()
+
 

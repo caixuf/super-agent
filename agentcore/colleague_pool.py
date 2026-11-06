@@ -207,6 +207,7 @@ class MorphedColleagueContext:
     cancel_token: Optional[CancellationToken] = None
     metadata: Dict[str, Any] = dataclasses.field(default_factory=dict)
     _modified_files: Set[str] = dataclasses.field(default_factory=set)
+    pool: Optional[Any] = None
 
     def is_cancelled(self) -> bool:
         if self.cancel_token:
@@ -217,17 +218,34 @@ class MorphedColleagueContext:
         if self.cancel_token:
             self.cancel_token.throw_if_cancellation_requested()
 
+    def renew_lease(self, extend_seconds: Optional[float] = None) -> float:
+        """Renew the slot lease on both in-memory slot and durable pool if available."""
+        if self.pool is not None and hasattr(self.pool, "renew_lease"):
+            self.lease_deadline = self.pool.renew_lease(self.slot_id, extend_seconds)
+            return self.lease_deadline
+        self.lease_deadline = time.monotonic() + (extend_seconds or 60.0)
+        return self.lease_deadline
+
     def write_file(self, relpath: str, content: str) -> Path:
-        target = (self.scratch_dir / relpath).resolve()
+        p = Path(relpath)
+        if p.is_absolute():
+            target = p.resolve()
+        else:
+            target = (self.scratch_dir / p).resolve()
         if not target.is_relative_to(self.scratch_dir.resolve()):
             raise PermissionError("worktree_escape_denied")
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         target.write_text(content, encoding="utf-8")
-        self._modified_files.add(relpath)
+        clean_rel = str(target.relative_to(self.scratch_dir.resolve()))
+        self._modified_files.add(clean_rel)
         return target
 
     def read_file(self, relpath: str) -> str:
-        target = (self.scratch_dir / relpath).resolve()
+        p = Path(relpath)
+        if p.is_absolute():
+            target = p.resolve()
+        else:
+            target = (self.scratch_dir / p).resolve()
         if not target.is_relative_to(self.scratch_dir.resolve()):
             raise PermissionError("worktree_escape_denied")
         return target.read_text(encoding="utf-8")
@@ -264,6 +282,7 @@ class ComputeSlot:
         lease_duration: float,
         cancel_token: Optional[CancellationToken] = None,
         context_data: Optional[Mapping[str, Any]] = None,
+        pool: Optional[Any] = None,
     ) -> MorphedColleagueContext:
         with self._lock:
             if self.state not in (SlotState.IDLE, SlotState.ACQUIRED):
@@ -292,6 +311,7 @@ class ComputeSlot:
                 lease_deadline=lease_deadline,
                 cancel_token=cancel_token,
                 metadata=dict(context_data or {}),
+                pool=pool,
             )
             self.state = SlotState.MORPHED
             return self.context
@@ -331,15 +351,18 @@ class ComputeSlot:
             report_raw = json.dumps(report_data, sort_keys=True, indent=2, ensure_ascii=False)
             (target_dir / "report.json").write_text(report_raw, encoding="utf-8")
 
+            artifacts = sorted(list({"report.json", "manifest.json"} | (set(extra_manifest.get("artifacts", [])) if extra_manifest else set())))
             manifest_data = {
                 "job": ctx.task_id,
                 "attempt": ctx.attempt_token,
                 "verification": "dev_traceability_v1",
                 "worktree": str(ctx.scratch_dir),
                 "modified_files": sorted(list(ctx._modified_files)),
+                "artifacts": artifacts,
             }
             if extra_manifest:
                 manifest_data.update(extra_manifest)
+            manifest_data["artifacts"] = artifacts
             manifest_raw = json.dumps(manifest_data, sort_keys=True, indent=2, ensure_ascii=False)
             (target_dir / "manifest.json").write_text(manifest_raw, encoding="utf-8")
 
@@ -354,6 +377,7 @@ class ComputeSlot:
                 "manifest_sha256": hashlib.sha256(manifest_raw.encode("utf-8")).hexdigest(),
                 "worktree": str(ctx.scratch_dir),
                 "modified_files": sorted(list(ctx._modified_files)),
+                "artifacts": artifacts,
             }
 
     def demorph(self, cleanup_scratch: bool = False) -> None:
@@ -382,6 +406,7 @@ class ColleaguePool:
         pool: Optional[Any] = None,
         *,
         max_workers: int = 16,
+        capacity: Optional[int] = None,
         backend: str = "stdlib",
         scratch_root: Optional[Union[str, Path]] = None,
         lease_duration: float = 60.0,
@@ -390,11 +415,14 @@ class ColleaguePool:
     ):
         if not isinstance(max_workers, int) or max_workers < 1:
             raise ValueError("max_workers must be a positive integer")
+        if capacity is not None and (not isinstance(capacity, int) or capacity < max_workers):
+            raise ValueError("capacity must be an integer >= max_workers")
         if lease_duration <= 0:
             raise ValueError("lease_duration must be positive")
 
         self.durable_pool = pool
         self.max_workers = max_workers
+        self.queue_capacity = capacity or (max_workers * 2)
         self.backend = backend
         self.lease_duration = lease_duration
         self.role_registry = role_registry or RoleRegistry()
@@ -425,11 +453,15 @@ class ColleaguePool:
         self._completed_count = 0
         self._failed_count = 0
 
-        # Backing execution scheduler
-        self._scheduler = AgentScheduler(backend=backend, workers=max_workers, capacity=max_workers)
+        # Backing execution scheduler with bounded queue capacity
+        self._scheduler = AgentScheduler(backend=backend, workers=max_workers, capacity=self.queue_capacity)
 
     @property
     def capacity(self) -> int:
+        return self.queue_capacity
+
+    @property
+    def max_concurrent(self) -> int:
         return self.max_workers
 
     @property
@@ -517,6 +549,7 @@ class ColleaguePool:
                     lease_duration=self.lease_duration,
                     cancel_token=cancel_token,
                     context_data=context_data,
+                    pool=self,
                 )
                 return context
             except BaseException:
@@ -581,7 +614,7 @@ class ColleaguePool:
 
             # If durable pool is attached, record terminal status with attempt fence
             if self.durable_pool is not None:
-                with contextlib.suppress(Exception):
+                try:
                     with self.durable_pool.db() as db:
                         receipt_payload = {
                             "ok": (status == "completed"),
@@ -593,11 +626,22 @@ class ColleaguePool:
                                 "success": (status == "completed"),
                                 "role": result.get("role"),
                                 "output": result.get("output"),
+                                "worktree": result.get("evidence", {}).get("worktree"),
+                                "artifacts": result.get("evidence", {}).get("artifacts", ["report.json", "manifest.json"]),
                             },
                         }
-                        self.durable_pool._terminal(
+                        updated = self.durable_pool._terminal(
                             db, task_id, status, receipt_payload, attempt=attempt_token
                         )
+                        if not updated:
+                            logger.warning(
+                                "Attempt fencing: durable pool rejected terminal update for %s attempt %s",
+                                task_id, attempt_token,
+                            )
+                            return False
+                except Exception as exc:
+                    logger.error("Durable pool terminal commit failed for task %s: %s", task_id, exc)
+                    return False
 
             return True
 
@@ -610,10 +654,13 @@ class ColleaguePool:
         attempt_token: Optional[str] = None,
         payload: Optional[Mapping[str, Any]] = None,
         timeout: Optional[float] = None,
+        admission_timeout: Optional[float] = None,
+        claim_lock_fd: Optional[int] = None,
         cleanup_scratch: bool = False,
     ) -> ToolHandle:
         """Asynchronously dispatch a task into the colleague pool with bounded backpressure."""
         tid = task_id or uuid.uuid4().hex
+        adm_timeout = admission_timeout if admission_timeout is not None else timeout
         
         def _execute_in_slot(cancel_token: Optional[CancellationToken] = None) -> Dict[str, Any]:
             context = self.acquire_slot(
@@ -681,9 +728,33 @@ class ColleaguePool:
                     self._failed_count += 1
                 raise
             finally:
+                if claim_lock_fd is not None:
+                    try:
+                        os.close(claim_lock_fd)
+                    except OSError:
+                        pass
                 self.release_slot(context.slot_id, cleanup_scratch=cleanup_scratch)
 
-        return self._scheduler.submit(f"colleague-{role}-{tid[:8]}", _execute_in_slot)
+        try:
+            handle = self._scheduler.submit(
+                f"colleague-{role}-{tid[:8]}",
+                _execute_in_slot,
+                admission_timeout=adm_timeout,
+            )
+        except BaseException:
+            if claim_lock_fd is not None:
+                try:
+                    os.close(claim_lock_fd)
+                except OSError:
+                    pass
+            raise
+
+        def _notify_done(_):
+            with self._cv:
+                self._cv.notify_all()
+
+        handle.future.add_done_callback(_notify_done)
+        return handle
 
     def _get_attempts_dir(self, attempt_token: str) -> Optional[Path]:
         if self.durable_pool is not None and hasattr(self.durable_pool, "root"):
@@ -748,7 +819,6 @@ class ColleaguePool:
                     if claim is None:
                         break
                     row, fd = claim
-                    os.close(fd)  # Relinquish direct lock fd; attempt token & fence protect row
                     stats["claimed"] += 1
                     
                     try:
@@ -759,17 +829,22 @@ class ColleaguePool:
                     role = payload.get("role") or payload.get("member_id") or "cases"
                     goal = payload.get("goal") or payload.get("prompt") or f"Execute task {row['id']}"
 
-                    handle = self.submit_colleague_task(
-                        role=role,
-                        goal=goal,
-                        handler=handler,
-                        task_id=row["id"],
-                        attempt_token=row["attempt"],
-                        payload=payload,
-                        cleanup_scratch=cleanup_scratch,
-                    )
-                    active_handles.append(handle)
-                    stats["dispatched"] += 1
+                    try:
+                        handle = self.submit_colleague_task(
+                            role=role,
+                            goal=goal,
+                            handler=handler,
+                            task_id=row["id"],
+                            attempt_token=row["attempt"],
+                            payload=payload,
+                            cleanup_scratch=cleanup_scratch,
+                            claim_lock_fd=fd,
+                        )
+                        active_handles.append(handle)
+                        stats["dispatched"] += 1
+                    except BaseException:
+                        os.close(fd)
+                        raise
 
             # Event-driven reaping of active handles
             active_handles = [h for h in active_handles if not h.done()]
@@ -793,10 +868,10 @@ class ColleaguePool:
         return stats
 
     def drain(self, timeout: Optional[float] = None) -> None:
-        """Event-driven wait until all active compute slots are idle."""
+        """Event-driven wait until all active compute slots are idle and scheduler has no pending tasks."""
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._cv:
-            while self._active_slots:
+            while (self._active_slots or self._scheduler.pending_count > 0) and not self._closed:
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     raise TimeoutError("drain_timed_out")
