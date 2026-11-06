@@ -187,6 +187,8 @@ def _probe_ssh(ssh_target: str, timeout_s: float) -> dict[str, Any]:
         "-o",
         "BatchMode=yes",
         "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
         f"ConnectTimeout={connect_timeout}",
         ssh_target,
         "uname -n",
@@ -256,12 +258,22 @@ def probe_node(
 
 
 @contextmanager
-def _locked_sessions(state_dir: Path):
+def _locked_sessions(state_dir: Path, *, timeout_s: float = 10.0):
     state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock_file = state_dir / "lan_sessions.lock"
     fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o600)
+    acquired = False
+    start_time = time.monotonic()
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except (BlockingIOError, OSError):
+                if time.monotonic() - start_time >= timeout_s:
+                    raise TimeoutError(f"lan_sessions_lock_timeout_{timeout_s}s")
+                time.sleep(0.05)
         sessions_file = state_dir / "lan_sessions.json"
         try:
             data = (
@@ -280,7 +292,8 @@ def _locked_sessions(state_dir: Path):
         os.replace(tmp, sessions_file)
     finally:
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if acquired:
+                fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
 

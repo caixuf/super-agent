@@ -17,10 +17,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from .entity_store import EntityStore
 from . import memory_store
+
+_LOG = logging.getLogger("superagent.agentcore.memory.hybrid_recall")
 
 
 def rrf_fuse(
@@ -172,8 +175,8 @@ def recall_hybrid(
             try:
                 from . import memory_trace
                 memory_trace.record(fact_ids, task_id=task_id, channel="hybrid_recall", query=q, ebm=ebm or "")
-            except Exception:
-                pass
+            except Exception as exc:
+                _LOG.warning("failed to record memory_trace for task %s: %s", task_id, exc)
 
     payload: Dict[str, Any] = {
         "ok": True,

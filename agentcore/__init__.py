@@ -17,6 +17,7 @@ from .failure_mender import (
     escalate_timeout,
     validate_failure_decision,
 )
+from .logging import configure_logging, get_logger, set_log_context
 from .memory import (
     MemoryConfig,
     configure,
@@ -51,6 +52,9 @@ __all__ = [
     "get_config",
     "reset_config",
     "write_fact",
+    "get_logger",
+    "configure_logging",
+    "set_log_context",
     "recall_facts",
     "flush_background",
     "classify_failure",

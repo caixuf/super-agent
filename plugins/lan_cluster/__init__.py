@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 from pathlib import Path
+
+_LOG = logging.getLogger("superagent.plugins.lan_cluster")
 
 
 def _engine(ctx):
@@ -45,7 +48,8 @@ def register(ctx):
                 capability=args.get("capability"),
             )
             return json.dumps(res, ensure_ascii=False)
-        except Exception:
+        except Exception as exc:
+            _LOG.error("lan_node_list failed: %s", exc, exc_info=True)
             return json.dumps({"ok": False, "error": "lan_node_list_failed"})
 
     def handle_probe(args, *, session_id=None, **_kwargs):
@@ -64,7 +68,8 @@ def register(ctx):
             return json.dumps(res, ensure_ascii=False)
         except ValueError as exc:
             return json.dumps({"ok": False, "error": str(exc)})
-        except Exception:
+        except Exception as exc:
+            _LOG.error("lan_node_probe failed on %s: %s", args.get("node_id"), exc, exc_info=True)
             return json.dumps({"ok": False, "error": "lan_node_probe_failed"})
 
     def handle_rpc(args, *, session_id=None, **_kwargs):
@@ -90,7 +95,8 @@ def register(ctx):
             return json.dumps(res, ensure_ascii=False)
         except ValueError as exc:
             return json.dumps({"ok": False, "error": str(exc)})
-        except Exception:
+        except Exception as exc:
+            _LOG.error("lan_node_rpc failed on %s: %s", args.get("node_id"), exc, exc_info=True)
             return json.dumps({"ok": False, "error": "lan_node_rpc_failed"})
 
     ctx.register_tool(
