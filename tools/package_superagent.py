@@ -110,7 +110,7 @@ def build_package(output_dir: Path | None = None, *, allow_dirty: bool = False,
         files[name] = (content, 0o755 if mode == b"100755" else 0o644)
     if any(name not in files for name in REQUIRED):
         raise ValueError("required release input is missing")
-    for directory in ("plugins", "skills", "patches", "integrations", "runtime", "toolsets"):
+    for directory in ("plugins", "skills", "patches", "runtime", "toolsets"):
         if not any(name.startswith(directory + "/") for name in files):
             raise ValueError("required release directory is missing: " + directory)
 
