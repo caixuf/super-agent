@@ -6,8 +6,9 @@
 > [`RELEASE_CAPABILITIES.md`](RELEASE_CAPABILITIES.md)；本文的通过 / 跳过数字
 > 也只覆盖各自记录时的提交，不能外推到当前 HEAD。
 
-更新日期：2026-11-06（Asia/Shanghai）。
-远端基线：`2210e30`（`origin/main` 与本地 HEAD 一致）；本轮修复 `c93790f` 尚未推送。
+更新日期：2026-11-07（Asia/Shanghai）。
+远端基线：`dbd9074`；本地三提交（`780b230`/`096c06f`/`10b55bb`）已 rebase 其上并
+推送到 `origin/main`，当前 `origin/main` = `10b55bb` = 本地 HEAD。
 结论：**当前不具备正式发版证据**。源码测试、候选包安装成功与实际前台、
 Worker、记忆、真实渠道可用是不同层次，不能互相替代。
 
@@ -18,11 +19,11 @@ home 与同名 profile 目录不同，现场尚无新前台边界；现有只读
 当前功能输入已包含记忆身份路由、受管 provider 接线、同事绑定读取修复、研发
 验收命令授权、有界输出/清理，以及同事 Gateway 派工与完成回执接线。
 
-**本机完整 `verify.sh` 已退出码 0**（2026-11-06，HEAD `dc398f7` = `origin/main` `c018c50`
-+ 本地修复 `3895f18`/`dc398f7`）：
-单测块 **2879 passed / 55 skipped / 603.03 秒**，防退化靶场另 **5 passed**，
+**本机完整 `verify.sh` 已退出码 0**（2026-11-07，HEAD `10b55bb` = `origin/main`
+`dbd9074` + 本地三提交 `780b230`/`096c06f`/`10b55bb`，已推送）：
+单测块 **2899 passed / 55 skipped / 589.47 秒**，防退化靶场另 **5 passed**，
 15 个 shell 脚本语法检查与安装 dry-run 通过，⑥.1 三项延迟门禁全部通过
-（DNS 33.9ms、本地 I/O 0.26ms、平台 OpenAPI 116.8ms），⑦ 模型上下文端点
+（DNS 11.2ms、本地 I/O 0.3ms、平台 OpenAPI 116.7ms），⑦ 模型上下文端点
 返回 **1441792 (source=models)** 并报出手写 pin 与目录不一致的告警。
 ⑥ 真实通道仍因未设置 `FEISHU_APP_ID`/`FEISHU_APP_SECRET`/`FEISHU_TEST_CHAT_ID`
 按 `verify.sh` 规则记跳过，**不能算通过**；另用现场 `.env` 凭据与 home channel
@@ -31,7 +32,8 @@ home 与同名 profile 目录不同，现场尚无新前台边界；现有只读
 复现方式：`PYTHON=<装有 test extra 的解释器> bash verify.sh`。
 同一份源码用未装依赖的系统 `python3` 实测为 **2716 passed / 55 skipped / 556.86 秒**
 （差 11 passed / 1 skipped：文档渲染链与 illustrated_delivery 各贡献 1 组），
-⑦ 则已能探到端点、不再记 SKIP。
+⑦ 则已能探到端点、不再记 SKIP。**该对照数字记录于 HEAD `dc398f7`**，说明的是
+解释器依赖差异本身，不能外推为 `10b55bb` 的通过数。
 
 上一轮（HEAD `2210e30` + 修复 `c93790f`）的 **2727 passed / 54 skipped / 563.87 秒**
 属于 2026-11-06 凌晨那轮，**已被本轮取代**：此后并入 `origin/main` 的 80 个提交
@@ -80,15 +82,17 @@ home 与同名 profile 目录不同，现场尚无新前台边界；现有只读
 
 ## bot1 重部署记录（2026-11-06）
 
-bot1 = 本机 `~/.hermes` 宿主（单 profile `default`，单元 `hermes-gateway.service`）。
-本轮把源码从 `2210e30` 更新到 `dc398f7`（并入 `origin/main` 80 个提交），并把
-bot1 从**旧布局**迁到**受管布局**（`~/super_agent/default/`）。
+bot1 = 本机 `~/.hermes` 宿主（单 profile `default`，网关单元现为
+`hermes-gateway-default.service`，迁移前是 `hermes-gateway.service`）。
+2026-11-06 那轮把源码从 `2210e30` 更新到 `dc398f7`（并入 `origin/main` 80 个提交），并把
+bot1 从**旧布局**迁到**受管布局**（`~/super_agent/default/`）；2026-11-07 再升到
+`10b55bb`，见下节。
 
 ### 落地状态
 
 | 项 | 部署前 | 部署后 |
 | :--- | :--- | :--- |
-| 受管 release | 无（`doctor` 记 not-installed） | `~/super_agent/default/current` → `releases/dc398f7` |
+| 受管 release | 无（`doctor` 记 not-installed） | `~/super_agent/default/current` → `releases/10b55bb`（初迁 `releases/dc398f7`，2026-11-07 再升） |
 | 插件来源 | 工作区副本 | 全部软链到 release；`engine_root` 从 `/home/caixuf/code/super-agent` 迁到 `current` |
 | 卡片生产者 | HFC sidecar（`hermes-feishu-card` 插件 + `hermes-feishu-card-sidecar.service`） | 原生 CardKit 三件补丁（card-replies / card-lifecycle / card-delivery-guard），sidecar 已停用并留底 |
 | 网关单元 | `hermes-gateway.service` → 旧 Hermes 树 v0.22.2 | `hermes-gateway-default.service` → 受管候选 `hermes/v0.22.5-bf0203a794a0`（v0.22.5，含当前三件卡片补丁） |
@@ -123,6 +127,15 @@ bot1 从**旧布局**迁到**受管布局**（`~/super_agent/default/`）。
   目录值 1441792 不一致（⑦ 门禁持续报 warning）。删除它属于运行时配置改动，未做。
 - `~/.hermes/var/memory*`（旧记忆目录）与 `~/.hermes/state/superagent-memory`（新目录）
   现在各有一份库；旧目录保留作为回退底本，**尚未清理**，避免出现两套写入。
+- **清单声明的 `managed_paths` 与现场实际路径不一致**（2026-11-07 核实）：
+  `install-manifest.json` 声明 `queue_root=…/default/state/analysis-queue`、
+  `liveness_db=…/default/state/liveness.db`、`memory_spool=…/state/memory-spool`、
+  `markdown_outbox=…/state/markdown-outbox`、`colleague_registry=…/state/colleague-team/registry.sqlite`，
+  但 `~/super_agent/default/state/` **根本不存在**；现场配置实际仍指向
+  `~/.hermes/var/durable-queue`、`~/.hermes/var/liveness.db`，
+  记忆在 `~/.hermes/state/superagent-memory/`。迁移工具只改它拥有的路径标量，
+  这几条路径未被接管。运行时读写的仍是站点路径（数据一致、doctor 报 ready），
+  但「清单声明」与「现场事实」在此处不符，属**未决漂移**，未擅自改配置。
 
 ### BGE-M3 sidecar（CPU）
 
@@ -141,6 +154,65 @@ ollama 该模型常驻 CPU，`size_vram: 0`）。转发的请求形状与记忆�
 旧事实缺 `profile` 标签这一项，由 `~/.config/superagent/memory/backfill_profile_tag.py`
 显式补录：只在事实**自身**的 `user_id`/`agent_id` 已等于托管 profile 的唯一主体时补，
 不匹配即拒绝；本机 1 条事实补录后，严格 `profile=default` 召回命中。
+
+### 2026-11-07：rebase → 复验 → 推送 → 再次受管升级
+
+`origin/main` 在上一轮推送后又前进 3 个提交（`ad6bd5c` liveness 修复、`ccda0e0`
+outbox 净化 + liveness 与 queued 解耦 + CardKit 2.0 对齐、`dbd9074` CI 净化）。
+本轮按「先 rebase 再 push」处置：
+
+| 步骤 | 结果 |
+| :--- | :--- |
+| `git rebase origin/main` | 干净完成；本地三提交改写为 `780b230`/`096c06f`/`10b55bb`，与上游改动 **零文件重叠** |
+| 全量 `verify.sh`（HEAD `10b55bb`） | **退出码 0**：单测 **2899 passed / 55 skipped / 589.47 秒**、防退化另 5 passed、15 个 shell 语法检查 + 安装 dry-run 通过、⑥.1 三项延迟门禁全过、⑦ `1441792 (source=models)` 并报 pin 漂移 |
+| `git push origin main` | `dbd9074..10b55bb`，推送后与 `origin/main` 关系 **0/0** |
+| 受管 `update` | 退出码 0；release `dc398f7` → **`releases/10b55bb`**；备份 `~/super_agent/default/backups/backup-20261107-000438-261655`；插件链接全部改指新 release |
+| `doctor` | `status: ready`；release/插件链接/hash 全有效；网关 launcher 与进程命令行匹配；worker 的 PYTHONPATH（配置与进程）匹配；队列 0/0；三项卡片检查全 true |
+| 重启后运行态 | 网关重新连上消息平台长连接；记忆服务以 `profile=default` 严格作用域实测召回**命中**既有事实（一条构建约定），向量仍为 `bge-m3`/1024 维 |
+| 真实消息通道 | 用现场 `.env` 凭据与 home channel 单跑 **5 passed**（发→平台回读→幂等→撤回→投递） |
+
+上游 `ad6bd5c` 修的是**活体账本**口径：sweep/inspect 不再把 queued 任务记成
+stalled，并允许跨会话取消；它**不涉及**下面这条投递告警。
+
+`completion delivery backlog: parked=4 outcomes=- status=empty` 仍在每分钟打印，
+升级前后一致。现场核实：pool.db 里 4 条 job 的 `status` 全是 `completed`，但
+对应 4 条 outbox 行 `acknowledged=0`、`delivered` 为空；这 4 条 job 的 origin
+指向 2026-10-29 的三个会话（另有一条 origin 为空），会话已不可寻址，设计上
+保持 parked 而不猜会话。告警本身也只发过一次：`ops_alert_outbox` 里那条
+`health_fault` 事件创建于 2026-10-29 20:58，`attempts=0`、未投递；
+`ops_health_conditions` 中 scope `durable-completion-delivery` 自 2026-10-29 20:57
+起 `bad_since` 持续、`good_since` 仍为空（`last_at` 随每分钟检查刷新）。
+**这不是实时投递失败，也未消费这批积压**，但健康条件至今没有被判定为恢复 ——
+若要把它判为已恢复，需要单独授权决定这批历史 outbox 的收口方式，不能由代码
+自行重发（未知外部效果不盲重放）。
+
+### bot1 实际生效的工具面（2026-11-07 配置层核实）
+
+`plugins.enabled` 里有 **12** 个插件，但「在启用列表里」不等于「注册了工具或钩子」。
+宿主 `hermes_cli/plugins.py` 的 `ctx.get_config(key, default)` 只读
+`plugins.entries.<plugin_id>.settings.<key>`；**没有** `plugins.entries` 条目的插件，
+`get_config("enabled", False)` 返回 `False`，其 `register()` 提前返回，不注册任何东西。
+
+| 插件 | 现场 `plugins.entries` | 注册结果 |
+| :--- | :--- | :--- |
+| `durable-dispatch` | 有，`enabled: true` | 注册工具（提交/查询/取消等） |
+| `task-status` | 有，`enabled: true` | 注册工具 |
+| `illustrated-delivery` | 有，`enabled: true` | 注册工具 |
+| `colleague-catalog` | 有，`enabled: true` | 注册工具（含一个只读分析岗位定义） |
+| `memory-bridge` | 有，`enabled: true` | 注册工具 + 记忆 provider（localvec + BGE sidecar） |
+| `longtask-guard` | 有，但无 `enabled` 键 | 钩子无条件注册（pre/post_tool_call） |
+| `write-guard` | 无 | 钩子无条件注册（pre/post_tool_call + transform_tool_result） |
+| `capability-alert-outbox` | 有（仅 `engine_root`） | 本身不提供工具/钩子（仅 helper） |
+| `markdown-delivery` | 无 | **不注册**（`md_deliver` 等工具不可用） |
+| `lan-cluster` | 无 | **不注册**（`lan_node_*` 不可用） |
+| `colleague-team` | 无 | **不注册**；名册文件也不存在（doctor 记 `not_configured`） |
+| `local-model-grounding` | 无 | **不注册**（`pre_llm_call` 钩子不可用） |
+| `task-progress` | 有，`enabled: false` | 不注册（卡片生产者独占，故意关闭） |
+
+因此现场真正生效的是「5 个带工具的插件 + 2 组纪律钩子 + 1 个记忆 provider」；
+其余 4 个列在启用列表里但**当前没有任何工具面**，其中 `colleague-team` 还缺名册。
+这是配置层核实（源码语义 + 现场配置），**不是**对运行中网关工具清单的运行时观测
+（宿主未暴露该只读端点，单独起进程加载插件会有外发副作用，未做）。
 
 ## 已验证的修复
 
@@ -495,8 +567,8 @@ ready，完整固定宿主六项补丁均通过；导出源码专项 **219 passe
 | P3 同事配置 | 未完成 | 跨任务身份、权限撤销、实例代次；无业务平台依赖的通用执行路径 |
 | P4 记忆 | 未完成 | 身份边界、安全反例、真实模型的准入/召回固定样本评测，以及授权的生产启用 |
 | P5 真实 IM 灰度与回退 | 未开始 | 明确测试目标和窗口后验证真实消息、附件、回读、呈现、插话与回退 |
-| 当前源码全量测试 | 整轮 `verify.sh` 退出码 0；真实运行仍未验收 | HEAD `dc398f7`（`origin/main` `c018c50` + 本地修复）**2879 passed / 55 skipped / 603.03 秒**（装齐声明的 `test` extra；不装则实测 2716 / 55），防退化另 5 passed，⑥.1 三项延迟门禁全通过，⑦ 模型端点 **1441792 (source=models)** 并报出 pin 漂移；⑥ 真实通道缺 `FEISHU_*` 按规则跳过，**不算通过**（另用现场凭据单跑真实通道 5 passed） |
-| 干净室 | 本轮功能候选通过，非正式发布提交 | 断网容器 2474 passed / 138 skipped / 401.55 秒，安装/浏览器/幂等/离线记忆通过；不是实际宿主/IM 验收 |
+| 当前源码全量测试 | 整轮 `verify.sh` 退出码 0；真实运行仍未验收 | HEAD `10b55bb`（`origin/main` `dbd9074` + 本地三提交，已推送）**2899 passed / 55 skipped / 589.47 秒**（装齐声明的 `test` extra；未装依赖的系统 `python3` 对照在上一基线实测 2716 / 55），防退化另 5 passed，⑥.1 三项延迟门禁全通过，⑦ 模型端点 **1441792 (source=models)** 并报出 pin 漂移；⑥ 真实通道缺 `FEISHU_*` 按规则跳过，**不算通过**（另用现场凭据单跑真实通道 5 passed） |
+| 干净室 | 本轮功能候选通过，非正式发布提交 | 断网容器 2474 passed / 138 skipped / 401.55 秒，安装/浏览器/幂等/离线记忆通过；该数字记录于更早输入，**未在 `10b55bb` 重跑**，不能当当前源码通过；也不是实际宿主/IM 验收 |
 | 正式发布物 | 未生成 | 干净且包含全部新文件的提交、可复现归档、完整测试、安装/回退、对应能力的实际验收 |
 
 不绕过 containment/readiness 门禁，不覆盖历史任务/记忆，不自动重放未知外部效果。
