@@ -533,6 +533,8 @@ class LivenessLedger:
         state = row["state"]
         if state in TERMINAL_STATES:
             verdict = state
+        elif state == "queued":
+            verdict = "queued"
         elif alive is False:
             verdict = "lost"
         elif alive is True:
@@ -542,7 +544,10 @@ class LivenessLedger:
         else:
             verdict = "running"
         note = None
-        if verdict == "running" and alive is True and heartbeat_age > self.stall_seconds:
+        if verdict == "queued":
+            note = ("任务正在队列中等待可用工作进程调度（已排队 %.0f 秒）。"
+                    % elapsed)
+        elif verdict == "running" and alive is True and heartbeat_age > self.stall_seconds:
             note = ("进程仍可见，但最后心跳已是 %.0f 秒前；仅凭进程存在不能确认任务仍有进展。"
                     % heartbeat_age)
         elif verdict == "stalled":
@@ -608,6 +613,8 @@ class LivenessLedger:
             changed: List[Dict[str, Any]] = []
             for row in rows:
                 old = row["state"]
+                if old == "queued":
+                    continue
                 new = old
                 detail = row["detail"]
                 if row["pid"]:

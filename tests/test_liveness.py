@@ -98,6 +98,17 @@ def test_sweep_marks_pidless_silence_stalled_once(ledger):
     assert store.sweep() == []
 
 
+def test_queued_task_is_not_marked_stalled_by_sweep_or_inspect(ledger):
+    store, clock = ledger
+    store.register("t_queued", kind="durable", state="queued")
+    clock.advance(600)  # advance 10 minutes
+    assert store.sweep() == []
+    inspected = store.inspect("t_queued")
+    assert inspected["verdict"] == "queued"
+    assert inspected["stalled"] is False
+    assert "队列中等待" in inspected["liveness_note"]
+
+
 def test_owner_scoped_sweep_never_changes_another_session(ledger):
     store, clock = ledger
     store.register('one', kind='durable', owner='profile:one', state='running')

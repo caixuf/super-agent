@@ -521,7 +521,7 @@ class DispatchService:
         if not isinstance(args, dict) or set(args) != {'task_id'}:
             raise ValueError('task_id required')
         job = args['task_id']
-        self._owned(session_id, job)
+        self._owned(session_id, job, allow_cross_session=self.cross_session_status)
         before = self.pool.status(job)
         if before['status'] in ('completed', 'failed', 'cancelled'):
             return {'ok': True, 'task_id': job, 'already_terminal': True,
