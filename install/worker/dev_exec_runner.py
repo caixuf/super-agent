@@ -198,6 +198,24 @@ def _workdir() -> Path:
     return path if path.is_dir() else Path.home()
 
 
+def _find_and_load_checkpoint() -> dict | None:
+    candidates = []
+    env_ckpt = os.environ.get("DEV_CHECKPOINT_PATH")
+    if env_ckpt:
+        candidates.append(Path(env_ckpt))
+    candidates.append(_workdir() / "checkpoint.json")
+    candidates.append(Path("checkpoint.json"))
+    for path in candidates:
+        try:
+            if path.is_file():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and (data.get("summary") or data.get("phase")):
+                    return data
+        except Exception:
+            pass
+    return None
+
+
 def run_hermes(goal: str, *, route: dict | None = None) -> dict:
     effective_goal = _decorate_goal(goal)
     budget = int(os.environ.get("DEV_BUDGET", "3600"))
@@ -249,9 +267,12 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
     except subprocess.TimeoutExpired as exc:
         full_stdout = exc.stdout or ""
         summary = _clean_hermes_output(full_stdout)[-MAX_OUTPUT:] if isinstance(full_stdout, str) else ""
+        checkpoint_data = _find_and_load_checkpoint()
+        if not summary.strip() and checkpoint_data and checkpoint_data.get("summary"):
+            summary = checkpoint_data["summary"]
         if summary.strip():
             # Progressive delivery: salvage Phase 1 text checkpoint even if later rendering steps timed out
-            return {
+            payload = {
                 "ok": True,
                 "summary": summary.strip(),
                 "output": (full_stdout[-MAX_OUTPUT:] if isinstance(full_stdout, str) else ""),
@@ -262,6 +283,9 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
                 "phase": "phase1_text",
                 "checkpoint_delivered": True,
             }
+            if checkpoint_data:
+                payload["checkpoint"] = checkpoint_data
+            return payload
         return {"ok": False, "error": "runner_timeout"}
     except Exception as exc:
         return {"ok": False, "error": "runner_spawn_failed: " + type(exc).__name__}
@@ -271,14 +295,7 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
     err = (done.stderr or "")[-MAX_STDERR:]
     ok = done.returncode == 0 and bool((summary or out).strip())
 
-    checkpoint_file = _workdir() / "checkpoint.json"
-    checkpoint_data = None
-    if checkpoint_file.is_file():
-        try:
-            checkpoint_data = json.loads(checkpoint_file.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-
+    checkpoint_data = _find_and_load_checkpoint()
     degraded = False
     degradation_reason = ""
     if not ok and checkpoint_data and checkpoint_data.get("summary"):
@@ -394,6 +411,28 @@ def main() -> int:
             "degradation_reason": combined_reason,
             "result": fallback,
             "primary_error": primary_err,
+        }, ensure_ascii=False))
+        return 0
+
+    # If both engines failed, salvage Phase 1 checkpoint from disk if one was persisted
+    salvaged_checkpoint = _find_and_load_checkpoint()
+    if salvaged_checkpoint and salvaged_checkpoint.get("summary"):
+        print(json.dumps({
+            "ok": True,
+            "engine": "checkpoint_salvaged",
+            "model_tier": model_tier,
+            "degraded": True,
+            "engine_degraded": True,
+            "degradation_reason": "phase1_checkpoint_salvaged_after_engine_failure",
+            "result": {
+                "ok": True,
+                "summary": salvaged_checkpoint["summary"],
+                "checkpoint": salvaged_checkpoint,
+                "phase": "phase1_text",
+                "checkpoint_delivered": True,
+                "degraded": True,
+                "degradation_reason": "phase1_checkpoint_salvaged_after_engine_failure",
+            },
         }, ensure_ascii=False))
         return 0
 

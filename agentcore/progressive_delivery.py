@@ -29,6 +29,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import threading
 import time
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
@@ -36,9 +37,11 @@ logger = logging.getLogger(__name__)
 
 #: Markers that indicate a Phase 1 progressive delivery or checkpoint output.
 PROGRESSIVE_MARKERS = re.compile(
-    r"(?m)^\s*##(?:CHECKPOINT|PHASE1|PROGRESSIVE_DELIVERY):\s*\S+"
-    r"|\[(?:CHECKPOINT|PROGRESSIVE[ _-]DELIVERY|渐进式交付)\]"
-    r"|出图作为异步附加物|后台渲染中|渲染中\.\.\.|rendering in background|out-of-band rendering",
+    r"(?m)^\s*##\s*(?:CHECKPOINT|PHASE1|PROGRESSIVE_DELIVERY|阶段一|阶段1)[:\s]\s*\S+"
+    r"|^\s*##\s*(?:CHECKPOINT|PHASE1|PROGRESSIVE_DELIVERY|阶段一|阶段1)\s*$"
+    r"|[\[【](?:CHECKPOINT|PHASE1|PROGRESSIVE[ _-]DELIVERY|渐进式交付|阶段一|阶段1)[\]】]"
+    r"|出图作为异步附加物|后台渲染中|渲染中\.\.\.|rendering in background|out-of-band rendering"
+    r"|阶段一[：:]\s*(?:核心|文字|架构|结论)",
     re.I,
 )
 
@@ -206,6 +209,20 @@ def build_progressive_receipt(
     }
 
 
+def _safe_finish_card(emitter: Any, *, phase: str, artifacts: Sequence[str], detail: str = "") -> None:
+    if emitter is None:
+        return
+    try:
+        emitter.finish(phase=phase, artifacts=artifacts, detail=detail)
+    except TypeError:
+        try:
+            emitter.finish(phase=phase, artifacts=artifacts)
+        except Exception as exc:
+            logger.warning("Failed to finish card without detail: %s", type(exc).__name__)
+    except Exception as exc:
+        logger.warning("Failed to finish card: %s", type(exc).__name__)
+
+
 class ProgressiveDeliveryCoordinator:
     """Coordinates Phase 1 immediate text delivery and Phase 2 out-of-band rendering.
 
@@ -259,12 +276,40 @@ class ProgressiveDeliveryCoordinator:
         base_artifacts: Sequence[str] = (),
         on_success: Optional[Callable[[Sequence[str]], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
+        asynchronous: bool = False,
     ) -> Dict[str, Any]:
         """Execute Phase 2 rendering out-of-band with strict timeout and error containment.
 
         Guarantees that rendering crashes or timeouts never raise or block callers,
         and gracefully finishes the card emitter without destroying Phase 1 delivery.
+
+        When asynchronous=True, spawns rendering in a background thread and returns
+        immediately with 0 blocking to the caller.
         """
+        if asynchronous:
+            def _async_worker():
+                try:
+                    self.run_out_of_band_rendering(
+                        render_fn,
+                        timeout_s=timeout_s,
+                        base_artifacts=base_artifacts,
+                        on_success=on_success,
+                        on_error=on_error,
+                        asynchronous=False,
+                    )
+                except Exception as exc:
+                    logger.warning("Background rendering failed unexpectedly: %s", exc)
+
+            thread = threading.Thread(target=_async_worker, daemon=True)
+            thread.start()
+            return {
+                "ok": True,
+                "status": "rendering_started",
+                "phase": "rendering",
+                "artifacts": list(base_artifacts),
+                "rendering_state": "rendering",
+            }
+
         all_artifacts = list(base_artifacts)
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         future = executor.submit(render_fn)
@@ -275,14 +320,12 @@ class ProgressiveDeliveryCoordinator:
                     if str(item) not in all_artifacts:
                         all_artifacts.append(str(item))
 
-            if self.card_emitter is not None:
-                try:
-                    self.card_emitter.finish(
-                        phase="completed",
-                        artifacts=all_artifacts,
-                    )
-                except Exception as exc:
-                    logger.warning("Failed to finish card on rendering success: %s", type(exc).__name__)
+            _safe_finish_card(
+                self.card_emitter,
+                phase="completed",
+                detail="文字结论与图表渲染已全部交付",
+                artifacts=all_artifacts,
+            )
 
             if on_success:
                 try:
@@ -299,14 +342,12 @@ class ProgressiveDeliveryCoordinator:
         except concurrent.futures.TimeoutError:
             logger.warning("Out-of-band rendering timed out after %s seconds", timeout_s)
             future.cancel()
-            if self.card_emitter is not None:
-                try:
-                    self.card_emitter.finish(
-                        phase="completed_degraded",
-                        artifacts=all_artifacts,
-                    )
-                except Exception as exc:
-                    logger.warning("Failed to finish card on timeout: %s", type(exc).__name__)
+            _safe_finish_card(
+                self.card_emitter,
+                phase="completed_degraded",
+                detail=f"图表渲染超时（{timeout_s}s），已自动降级；文字结论已有效交付",
+                artifacts=all_artifacts,
+            )
 
             if on_error:
                 try:
@@ -323,14 +364,12 @@ class ProgressiveDeliveryCoordinator:
             }
         except Exception as exc:
             logger.warning("Out-of-band rendering failed: %s", type(exc).__name__)
-            if self.card_emitter is not None:
-                try:
-                    self.card_emitter.finish(
-                        phase="completed_degraded",
-                        artifacts=all_artifacts,
-                    )
-                except Exception:
-                    pass
+            _safe_finish_card(
+                self.card_emitter,
+                phase="completed_degraded",
+                detail=f"图表渲染异常（{type(exc).__name__}），已自动降级；文字结论已有效交付",
+                artifacts=all_artifacts,
+            )
 
             if on_error:
                 try:
@@ -347,3 +386,22 @@ class ProgressiveDeliveryCoordinator:
             }
         finally:
             executor.shutdown(wait=False)
+
+    def spawn_out_of_band_rendering(
+        self,
+        render_fn: Callable[[], Sequence[str]],
+        *,
+        timeout_s: float = 60.0,
+        base_artifacts: Sequence[str] = (),
+        on_success: Optional[Callable[[Sequence[str]], None]] = None,
+        on_error: Optional[Callable[[Exception], None]] = None,
+    ) -> Dict[str, Any]:
+        """Convenience helper to spawn out-of-band rendering asynchronously (0-blocking)."""
+        return self.run_out_of_band_rendering(
+            render_fn,
+            timeout_s=timeout_s,
+            base_artifacts=base_artifacts,
+            on_success=on_success,
+            on_error=on_error,
+            asynchronous=True,
+        )

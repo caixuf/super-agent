@@ -410,11 +410,11 @@ class CardEmitter:
             hitl_request_id=hitl_request_id,
             **self._identity_kwargs()))
 
-    def finish(self, *, phase: str = "", host: str = "",
+    def finish(self, *, phase: str = "", detail: str = "", host: str = "",
                artifacts: Sequence[str] = ()) -> Optional[CardView]:
         """Terminal success. Always the card's last frame — never a second message."""
         return self._publish(self._writer.emit(
-            CardState.DONE, phase=phase, host=host, artifacts=artifacts, final=True,
+            CardState.DONE, phase=phase, detail=detail, host=host, artifacts=artifacts, final=True,
             **self._identity_kwargs()))
 
     def fail(self, *, detail: str = "", artifacts: Sequence[str] = ()) -> Optional[CardView]:

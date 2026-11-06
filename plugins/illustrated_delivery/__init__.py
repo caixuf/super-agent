@@ -36,9 +36,11 @@ _MEDIA_DOC = re.compile(r'(?m)^\s*MEDIA:\s*(\S+?\.(?:html|htm|pdf))\s*$', re.I)
 # from out-of-band diagram rendering. Checkpoint markers or out-of-band notices
 # represent valid text delivery and must not be blocked or warned against.
 _PROGRESSIVE_DOC = re.compile(
-    r'(?m)^\s*##(?:CHECKPOINT|PHASE1|PROGRESSIVE_DELIVERY):\s*\S+'
-    r'|\[(?:CHECKPOINT|PROGRESSIVE[ _-]DELIVERY|渐进式交付)\]'
-    r'|出图作为异步附加物|后台渲染中|渲染中\.\.\.|rendering in background|out-of-band rendering',
+    r'(?m)^\s*##\s*(?:CHECKPOINT|PHASE1|PROGRESSIVE_DELIVERY|阶段一|阶段1)[:\s]\s*\S+'
+    r'|^\s*##\s*(?:CHECKPOINT|PHASE1|PROGRESSIVE_DELIVERY|阶段一|阶段1)\s*$'
+    r'|[\[【](?:CHECKPOINT|PHASE1|PROGRESSIVE[ _-]DELIVERY|渐进式交付|阶段一|阶段1)[\]】]'
+    r'|出图作为异步附加物|后台渲染中|渲染中\.\.\.|rendering in background|out-of-band rendering'
+    r'|阶段一[：:]\s*(?:核心|文字|架构|结论)',
     re.I
 )
 

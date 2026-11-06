@@ -100,7 +100,9 @@ def delivery_context(advice):
               'Respect the user format preference. Lead with the answer and explain who does what in familiar words; '
               'explain necessary terms on first use. Include file names, APIs and internal identifiers only when they help verification. '
               'A visual must improve understanding, not decorate a long answer. '
-              'Never claim an artifact exists before successful rendering and visual inspection.')
+              'Follow progressive delivery (渐进式交付): output core text conclusions and structured analysis immediately (Phase 1); '
+              'diagram rendering via arch_doc.py is an out-of-band enhancement (Phase 2). '
+              'Never claim an artifact exists before successful rendering, but never withhold Phase 1 text conclusions waiting for rendering.')
     if mode == 'inline':
         return ('Delivery advice: answer this bounded request directly in text. '
                 'For a local follow-up, explain the relevant part without regenerating the whole document. ' + common)
@@ -116,10 +118,11 @@ def delivery_context(advice):
         return ('Delivery advice: an illustrated ' + advice['kind'] + ' is likely useful. '
                 'Read and apply the existing illustrated-doc-rendering skill; use the existing tools/arch_doc.py renderer. '
                 'Choose a visual that explains ' + advice['suggested_visual'] + '. '
-                'Lead with the answer, produce a readable preview plus complete HTML, verify rendering, and inspect the result. ' + common)
+                'Follow progressive delivery: output core textual conclusions and report first (Phase 1); '
+                'produce a readable preview plus complete HTML out-of-band (Phase 2), verify rendering, and inspect the result. ' + common)
     return ('Delivery advice: decide whether relationships, stages, dependencies, or tradeoffs in your planned answer '
             'would be clearer in a reusable visual document. If useful, apply illustrated-doc-rendering and the existing renderer; '
-            'otherwise answer inline. Use the appropriate artifact tool for an explicitly requested file format. ' + common)
+            'otherwise answer inline. Follow progressive delivery when rendering. Use the appropriate artifact tool for an explicitly requested file format. ' + common)
 
 
 # Stable public aliases for host integrations that use decision-oriented naming.

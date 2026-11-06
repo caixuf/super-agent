@@ -372,3 +372,140 @@ def test_dev_exec_runner_timeout_salvages_stdout(monkeypatch, tmp_path: Path):
     assert result["degradation_reason"] == "runner_timeout_checkpoint_salvaged"
     assert result["phase"] == "phase1_text"
     assert "分析结论已完成" in result["summary"]
+
+
+def test_progressive_markers_expanded_syntax():
+    # Standard Markdown headings with space after ##
+    assert is_progressive_phase1("## CHECKPOINT: arch_phase1\n正文...")
+    assert is_progressive_phase1("## PHASE1: text_ready\n正文...")
+    assert is_progressive_phase1("## 阶段一：核心架构结论\n正文...")
+    assert is_progressive_phase1("## 阶段1: 核心结论\n正文...")
+
+    # Chinese bracket formats
+    assert is_progressive_phase1("【渐进式交付】阶段一：结论已就绪\n正文...")
+    assert is_progressive_phase1("【阶段一】核心文字结论\n正文...")
+    assert is_progressive_phase1("[阶段一] 核心架构已完成\n正文...")
+
+    # Direct section markers
+    assert is_progressive_phase1("阶段一：核心文字结论已完成\n正文...")
+    assert is_progressive_phase1("阶段一: 核心架构推导完成\n正文...")
+
+
+def test_progressive_coordinator_async_nonblocking(tmp_path: Path):
+    store = CardStore(tmp_path / "cards.db")
+    store.bind("task-async", "chat-1", "msg-1")
+    transport = MagicMock()
+    emitter = CardEmitter(store, "task-async", transport, title="异步出图")
+
+    coordinator = ProgressiveDeliveryCoordinator(card_emitter=emitter)
+
+    # 1. Deliver Phase 1 text immediately (0-blocking)
+    phase1_result = coordinator.deliver_phase1(
+        "task-async",
+        "阶段一：核心文字结论已交付。",
+        artifacts=["report.md"],
+    )
+    assert phase1_result["ok"] is True
+    assert phase1_result["phase"] == "phase1_text"
+
+    rendered_signal = []
+
+    def mock_render():
+        time.sleep(0.1)
+        rendered_signal.append("done")
+        return ["chart.png"]
+
+    # 2. Spawn out-of-band rendering asynchronously (must return immediately without waiting)
+    start_t = time.monotonic()
+    phase2_result = coordinator.spawn_out_of_band_rendering(
+        mock_render,
+        timeout_s=5.0,
+        base_artifacts=["report.md"],
+    )
+    elapsed = time.monotonic() - start_t
+    assert elapsed < 0.05  # Returned instantly, 0-blocking!
+    assert phase2_result["ok"] is True
+    assert phase2_result["status"] == "rendering_started"
+    assert phase2_result["rendering_state"] == "rendering"
+
+    # Wait for the background thread to finish
+    deadline = time.monotonic() + 3.0
+    while not rendered_signal and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    assert rendered_signal == ["done"]
+    # Card is finished in background
+    assert emitter.handle.state == CardState.DONE
+
+
+def test_dev_exec_runner_timeout_salvages_checkpoint_json_when_stdout_empty(monkeypatch, tmp_path: Path):
+    from install.worker import dev_exec_runner
+
+    monkeypatch.setattr(dev_exec_runner, "_workdir", lambda: tmp_path)
+    monkeypatch.setattr(dev_exec_runner, "_hermes_bin", lambda: "/bin/true")
+
+    # Persist a valid checkpoint.json before timeout
+    ckpt_file = tmp_path / "checkpoint.json"
+    ckpt_file.write_text(json.dumps({
+        "job": "job-salvage",
+        "attempt": "att-1",
+        "phase": "phase1_text",
+        "summary": "阶段一文字结论：核心流水线已设计完毕。",
+        "delivered": True,
+    }), encoding="utf-8")
+
+    # Simulate subprocess timeout with empty stdout
+    def fake_run(*args, **kwargs):
+        err = subprocess.TimeoutExpired(cmd=["hermes"], timeout=10)
+        err.stdout = ""
+        err.stderr = "rendering timed out"
+        raise err
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = dev_exec_runner.run_hermes("分析核心架构")
+    assert result["ok"] is True
+    assert result["degraded"] is True
+    assert result["degradation_reason"] == "runner_timeout_checkpoint_salvaged"
+    assert result["phase"] == "phase1_text"
+    assert "核心流水线已设计完毕" in result["summary"]
+    assert result.get("checkpoint", {}).get("phase") == "phase1_text"
+
+
+def test_dev_exec_runner_main_salvages_checkpoint_on_dual_engine_failure(monkeypatch, tmp_path: Path):
+    from install.worker import dev_exec_runner
+    import io
+
+    monkeypatch.setattr(dev_exec_runner, "_workdir", lambda: tmp_path)
+    monkeypatch.setattr(dev_exec_runner, "_read_job_envelope", lambda stream: ("分析架构", {}))
+    monkeypatch.setattr(dev_exec_runner, "run_hermes", lambda goal, route=None: {"ok": False, "error": "turn_failed"})
+    monkeypatch.setattr(dev_exec_runner, "run_pi", lambda goal, route=None: {"ok": False, "error": "pi_unavailable"})
+
+    # Persist a valid checkpoint.json
+    ckpt_file = tmp_path / "checkpoint.json"
+    ckpt_file.write_text(json.dumps({
+        "job": "job-dual-fail",
+        "phase": "phase1_text",
+        "summary": "阶段一核心结论：各组件已完成解耦设计。",
+    }), encoding="utf-8")
+
+    captured_out = io.StringIO()
+    monkeypatch.setattr("sys.stdout", captured_out)
+
+    code = dev_exec_runner.main()
+    assert code == 0
+    payload = json.loads(captured_out.getvalue())
+    assert payload["ok"] is True
+    assert payload["engine"] == "checkpoint_salvaged"
+    assert payload["degraded"] is True
+    assert "各组件已完成解耦设计" in payload["result"]["summary"]
+
+
+def test_document_intent_advises_progressive_delivery():
+    from agentcore.document_intent import advise_delivery, delivery_context
+
+    decision = advise_delivery("介绍一下服务的架构与模块协作关系")
+    assert decision["mode"] == "artifact"
+    context = delivery_context(decision)
+    assert "progressive delivery" in context.lower() or "渐进式交付" in context
+    assert "Phase 1" in context or "阶段一" in context
