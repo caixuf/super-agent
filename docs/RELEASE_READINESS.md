@@ -30,10 +30,12 @@ home 与同名 profile 目录不同，现场尚无新前台边界；现有只读
 单独跑真实通道用例为 **5 passed**（发→平台回读→幂等→撤回→投递）。
 
 复现方式：`PYTHON=<装有 test extra 的解释器> bash verify.sh`。
-同一份源码用未装依赖的系统 `python3` 实测为 **2716 passed / 55 skipped / 556.86 秒**
-（差 11 passed / 1 skipped：文档渲染链与 illustrated_delivery 各贡献 1 组），
-⑦ 则已能探到端点、不再记 SKIP。**该对照数字记录于 HEAD `dc398f7`**，说明的是
-解释器依赖差异本身，不能外推为 `10b55bb` 的通过数。
+同一份源码、**同一提交 `10b55bb`**，用未装声明依赖的系统 `python3` 实测为
+**2888 passed / 56 skipped / 599.44 秒**（退出码 0）：差 **11 passed / 1 skipped**，
+来自 `test` extra 声明的 `markdown>=3.4`（`tests/test_arch_doc.py` 整组跳过）与
+`ruamel.yaml==0.18.16`（`tests/test_illustrated_delivery.py` 1 条），
+⑦ 则已能探到端点、不再记 SKIP。上一轮记为 2716 / 55 的那次对照是在别的条件下
+测的（差值 183 而非 11），已由本轮同提交对照取代，不作外推。
 
 上一轮（HEAD `2210e30` + 修复 `c93790f`）的 **2727 passed / 54 skipped / 563.87 秒**
 属于 2026-11-06 凌晨那轮，**已被本轮取代**：此后并入 `origin/main` 的 80 个提交
@@ -92,7 +94,7 @@ bot1 从**旧布局**迁到**受管布局**（`~/super_agent/default/`）；2026
 
 | 项 | 部署前 | 部署后 |
 | :--- | :--- | :--- |
-| 受管 release | 无（`doctor` 记 not-installed） | `~/super_agent/default/current` → `releases/10b55bb`（初迁 `releases/dc398f7`，2026-11-07 再升） |
+| 受管 release | 无（`doctor` 记 not-installed） | `~/super_agent/default/current` → `releases/<仓库 HEAD 提交>`；历次 `dc398f7` → `10b55bb` → `e0e86f8`（**docs-only 提交同样会重建 release**） |
 | 插件来源 | 工作区副本 | 全部软链到 release；`engine_root` 从 `/home/caixuf/code/super-agent` 迁到 `current` |
 | 卡片生产者 | HFC sidecar（`hermes-feishu-card` 插件 + `hermes-feishu-card-sidecar.service`） | 原生 CardKit 三件补丁（card-replies / card-lifecycle / card-delivery-guard），sidecar 已停用并留底 |
 | 网关单元 | `hermes-gateway.service` → 旧 Hermes 树 v0.22.2 | `hermes-gateway-default.service` → 受管候选 `hermes/v0.22.5-bf0203a794a0`（v0.22.5，含当前三件卡片补丁） |
@@ -166,10 +168,12 @@ outbox 净化 + liveness 与 queued 解耦 + CardKit 2.0 对齐、`dbd9074` CI �
 | `git rebase origin/main` | 干净完成；本地三提交改写为 `780b230`/`096c06f`/`10b55bb`，与上游改动 **零文件重叠** |
 | 全量 `verify.sh`（HEAD `10b55bb`） | **退出码 0**：单测 **2899 passed / 55 skipped / 589.47 秒**、防退化另 5 passed、15 个 shell 语法检查 + 安装 dry-run 通过、⑥.1 三项延迟门禁全过、⑦ `1441792 (source=models)` 并报 pin 漂移 |
 | `git push origin main` | `dbd9074..10b55bb`，推送后与 `origin/main` 关系 **0/0** |
-| 受管 `update` | 退出码 0；release `dc398f7` → **`releases/10b55bb`**；备份 `~/super_agent/default/backups/backup-20261107-000438-261655`；插件链接全部改指新 release |
+| 受管 `update` | 退出码 0；release `dc398f7` → `releases/10b55bb`；备份 `~/super_agent/default/backups/backup-20261107-000438-261655`；插件链接全部改指新 release |
+| 二次受管 `update` | 退出码 0；为让运行态与 HEAD 精确对齐，再升到 `releases/e0e86f8`（仅 docs 差异，运行行为不变）；`doctor` 复跑仍 `ready`，`release_history` 记 `dc398f7` → `10b55bb` |
 | `doctor` | `status: ready`；release/插件链接/hash 全有效；网关 launcher 与进程命令行匹配；worker 的 PYTHONPATH（配置与进程）匹配；队列 0/0；三项卡片检查全 true |
 | 重启后运行态 | 网关重新连上消息平台长连接；记忆服务以 `profile=default` 严格作用域实测召回**命中**既有事实（一条构建约定），向量仍为 `bge-m3`/1024 维 |
-| 真实消息通道 | 用现场 `.env` 凭据与 home channel 单跑 **5 passed**（发→平台回读→幂等→撤回→投递） |
+| 真实消息通道 | 用现场 `.env` 凭据与 home channel 单跑 **5 passed**（发→平台回读→幂等→撤回→投递）；升级后再跑一次仍 **5 passed** |
+| 网关自报状态 | 网关本地 HTTP `/api/status`：`overall: ok`、平台 **connected**、`needs_attention: false`、dashboard `recent_unhandled_errors: 0`、storage ok、`last_boot_unclean: false` |
 
 上游 `ad6bd5c` 修的是**活体账本**口径：sweep/inspect 不再把 queued 任务记成
 stalled，并允许跨会话取消；它**不涉及**下面这条投递告警。
@@ -211,6 +215,16 @@ stalled，并允许跨会话取消；它**不涉及**下面这条投递告警。
 
 因此现场真正生效的是「5 个带工具的插件 + 2 组纪律钩子 + 1 个记忆 provider」；
 其余 4 个列在启用列表里但**当前没有任何工具面**，其中 `colleague-team` 还缺名册。
+影响面（按 `RELEASE_CAPABILITIES.md`）：D05「文档、附件与图文交付」的
+`md_deliver`/`md_resolve` 工具**不可用**（全仓只有该插件提供这两个工具，
+`install/configure_defaults.py` 的 `ensure_toolset` 也因为 `enabled` 不为
+true 而不会把它接进任何平台的 toolset）；C01–C02 的同事**写侧**工具
+（hire/grant/assign 等）不可用，只有 `colleague-catalog` 的只读名册在；
+E02 的本地双模型钩子不生效；`lan_node_*` 不生效。
+补齐这些只需给对应插件写 `plugins.entries.<id>.settings.enabled: true`
+（`colleague-team` 还需名册路径与 team/primary 标识），属于现场配置改动，
+**未擅自改**。
+
 这是配置层核实（源码语义 + 现场配置），**不是**对运行中网关工具清单的运行时观测
 （宿主未暴露该只读端点，单独起进程加载插件会有外发副作用，未做）。
 
@@ -567,7 +581,7 @@ ready，完整固定宿主六项补丁均通过；导出源码专项 **219 passe
 | P3 同事配置 | 未完成 | 跨任务身份、权限撤销、实例代次；无业务平台依赖的通用执行路径 |
 | P4 记忆 | 未完成 | 身份边界、安全反例、真实模型的准入/召回固定样本评测，以及授权的生产启用 |
 | P5 真实 IM 灰度与回退 | 未开始 | 明确测试目标和窗口后验证真实消息、附件、回读、呈现、插话与回退 |
-| 当前源码全量测试 | 整轮 `verify.sh` 退出码 0；真实运行仍未验收 | HEAD `10b55bb`（`origin/main` `dbd9074` + 本地三提交，已推送）**2899 passed / 55 skipped / 589.47 秒**（装齐声明的 `test` extra；未装依赖的系统 `python3` 对照在上一基线实测 2716 / 55），防退化另 5 passed，⑥.1 三项延迟门禁全通过，⑦ 模型端点 **1441792 (source=models)** 并报出 pin 漂移；⑥ 真实通道缺 `FEISHU_*` 按规则跳过，**不算通过**（另用现场凭据单跑真实通道 5 passed） |
+| 当前源码全量测试 | 整轮 `verify.sh` 退出码 0；真实运行仍未验收 | HEAD `10b55bb`（`origin/main` `dbd9074` + 本地三提交，已推送）**2899 passed / 55 skipped / 589.47 秒**（装齐声明的 `test` extra；**同提交**用未装依赖的系统 `python3` 对照为 **2888 / 56 / 599.44 秒**），防退化另 5 passed，⑥.1 三项延迟门禁全通过，⑦ 模型端点 **1441792 (source=models)** 并报出 pin 漂移；⑥ 真实通道缺 `FEISHU_*` 按规则跳过，**不算通过**（另用现场凭据单跑真实通道 5 passed） |
 | 干净室 | 本轮功能候选通过，非正式发布提交 | 断网容器 2474 passed / 138 skipped / 401.55 秒，安装/浏览器/幂等/离线记忆通过；该数字记录于更早输入，**未在 `10b55bb` 重跑**，不能当当前源码通过；也不是实际宿主/IM 验收 |
 | 正式发布物 | 未生成 | 干净且包含全部新文件的提交、可复现归档、完整测试、安装/回退、对应能力的实际验收 |
 
