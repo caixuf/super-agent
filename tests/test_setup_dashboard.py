@@ -18,7 +18,7 @@ def test_render_dashboard_service():
     assert "Description=Hermes Web Dashboard Visualization Service" in rendered
     assert 'ExecStart="/opt/hermes/.hermes/bin/hermes" "dashboard" "--port" "9119" "--host" "127.0.0.1" "--skip-build" "--no-open"' in rendered
     assert 'Environment="HERMES_HOME=/home/user/.hermes"' in rendered
-    assert 'WorkingDirectory="/home/user/.hermes"' in rendered
+    assert "WorkingDirectory=/home/user/.hermes" in rendered
     assert "Restart=always" in rendered
 
 
