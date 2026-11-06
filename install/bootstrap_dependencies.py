@@ -38,14 +38,26 @@ def main():
             raise RuntimeError("private document dependencies unavailable; check Python venv and package network access")
     cache = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", str(Path.home() / ".cache/ms-playwright")))
     local_cache = root / ".browser-cache"
+    _SHELL_PATTERNS = (
+        "chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell",
+        "chromium_headless_shell-*/chrome-linux64/chrome-headless-shell",
+        "chromium-*/chrome-linux64/chrome-headless-shell",
+        "chromium-*/chrome-linux/chrome-headless-shell",
+        "chrome-headless-shell-*/chrome-headless-shell-linux64/chrome-headless-shell",
+        "chrome-headless-shell-linux64/chrome-headless-shell",
+        "chromium-*/chrome-linux64/chrome",
+        "chromium-*/chrome-linux/chrome",
+    )
     def cached(base):
-        return [p for p in base.glob("chromium-*/chrome-linux64/chrome")
-                if p.is_file() and os.access(p, os.X_OK)]
+        res = []
+        for pat in _SHELL_PATTERNS:
+            res.extend(p for p in base.glob(pat) if p.is_file() and os.access(p, os.X_OK))
+        return res
 
     def works(candidate):
         try:
             with tempfile.TemporaryDirectory(prefix="superagent-browser-probe-") as profile:
-                proc = subprocess.run([str(candidate), "--headless", "--no-sandbox", "--disable-gpu",
+                proc = subprocess.run([str(candidate), "--headless=new", "--no-sandbox", "--disable-gpu",
                                        "--disable-dev-shm-usage", "--user-data-dir=" + profile,
                                        "--dump-dom", "data:text/html,<p>probe</p>"],
                                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20)
@@ -61,25 +73,37 @@ def main():
             raise RuntimeError("configured ARCH_DOC_BROWSER cannot start")
         candidates.append(Path(configured_path))
     candidates += cached(cache) + cached(local_cache)
-    for name in ("google-chrome", "google-chrome-stable", "chromium"):
+    for name in ("chrome-headless-shell", "chromium-headless-shell", "google-chrome", "google-chrome-stable", "chromium"):
         binary = shutil.which(name)
         if binary and Path(binary).resolve().name != "snap":
             candidates.append(Path(binary))
     selected = next((path for path in candidates if works(path)), None)
     if selected is None:
-        # Install into the managed deployment, never into an unrelated profile.
+        # 1. Try Playwright chromium-headless-shell or chromium
         env = dict(os.environ, PLAYWRIGHT_BROWSERS_PATH=str(local_cache))
         packages = subprocess.run([str(python), "-m", "pip", "install", "--disable-pip-version-check",
                                    "playwright>=1.40"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if packages.returncode:
-            raise RuntimeError("browser bootstrap dependency unavailable")
-        browser = subprocess.run([str(python), "-m", "playwright", "install", "chromium"],
-                                 env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if browser.returncode:
-            raise RuntimeError("Chromium download failed; check browser package network access")
-        selected = next((path for path in cached(local_cache) if works(path)), None)
+        if packages.returncode == 0:
+            for target in ("chromium-headless-shell", "chromium"):
+                subprocess.run([str(python), "-m", "playwright", "install", target],
+                               env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                selected = next((path for path in cached(local_cache) if works(path)), None)
+                if selected:
+                    break
+
+        # 2. Standalone fallback: direct download via tools.doc_browser.obtain_headless_shell
         if selected is None:
-            raise RuntimeError("Chromium cannot start; check operating system browser dependencies")
+            try:
+                sys.path.insert(0, str(root))
+                from tools.doc_browser import obtain_headless_shell
+                obtained = obtain_headless_shell(local_cache)
+                if obtained and works(Path(obtained)):
+                    selected = Path(obtained)
+            except Exception:
+                pass
+
+        if selected is None:
+            raise RuntimeError("Chromium / chrome-headless-shell cannot start; check operating system browser dependencies")
     marker = root / ".browser-path"
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=root, prefix=".browser-path-", delete=False) as out:
         out.write(str(selected.resolve()) + "\n")

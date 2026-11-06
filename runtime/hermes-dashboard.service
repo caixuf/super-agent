@@ -1,0 +1,17 @@
+[Unit]
+Description=Hermes Web Dashboard Visualization Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment="HERMES_HOME=%h/.hermes"
+ExecStart=%h/.hermes/hermes-agent/bin/hermes dashboard --port 9119 --host 127.0.0.1 --no-open --skip-build
+WorkingDirectory=%h/.hermes
+Restart=always
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

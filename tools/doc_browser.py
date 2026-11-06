@@ -22,7 +22,94 @@ class BrowserError(RuntimeError):
     pass
 
 
-def find_browser(candidates=()):
+_BROWSER_CACHE_PATTERNS = (
+    "chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell",
+    "chromium_headless_shell-*/chrome-linux64/chrome-headless-shell",
+    "chromium-*/chrome-linux64/chrome-headless-shell",
+    "chromium-*/chrome-linux/chrome-headless-shell",
+    "chrome-headless-shell-*/chrome-headless-shell-linux64/chrome-headless-shell",
+    "chrome-headless-shell-linux64/chrome-headless-shell",
+    "chromium-*/chrome-linux64/chrome",
+    "chromium-*/chrome-linux/chrome",
+)
+
+CFT_LAST_KNOWN_GOOD = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
+CFT_FALLBACK_URL = "https://storage.googleapis.com/chrome-for-testing-public/128.0.6613.119/linux64/chrome-headless-shell-linux64.zip"
+
+
+def probe_browser(candidate: Path | str) -> bool:
+    """Verify that a browser binary can start in headless mode."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="arch-doc-probe-") as profile:
+            cmd = [str(candidate), "--headless=new", "--no-sandbox", "--disable-gpu",
+                   "--disable-dev-shm-usage", f"--user-data-dir={profile}",
+                   "--dump-dom", "data:text/html,<p>probe</p>"]
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15)
+            return proc.returncode == 0 and b"probe" in proc.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def obtain_headless_shell(target_dir: Path | None = None) -> str:
+    """Download and unpack a standalone chrome-headless-shell binary."""
+    import io
+    import urllib.request
+    import zipfile
+
+    dest_dir = (target_dir or (Path(__file__).resolve().parent.parent / ".browser-cache")).resolve()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Try Chrome for Testing last-known-good
+    url = None
+    try:
+        req = urllib.request.Request(CFT_LAST_KNOWN_GOOD, headers={"User-Agent": "superagent-doc-browser"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            downloads = data.get("channels", {}).get("Stable", {}).get("downloads", {})
+            for item in downloads.get("chrome-headless-shell", []):
+                if item.get("platform") == "linux64":
+                    url = item.get("url")
+                    break
+    except Exception:
+        pass
+    if not url:
+        url = CFT_FALLBACK_URL
+
+    req = urllib.request.Request(url, headers={"User-Agent": "superagent-doc-browser"})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        archive_bytes = resp.read()
+
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
+        zf.extractall(dest_dir)
+
+    # Locate binary
+    binary = None
+    for pattern in _BROWSER_CACHE_PATTERNS:
+        matches = list(dest_dir.glob(pattern))
+        if matches and matches[0].is_file():
+            binary = matches[0]
+            break
+    if not binary:
+        shell_path = dest_dir / "chrome-headless-shell-linux64" / "chrome-headless-shell"
+        if shell_path.is_file():
+            binary = shell_path
+
+    if not binary or not binary.is_file():
+        raise BrowserError("chrome-headless-shell unpacked but binary not found")
+
+    os.chmod(binary, 0o755)
+    if not probe_browser(binary):
+        raise BrowserError("Downloaded chrome-headless-shell failed headless probe")
+
+    marker = dest_dir.parent / ".browser-path"
+    try:
+        marker.write_text(str(binary.resolve()) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    return str(binary.resolve())
+
+
+def find_browser(candidates=(), *, auto_obtain=False):
     configured = os.environ.get('ARCH_DOC_BROWSER')
     # Playwright's downloaded Chromium works without the Snap launcher, whose
     # confined home often cannot access the temporary DevTools profile in WSL.
@@ -33,18 +120,47 @@ def find_browser(candidates=()):
         prepared = marker.read_text(encoding="utf-8").strip()
     except OSError:
         prepared = ""
-    cached = sorted(cache.glob("chromium-*/chrome-linux64/chrome"), reverse=True)
-    if local_cache != cache:
-        cached.extend(sorted(local_cache.glob("chromium-*/chrome-linux64/chrome"), reverse=True))
-    names = ([configured] if configured else []) + ([prepared] if prepared else []) + [str(p) for p in cached] + list(candidates) + [
-        str(Path.home() / '.local/bin/chromium'), str(Path.home() / '.local/bin/google-chrome'),
-        'chromium', 'chromium-browser', 'google-chrome', 'google-chrome-stable',
-    ]
+    cached = []
+    for base in (cache, local_cache):
+        for pattern in _BROWSER_CACHE_PATTERNS:
+            cached.extend(sorted(base.glob(pattern), reverse=True))
+
+    names = (
+        ([configured] if configured else [])
+        + ([prepared] if prepared else [])
+        + [str(p) for p in cached]
+        + list(candidates)
+        + [
+            str(Path.home() / '.local/bin/chrome-headless-shell'),
+            str(Path.home() / '.local/bin/chromium-headless-shell'),
+            str(Path.home() / '.local/bin/chromium'),
+            str(Path.home() / '.local/bin/google-chrome'),
+            '/opt/google/chrome-headless-shell/chrome-headless-shell',
+            '/usr/local/bin/chrome-headless-shell',
+            '/usr/bin/chrome-headless-shell',
+            'chrome-headless-shell',
+            'chromium-headless-shell',
+            'chromium',
+            'chromium-browser',
+            'google-chrome',
+            'google-chrome-stable',
+        ]
+    )
     for name in names:
         found = shutil.which(name)
         if found and os.access(found, os.X_OK):
             return found
+    if auto_obtain:
+        return obtain_headless_shell(local_cache)
     raise BrowserError('No local Chromium browser; set ARCH_DOC_BROWSER to its executable')
+
+
+def ensure_browser(candidates=()) -> str:
+    """Find an existing browser or automatically obtain a headless shell."""
+    try:
+        return find_browser(candidates)
+    except BrowserError:
+        return find_browser(candidates, auto_obtain=True)
 
 
 class Browser:

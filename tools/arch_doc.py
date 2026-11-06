@@ -45,8 +45,12 @@ MERMAID_LOCAL = ASSETS / "mermaid.min.js"
 MERMAID_CDN = "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"
 
 BROWSERS = [
+    str(Path.home() / '.local/bin/chrome-headless-shell'),
+    str(Path.home() / '.local/bin/chromium-headless-shell'),
     str(Path.home() / '.local/bin/chromium'),
     str(Path.home() / '.local/bin/google-chrome'),
+    "chrome-headless-shell",
+    "chromium-headless-shell",
     "chromium",
     "google-chrome",
 ]

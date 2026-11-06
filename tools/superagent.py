@@ -1569,6 +1569,17 @@ def _feishu_card_observation(profile_home: Path, hermes_root) -> dict[str, Any]:
         return {"status": "unknown", "reason": "configuration_unavailable"}
 
 
+def _browser_observation(engine_root: Path) -> dict[str, Any]:
+    try:
+        if str(engine_root) not in sys.path:
+            sys.path.insert(0, str(engine_root))
+        from tools.doc_browser import find_browser
+        browser_bin = find_browser()
+        return {"status": "ready", "browser": browser_bin}
+    except Exception as exc:
+        return {"status": "missing", "error": str(exc)}
+
+
 def doctor(args: argparse.Namespace) -> int:
     found = _manifest(args)
     if found is None:
@@ -1595,6 +1606,7 @@ def doctor(args: argparse.Namespace) -> int:
                       "runtime_observation": _gateway_runtime_observation(
                           args.profile, manifest.get("hermes_root")),
                       "worker_observation": _worker_runtime_observation(args.profile, current),
+                      "browser_observation": _browser_observation(current.resolve() if current.exists() else root),
                       "colleague_settlement_observation": _legacy_colleague_settlement_observation(profile_home),
                       "gateway_queue_observation": _gateway_queue_observation(profile_home),
                       "cron_observation": _cron_observation(profile_home),

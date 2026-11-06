@@ -130,3 +130,46 @@ def test_browser_prefers_cached_chromium_before_snap(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "__file__", str(tmp_path / "engine/tools/doc_browser.py"))
     monkeypatch.delenv("ARCH_DOC_BROWSER", raising=False)
     assert module.find_browser() == str(binary)
+
+
+def test_browser_finds_cached_chrome_headless_shell(tmp_path, monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    module_path = Path(__file__).resolve().parents[1] / "tools/doc_browser.py"
+    spec = importlib.util.spec_from_file_location("browser_discovery_shell_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    binary = tmp_path / "chromium_headless_shell-1248/chrome-headless-shell-linux64/chrome-headless-shell"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
+    monkeypatch.setattr(module, "__file__", str(tmp_path / "engine/tools/doc_browser.py"))
+    monkeypatch.delenv("ARCH_DOC_BROWSER", raising=False)
+    assert module.find_browser() == str(binary)
+
+
+def test_browser_finds_system_chrome_headless_shell(tmp_path, monkeypatch):
+    import importlib.util
+    import shutil
+    from pathlib import Path
+    module_path = Path(__file__).resolve().parents[1] / "tools/doc_browser.py"
+    spec = importlib.util.spec_from_file_location("browser_discovery_system_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    fake_cache = tmp_path / "empty_cache"
+    fake_cache.mkdir()
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(fake_cache))
+    monkeypatch.setattr(module, "__file__", str(tmp_path / "engine/tools/doc_browser.py"))
+    monkeypatch.delenv("ARCH_DOC_BROWSER", raising=False)
+
+    def fake_which(cmd):
+        if cmd == "chrome-headless-shell":
+            return "/usr/bin/chrome-headless-shell"
+        return None
+
+    monkeypatch.setattr(shutil, "which", fake_which)
+    import os
+    monkeypatch.setattr(os, "access", lambda path, mode: True)
+    assert module.find_browser() == "/usr/bin/chrome-headless-shell"
+
