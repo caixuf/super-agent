@@ -158,19 +158,13 @@ class TaskCardBridge:
             fail_desc = error_msg or summary or "任务未达到预期终态或已取消"
             body_lines.append(f"**未完成说明**：\n{fail_desc}")
 
+        body_lines.append("")
+        body_lines.append(f"<font color='grey'>状态更新于 {now_str} · 卡片与任务严格解耦绑定</font>")
+
         elements = [
             {
                 "tag": "markdown",
                 "content": "\n".join(body_lines),
-            },
-            {
-                "tag": "note",
-                "elements": [
-                    {
-                        "tag": "plain_text",
-                        "content": f"状态更新于 {now_str} · 卡片与任务严格解耦绑定",
-                    }
-                ],
             },
         ]
 
