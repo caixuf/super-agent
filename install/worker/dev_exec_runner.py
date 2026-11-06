@@ -41,6 +41,7 @@ def _decorate_goal(goal: str) -> str:
     lines = [
         "[Expert Context]",
         "- Mode: Backend executor (execute directly with terminal/file/MCP tools and return concrete evidence; do NOT call durable_submit).",
+        "- Progressive Delivery: Follow conclusion-first progressive delivery (Phase 1: deliver core text analysis, Markdown report, and checkpoint output immediately; Phase 2: heavy diagram/browser rendering is an out-of-band enhancement. Never block, delay, or withhold Phase 1 text delivery due to rendering failures, delays, or timeouts).",
         "- Colleague Collaboration & Fault Tolerance: You can inspect the team roster (`colleague_list`), assign/consult specialist colleagues (`colleague_assign` / `colleague_task_status` for architect/cases/reviewer/test/triage/ops/backend/frontend), or spawn parallel subagents (`delegate_task`) when cross-role collaboration or failover speeds up or recovers a task.",
     ]
     if duty:
@@ -199,8 +200,8 @@ def _workdir() -> Path:
 
 def run_hermes(goal: str, *, route: dict | None = None) -> dict:
     effective_goal = _decorate_goal(goal)
-    budget = int(os.environ.get("DEV_BUDGET", "480"))
-    max_turns = int(os.environ.get("DEV_MAX_TURNS", "40"))
+    budget = int(os.environ.get("DEV_BUDGET", "3600"))
+    max_turns = int(os.environ.get("DEV_MAX_TURNS", "1000"))
     ssh_host = (os.environ.get("DEV_SSH_HOST") or "").strip()
     if ssh_host:
         if not _SSH_HOST_RE.fullmatch(ssh_host):
@@ -245,7 +246,22 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
     try:
         done = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=budget + 60, **run_kwargs)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        full_stdout = exc.stdout or ""
+        summary = _clean_hermes_output(full_stdout)[-MAX_OUTPUT:] if isinstance(full_stdout, str) else ""
+        if summary.strip():
+            # Progressive delivery: salvage Phase 1 text checkpoint even if later rendering steps timed out
+            return {
+                "ok": True,
+                "summary": summary.strip(),
+                "output": (full_stdout[-MAX_OUTPUT:] if isinstance(full_stdout, str) else ""),
+                "stderr": (exc.stderr or "")[-MAX_STDERR:] if isinstance(exc.stderr, str) else "",
+                "returncode": -1,
+                "degraded": True,
+                "degradation_reason": "runner_timeout_checkpoint_salvaged",
+                "phase": "phase1_text",
+                "checkpoint_delivered": True,
+            }
         return {"ok": False, "error": "runner_timeout"}
     except Exception as exc:
         return {"ok": False, "error": "runner_spawn_failed: " + type(exc).__name__}
@@ -254,6 +270,23 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
     summary = _clean_hermes_output(full_stdout)[-MAX_OUTPUT:]
     err = (done.stderr or "")[-MAX_STDERR:]
     ok = done.returncode == 0 and bool((summary or out).strip())
+
+    checkpoint_file = _workdir() / "checkpoint.json"
+    checkpoint_data = None
+    if checkpoint_file.is_file():
+        try:
+            checkpoint_data = json.loads(checkpoint_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    degraded = False
+    degradation_reason = ""
+    if not ok and checkpoint_data and checkpoint_data.get("summary"):
+        summary = checkpoint_data["summary"]
+        ok = True
+        degraded = True
+        degradation_reason = "phase1_checkpoint_recovered"
+
     payload = {
         "ok": ok,
         "summary": summary or out.strip(),
@@ -261,6 +294,12 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
         "stderr": err,
         "returncode": done.returncode,
     }
+    if checkpoint_data:
+        payload["checkpoint"] = checkpoint_data
+        payload["checkpoint_delivered"] = True
+    if degraded:
+        payload["degraded"] = True
+        payload["degradation_reason"] = degradation_reason
     if not ok:
         payload["error"] = "turn_failed"
     return payload

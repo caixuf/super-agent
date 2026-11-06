@@ -67,9 +67,10 @@ def verify_internal_result(pool, job_id):
         raise HandoffEvidenceError("invalid_job_record") from exc
     result = receipt.get("result") if isinstance(receipt, dict) and receipt.get("ok") is True else None
     if (not isinstance(result, dict) or result.get("job") != job_id or result.get("attempt") != attempt
-            or result.get("verification") not in ("citation_traceability_only", "dev_traceability_v1")):
+            or result.get("verification") not in ("citation_traceability_only", "dev_traceability_v1", "progressive_delivery_v1")):
         raise HandoffEvidenceError("receipt_identity_mismatch")
     verification_mode = result.get("verification")
+    checkpoint_raw = None
     try:
         root = os.open(Path(pool.root) / "attempts", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
@@ -77,6 +78,10 @@ def verify_internal_result(pool, job_id):
             try:
                 report_raw = _read_file(directory, "report.json", _MAX_REPORT)
                 manifest_raw = _read_file(directory, "manifest.json", _MAX_MANIFEST)
+                try:
+                    checkpoint_raw = _read_file(directory, "checkpoint.json", _MAX_REPORT)
+                except HandoffEvidenceError:
+                    pass
             finally:
                 os.close(directory)
         finally:
@@ -85,24 +90,34 @@ def verify_internal_result(pool, job_id):
     except (OSError, ValueError, UnicodeError) as exc:
         raise HandoffEvidenceError("invalid_artifact") from exc
 
-    if verification_mode == "dev_traceability_v1":
+    if verification_mode in ("dev_traceability_v1", "progressive_delivery_v1"):
         if (not isinstance(manifest, dict) or manifest.get("job") != job_id or manifest.get("attempt") != attempt
-                or manifest.get("verification") != "dev_traceability_v1"):
+                or manifest.get("verification") not in ("dev_traceability_v1", "progressive_delivery_v1")):
             raise HandoffEvidenceError("manifest_identity_mismatch")
         if (not isinstance(report, dict) or report.get("job") != job_id or report.get("attempt") != attempt
-                or report.get("verification") != "dev_traceability_v1"):
+                or report.get("verification") not in ("dev_traceability_v1", "progressive_delivery_v1")):
             raise HandoffEvidenceError("report_receipt_mismatch")
         summary_text = (report.get("summary") or "")[:_MAX_SUMMARY]
-        return {
+        checkpoint_data = json.loads(checkpoint_raw) if checkpoint_raw is not None else None
+        if not summary_text and isinstance(checkpoint_data, dict):
+            summary_text = (checkpoint_data.get("summary") or "")[:_MAX_SUMMARY]
+        text_delivered = bool(report.get("text_delivered") or (checkpoint_data and checkpoint_data.get("delivered"))
+                              or report.get("checkpoint_delivered") or (report.get("ok") and summary_text))
+        success = report.get("success", False) or text_delivered
+        evidence = {
             "attempt_id": attempt,
             "report_sha256": hashlib.sha256(report_raw).hexdigest(),
             "source_manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
             "summary": summary_text,
-            "verification": "dev_traceability_v1",
+            "verification": verification_mode,
             "worktree": manifest.get("worktree"),
             "modified_files": manifest.get("modified_files", []),
-            "success": report.get("success", False),
+            "success": success,
         }
+        if checkpoint_data:
+            evidence["checkpoint"] = checkpoint_data
+            evidence["rendering_state"] = checkpoint_data.get("rendering_state", "not_requested")
+        return evidence
 
     if (not isinstance(manifest, dict) or manifest.get("job") != job_id or manifest.get("attempt") != attempt
             or manifest.get("verification") != "citation_traceability_only"):

@@ -94,6 +94,10 @@ class CompletionMessage:
     degradation_reason: str | None = None
     engine: str | None = None
     model_tier: str | None = None
+    # Progressive Delivery: decouple Phase 1 text delivery from Phase 2 rendering
+    phase: str | None = None
+    checkpoint_delivered: bool = False
+    rendering_state: str | None = None
 
     def render(self) -> dict[str, Any]:
         result = {
@@ -136,6 +140,12 @@ class CompletionMessage:
             result["engine"] = self.engine
         if self.model_tier:
             result["model_tier"] = self.model_tier
+        if self.phase:
+            result["phase"] = self.phase
+        if self.checkpoint_delivered:
+            result["checkpoint_delivered"] = True
+        if self.rendering_state:
+            result["rendering_state"] = self.rendering_state
         return result
 
 
@@ -143,11 +153,19 @@ def _summary(result: Any, *, limit: int = MAX_SUMMARY_CHARS) -> tuple[str, bool]
     """Extract a bounded, human-readable summary from a worker receipt result."""
     text = ''
     if isinstance(result, dict):
-        for key in ('summary', 'final_text', 'report', 'message', 'output', 'reason', 'error'):
-            value = result.get(key)
-            if isinstance(value, str) and value.strip():
-                text = value.strip()
-                break
+        checkpoint = result.get('checkpoint')
+        if isinstance(checkpoint, dict):
+            for key in ('summary', 'final_text', 'report', 'report_md'):
+                value = checkpoint.get(key)
+                if isinstance(value, str) and value.strip():
+                    text = value.strip()
+                    break
+        if not text:
+            for key in ('summary', 'final_text', 'report', 'checkpoint_summary', 'message', 'output', 'reason', 'error'):
+                value = result.get(key)
+                if isinstance(value, str) and value.strip():
+                    text = value.strip()
+                    break
         if not text:
             text = 'status: %s' % (result.get('reason') or result.get('status') or 'completed')
     elif isinstance(result, str) and result.strip():
@@ -193,6 +211,9 @@ def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS,
     degradation_reason: str | None = None
     engine: str | None = None
     model_tier: str | None = None
+    phase: str | None = None
+    checkpoint_delivered: bool = False
+    rendering_state: str | None = None
     if isinstance(result, dict):
         raw_engine = result.get('engine')
         if isinstance(raw_engine, str) and raw_engine.strip():
@@ -207,6 +228,9 @@ def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS,
             degradation_reason = raw_reason.strip()[:512]
         elif degraded and engine == 'pi':
             degradation_reason = 'primary_engine_fallback:hermes->pi'
+        phase = result.get('phase')
+        checkpoint_delivered = bool(result.get('checkpoint_delivered') or result.get('checkpoint'))
+        rendering_state = result.get('rendering_state')
 
     # Worker protocol envelopes persist intact in the queue. Unwrap only an
     # explicit successful envelope, never arbitrary nested model fields.
@@ -218,6 +242,12 @@ def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS,
             degraded = True
             if not degradation_reason and isinstance(inner.get('degradation_reason'), str):
                 degradation_reason = inner['degradation_reason'].strip()[:512]
+        if not phase and inner.get('phase'):
+            phase = inner['phase']
+        if inner.get('checkpoint_delivered') or inner.get('checkpoint'):
+            checkpoint_delivered = True
+        if not rendering_state and inner.get('rendering_state'):
+            rendering_state = inner['rendering_state']
         result = inner
     elif isinstance(result, dict) and result.get('ok') is False and isinstance(result.get('result'), dict):
         inner = result['result']
@@ -245,6 +275,9 @@ def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS,
         degradation_reason=degradation_reason,
         engine=engine,
         model_tier=model_tier,
+        phase=phase,
+        checkpoint_delivered=checkpoint_delivered,
+        rendering_state=rendering_state,
     )
 
 
@@ -378,8 +411,8 @@ def inspect_pending(pool: Pool, *, limit: int = 20,
 
 
 
-#: Terminal statuses that fire Prefer-C2 side-channel notify (pool outbox / host signal).
-TERMINAL_NOTIFY_STATUSES = frozenset({"completed", "failed", "cancelled"})
+#: Terminal or progressive checkpoint statuses that fire Prefer-C2 side-channel notify.
+TERMINAL_NOTIFY_STATUSES = frozenset({"completed", "failed", "cancelled", "checkpoint_delivered"})
 
 
 def is_terminal_status(status: Any) -> bool:

@@ -47,8 +47,8 @@ class WorkerSpec:
     concurrency: int = 1
     timeout: int = 600
     max_file: int = 67108864
-    max_turns: int = 40
-    run_budget: int = 480
+    max_turns: int = 1000
+    run_budget: int = 3600
     env: Dict[str, str] = field(default_factory=dict)
 
     def validate(self) -> List[str]:

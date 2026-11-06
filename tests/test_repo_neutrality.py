@@ -96,7 +96,7 @@ ALL_PATTERNS = PATTERNS + ENV_PATTERNS
 #: 而 pytest 在收集阶段就写出了 `.pytest_cache/v/cache/nodeids`，参数化自检用例名里带词表
 #: 字面量（`[imfl]` / `[R6]` …），门禁因此红在自己身上（实测：本地绿、干净室红）。
 EXCLUDED_DIRS = frozenset({".git", "__pycache__", ".pytest_cache", ".mypy_cache",
-                           ".ruff_cache", "node_modules", ".venv", "venv"})
+                           ".ruff_cache", "node_modules", ".venv", "venv", ".agents"})
 
 
 def _is_generated(path: Path) -> bool:

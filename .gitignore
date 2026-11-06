@@ -12,3 +12,5 @@ identity/manifests/
 identity/overlays/*.overlay.md
 
 dist/
+.agents/
+PROJECT.md

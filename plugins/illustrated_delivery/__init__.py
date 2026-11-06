@@ -32,11 +32,23 @@ _DOC_LINK = re.compile(
 # mistaken for the deliverable.
 _MEDIA_DOC = re.compile(r'(?m)^\s*MEDIA:\s*(\S+?\.(?:html|htm|pdf))\s*$', re.I)
 
+# Progressive Delivery: Phase 1 text delivery / checkpoint output is decoupled
+# from out-of-band diagram rendering. Checkpoint markers or out-of-band notices
+# represent valid text delivery and must not be blocked or warned against.
+_PROGRESSIVE_DOC = re.compile(
+    r'(?m)^\s*##(?:CHECKPOINT|PHASE1|PROGRESSIVE_DELIVERY):\s*\S+'
+    r'|\[(?:CHECKPOINT|PROGRESSIVE[ _-]DELIVERY|渐进式交付)\]'
+    r'|出图作为异步附加物|后台渲染中|渲染中\.\.\.|rendering in background|out-of-band rendering',
+    re.I
+)
+
 
 def _delivered(text) -> bool:
     """Whether the reply actually handed over a document, not just a path."""
     text = text or ''
     if _DOC_LINK.search(text):
+        return True
+    if _PROGRESSIVE_DOC.search(text):
         return True
     for match in _MEDIA_DOC.finditer(text):
         try:
