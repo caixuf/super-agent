@@ -18,13 +18,27 @@ home 与同名 profile 目录不同，现场尚无新前台边界；现有只读
 当前功能输入已包含记忆身份路由、受管 provider 接线、同事绑定读取修复、研发
 验收命令授权、有界输出/清理，以及同事 Gateway 派工与完成回执接线。
 
-**本机完整 `verify.sh` 已退出码 0**（2026-11-06，HEAD `2210e30` + 本轮修复 `c93790f`）：
-单测块 **2727 passed / 54 skipped / 563.87 秒**，防退化靶场另 **5 passed**，
-13 个 shell 脚本语法检查与安装 dry-run 通过，⑥.1 三项延迟门禁全部通过
-（DNS 12.0ms、本地 I/O 0.27ms、平台 OpenAPI 92.4ms），⑦ 模型上下文端点
+**本机完整 `verify.sh` 已退出码 0**（2026-11-06，HEAD `dc398f7` = `origin/main` `c018c50`
++ 本地修复 `3895f18`/`dc398f7`）：
+单测块 **2879 passed / 55 skipped / 603.03 秒**，防退化靶场另 **5 passed**，
+15 个 shell 脚本语法检查与安装 dry-run 通过，⑥.1 三项延迟门禁全部通过
+（DNS 33.9ms、本地 I/O 0.26ms、平台 OpenAPI 116.8ms），⑦ 模型上下文端点
 返回 **1441792 (source=models)** 并报出手写 pin 与目录不一致的告警。
 ⑥ 真实通道仍因未设置 `FEISHU_APP_ID`/`FEISHU_APP_SECRET`/`FEISHU_TEST_CHAT_ID`
-按 `verify.sh` 规则记跳过，**不能算通过**。
+按 `verify.sh` 规则记跳过，**不能算通过**；另用现场 `.env` 凭据与 home channel
+单独跑真实通道用例为 **5 passed**（发→平台回读→幂等→撤回→投递）。
+
+复现方式：`PYTHON=<装有 test extra 的解释器> bash verify.sh`。
+同一份源码用未装依赖的系统 `python3` 实测为 **2716 passed / 55 skipped / 556.86 秒**
+（差 11 passed / 1 skipped：文档渲染链与 illustrated_delivery 各贡献 1 组），
+⑦ 则已能探到端点、不再记 SKIP。
+
+上一轮（HEAD `2210e30` + 修复 `c93790f`）的 **2727 passed / 54 skipped / 563.87 秒**
+属于 2026-11-06 凌晨那轮，**已被本轮取代**：此后并入 `origin/main` 的 80 个提交
+（新增 `task_card_bridge`、`colleague_pool`、`lan_cluster`、`progressive_delivery`、
+`production_gates` 等子系统，+11691 行）改变了测试规模，那轮数字没有覆盖这些改动。
+更早的记录（HEAD `e0a953a`、2754 passed / 63 skipped / 709.91 秒、⑦ 返回 1000000）
+同属历史基线。
 
 本轮重验同时查实两处「证据其实没落地」的问题，均已修复：
 
@@ -43,16 +57,6 @@ home 与同名 profile 目录不同，现场尚无新前台边界；现有只读
   装齐声明依赖后重跑，上述两处分别变成 10 passed + 1 skipped（缺 chromium）与
   6 passed。`verify.sh` 的单测块同时改为 `-rs`，跳过项逐项打印原因 ——
   计数不能替代原因。
-
-复现方式：`PYTHON=<装有 test extra 的解释器> bash verify.sh`。
-同一份源码用未装依赖的系统 `python3` 实测为 **2716 passed / 55 skipped / 556.86 秒**
-（差 11 passed / 1 skipped：文档渲染链与 illustrated_delivery 各贡献 1 组），
-⑦ 则已能探到端点、不再记 SKIP。
-
-上表数字对应的旧记录（HEAD `e0a953a`、2754 passed / 63 skipped / 709.91 秒、
-⑦ 返回 1000000）属于 2026-11-04 11:25 那轮，**已被本轮取代**：此后
-`f5881df`、`2210e30` 改了 `agentcore/preflight.py`（224 行）与 `verify.sh`，
-`67e8969` 删除了 HFC sidecar（3556 行），那轮数字没有覆盖这些改动。
 
 该轮之前的两轮为红，根因均已在同一天定位并修复，不属代码回归：
 首轮 ⑥.1 DNS 解析 1080.4ms 超 300ms 预算 —— 本机 `/etc/resolv.conf` 首选
@@ -73,6 +77,70 @@ home 与同名 profile 目录不同，现场尚无新前台边界；现有只读
 16 条反例均失败；生成、验收、停止及相邻恢复专项为 154 passed / 2 skipped。
 该入口尚不代表部署了完整研发 runtime；上文历史全量及候选摘要属于前一功能输入，
 不能直接覆盖此增量，须在本轮冻结后重验。
+
+## bot1 重部署记录（2026-11-06）
+
+bot1 = 本机 `~/.hermes` 宿主（单 profile `default`，单元 `hermes-gateway.service`）。
+本轮把源码从 `2210e30` 更新到 `dc398f7`（并入 `origin/main` 80 个提交），并把
+bot1 从**旧布局**迁到**受管布局**（`~/super_agent/default/`）。
+
+### 落地状态
+
+| 项 | 部署前 | 部署后 |
+| :--- | :--- | :--- |
+| 受管 release | 无（`doctor` 记 not-installed） | `~/super_agent/default/current` → `releases/dc398f7` |
+| 插件来源 | 工作区副本 | 全部软链到 release；`engine_root` 从 `/home/caixuf/code/super-agent` 迁到 `current` |
+| 卡片生产者 | HFC sidecar（`hermes-feishu-card` 插件 + `hermes-feishu-card-sidecar.service`） | 原生 CardKit 三件补丁（card-replies / card-lifecycle / card-delivery-guard），sidecar 已停用并留底 |
+| 网关单元 | `hermes-gateway.service` → 旧 Hermes 树 v0.22.2 | `hermes-gateway-default.service` → 受管候选 `hermes/v0.22.5-bf0203a794a0`（v0.22.5，含当前三件卡片补丁） |
+| Worker | `agentcore-worker@default`（工作区 PYTHONPATH） | `superagent-worker-default.service`（`PYTHONPATH=…/current`） |
+| 记忆服务 | `agentcore-memory@default`（站点 ollama 召回） | `superagent-memory-default.service`（严格 `profile` 作用域 + BGE sidecar） |
+| 嵌入服务 | 无（只有 ollama 原生 API） | `bge-m3-sidecar.service` → `127.0.0.1:8910`（CPU，协议 `POST /encode`） |
+| `card_replies` | `false`（交给 HFC） | `true`（原生链路独占） |
+
+`doctor` 结果：`status: ready`，三项卡片检查全 true，release/插件链接/hash 全有效，
+网关 launcher 与进程命令行均匹配，worker 的 PYTHONPATH 匹配，队列观测为 0/0。
+真实消息通道单跑 **5 passed**（发送→平台回读→幂等→撤回→投递）。
+
+### 门禁为什么曾一直红
+
+初次 `update` 被 `legacy_card_patches_require_clean_candidate` 阻断。**真实原因不是宿主
+不干净，而是 `--hermes-root` 指错了目标**：安装器默认看共享工作树（带过时
+`card-native-markdown` 补丁与 27 处未提交改动），而网关实际要跑的是受管候选。
+把 `--hermes-root` 指向实际运行宿主后 `plan` 退出码 0、`blockers: []`、
+`card_impl: release-cardkit`——与远端跑测机同一处置法。
+
+候选树必须**先干净再补当前卡片补丁**：托管工具的 `switch-gateway-source` 拒绝带卡片
+补丁的候选，而 `plan` 又要求目标宿主卡片补丁在位。顺序是「建干净候选 → 暂存 →
+切网关源 → 再补三件当前卡片补丁」。
+
+### 仍需处理的残留漂移
+
+- `memory.localvec.recall_cmd` 之外，`delivery_transport_file` 仍指向工作区源码
+  （`/home/caixuf/code/super-agent/runtime/hermes_completion_transport.py`）；
+  迁移工具只改 `engine_root`，这条是**投递通道**的路径，需要单独确认是否迁往
+  `…/current`。
+- 现场 `~/.hermes/config.yaml` 的 `model.context_length: 1048000` 是手写 pin，与端点
+  目录值 1441792 不一致（⑦ 门禁持续报 warning）。删除它属于运行时配置改动，未做。
+- `~/.hermes/var/memory*`（旧记忆目录）与 `~/.hermes/state/superagent-memory`（新目录）
+  现在各有一份库；旧目录保留作为回退底本，**尚未清理**，避免出现两套写入。
+
+### BGE-M3 sidecar（CPU）
+
+仓内 `agentcore/memory/bge_sidecar.py` 的客户端把 base URL 收敛成 loopback 根地址后
+固定发往 **`POST /encode`**，请求体 `{"texts": [...], "return_dense": true, …}`，
+期望 `{"dense": [[1024 floats], …]}`；`docs/REDEPLOY.md` 约定默认地址
+`http://127.0.0.1:8910`。本机原本**没有**这个服务，只有 ollama 的原生 API。
+
+现由 `~/.config/superagent/bge-sidecar/server.py` + `bge-m3-sidecar.service` 提供：
+只监听 loopback，只用标准库，把请求转给本地 ollama 的 `bge-m3`（本机无 NVIDIA GPU，
+ollama 该模型常驻 CPU，`size_vram: 0`）。转发的请求形状与记忆库自身的嵌入器
+（`memory_store._embed_one_batch`：`POST /api/embed` + `{"model": "bge-m3", "input": [...]}`）
+**逐字一致**，实测同一段文本两边返回的向量**逐元素完全相同、余弦 1.0** ——
+因此库里既有 `bge-m3`/1024 维向量与新向量同空间，不会被模型身份挡住。
+
+旧事实缺 `profile` 标签这一项，由 `~/.config/superagent/memory/backfill_profile_tag.py`
+显式补录：只在事实**自身**的 `user_id`/`agent_id` 已等于托管 profile 的唯一主体时补，
+不匹配即拒绝；本机 1 条事实补录后，严格 `profile=default` 召回命中。
 
 ## 已验证的修复
 
@@ -427,7 +495,7 @@ ready，完整固定宿主六项补丁均通过；导出源码专项 **219 passe
 | P3 同事配置 | 未完成 | 跨任务身份、权限撤销、实例代次；无业务平台依赖的通用执行路径 |
 | P4 记忆 | 未完成 | 身份边界、安全反例、真实模型的准入/召回固定样本评测，以及授权的生产启用 |
 | P5 真实 IM 灰度与回退 | 未开始 | 明确测试目标和窗口后验证真实消息、附件、回读、呈现、插话与回退 |
-| 当前源码全量测试 | 整轮 `verify.sh` 退出码 0；真实运行仍未验收 | HEAD `2210e30` + 修复 `c93790f` 的工作树 **2727 passed / 54 skipped / 563.87 秒**（装齐声明的 `test` extra；不装则实测 2716 / 55），防退化另 5 passed，⑥.1 三项延迟门禁全通过，⑦ 模型端点 **1441792 (source=models)** 并报出 pin 漂移；⑥ 真实通道缺 `FEISHU_*` 按规则跳过，**不算通过** |
+| 当前源码全量测试 | 整轮 `verify.sh` 退出码 0；真实运行仍未验收 | HEAD `dc398f7`（`origin/main` `c018c50` + 本地修复）**2879 passed / 55 skipped / 603.03 秒**（装齐声明的 `test` extra；不装则实测 2716 / 55），防退化另 5 passed，⑥.1 三项延迟门禁全通过，⑦ 模型端点 **1441792 (source=models)** 并报出 pin 漂移；⑥ 真实通道缺 `FEISHU_*` 按规则跳过，**不算通过**（另用现场凭据单跑真实通道 5 passed） |
 | 干净室 | 本轮功能候选通过，非正式发布提交 | 断网容器 2474 passed / 138 skipped / 401.55 秒，安装/浏览器/幂等/离线记忆通过；不是实际宿主/IM 验收 |
 | 正式发布物 | 未生成 | 干净且包含全部新文件的提交、可复现归档、完整测试、安装/回退、对应能力的实际验收 |
 
