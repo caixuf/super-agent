@@ -113,6 +113,7 @@ class HostSender:
 
 
 def _render(message):
+    from agentcore.delivery_sanitizer import sanitize_and_extract_artifacts
     role = message.get('colleague_role')
     name = message.get('colleague_name')
     label = message.get('colleague_label')
@@ -125,7 +126,9 @@ def _render(message):
         prefix = ''
     status = {'completed': '已完成', 'failed': '失败', 'cancelled': '已取消'}.get(
         message['status'], message['status'])
-    return prefix + '[后台任务 ' + message['task_id'] + '] ' + status + '\n' + message['summary']
+    summary = message.get('summary', '')
+    sanitized_summary, _ = sanitize_and_extract_artifacts(summary)
+    return prefix + '[后台任务 ' + message['task_id'] + '] ' + status + '\n' + sanitized_summary
 
 
 def create_transport(ctx, service):
@@ -138,7 +141,30 @@ def create_transport(ctx, service):
 
     class _HumanCompletionTransport(base_type):
         def deliver(self, address, message, *, idempotency_key):
-            files = message.get('artifacts')
+            import shutil
+            from agentcore.delivery_sanitizer import sanitize_and_extract_artifacts
+            summary = message.get('summary', '')
+            sanitized_summary, detected = sanitize_and_extract_artifacts(summary)
+            message = dict(message, summary=sanitized_summary)
+
+            # Stage extracted artifacts if attempt directory is accessible
+            files = list(message.get('artifacts') or [])
+            attempt = self.attempt_provider(message.get('task_id')) if callable(self.attempt_provider) else None
+            if attempt and detected:
+                allowed_dir = (self.attempt_root / attempt).resolve()
+                if allowed_dir.exists() and allowed_dir.is_dir():
+                    for art in detected:
+                        try:
+                            src_p = Path(art['path']).resolve()
+                            if src_p.exists() and src_p.is_file():
+                                target_p = allowed_dir / src_p.name
+                                if not target_p.exists():
+                                    shutil.copy2(src_p, target_p)
+                                if str(target_p) not in files:
+                                    files.append(str(target_p))
+                        except Exception:
+                            pass
+
             if isinstance(files, list):
                 excluded = {'manifest.json', 'report.json'}
                 if self.card and not message.get('truncated'):

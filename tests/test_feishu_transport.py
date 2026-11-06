@@ -41,15 +41,20 @@ class Server:
             if message_id in self.deleted or message_id not in self.messages:
                 return {"code": 230001, "msg": "message not found"}
             return {"code": 0, "data": {"items": [self.messages[message_id]]}}
-        body = json.loads(request.data.decode())
         if request.full_url.endswith("/tenant_access_token/internal"):
             self.tokens += 1
             return {"code": 0, "tenant_access_token": "t-%d" % self.tokens, "expire": 7200}
+        if "/im/v1/images" in request.full_url:
+            return {"code": 0, "data": {"image_key": "img_mock_123"}}
+        if "/im/v1/files" in request.full_url:
+            return {"code": 0, "data": {"file_key": "file_mock_456"}}
+        body = json.loads(request.data.decode())
         assert "/im/v1/messages" in request.full_url
         self.next_id += 1
         message_id = "om_%d" % self.next_id
+        content_dict = json.loads(body["content"]) if isinstance(body.get("content"), str) else body.get("content", {})
         text = self.override_text if self.override_text is not None \
-            else json.loads(body["content"])["text"]
+            else content_dict.get("text", "")
         chat = self.override_chat or body["receive_id"]
         self.sent.append(body)
         self.messages[message_id] = {"message_id": message_id, "chat_id": chat, "deleted": False,
@@ -235,8 +240,22 @@ def test_completion_sender_marks_only_pre_send_refusals_as_not_sent(server, tran
     assert server.sent == []
 
 
-def test_completion_sender_refuses_attachments_it_cannot_deliver(transport):
+def test_completion_sender_delivers_file_and_image_attachments(transport, tmp_path):
     from agentcore.feishu_transport import FeishuCompletionSender
     sender = FeishuCompletionSender(transport)
-    with pytest.raises(ValueError, match="feishu_file_delivery_unsupported"):
-        sender(_origin(), {"kind": "file", "path": "/tmp/x"}, idempotency_key="k1")
+
+    test_file = tmp_path / "report.html"
+    test_file.write_text("<h1>Report</h1>")
+    res_file = sender(_origin(), {"kind": "file", "path": str(test_file)}, idempotency_key="k1")
+    assert res_file.get("ok") is True
+    assert res_file.get("message_id") is not None
+
+    test_img = tmp_path / "diagram.png"
+    test_img.write_bytes(b"\x89PNG\r\n\x1a\n")
+    res_img = sender(_origin(), {"kind": "image", "path": str(test_img)}, idempotency_key="k2")
+    assert res_img.get("ok") is True
+    assert res_img.get("message_id") is not None
+
+    # Unsupported kind should still fail
+    with pytest.raises(ValueError, match="unsupported_delivery_kind_unknown"):
+        sender(_origin(), {"kind": "unknown"}, idempotency_key="k3")

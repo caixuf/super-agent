@@ -25,7 +25,7 @@ TASK_TOOLS = frozenset({
 MEMORY_READ_TOOLS = frozenset({
     "memory_search_l1", "memory_timeline_l2", "memory_get_observations_l3",
 })
-CHAT_COMMANDS = frozenset({"help", "commands", "whoami", "version", "new", "reset", "stop", "status"})
+CHAT_COMMANDS = frozenset({"help", "commands", "whoami", "version", "new", "reset", "stop", "status", "boost"})
 UNAVAILABLE = "frontdesk_policy_unavailable: execution refused; ask the administrator to check this profile."
 TOOL_DENIED = "frontdesk_tool_denied: use the durable task APIs; do not execute or delegate work in this profile."
 COMMAND_DENIED = "frontdesk_command_denied: this profile only supports chat controls and durable task operations."

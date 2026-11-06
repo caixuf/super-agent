@@ -405,7 +405,7 @@ class ColleaguePool:
         self,
         pool: Optional[Any] = None,
         *,
-        max_workers: int = 16,
+        max_workers: int = 128,
         capacity: Optional[int] = None,
         backend: str = "stdlib",
         scratch_root: Optional[Union[str, Path]] = None,
@@ -790,7 +790,7 @@ class ColleaguePool:
     def dispatch_from_durable_pool(
         self,
         handler: Optional[Callable[[MorphedColleagueContext], Any]] = None,
-        batch_size: int = 16,
+        batch_size: int = 32,
         stop_event: Optional[threading.Event] = None,
         drain: bool = False,
         cleanup_scratch: bool = False,
@@ -855,10 +855,10 @@ class ColleaguePool:
             with self._cv:
                 if not active_handles and not stop.is_set():
                     # Wait for notifications instead of busy spinning
-                    self._cv.wait(timeout=0.2)
+                    self._cv.wait(timeout=0.05)
                 elif active_handles:
                     # Wait for any completion
-                    self._cv.wait(timeout=0.1)
+                    self._cv.wait(timeout=0.02)
 
         # Wait for all dispatched tasks if draining
         if drain:

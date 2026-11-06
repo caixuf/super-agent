@@ -11,7 +11,7 @@ from agentcore.scheduler import AgentScheduler
 
 class Worker:
     def __init__(self, pool, command, workers=1, backend='stdlib', timeout=300,
-                 lease=60, max_output=1048576, max_file=67108864, poll_interval=0.5):
+                 lease=60, max_output=1048576, max_file=67108864, poll_interval=0.05):
         if not isinstance(workers, int) or workers < 1:
             raise ValueError('workers must be a positive integer')
         if min(timeout, lease, max_output, max_file, poll_interval) <= 0:

@@ -161,3 +161,62 @@ def test_text_only_adapter_keeps_artifacts_out_of_the_delivered_message():
     _TextOnly(Capture()).deliver({"route": "r"}, {"task_id": "t", "artifacts": ["/tmp/a"]},
                                  idempotency_key="t")
     assert seen[0]["artifacts"] == [] and seen[0]["artifact_paths"] == ["/tmp/a"]
+
+
+def test_deliverable_transport_sanitizes_paths_and_uploads_artifacts(tmp_path):
+    from agentcore.colleague_delivery_cli import DeliverableTransport
+
+    html_file = tmp_path / "review.html"
+    html_file.write_text("<h1>Review</h1>")
+    png_file = tmp_path / "arch.png"
+    png_file.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    delivered_messages = []
+    class MockCompletion:
+        def deliver(self, address, message, *, idempotency_key):
+            delivered_messages.append((address, message, idempotency_key))
+            return {"accepted": True, "event_id": idempotency_key, "receipt_id": "rec_1"}
+
+    feishu_actions = []
+    class MockFeishuTransport:
+        def upload_image(self, path):
+            feishu_actions.append(("upload_image", path))
+            return "img_key_test"
+
+        def send_image(self, *, origin, delivery_key, image_key):
+            feishu_actions.append(("send_image", origin, delivery_key, image_key))
+
+        def upload_file(self, path):
+            feishu_actions.append(("upload_file", path))
+            return "file_key_test"
+
+        def send_file(self, *, origin, delivery_key, file_key):
+            feishu_actions.append(("send_file", origin, delivery_key, file_key))
+
+    transport = DeliverableTransport(MockCompletion(), MockFeishuTransport())
+
+    raw_summary = (
+        f"架构审查已完成。\n"
+        f"本地HTML文件：{html_file}\n"
+        f"架构高清长图：{png_file}\n"
+    )
+
+    transport.deliver(
+        {"chat": CHAT},
+        {"task_id": "t_deliv_1", "summary": raw_summary, "status": "completed"},
+        idempotency_key="k_deliv_1"
+    )
+
+    assert len(delivered_messages) == 1
+    sent_msg = delivered_messages[0][1]
+    # Local path should be replaced by friendly placeholder
+    assert str(html_file) not in sent_msg["summary"]
+    assert str(png_file) not in sent_msg["summary"]
+    assert "📎 [文件附件已随附上传: review.html]" in sent_msg["summary"]
+    assert "📷 [图片附件已随附上传: arch.png]" in sent_msg["summary"]
+
+    # Feishu upload actions should be triggered for both files
+    assert ("upload_file", str(html_file)) in feishu_actions
+    assert ("upload_image", str(png_file)) in feishu_actions
+    assert any(a[0] == "send_file" and a[3] == "file_key_test" for a in feishu_actions)
+    assert any(a[0] == "send_image" and a[3] == "img_key_test" for a in feishu_actions)

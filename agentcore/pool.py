@@ -1132,7 +1132,7 @@ class Pool:
                             stop_deadline = time.monotonic() + 5
                     if stop_deadline is not None and time.monotonic() > stop_deadline:
                         raise TimeoutError('supervisor stop confirmation unavailable')
-                    time.sleep(min(0.2, lease / 4))
+                    time.sleep(min(0.05, lease / 4))
                 proc.wait()
                 if reason is None:
                     if time.monotonic() > deadline:
@@ -1224,6 +1224,8 @@ def main():
     worker.add_argument('--backend', choices=['stdlib', 'flowcoro'], default='stdlib')
     worker.add_argument('--max-output', type=int, default=1048576)
     worker.add_argument('--max-file', type=int, default=67108864)
+    worker.add_argument('--poll-interval', type=float, default=0.05,
+                        help='Queue polling and reaping interval in seconds (default: 0.05s)')
     args = parser.parse_args()
     pool = Pool(args.root)
     if args.action == 'submit':
@@ -1254,7 +1256,8 @@ def main():
                 previous[sig] = signal.signal(sig, lambda *_: stop.set())
             try:
                 stats = Worker(pool, command, workers=args.workers, backend=args.backend,
-                               timeout=args.timeout, max_output=args.max_output, max_file=args.max_file).run(stop, drain=args.drain)
+                               timeout=args.timeout, max_output=args.max_output, max_file=args.max_file,
+                               poll_interval=args.poll_interval).run(stop, drain=args.drain)
                 print(json.dumps(stats))
             finally:
                 for sig, handler in previous.items():

@@ -638,6 +638,8 @@ class LivenessLedger:
                 changed.append(out)
         return changed
 
+    sweep_stale = sweep
+
     def drain(self, timeout: float = 60.0, poll_interval: float = 1.0,
               owner: Optional[str] = None,
               sleep_fn: Optional[Callable[[float], None]] = None) -> Dict[str, Any]:
@@ -645,7 +647,7 @@ class LivenessLedger:
         deadline = self._now() + max(0.0, float(timeout))
         sleeper = sleep_fn or getattr(self, "_sleep_fn", None) or time.sleep
         try:
-            self.sweep_stale()
+            self.sweep()
         except Exception:
             pass
         while True:
