@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import pytest
 
-from agentcore.logging import (
+from agentcore.structured_logging import (
     configure_logging,
     get_logger,
     set_log_context,

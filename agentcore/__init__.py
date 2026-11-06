@@ -17,7 +17,7 @@ from .failure_mender import (
     escalate_timeout,
     validate_failure_decision,
 )
-from .logging import configure_logging, get_logger, set_log_context
+from .structured_logging import configure_logging, get_logger, set_log_context
 from .memory import (
     MemoryConfig,
     configure,
@@ -42,6 +42,14 @@ from .verification_gate import (
     evaluate_verification_checks,
     normalize_verification_check,
     validate_verification_receipt,
+)
+from .colleague_pool import (
+    ColleaguePool,
+    ComputeSlot,
+    MorphedColleagueContext,
+    RoleRegistry,
+    SlotState,
+    ToolRegistry,
 )
 
 __version__ = "0.2.0"
@@ -74,5 +82,11 @@ __all__ = [
     "GOAL_ECHO_PROTOCOL",
     "VERIFICATION_STOP_PROTOCOL",
     "SEARCH_DISCIPLINE_PROTOCOL",
+    "ColleaguePool",
+    "ComputeSlot",
+    "MorphedColleagueContext",
+    "RoleRegistry",
+    "ToolRegistry",
+    "SlotState",
     "__version__",
 ]
