@@ -42,7 +42,7 @@ def render_dashboard_service(
         "Type=simple\n"
         f"Environment={env_home}\n"
         f"ExecStart={exec_start}\n"
-        f"WorkingDirectory={quote_systemd(str(hermes_home))}\n"
+        f"WorkingDirectory={hermes_home}\n"
         "Restart=always\n"
         "RestartSec=5\n"
         "KillMode=control-group\n"
