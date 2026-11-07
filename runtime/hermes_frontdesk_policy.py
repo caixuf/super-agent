@@ -9,7 +9,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import stat
-import sys
 from typing import Any
 
 # Read-only roster queries belong to the thin frontdesk: they have no source files,
@@ -30,6 +29,173 @@ UNAVAILABLE = "frontdesk_policy_unavailable: execution refused; ask the administ
 TOOL_DENIED = "frontdesk_tool_denied: use the durable task APIs; do not execute or delegate work in this profile."
 COMMAND_DENIED = "frontdesk_command_denied: this profile only supports chat controls and durable task operations."
 _MAX_CONFIG_BYTES = 1024 * 1024
+
+#: YAML 1.1 booleans, exactly as the host's ruamel resolver reads them.
+_YAML11_TRUE = frozenset({"y", "yes", "on", "true"})
+_YAML11_FALSE = frozenset({"n", "no", "off", "false"})
+
+
+def _scalar(text: str) -> Any:
+    """One plain or quoted scalar, with YAML 1.1 booleans."""
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        return text[1:-1]
+    if text.startswith("[") or text.startswith("{"):
+        raise ValueError("frontdesk policy uses an unsupported value")
+    low = text.lower()
+    if low in _YAML11_TRUE:
+        return True
+    if low in _YAML11_FALSE:
+        return False
+    if low in ("", "null", "~"):
+        return None
+    return text
+
+
+def _parse_mapping(text: str) -> Any:
+    """Parse the indentation-based mapping subset the policy reads.
+
+    Strict on purpose: a duplicate key is an error, not a last-one-wins, and
+    a construct this parser does not understand is an error too. A policy that
+    cannot be read has to fail closed.
+    """
+    root: dict = {}
+    stack: list[tuple[int, dict]] = [(-1, root)]
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        body = raw.strip()
+        if ":" not in body:
+            raise ValueError("frontdesk policy is not a mapping")
+        key, _, rest = body.partition(":")
+        key = key.strip()
+        if not key or not key.replace("-", "").replace("_", "").isalnum():
+            raise ValueError("frontdesk policy has an unsupported key")
+        while len(stack) > 1 and indent <= stack[-1][0]:
+            stack.pop()
+        parent = stack[-1][1]
+        if key in parent:
+            raise ValueError("frontdesk policy has a duplicate key")
+        rest = rest.strip()
+        if not rest:
+            child: dict = {}
+            parent[key] = child
+            stack.append((indent, child))
+        else:
+            parent[key] = _scalar(rest)
+    return root
+
+
+def _parse_frontdesk_block(raw: bytes) -> Any:
+    """Parse only the ``superagent:`` block, with the host's semantics.
+
+    The policy reads one small section, so the fallback reads that section
+    alone: the rest of the profile config — lists, long quoted documents, the
+    plugin tree — is none of this module's business, and a narrow parser that
+    refuses what it does not understand fails closed instead of guessing.
+    """
+    text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+    block: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not inside:
+            if not stripped or stripped.startswith("#") or line.startswith(" "):
+                continue
+            key, _, rest = stripped.partition(":")
+            if key.strip() != "superagent":
+                continue
+            if rest.strip():
+                # The section is an inline scalar, not a block.
+                return _scalar(rest)
+            inside = True
+            continue
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not line.startswith(" "):
+            break
+        block.append(line)
+    if not block:
+        return {}
+    return _parse_mapping("superagent:\n" + "\n".join(block))
+
+
+def _load_config(raw: bytes) -> Any:
+    """Parse the profile config the way the host parses it.
+
+    The host exposes ``hermes_yaml``: ruamel in YAML 1.1 mode, which reads
+    bare ``y``/``n`` booleans and rejects duplicate keys. The fallbacks below
+    reproduce those two rules rather than approximating them — a policy read
+    under different rules than the host uses is not the host's policy:
+
+    1. the host's own loader;
+    2. ruamel with the same settings;
+    3. PyYAML, corrected to the same two rules (its resolver drops bare
+       ``y``/``n``, and its loader keeps duplicate keys);
+    4. a narrow local parser for the block subset, when no YAML library is
+       importable at all.
+    """
+    try:
+        from hermes_yaml import safe_load
+    except ImportError:
+        pass
+    else:
+        return safe_load(raw)
+    try:
+        from ruamel.yaml import YAML
+    except ImportError:
+        pass
+    else:
+        loader = YAML(typ="safe", pure=True)
+        loader.version = (1, 1)
+        loader.allow_duplicate_keys = False
+        return loader.load(raw)
+    try:
+        return _pyyaml_load(raw)
+    except ImportError:
+        return _parse_frontdesk_block(raw)
+
+
+def _pyyaml_load(raw: bytes) -> Any:
+    """PyYAML, corrected to the host's YAML 1.1 policy.
+
+    Two corrections, both required to agree with the host: bare ``y``/``n``
+    count as booleans, and a duplicate key is an error rather than a
+    last-one-wins. The corrections are scoped to a private loader class, so
+    PyYAML's own behaviour is untouched for every other caller.
+    """
+    import re
+
+    import yaml
+
+    class _Host11Loader(yaml.SafeLoader):
+        pass
+
+    _Host11Loader.add_implicit_resolver(
+        "tag:yaml.org,2002:bool",
+        re.compile(
+            r"^(?:y|Y|yes|Yes|YES|n|N|no|No|NO"
+            r"|true|True|TRUE|false|False|FALSE"
+            r"|on|On|ON|off|Off|OFF)$", re.X),
+        list("yYnNtTfFoO"))
+
+    def _mapping(loader, node, deep=False):
+        loader.flatten_mapping(node)
+        mapping = {}
+        for key_node, value_node in node.value:
+            key = loader.construct_object(key_node, deep=deep)
+            if key in mapping:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping", node.start_mark,
+                    "found duplicate key %r" % (key,), key_node.start_mark)
+            mapping[key] = loader.construct_object(value_node, deep=deep)
+        return mapping
+
+    _Host11Loader.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
+    text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+    return yaml.load(text, Loader=_Host11Loader)
 
 #: Programmatic backend entries (the relay bridge's /v1/runs, API-server clients)
 #: are not a human frontdesk. Restricting them to task APIs would break every
@@ -75,27 +241,7 @@ def _settings(home: Path | str | None = None) -> dict[str, bool]:
 
     # Match the host's hermes_yaml policy, including YAML 1.1 booleans and
     # duplicate-key rejection. Parsers are per call, never shared by threads.
-    try:
-        from ruamel.yaml import YAML
-    except ImportError:
-        venv_lib = Path.home() / ".hermes/hermes-agent/venv/lib"
-        if venv_lib.is_dir():
-            for sp in venv_lib.glob("python*/site-packages"):
-                if sp.is_dir() and str(sp) not in sys.path:
-                    sys.path.append(str(sp))
-        try:
-            from ruamel.yaml import YAML
-        except ImportError:
-            YAML = None
-
-    if YAML is not None:
-        loader = YAML(typ="safe", pure=True)
-        loader.version = (1, 1)
-        loader.allow_duplicate_keys = False
-        config = loader.load(raw)
-    else:
-        import yaml
-        config = yaml.safe_load(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    config = _load_config(raw)
     if config is None:
         config = {}
     if not isinstance(config, dict):
