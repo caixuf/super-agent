@@ -36,6 +36,41 @@ plugins:
     assert "not proof" in result.stdout
 
 
+def test_readiness_covers_the_lan_cluster_capability(tmp_path):
+    """局域网集群能力必须在就绪门禁里出现，否则它坏了也没人报。
+
+    节点名册是运维方给的，默认安装不写；所以门禁只要求总开关 + 引擎根 +
+    自己的状态目录 —— 空集群是合法状态，不是缺口。
+    """
+    (tmp_path / "config.yaml").write_text("""plugins:
+  enabled: [lan-cluster]
+  entries:
+    lan-cluster:
+      settings:
+        enabled: true
+        engine_root: /somewhere/engine
+        state_dir: /somewhere/state
+""")
+    result = subprocess.run([sys.executable, str(REPO / "tools/deployment_readiness.py"),
+                             "--profile-home", str(tmp_path), "--profile", "test"],
+                            capture_output=True, text=True)
+    assert "[CONFIGURED] lan-cluster" in result.stdout
+
+    (tmp_path / "config.yaml").write_text("""plugins:
+  enabled: [lan-cluster]
+  entries:
+    lan-cluster:
+      settings:
+        enabled: true
+        engine_root: /somewhere/engine
+""")
+    result = subprocess.run([sys.executable, str(REPO / "tools/deployment_readiness.py"),
+                             "--profile-home", str(tmp_path), "--profile", "test"],
+                            capture_output=True, text=True)
+    assert "[OPEN] lan-cluster" in result.stdout
+    assert "state_dir" in result.stdout
+
+
 def test_worker_readiness_detects_policy_drift(tmp_path, monkeypatch):
     import importlib.util
     import json

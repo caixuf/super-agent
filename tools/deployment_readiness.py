@@ -190,6 +190,10 @@ def inspect(home: Path, profile: str):
         "memory-bridge": (("enabled", "engine_root", "identity_routes_file", "embed_url") if routed else
                           ("enabled", "engine_root", "spool_dir", "user_id", "agent_id")),
         "colleague-catalog": ("enabled", "engine_root", "roles"),
+        # An empty cluster is a valid cluster: the node map is administrator
+        # supplied, so it is not required here — only the switch and the
+        # engine root the tools read from.
+        "lan-cluster": ("enabled", "engine_root", "state_dir"),
     }.items():
         entry = (entries.get(name) or {}).get("settings") or {}
         missing = [key for key in required if not entry.get(key)]
