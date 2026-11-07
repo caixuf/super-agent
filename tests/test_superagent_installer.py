@@ -1549,3 +1549,38 @@ def test_staged_release_carries_the_managed_worker_runner(tmp_path, monkeypatch)
     assert runner.is_file()
     assert runner.read_text(encoding="utf-8") == "# install/worker/dev_exec_runner.py" + chr(10)
 
+
+def test_prune_releases_removes_old_releases_and_tarballs_keeping_only_active(tmp_path):
+    _seed_profile(tmp_path)
+    first = json.loads(_run(tmp_path, "install", check=True).stdout)
+    root = Path(first["managed_root"])
+    active = Path(first["release"])
+    stale_dir = root / "releases" / "old-release-001"
+    stale_dir.mkdir(parents=True)
+    (stale_dir / "dummy.txt").write_text("stale")
+    stale_tar = root / "releases" / "old-bundle.tar.gz"
+    stale_tar.write_bytes(b"tarball")
+    pruned = json.loads(_run(tmp_path, "prune-releases", check=True).stdout)
+    assert pruned["status"] == "pruned"
+    assert set(pruned["removed"]) == {"old-release-001", "old-bundle.tar.gz"}
+    remaining = [p.name for p in (root / "releases").iterdir()]
+    assert remaining == [active.name]
+    manifest = json.loads((root / "install-manifest.json").read_text())
+    assert manifest["release_history"] == []
+
+
+def test_sync_profile_skills_refreshes_existing_local_skill_copy(tmp_path):
+    module = _load_installer()
+    profile = tmp_path / "profile"
+    local_skill = profile / "skills" / "illustrated-doc-rendering"
+    local_skill.mkdir(parents=True)
+    (local_skill / "SKILL.md").write_text("# stale 11-01 skill\n", encoding="utf-8")
+    release = tmp_path / "release"
+    rel_skill = release / "skills" / "illustrated-doc-rendering"
+    rel_skill.mkdir(parents=True)
+    (rel_skill / "SKILL.md").write_text("# updated skill with progressive delivery\n", encoding="utf-8")
+    synced = module._sync_profile_skills(profile, release)
+    assert synced == ["illustrated-doc-rendering"]
+    assert (local_skill / "SKILL.md").read_text(encoding="utf-8") == "# updated skill with progressive delivery\n"
+
+

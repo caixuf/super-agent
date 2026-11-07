@@ -38,7 +38,8 @@ def configure(config: Path, engine: Path):
     if settings.get("delivery_transport_file") not in (None, str(transport)):
         raise ValueError("existing completion transport differs; explicit configuration required")
     defaults = {"direct_delivery_enabled": True, "delivery_transport_file": str(transport),
-                "delivery_not_before": time.time(), "deliver_completions": True}
+                "delivery_not_before": time.time(), "deliver_completions": True,
+                "task_lifecycle_cards_enabled": True}
     updated = original
     for key, value in defaults.items():
         updated = add_missing(updated, ["plugins", "entries", "durable-dispatch", "settings", key], value)

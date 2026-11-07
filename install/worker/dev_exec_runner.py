@@ -200,6 +200,13 @@ def _workdir() -> Path:
 
 
 def _find_and_load_checkpoint() -> dict | None:
+    engine = _engine_root()
+    if str(engine) not in sys.path:
+        sys.path.insert(0, str(engine))
+    try:
+        from agentcore.progressive_delivery import load_checkpoint
+    except Exception:
+        load_checkpoint = None
     candidates = []
     env_ckpt = os.environ.get("DEV_CHECKPOINT_PATH")
     if env_ckpt:
@@ -208,6 +215,10 @@ def _find_and_load_checkpoint() -> dict | None:
     candidates.append(Path("checkpoint.json"))
     for path in candidates:
         try:
+            if load_checkpoint is not None and path.name == "checkpoint.json" and path.parent.is_dir():
+                loaded = load_checkpoint(path.parent)
+                if isinstance(loaded, dict) and (loaded.get("summary") or loaded.get("phase")):
+                    return loaded
             if path.is_file():
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(data, dict) and (data.get("summary") or data.get("phase")):

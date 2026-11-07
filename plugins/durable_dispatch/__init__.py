@@ -550,6 +550,45 @@ class DispatchService:
             outcomes.append({'task_id': job, 'state': state, 'error': error})
         return outcomes
 
+    def refresh_running_cards(self, transport, *, limit=20, min_age=15.0, not_before=None, stop_event=None):
+        """Refresh active running task cards with live phase, progress, and elapsed time."""
+        bridge = getattr(transport, 'card_bridge', None)
+        if bridge is None or not hasattr(self.pool, 'active_running_card_jobs'):
+            return []
+        now = time.time()
+        rows = self.pool.active_running_card_jobs(limit=limit, min_age=min_age, not_before=not_before, now=now)
+        if not rows:
+            return []
+        ledger = self._resolve_liveness()
+        outcomes = []
+        for row in rows:
+            if stop_event is not None and stop_event.is_set():
+                break
+            job = row['job']
+            created = float(row.get('created') or now)
+            elapsed = round(max(0.0, now - created), 1)
+            phase = '执行进程运行中'
+            progress = 0.0
+            if ledger is not None:
+                try:
+                    live = ledger.inspect(job)
+                    if isinstance(live, dict) and live.get('ok'):
+                        if isinstance(live.get('elapsed_s'), (int, float)) and live['elapsed_s'] > 0:
+                            elapsed = round(float(live['elapsed_s']), 1)
+                        if isinstance(live.get('phase'), str) and live['phase'].strip():
+                            phase = live['phase'].strip()
+                        if isinstance(live.get('progress'), (int, float)) and 0.0 <= float(live['progress']) <= 1.0:
+                            progress = float(live['progress'])
+                except Exception:
+                    pass
+            try:
+                bridge.update_progress(job, status='running', phase=phase, progress=progress, elapsed=elapsed)
+            except Exception as exc:
+                logging.getLogger(__name__).debug('card live refresh skipped: %s', type(exc).__name__)
+            self.pool.touch_running_card_progress(job, now=now)
+            outcomes.append({'task_id': job, 'elapsed': elapsed, 'phase': phase})
+        return outcomes
+
     def inspect_card_health(self, *, not_before=None, now=None, bridge=None):
         """Return aggregate operator health without task contents or destinations."""
         if not_before is not None and (isinstance(not_before, bool)
@@ -964,6 +1003,9 @@ def start_backfill(ctx, service):
                 try:
                     service.drain_cards(transport, not_before=not_before, stop_event=stop)
                     service.sync_running_cards(transport, not_before=not_before, stop_event=stop)
+                    refresh = getattr(service, 'refresh_running_cards', None)
+                    if callable(refresh):
+                        refresh(transport, not_before=not_before, stop_event=stop)
                     now = time.monotonic()
                     if now >= next_inspection:
                         next_inspection = now + _DELIVERY_WARNING_INTERVAL

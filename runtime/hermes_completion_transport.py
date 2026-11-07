@@ -15,11 +15,22 @@ logger = logging.getLogger(__name__)
 
 def _finalize_card(bridge, task_id, message):
     """Report card failures without retrying an already accepted completion."""
+    elapsed = message.get('elapsed', 0.0)
+    if not elapsed:
+        try:
+            card = bridge.get_card(task_id)
+            if isinstance(card, dict):
+                if card.get('finalized'):
+                    elapsed = float(card.get('elapsed') or 0.0)
+                elif card.get('created_at'):
+                    elapsed = round(max(0.0, time.time() - float(card['created_at'])), 1)
+        except Exception:
+            elapsed = 0.0
     try:
         result = bridge.finalize(
             task_id, status=message.get('status', 'completed'),
             summary=message.get('summary', ''), artifacts=message.get('artifacts'),
-            elapsed=message.get('elapsed', 0.0))
+            elapsed=elapsed)
     except Exception as exc:
         logger.warning('task-card finalization failed for %s (%s)', task_id, type(exc).__name__)
         return
@@ -285,16 +296,20 @@ def _render(message):
 
 
 def create_transport(ctx, service):
+    import sys
     if ctx.get_config('direct_delivery_enabled', False) is not True:
         raise ValueError('direct delivery requires administrator opt-in')
     engine = Path(ctx.get_config('engine_root', ''))
     if not engine.is_absolute():
         raise ValueError('absolute engine root required')
+    if str(engine) not in sys.path:
+        sys.path.insert(0, str(engine))
     base_type = _transport_type(engine)
 
     class _HumanCompletionTransport(base_type):
         def _prepare_message(self, message):
             from agentcore.delivery_sanitizer import sanitize_and_extract_artifacts
+            from agentcore.progressive_delivery import is_progressive_phase1, load_checkpoint
             summary = message.get('summary', '')
             attempt = self.attempt_provider(message.get('task_id')) if callable(self.attempt_provider) else None
             # Restrict discovery to the owning attempt before the durable transport
@@ -306,6 +321,16 @@ def create_transport(ctx, service):
             sanitized_summary, detected = sanitize_and_extract_artifacts(
                 summary, base_dir=allowed_dir, allow_nonexistent=True)
             message = dict(message, summary=sanitized_summary)
+
+            ckpt = load_checkpoint(allowed_dir) if allowed_dir and allowed_dir.is_dir() else None
+            if ckpt or is_progressive_phase1(sanitized_summary):
+                message['checkpoint_delivered'] = True
+                if ckpt and ckpt.get('phase'):
+                    message.setdefault('phase', ckpt['phase'])
+                else:
+                    message.setdefault('phase', 'phase1_text')
+                if ckpt and ckpt.get('rendering_state'):
+                    message.setdefault('rendering_state', ckpt['rendering_state'])
 
             files = list(message.get('artifacts') or [])
             for art in detected:
@@ -367,13 +392,15 @@ def create_transport(ctx, service):
 
     sender = HostSender(ctx)
     card_bridge = None
+    cards_root_cfg = ctx.get_config('cards_root', '')
+    cards_dir = Path(cards_root_cfg) if isinstance(cards_root_cfg, str) and cards_root_cfg and Path(cards_root_cfg).is_absolute() else (service.pool.root.parent / 'cards')
     try:
         from agentcore.task_card_bridge import TaskCardBridge
-        card_bridge = TaskCardBridge(service.pool.root.parent / 'cards',
+        card_bridge = TaskCardBridge(cards_dir,
                                      profile=service.profile,
                                      sender=lambda address, message_id, card_payload: sender.patch_card(address, message_id, card_payload))
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning('TaskCardBridge unavailable for %s (%s)', service.profile, type(exc).__name__)
 
     transport = _HumanCompletionTransport(service.pool.root/'direct-delivery', profile=service.profile,
         sender=sender, render=_render,
@@ -382,4 +409,10 @@ def create_transport(ctx, service):
         card=ctx.get_config('completion_card_enabled', False) is True)
     transport.card_bridge = card_bridge
     transport.card_creator = sender.create_card
+    try:
+        from agentcore.progressive_delivery import ProgressiveDeliveryCoordinator
+        transport.progressive_coordinator = ProgressiveDeliveryCoordinator(
+            card_emitter=card_bridge, transport=transport)
+    except Exception as exc:
+        logger.warning('ProgressiveDeliveryCoordinator unavailable for %s (%s)', service.profile, type(exc).__name__)
     return transport

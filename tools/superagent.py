@@ -1216,6 +1216,7 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
             release / "overlay",
             skip_overlay=getattr(args, "skip_overlay", False),
         )
+    _sync_profile_skills(profile_home, release)
     release_history = list(previous_history)
     if previous is not None and previous.resolve() != release.resolve():
         release_history = [*release_history, str(previous.resolve())][-10:]
@@ -1239,6 +1240,79 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     return 0
 
 
+def _sync_profile_skills(profile_home: Path, release: Path) -> list[str]:
+    """Refresh existing profile-local copies of repo skills so they never shadow the release."""
+    src_skills = release / "skills"
+    dst_skills = profile_home / "skills"
+    if not src_skills.is_dir() or not dst_skills.is_dir():
+        return []
+    synced = []
+    for skill_entry in sorted(src_skills.iterdir()):
+        if not skill_entry.is_dir():
+            continue
+        target = dst_skills / skill_entry.name
+        if not target.is_dir() or target.is_symlink():
+            continue
+        for item in sorted(skill_entry.rglob("*")):
+            if not item.is_file():
+                continue
+            rel = item.relative_to(skill_entry)
+            dest = target / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if not dest.is_file() or dest.read_bytes() != item.read_bytes():
+                shutil.copy2(item, dest)
+        synced.append(skill_entry.name)
+    return synced
+
+
+def _prune_old_releases(root: Path, active_release: Path, manifest_path: Path | None = None) -> list[str]:
+    """Delete all non-active release directories and tarballs under root/releases."""
+    releases_dir = root / "releases"
+    if not releases_dir.is_dir():
+        return []
+    active_resolved = active_release.resolve()
+    removed = []
+    for entry in sorted(releases_dir.iterdir()):
+        if entry.name.startswith(".staging-"):
+            continue
+        try:
+            if not entry.is_symlink() and entry.resolve() == active_resolved:
+                continue
+        except OSError:
+            pass
+        try:
+            if entry.is_symlink() or entry.is_file():
+                entry.unlink()
+            elif entry.is_dir():
+                shutil.rmtree(entry)
+            removed.append(entry.name)
+        except OSError:
+            pass
+    if manifest_path is not None and manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(manifest, dict) and manifest.get("release_history"):
+                manifest["release_history"] = []
+                _write_json_atomic(manifest_path, manifest)
+        except (OSError, ValueError):
+            pass
+    return removed
+
+
+def prune_releases(args: argparse.Namespace) -> int:
+    found = _manifest(args)
+    if found is None:
+        return 1
+    path, manifest = found
+    root = _managed_root(args)
+    current = root / "current"
+    if not current.is_symlink() or not current.exists():
+        print(json.dumps({"status": "refused", "reason": "no_active_release"}))
+        return 1
+    active = current.resolve()
+    removed = _prune_old_releases(root, active, path)
+    print(json.dumps({"status": "pruned", "active_release": str(active), "removed": removed}, indent=2))
+    return 0
 def _manifest(args: argparse.Namespace) -> tuple[Path, dict[str, Any]] | None:
     root = _managed_root(args)
     path = root / "install-manifest.json"
@@ -2098,6 +2172,7 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
                 if time.monotonic() >= deadline:
                     raise RuntimeError("managed_service_import_path_unproven:" + name)
                 time.sleep(0.2)
+        _prune_old_releases(root, Path(manifest["release"]), _path)
         return 0
     except Exception as exc:
         rollback_errors = []
@@ -2163,14 +2238,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="Skip applying profile overlay even if present in release archive")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("plan", "install", "update", "doctor", "uninstall",
-                 "activate-release", "rollback", "migrate-config", "candidate-hermes", "install-hermes-candidate", "switch-gateway-source"):
+                 "activate-release", "rollback", "prune-releases", "migrate-config", "candidate-hermes", "install-hermes-candidate", "switch-gateway-source"):
         cmd = commands.add_parser(name)
         cmd.add_argument("--keep-data", action="store_true")
         if name == "activate-release":
             cmd.add_argument("--release", type=Path, required=True)
     raw = list(argv if argv is not None else sys.argv[1:])
     known = {"plan", "install", "update", "doctor", "uninstall",
-             "activate-release", "rollback", "migrate-config", "candidate-hermes", "install-hermes-candidate", "switch-gateway-source"}
+             "activate-release", "rollback", "prune-releases", "migrate-config", "candidate-hermes", "install-hermes-candidate", "switch-gateway-source"}
     if (command_index := next((i for i, value in enumerate(raw) if value in known), None)) is not None:
         before, command, after = raw[:command_index], raw[command_index], raw[command_index + 1:]
         global_opts, command_opts = [], []
@@ -2194,6 +2269,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return activate_release(args)
     if args.command == "rollback":
         return rollback(args)
+    if args.command == "prune-releases":
+        return prune_releases(args)
     if args.command == "candidate-hermes":
         plan = build_plan(args)
         candidate = build_clean_hermes_candidate(args, plan)

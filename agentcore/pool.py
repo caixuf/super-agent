@@ -1128,6 +1128,31 @@ class Pool:
                 (state, error, time.time(), job),
             )
 
+    def active_running_card_jobs(self, *, limit=20, min_age=15.0, not_before=None, now=None):
+        """Return running jobs whose initial running transition succeeded and are due for a live progress refresh."""
+        current = time.time() if now is None else float(now)
+        cutoff = current - max(1.0, float(min_age))
+        with self.db() as db:
+            return [
+                dict(row)
+                for row in db.execute(
+                    "SELECT c.job,j.created FROM card_outbox c JOIN jobs j ON j.id=c.job "
+                    "WHERE c.state='sent' AND c.progress_state='sent' "
+                    "AND j.status='running' AND j.pid IS NOT NULL AND j.cancel=0 "
+                    "AND c.updated<=? AND (? IS NULL OR j.created>=?) ORDER BY c.updated,c.job LIMIT ?",
+                    (cutoff, not_before, not_before, limit),
+                ).fetchall()
+            ]
+
+    def touch_running_card_progress(self, job, *, now=None):
+        """Record a periodic live progress refresh timestamp without changing progress_state."""
+        current = time.time() if now is None else float(now)
+        with self.db() as db:
+            db.execute(
+                "UPDATE card_outbox SET updated=? WHERE job=? AND state='sent' AND progress_state='sent'",
+                (current, job),
+            )
+
     def card_outbox_health_counts(self, *, not_before=None, now=None):
         """Return consistent snapshot counts for card_outbox health states."""
         current = time.time() if now is None else now
