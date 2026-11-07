@@ -474,10 +474,11 @@ PYTHONPATH=/home/caixuf/.hermes/agentcore python3 -m agentcore.completion_backfi
 
 ```bash
 python3 -m pytest tests/ -q
-# 3046 passed, 59 skipped in 575.99s (0:09:35)   退出码 0
+# 3048 passed, 59 skipped in 589.02s (0:09:49)   退出码 0
 ```
 
 对比部署前基线 `3036 passed / 59 skipped`：**+10** 来自本次新增/改写的用例
+（合并上游 `5114086` 后上游自带 +2，最终为 **3048 passed / 59 skipped**）
 （`tests/test_lan_cluster_plugin.py` 7、`tests/test_lan_cluster.py` 1、
 `tests/test_install_script.py` 1、`tests/test_deployment_readiness.py` 1）。
 
