@@ -7,13 +7,9 @@ import subprocess
 import pytest
 
 
-def test_real_host_routes_directly_without_a_model_turn(tmp_path):
-    host = Path(os.environ.get('HERMES_SOURCE', Path.home()/'.hermes/hermes-agent'))
-    runtime = host/'.venv/bin/python'
-    if not runtime.is_file():
-        runtime = host/'venv/bin/python'
-    if not runtime.is_file():
-        pytest.skip('Hermes host interpreter unavailable')
+def test_real_host_routes_directly_without_a_model_turn(tmp_path, real_host):
+    host = real_host.host
+    runtime = real_host.require('hermes_cli/plugin_messages.py', 'gateway/plugin_messages.py')
     engine = Path(__file__).resolve().parents[1]
     code = r'''
 import asyncio,importlib.util,json,os,sys,threading,time
@@ -98,13 +94,9 @@ print(json.dumps(dict(passed=True,text_sends=1,file_sends=1,profile_checks=len(c
     assert proof['passed'] and proof['model_turns'] == 0 and proof['file_sends'] == 1
 
 
-def test_real_host_resolver_uses_real_profile_ownership_guard(tmp_path):
-    host = Path(os.environ.get('HERMES_SOURCE', Path.home()/'.hermes/hermes-agent'))
-    runtime = host/'.venv/bin/python'
-    if not runtime.is_file():
-        runtime = host/'venv/bin/python'
-    if not runtime.is_file():
-        pytest.skip('Hermes host interpreter unavailable')
+def test_real_host_resolver_uses_real_profile_ownership_guard(tmp_path, real_host):
+    host = real_host.host
+    runtime = real_host.require('gateway/plugin_messages.py')
     code = r'''
 import sys
 from pathlib import Path
@@ -136,13 +128,9 @@ assert target is None and refusal['error']=='no_conversation'
     assert result.returncode == 0, result.stderr[-3000:]
 
 
-def test_real_plugin_context_registers_card_intent_from_bound_session(tmp_path):
-    host = Path(os.environ.get('HERMES_SOURCE', Path.home()/'.hermes/hermes-agent'))
-    runtime = host/'.venv/bin/python'
-    if not runtime.is_file():
-        runtime = host/'venv/bin/python'
-    if not runtime.is_file():
-        pytest.skip('Hermes host interpreter unavailable')
+def test_real_plugin_context_registers_card_intent_from_bound_session(tmp_path, real_host):
+    host = real_host.host
+    runtime = real_host.require('gateway/session_context.py')
     engine = Path(__file__).resolve().parents[1]
     code = r'''
 import importlib.util,json,os,sys

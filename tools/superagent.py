@@ -793,6 +793,40 @@ def _enable_plugins(profile_home: Path, names: list[str]) -> None:
           "--config", str(config), *sum((["--name", name] for name in names), [])], check=True)
 
 
+def _credentials_file(profile_home: Path) -> Path:
+    """The environment file that carries the app credentials.
+
+    Hermes resolves it from the global home (``get_hermes_home()/.env``); a
+    profile home that lives under ``<global>/profiles/<name>`` therefore points
+    at the global home, not at the profile directory.
+    """
+    home = profile_home
+    if home.parent.name == "profiles":
+        home = home.parent.parent
+    return home / ".env"
+
+
+def _apply_official_plugin_defaults(profile_home: Path, engine_root: Path, profile: str) -> list[str]:
+    """Delegate capability defaults to the official installers.
+
+    The managed layout and the ordinary layout must not diverge: both write
+    plugin defaults through ``install/plugin_defaults.py`` and
+    ``install/configure_defaults.py``. Only absent entries are filled, so
+    existing entries and explicit opt-outs stay untouched.
+    """
+    config = profile_home / "config.yaml"
+    if not config.is_file():
+        return []
+    before = config.read_text(encoding="utf-8")
+    _run([sys.executable, str(REPO / "install" / "plugin_defaults.py"),
+          "--config", str(config), "--home", str(profile_home),
+          "--engine-root", str(engine_root), "--profile", profile,
+          "--env-file", str(_credentials_file(profile_home))], check=True)
+    _run([sys.executable, str(REPO / "install" / "configure_defaults.py"),
+          str(config), str(engine_root)], check=True)
+    return ["plugin_defaults", "configure_defaults"] if config.read_text(encoding="utf-8") != before else []
+
+
 def _disable_plugins(profile_home: Path, names: list[str]) -> None:
     config = profile_home / "config.yaml"
     if not config.is_file() or not names:
@@ -1201,6 +1235,7 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
                     rollback_backup=getattr(args, "_plugin_rollback_dir", None))
     migrate_config(args, plan, quiet=True)
     _enable_plugins(profile_home, plugins)
+    _apply_official_plugin_defaults(profile_home, Path(plan["release"]), args.profile)
     _purge_legacy_plugins(profile_home)
     if plan.get("card_implementation") == "release-cardkit":
         _disable_legacy_card_producer(profile_home)

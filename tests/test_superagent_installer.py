@@ -479,6 +479,44 @@ exit 0
     assert any("start hermes-gateway-demo.service" in line for line in lines)
 
 
+def test_update_writes_capability_defaults_through_the_official_installers(tmp_path):
+    """受管布局与官方布局必须同源：能力默认值只由官方配置器写。
+
+    少了这一步，settings-gated 插件只剩一行启用记录、工具面为空。
+    """
+    import yaml
+    _seed_profile(tmp_path)
+    calls = tmp_path / "systemctl-calls"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    stub = bindir / "systemctl"
+    stub.write_text(
+        """#!/bin/sh
+printf '%s\n' "$*" >> "$TEST_SYSTEMCTL_CALLS"
+exit 0
+""", encoding="utf-8")
+    stub.chmod(0o755)
+    env = dict(os.environ, HOME=str(tmp_path), TEST_SYSTEMCTL_CALLS=str(calls),
+               PATH=str(bindir) + os.pathsep + os.environ["PATH"])
+    command = [
+        sys.executable, str(TOOL), "--profile", "demo",
+        "--profile-home", str(tmp_path / ".hermes/profiles/demo"),
+        "--root", str(tmp_path / ".hermes/superagent"), "update",
+    ]
+    proc = subprocess.run(command, env=env, text=True, capture_output=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    config = yaml.safe_load((tmp_path / ".hermes/profiles/demo/config.yaml").read_text())
+    entries = config["plugins"]["entries"]
+    # 官方默认能力：总开关就位，工具面不再为空。
+    assert entries["markdown-delivery"]["settings"]["enabled"] is True
+    assert entries["colleague-team"]["settings"]["enabled"] is True
+    assert entries["markdown-delivery"]["settings"]["outbox_root"].endswith(
+        "agentcore-state/markdown-outbox")
+    # 凭据只以路径出现，值留在全局 home 的环境文件里。
+    assert entries["markdown-delivery"]["settings"]["env_file"] == str(
+        tmp_path / ".hermes" / ".env")
+
+
 def test_shell_entrypoint_is_plan_only_without_apply(tmp_path):
     profile = _seed_profile(tmp_path)
     wrapper = REPO / "install/superagent.sh"

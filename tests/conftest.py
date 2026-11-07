@@ -152,3 +152,55 @@ def configured():
 @pytest.fixture
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+class RealHost:
+    """A real Hermes host tree plus the interpreter that can run it.
+
+    Resolution follows the convention already used by
+    ``tests/test_frontdesk_boundary.py``:
+
+    1. ``SUPERAGENT_HOST_TEST_PYTHON`` — an explicit interpreter override.
+    2. ``$HERMES_SOURCE/.venv/bin/python``.
+    3. ``$HERMES_SOURCE/venv/bin/python``.
+
+    The host source root is ``$HERMES_SOURCE`` and defaults to
+    ``~/.hermes/hermes-agent``. An explicitly requested host that cannot carry
+    the contract fails the test — a broken host must never be disguised. The
+    default host is an environment accident: when it does not carry the
+    contract, the test skips and says why. A skip is not a pass.
+    """
+
+    def __init__(self) -> None:
+        source = os.environ.get("HERMES_SOURCE")
+        override = os.environ.get("SUPERAGENT_HOST_TEST_PYTHON")
+        self.explicit = bool(source or override)
+        self.host = Path(source) if source else Path.home() / ".hermes" / "hermes-agent"
+        runtime = Path(override) if override else None
+        if runtime is None or not runtime.is_file():
+            for candidate in (self.host / ".venv" / "bin" / "python", self.host / "venv" / "bin" / "python"):
+                if candidate.is_file():
+                    runtime = candidate
+                    break
+        self.runtime = runtime if runtime is not None and runtime.is_file() else None
+
+    def require(self, *sources: str) -> Path:
+        """Return the interpreter, or skip/fail with a precise reason."""
+        if self.runtime is None:
+            reason = "Hermes host interpreter unavailable"
+            if self.explicit:
+                pytest.fail(reason)
+            pytest.skip(reason)
+        missing = [name for name in sources if not (self.host / name).is_file()]
+        if missing:
+            reason = (f"host {self.host} lacks {', '.join(missing)}"
+                      f" (host version does not carry this contract)")
+            if self.explicit:
+                pytest.fail(reason)
+            pytest.skip(reason + " — environment gap, not a pass")
+        return self.runtime
+
+
+@pytest.fixture
+def real_host() -> RealHost:
+    return RealHost()

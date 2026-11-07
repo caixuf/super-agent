@@ -90,11 +90,13 @@ def eligible_names(text, names):
     return result
 
 
-def defaults(home: Path, engine: Path, profile: str):
+def defaults(home: Path, engine: Path, profile: str, env_file: Path | None = None):
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", profile):
         raise config_text.Unsupported("profile is not a valid colleague primary_id")
     engine_settings = {"engine_root": str(engine)}
     ledger = str(home / "agentcore-state" / "liveness.db")
+    # Credentials stay in the environment file; only its path is a default.
+    credentials = str(env_file) if env_file is not None else str(home / ".env")
     return {
         "illustrated-delivery": {"enabled": True, **engine_settings},
         "longtask-guard": {**engine_settings, "liveness_db": ledger},
@@ -109,6 +111,9 @@ def defaults(home: Path, engine: Path, profile: str):
                            "team_id": "team-" + hashlib.sha256(str(home).encode()).hexdigest()[:16],
                            "primary_id": profile,
                            "registry_path": str(home / "agentcore-state" / "colleague-team" / "registry.db")},
+        "markdown-delivery": {"enabled": True, **engine_settings,
+                              "outbox_root": str(home / "agentcore-state" / "markdown-outbox"),
+                              "env_file": credentials},
     }
 
 
@@ -144,12 +149,26 @@ def merge_defaults(text, values):
     return "\n".join(lines) + ("\n" if text.endswith("\n") else ""), list(missing)
 
 
+def _private_directory(path: Path) -> None:
+    """Create or validate an owner-only directory for deployer state."""
+    if path.is_symlink():
+        raise config_text.Unsupported("directory must not be a symlink: " + str(path))
+    if path.exists():
+        info = path.stat()
+        if info.st_mode & 0o077 or info.st_uid != os.getuid():
+            raise config_text.Unsupported("existing directory is not private: " + str(path))
+    else:
+        path.mkdir(parents=True, mode=0o700)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--home", type=Path)
     parser.add_argument("--engine-root", type=Path)
     parser.add_argument("--profile", default="default")
+    parser.add_argument("--env-file", type=Path,
+                        help="environment file that carries the app credentials (default: <home>/.env)")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--eligible-name", action="append", default=[])
     args = parser.parse_args(argv)
@@ -162,7 +181,7 @@ def main(argv=None):
             parser.error("--home and --engine-root are required for defaults")
         home = args.home.resolve()
         args.engine_root.resolve(strict=True)  # Reject missing target without pinning saved paths.
-        values = defaults(home, args.engine_root.absolute(), args.profile)
+        values = defaults(home, args.engine_root.absolute(), args.profile, args.env_file)
         # During dry-run, enable_plugins has not created the mapping on disk.
         if not text.strip() or config_text.inspect(text)["structure"] != "mapping":
             text, _ = config_text.merge(text, [])
@@ -173,15 +192,9 @@ def main(argv=None):
             return 0
         if names:
             if "colleague-team" in names:
-                directory = home / "agentcore-state" / "colleague-team"
-                if directory.is_symlink():
-                    raise config_text.Unsupported("team registry directory must not be a symlink")
-                if directory.exists():
-                    info = directory.stat()
-                    if info.st_mode & 0o077 or info.st_uid != os.getuid():
-                        raise config_text.Unsupported("existing team registry directory is not private")
-                else:
-                    directory.mkdir(parents=True, mode=0o700)
+                _private_directory(home / "agentcore-state" / "colleague-team")
+            if "markdown-delivery" in names:
+                _private_directory(home / "agentcore-state" / "markdown-outbox")
             config_text._backup(args.config)
             config_text._write_atomic(args.config, changed)
             for name in names:

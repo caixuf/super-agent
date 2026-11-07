@@ -457,8 +457,13 @@ filter_opted_out_plugins() {
 install_plugin_defaults() {
   local engine="$DEPLOY_DIR"
   [ "$DRY_RUN" = "1" ] && engine="$REPO_ROOT"
+  # 凭据留在环境文件里；这里只给路径，与 Hermes 自己的 get_env_path() 同源。
+  # --hermes-home 就是全局 home；--profile 模式下全局 home 仍是 $HERMES_HOME。
+  local credentials_home="${HERMES_HOME_ARG:-${HERMES_HOME:-$HOME/.hermes}}"
+  local credentials="$credentials_home/.env"
   local -a args=(--config "$TARGET_HOME/config.yaml" --home "$TARGET_HOME"
-                 --engine-root "$engine" --profile "$TARGET_PROFILE")
+                 --engine-root "$engine" --profile "$TARGET_PROFILE"
+                 --env-file "$credentials")
   local rc=0
   [ "$DRY_RUN" = "1" ] && args+=(--dry-run)
   python3 "$DEFAULTS" "${args[@]}" || rc=$?

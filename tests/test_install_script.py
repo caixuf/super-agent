@@ -435,6 +435,120 @@ def test_plugin_defaults_keep_current_symlink(tmp_path):
     assert settings["engine_root"] == str(engine)
 
 
+def test_plugin_defaults_enable_markdown_delivery_with_credentials_path(tmp_path):
+    """文档交付工具面必须有总开关；凭据只以路径出现，值留在环境文件里。"""
+    import yaml
+    home = tmp_path / "profile"
+    home.mkdir()
+    config = home / "config.yaml"
+    config.write_text("plugins:\n  enabled: [markdown-delivery]\n")
+    engine = tmp_path / "current"
+    engine.symlink_to(REPO_ROOT, target_is_directory=True)
+    credentials = tmp_path / "home" / ".env"
+    proc = subprocess.run(["python3", str(REPO_ROOT / "install/plugin_defaults.py"),
+                           "--config", str(config), "--home", str(home), "--engine-root", str(engine),
+                           "--profile", "p1", "--env-file", str(credentials)],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    settings = yaml.safe_load(config.read_text())["plugins"]["entries"]["markdown-delivery"]["settings"]
+    assert settings["enabled"] is True
+    assert settings["engine_root"] == str(engine)
+    assert settings["env_file"] == str(credentials)
+    outbox = home / "agentcore-state" / "markdown-outbox"
+    assert settings["outbox_root"] == str(outbox)
+    assert outbox.is_dir()
+    assert not outbox.stat().st_mode & 0o077
+
+
+def test_plugin_defaults_markdown_delivery_never_overwrites_an_existing_entry(tmp_path):
+    """现场已有条目（含显式关闭）属于部署方，默认安装不得改写。"""
+    import yaml
+    home = tmp_path / "profile"
+    home.mkdir()
+    config = home / "config.yaml"
+    config.write_text("""plugins:
+  entries:
+    markdown-delivery:
+      settings:
+        enabled: false
+""")
+    engine = tmp_path / "current"
+    engine.symlink_to(REPO_ROOT, target_is_directory=True)
+    proc = subprocess.run(["python3", str(REPO_ROOT / "install/plugin_defaults.py"),
+                           "--config", str(config), "--home", str(home), "--engine-root", str(engine),
+                           "--profile", "p1"], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    settings = yaml.safe_load(config.read_text())["plugins"]["entries"]["markdown-delivery"]["settings"]
+    assert settings["enabled"] is False
+    assert "outbox_root" not in settings
+    assert not (home / "agentcore-state" / "markdown-outbox").exists()
+
+
+def test_migrate_engine_paths_rewrites_only_engine_internal_paths(tmp_path):
+    """引擎内部的路径随引擎搬；站点状态（队列/账本/记忆库）不动。"""
+    import yaml
+    config = tmp_path / "config.yaml"
+    config.write_text("""plugins:
+  entries:
+    durable-dispatch:
+      settings:
+        engine_root: "/old/engine"
+        delivery_transport_file: "/old/engine/runtime/transport.py"
+        queue_root: "/state/queue"
+    other:
+      settings:
+        engine_root: "/somewhere/else"
+memory:
+  localvec:
+    recall_cmd:
+    - /usr/bin/python3
+    - /old/engine/tools/recall_memory.py
+    - --data-dir
+    - /state/memory
+""")
+    proc = subprocess.run(["python3", str(REPO_ROOT / "install/migrate_engine_paths.py"),
+                           "--config", str(config),
+                           "--old-engine-root", "/old/engine",
+                           "--new-engine-root", "/new/engine"], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    data = yaml.safe_load(config.read_text())
+    settings = data["plugins"]["entries"]["durable-dispatch"]["settings"]
+    assert settings["engine_root"] == "/new/engine"
+    assert settings["delivery_transport_file"] == "/new/engine/runtime/transport.py"
+    assert settings["queue_root"] == "/state/queue"
+    assert data["plugins"]["entries"]["other"]["settings"]["engine_root"] == "/somewhere/else"
+    assert data["memory"]["localvec"]["recall_cmd"][1] == "/new/engine/tools/recall_memory.py"
+    assert data["memory"]["localvec"]["recall_cmd"][3] == "/state/memory"
+    assert any(name.name.startswith("config.yaml.bak.") for name in tmp_path.iterdir())
+
+
+def test_migrate_engine_paths_dry_run_never_writes(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("plugins:\n  entries:\n    a:\n      settings:\n"
+                      "        engine_root: /old/engine\n")
+    before = config.read_bytes()
+    proc = subprocess.run(["python3", str(REPO_ROOT / "install/migrate_engine_paths.py"),
+                           "--config", str(config),
+                           "--old-engine-root", "/old/engine",
+                           "--new-engine-root", "/new/engine", "--dry-run"],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert config.read_bytes() == before
+    assert not any(name.name.startswith("config.yaml.bak.") for name in tmp_path.iterdir())
+
+
+def test_migrate_engine_paths_refuses_a_malformed_config(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("plugins: {entries: {}}\n")
+    before = config.read_bytes()
+    proc = subprocess.run(["python3", str(REPO_ROOT / "install/migrate_engine_paths.py"),
+                           "--config", str(config),
+                           "--old-engine-root", "/old/engine",
+                           "--new-engine-root", "/new/engine"], capture_output=True, text=True)
+    assert proc.returncode != 0
+    assert config.read_bytes() == before
+
+
 def test_worker_keeps_engine_symlink_without_config_override(tmp_path):
     import json
     import yaml
@@ -483,8 +597,10 @@ def test_saved_platform_toolsets_include_default_task_status(tmp_path):
     assert result.returncode == 0, result.stderr
     text = config.read_text()
     values = yaml.safe_load(text)["platform_toolsets"]
-    assert values["feishu"] == ["terminal", "task_status", "colleague_catalog", "colleague_team"]
-    assert values["api_server"] == ["file", "web", "task_status", "colleague_catalog", "colleague_team"]
+    assert values["feishu"] == ["terminal", "task_status", "markdown_delivery",
+                                "colleague_catalog", "colleague_team"]
+    assert values["api_server"] == ["file", "web", "task_status", "markdown_delivery",
+                                    "colleague_catalog", "colleague_team"]
     assert "# retained" in text
     assert _run(home, "--skip-patch").returncode == 0
     assert config.read_text() == text
