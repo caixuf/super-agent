@@ -58,9 +58,7 @@ class CancelGuard:
     def _root(self, root_job, workflow, flow):
         if not isinstance(root_job, str) or not _JOB.fullmatch(root_job):
             raise BindingError('invalid root job identity')
-        with self.root_pool.db() as db:
-            row = db.execute('SELECT id,dedupe,payload,origin,status,cancel FROM jobs WHERE id=?',
-                             (root_job,)).fetchone()
+        row = self.root_pool.job_record(root_job)
         if row is None:
             raise BindingError('root job unavailable')
         try:
@@ -78,9 +76,7 @@ class CancelGuard:
 
     @staticmethod
     def _child(pool, stage, workflow):
-        with pool.db() as db:
-            row = db.execute('SELECT id,payload,origin,status,cancel FROM jobs WHERE dedupe=?',
-                             (stage['child_key'],)).fetchone()
+        row = pool.job_by_dedupe(stage['child_key'])
         if row is None:
             return None
         try:
@@ -155,9 +151,7 @@ class CancelGuard:
             raise ValueError('invalid scan cursor')
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError('invalid scan limit')
-        with self.root_pool.db() as db:
-            rows = db.execute('SELECT id,payload,origin FROM jobs WHERE id>? ORDER BY id LIMIT ?',
-                              (after, limit)).fetchall()
+        rows = self.root_pool.scan_jobs_page(after=after, limit=limit)
         outcomes = []
         for row in rows:
             try:

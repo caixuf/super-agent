@@ -78,10 +78,7 @@ class ReadOnlyQueue:
                 or (hasattr(os, 'getuid') and info.st_uid != os.getuid())):
             raise ValueError('private_queue_directory_required')
         self.pool, self.runtime, self.authorize_assignment = pool, runtime, authorize_assignment
-        with self.pool.db() as db:
-            db.execute('CREATE TABLE IF NOT EXISTS readonly_admissions '
-                       '(task TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, member TEXT NOT NULL, '
-                       'generation INTEGER NOT NULL, state TEXT NOT NULL)')
+        self.pool.init_readonly_admissions_schema()
 
     @contextmanager
     def _submission_guard(self, task):
@@ -157,20 +154,8 @@ class ReadOnlyQueue:
         key = 'readonly:' + task
         fingerprint = hashlib.sha256(encoded).hexdigest()
         with self._submission_guard(task):
-            with self.pool.db() as db:
-                db.execute('BEGIN IMMEDIATE')
-                admission = db.execute('SELECT fingerprint,member,generation,state FROM readonly_admissions '
-                                       'WHERE task=?', (task,)).fetchone()
-                if admission is None:
-                    db.execute('INSERT INTO readonly_admissions VALUES (?,?,?,?,?)',
-                               (task, fingerprint, member_id, generation, 'preparing'))
-                elif (admission['fingerprint'] != fingerprint or admission['member'] != member_id
-                      or admission['generation'] != generation):
-                    raise ValueError('request_id_conflict')
-                elif admission['state'] == 'aborted':
-                    raise ValueError('admission_closed')
-                existing = db.execute('SELECT id FROM jobs WHERE dedupe=?', (key,)).fetchone()
-            if existing is None:
+            existing_job = self.pool.prepare_readonly_admission(task, fingerprint, member_id, generation, key)
+            if existing_job is None:
                 if member['status'] != 'active':
                     raise ValueError('member_not_accepting_work')
                 first = self.runtime.registry.reserve_work(supervisor=self.runtime.supervisor,
@@ -184,14 +169,12 @@ class ReadOnlyQueue:
                         # enqueued between our first reserve and this failure.
                         self.runtime.registry.settle_work(supervisor=self.runtime.supervisor,
                             member_id=member_id, generation=generation, work_id=task)
-                        with self.pool.db() as db:
-                            db.execute("UPDATE readonly_admissions SET state='aborted' WHERE task=?", (task,))
+                        self.pool.set_readonly_admission_state(task, 'aborted')
                     raise
             # Pool validates exact payload on every replay. Internal origin=None
             # makes legacy backfill refuse to guess an external destination.
             job = self.pool.submit(key, payload, replay_safe=True, max_tries=3, origin=None)
-            with self.pool.db() as db:
-                db.execute("UPDATE readonly_admissions SET state='queued' WHERE task=?", (task,))
+            self.pool.set_readonly_admission_state(task, 'queued')
         return {'job_id': job, 'task_id': task, 'state': self.pool.status(job)['status']}
 
     def reconcile_orphan(self, *, owner, request_id, member_id, generation, confirmed_no_external_work):
@@ -208,10 +191,7 @@ class ReadOnlyQueue:
         self.runtime.registry.role_for_member(supervisor=self.runtime.supervisor,
                                               member_id=member_id, generation=generation)
         with self._submission_guard(task):
-            with self.pool.db() as db:
-                admission = db.execute('SELECT member,generation,state FROM readonly_admissions '
-                                       'WHERE task=?', (task,)).fetchone()
-                job = db.execute('SELECT id FROM jobs WHERE dedupe=?', ('readonly:' + task,)).fetchone()
+            admission, job = self.pool.inspect_readonly_admission(task, 'readonly:' + task)
             if (admission is None or admission['member'] != member_id or admission['generation'] != generation
                     or admission['state'] not in ('preparing', 'aborted') or job is not None
                     or self.runtime.inspect_assignment(owner=owner, request_id=request_id) is not None):
@@ -226,8 +206,7 @@ class ReadOnlyQueue:
                         raise
                 else:
                     closed.append(work_id)
-            with self.pool.db() as db:
-                db.execute("UPDATE readonly_admissions SET state='aborted' WHERE task=?", (task,))
+            self.pool.set_readonly_admission_state(task, 'aborted')
             return {'task_id': task, 'settled_reservations': len(closed)}
 
     def run_once(self, *, lease=120):
@@ -281,9 +260,7 @@ class ReadOnlyQueue:
         outbox adapter; an unknown send must never be blindly retried.
         """
         owner = self.runtime._owner(owner)
-        with self.pool.db() as db:
-            row = db.execute('SELECT j.payload,j.origin,o.receipt,o.acknowledged FROM jobs j '
-                             'JOIN outbox o ON o.job=j.id WHERE j.id=?', (job_id,)).fetchone()
+        row = self.pool.job_outbox_record(job_id)
         if row is None:
             return None
         payload = json.loads(row['payload'])

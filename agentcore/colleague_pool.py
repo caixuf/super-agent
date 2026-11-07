@@ -593,11 +593,9 @@ class ColleaguePool:
             # If connected to durable pool, heartbeat the attempt
             if self.durable_pool is not None and slot.context:
                 with contextlib.suppress(Exception):
-                    with self.durable_pool.db() as db:
-                        db.execute(
-                            "UPDATE jobs SET heartbeat=? WHERE id=? AND attempt=?",
-                            (time.time(), slot.context.task_id, slot.context.attempt_token),
-                        )
+                    self.durable_pool.touch_attempt_heartbeat(
+                        slot.context.task_id, slot.context.attempt_token
+                    )
             return new_deadline
 
     def commit_task_result(
@@ -621,30 +619,29 @@ class ColleaguePool:
             # If durable pool is attached, record terminal status with attempt fence
             if self.durable_pool is not None:
                 try:
-                    with self.durable_pool.db() as db:
-                        receipt_payload = {
-                            "ok": (status == "completed"),
-                            "result": {
-                                "job": task_id,
-                                "attempt": attempt_token,
-                                "verification": "dev_traceability_v1",
-                                "summary": result.get("evidence", {}).get("summary", ""),
-                                "success": (status == "completed"),
-                                "role": result.get("role"),
-                                "output": result.get("output"),
-                                "worktree": result.get("evidence", {}).get("worktree"),
-                                "artifacts": result.get("evidence", {}).get("artifacts", ["report.json", "manifest.json"]),
-                            },
-                        }
-                        updated = self.durable_pool._terminal(
-                            db, task_id, status, receipt_payload, attempt=attempt_token
+                    receipt_payload = {
+                        "ok": (status == "completed"),
+                        "result": {
+                            "job": task_id,
+                            "attempt": attempt_token,
+                            "verification": "dev_traceability_v1",
+                            "summary": result.get("evidence", {}).get("summary", ""),
+                            "success": (status == "completed"),
+                            "role": result.get("role"),
+                            "output": result.get("output"),
+                            "worktree": result.get("evidence", {}).get("worktree"),
+                            "artifacts": result.get("evidence", {}).get("artifacts", ["report.json", "manifest.json"]),
+                        },
+                    }
+                    updated = self.durable_pool.commit_terminal_attempt(
+                        task_id, status, receipt_payload, attempt=attempt_token
+                    )
+                    if not updated:
+                        logger.warning(
+                            "Attempt fencing: durable pool rejected terminal update for %s attempt %s",
+                            task_id, attempt_token,
                         )
-                        if not updated:
-                            logger.warning(
-                                "Attempt fencing: durable pool rejected terminal update for %s attempt %s",
-                                task_id, attempt_token,
-                            )
-                            return False
+                        return False
                 except Exception as exc:
                     logger.error("Durable pool terminal commit failed for task %s: %s", task_id, exc)
                     return False

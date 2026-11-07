@@ -1202,6 +1202,494 @@ class Pool:
             addresses.append((row['job'], address))
         return addresses
 
+    def job_record(self, job):
+        """Return the core job ledger row as a dict, or None."""
+        with self.db() as db:
+            row = db.execute(
+                'SELECT id,dedupe,payload,origin,status,attempt,result,cancel FROM jobs WHERE id=?',
+                (job,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def job_by_dedupe(self, dedupe_key):
+        """Return the core job ledger row matching ``dedupe_key`` as a dict, or None."""
+        with self.db() as db:
+            row = db.execute(
+                'SELECT id,dedupe,payload,origin,status,attempt,result,cancel FROM jobs WHERE dedupe=?',
+                (dedupe_key,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def outbox_record(self, job):
+        """Return the raw outbox ledger row for ``job`` as a dict, or None."""
+        with self.db() as db:
+            row = db.execute(
+                'SELECT receipt,acknowledged,receipt_id,delivered,lease_token,lease_until FROM outbox WHERE job=?',
+                (job,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def job_outbox_record(self, job):
+        """Return joined job + outbox columns for ``job`` as a dict, or None."""
+        with self.db() as db:
+            row = db.execute(
+                'SELECT j.id,j.payload,j.origin,j.status,o.receipt,o.acknowledged,o.receipt_id '
+                'FROM jobs j JOIN outbox o ON o.job=j.id WHERE j.id=?',
+                (job,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def scan_jobs_page(self, *, after='', limit=128):
+        """Return bounded ``[{'id': ..., 'payload': ..., 'origin': ...}, ...]`` rows ordered by id."""
+        with self.db() as db:
+            rows = db.execute(
+                'SELECT id,payload,origin FROM jobs WHERE id>? ORDER BY id LIMIT ?',
+                (after, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def touch_attempt_heartbeat(self, job, attempt):
+        """Stamp heartbeat for ``(job, attempt)`` in the durable ledger."""
+        with self.db() as db:
+            updated = db.execute(
+                'UPDATE jobs SET heartbeat=? WHERE id=? AND attempt=?',
+                (time.time(), job, attempt),
+            )
+            return updated.rowcount == 1
+
+    def commit_terminal_attempt(self, job, status, result, *, attempt=None):
+        """Commit terminal status and outbox receipt fenced by ``attempt``."""
+        with self.db() as db:
+            return self._terminal(db, job, status, result, attempt=attempt)
+
+    def init_ops_alert_schema(self):
+        """Ensure isolated ops_alert_* and ops_health_* tables exist in the Pool database."""
+        with self.db() as db:
+            db.executescript("""
+            CREATE TABLE IF NOT EXISTS ops_alert_episodes (
+              profile TEXT NOT NULL,
+              scope TEXT NOT NULL,
+              generation INTEGER NOT NULL DEFAULT 0,
+              active_event_id TEXT,
+              updated REAL NOT NULL,
+              PRIMARY KEY(profile, scope));
+            CREATE TABLE IF NOT EXISTS ops_alert_outbox (
+              event_id TEXT PRIMARY KEY,
+              profile TEXT NOT NULL,
+              scope TEXT NOT NULL,
+              generation INTEGER NOT NULL,
+              payload TEXT NOT NULL,
+              created REAL NOT NULL,
+              attempts INTEGER NOT NULL DEFAULT 0,
+              lease_token TEXT,
+              lease_until REAL,
+              receipt_id TEXT,
+              delivered REAL);
+            CREATE INDEX IF NOT EXISTS ops_alert_pending_idx
+              ON ops_alert_outbox(delivered, lease_until, created);
+            CREATE TABLE IF NOT EXISTS ops_health_conditions (
+              profile TEXT NOT NULL, scope TEXT NOT NULL,
+              generation INTEGER NOT NULL DEFAULT 0,
+              active_event_id TEXT, bad_since REAL, good_since REAL,
+              last_at REAL NOT NULL, PRIMARY KEY(profile,scope));
+            CREATE TABLE IF NOT EXISTS ops_health_events (
+              event_id TEXT PRIMARY KEY);
+            """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(ops_alert_outbox)")}
+            if "receipt_id" not in columns:
+                db.execute("ALTER TABLE ops_alert_outbox ADD COLUMN receipt_id TEXT")
+
+    def observe_drift_episode(self, profile, scope, *, drifted, event_id_fn, expected, observed,
+                              config_persisted, runtime_loaded, now=None):
+        """Record one capability drift observation and enqueue an alert only on new drift."""
+        current_time = time.time() if now is None else now
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT * FROM ops_alert_episodes WHERE profile=? AND scope=?",
+                (profile, scope),
+            ).fetchone()
+            if row is None:
+                db.execute(
+                    "INSERT INTO ops_alert_episodes(profile,scope,generation,updated) VALUES(?,?,0,?)",
+                    (profile, scope, current_time),
+                )
+                generation, active = 0, None
+            else:
+                generation, active = row["generation"], row["active_event_id"]
+
+            if not drifted:
+                db.execute(
+                    "UPDATE ops_alert_episodes SET active_event_id=NULL,updated=? WHERE profile=? AND scope=?",
+                    (current_time, profile, scope),
+                )
+                return {
+                    "drifted": False,
+                    "closed_episode": active is not None,
+                    "event_id": None,
+                    "created": False,
+                }
+            if active:
+                current = db.execute(
+                    "SELECT payload FROM ops_alert_outbox WHERE event_id=?",
+                    (active,),
+                ).fetchone()
+                return {
+                    "drifted": True,
+                    "closed_episode": False,
+                    "event_id": active,
+                    "created": False,
+                    "event": json.loads(current["payload"]) if current else None,
+                }
+
+            generation += 1
+            event_id = event_id_fn(profile, scope, generation)
+            payload = {
+                "kind": "capability_drift",
+                "event_id": event_id,
+                "profile": profile,
+                "scope": scope,
+                "generation": generation,
+                "expected": expected,
+                "observed": observed,
+                "config_persisted": config_persisted,
+                "runtime_loaded": runtime_loaded,
+            }
+            serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            db.execute(
+                "UPDATE ops_alert_episodes SET generation=?,active_event_id=?,updated=? WHERE profile=? AND scope=?",
+                (generation, event_id, current_time, profile, scope),
+            )
+            db.execute(
+                "INSERT INTO ops_alert_outbox(event_id,profile,scope,generation,payload,created) VALUES(?,?,?,?,?,?)",
+                (event_id, profile, scope, generation, serialized, current_time),
+            )
+            return {
+                "drifted": True,
+                "closed_episode": False,
+                "event_id": event_id,
+                "created": True,
+                "event": payload,
+            }
+
+    def observe_health_condition(self, profile, scope, *, healthy, expected, observed,
+                                 fault_grace=30, recovery_grace=10, now=None,
+                                 max_events=4096, retain_delivered=256):
+        """Debounce a health condition durably and enqueue fault/recovery atomically."""
+        current_time = time.time() if now is None else now
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute(
+                'SELECT * FROM ops_health_conditions WHERE profile=? AND scope=?',
+                (profile, scope),
+            ).fetchone()
+            if row is None:
+                if db.execute('SELECT count(*) FROM ops_health_conditions').fetchone()[0] >= 64:
+                    raise RuntimeError('health_condition_capacity')
+                generation, active, bad, good = 0, None, None, None
+            else:
+                generation, active, bad, good = (
+                    row[key] for key in ('generation', 'active_event_id', 'bad_since', 'good_since')
+                )
+                if current_time < row['last_at']:
+                    bad, good = None, None
+            phase = None
+            if healthy:
+                bad = None
+                if active is not None:
+                    good = current_time if good is None else good
+                    if current_time - good >= recovery_grace:
+                        phase = 'recovery'
+                else:
+                    good = None
+            else:
+                good = None
+                bad = current_time if bad is None else bad
+                if active is None and current_time - bad >= fault_grace:
+                    phase = 'fault'
+            payload = None
+            if phase is not None:
+                old = db.execute(
+                    '''SELECT e.event_id FROM ops_health_events e
+                    JOIN ops_alert_outbox o ON o.event_id=e.event_id
+                    WHERE o.delivered IS NOT NULL AND e.event_id NOT IN
+                      (SELECT active_event_id FROM ops_health_conditions WHERE active_event_id IS NOT NULL)
+                    ORDER BY o.delivered DESC,e.event_id DESC LIMIT -1 OFFSET ?''',
+                    (retain_delivered,),
+                ).fetchall()
+                ids = [(r[0],) for r in old]
+                db.executemany('DELETE FROM ops_alert_outbox WHERE event_id=?', ids)
+                db.executemany('DELETE FROM ops_health_events WHERE event_id=?', ids)
+                if db.execute('SELECT count(*) FROM ops_alert_outbox').fetchone()[0] >= max_events:
+                    raise RuntimeError('health_event_capacity')
+                if phase == 'fault':
+                    generation += 1
+                event_id = hashlib.sha256(
+                    json.dumps(['health', profile, scope, generation, phase], separators=(',', ':')).encode()
+                ).hexdigest()
+                payload = dict(
+                    kind='health_' + phase,
+                    event_id=event_id,
+                    profile=profile,
+                    scope=scope,
+                    generation=generation,
+                    expected=expected,
+                    observed=observed,
+                    fault_event_id=active if phase == 'recovery' else event_id,
+                )
+                serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False)
+                db.execute(
+                    'INSERT INTO ops_alert_outbox(event_id,profile,scope,generation,payload,created) VALUES(?,?,?,?,?,?)',
+                    (event_id, profile, scope, generation, serialized, current_time),
+                )
+                db.execute('INSERT INTO ops_health_events VALUES(?)', (event_id,))
+                active = event_id if phase == 'fault' else None
+                if phase == 'recovery':
+                    good = None
+            db.execute(
+                '''INSERT INTO ops_health_conditions VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(profile,scope) DO UPDATE SET generation=excluded.generation,
+                active_event_id=excluded.active_event_id,bad_since=excluded.bad_since,
+                good_since=excluded.good_since,last_at=excluded.last_at''',
+                (profile, scope, generation, active, bad, good, current_time),
+            )
+            return dict(healthy=healthy, active_event_id=active, created=payload is not None, event=payload)
+
+    def claim_ops_alert(self, lease=60, *, now=None):
+        """Lease the oldest undelivered ops alert event."""
+        current_time = time.time() if now is None else now
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                """
+                SELECT * FROM ops_alert_outbox
+                WHERE delivered IS NULL AND (lease_until IS NULL OR lease_until < ?)
+                ORDER BY created,event_id LIMIT 1
+                """,
+                (current_time,),
+            ).fetchone()
+            if row is None:
+                return None
+            token = uuid.uuid4().hex
+            db.execute(
+                "UPDATE ops_alert_outbox SET lease_token=?,lease_until=?,attempts=attempts+1 WHERE event_id=?",
+                (token, current_time + lease, row["event_id"]),
+            )
+            return {
+                "event_id": row["event_id"],
+                "token": token,
+                "lease_until": current_time + lease,
+                "attempt": row["attempts"] + 1,
+                "event": json.loads(row["payload"]),
+            }
+
+    def acknowledge_ops_alert(self, event_id, token, receipt_id, *, now=None):
+        """Acknowledge a leased ops alert event."""
+        current_time = time.time() if now is None else now
+        with self.db() as db:
+            updated = db.execute(
+                """
+                UPDATE ops_alert_outbox SET delivered=?,receipt_id=?,lease_token=NULL,lease_until=NULL
+                WHERE event_id=? AND lease_token=? AND lease_until>? AND delivered IS NULL
+                """,
+                (current_time, receipt_id, event_id, token, current_time),
+            )
+            return updated.rowcount == 1
+
+    def pending_ops_alerts(self):
+        """Return undelivered ops alert rows ordered by creation time."""
+        with self.db() as db:
+            rows = db.execute(
+                "SELECT event_id,payload,attempts,lease_until FROM ops_alert_outbox "
+                "WHERE delivered IS NULL ORDER BY created,event_id"
+            ).fetchall()
+            return [
+                {
+                    "event_id": r["event_id"],
+                    "event": json.loads(r["payload"]),
+                    "attempts": r["attempts"],
+                    "lease_until": r["lease_until"],
+                }
+                for r in rows
+            ]
+
+    def init_readonly_admissions_schema(self):
+        """Ensure readonly_admissions table exists in the Pool database."""
+        with self.db() as db:
+            db.execute(
+                'CREATE TABLE IF NOT EXISTS readonly_admissions '
+                '(task TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, member TEXT NOT NULL, '
+                'generation INTEGER NOT NULL, state TEXT NOT NULL)'
+            )
+
+    def prepare_readonly_admission(self, task, fingerprint, member_id, generation, dedupe_key):
+        """Reserve or verify an admission record and return whether the job already exists."""
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            admission = db.execute(
+                'SELECT fingerprint,member,generation,state FROM readonly_admissions WHERE task=?',
+                (task,),
+            ).fetchone()
+            if admission is None:
+                db.execute(
+                    'INSERT INTO readonly_admissions VALUES (?,?,?,?,?)',
+                    (task, fingerprint, member_id, generation, 'preparing'),
+                )
+            elif (
+                admission['fingerprint'] != fingerprint
+                or admission['member'] != member_id
+                or admission['generation'] != generation
+            ):
+                raise ValueError('request_id_conflict')
+            elif admission['state'] == 'aborted':
+                raise ValueError('admission_closed')
+            existing = db.execute('SELECT id FROM jobs WHERE dedupe=?', (dedupe_key,)).fetchone()
+        return existing['id'] if existing is not None else None
+
+    def set_readonly_admission_state(self, task, state):
+        """Update the state of a readonly_admissions row."""
+        with self.db() as db:
+            db.execute('UPDATE readonly_admissions SET state=? WHERE task=?', (state, task))
+
+    def inspect_readonly_admission(self, task, dedupe_key):
+        """Return ``(admission_dict_or_none, existing_job_id_or_none)`` for orphan reconciliation."""
+        with self.db() as db:
+            admission = db.execute(
+                'SELECT member,generation,state FROM readonly_admissions WHERE task=?',
+                (task,),
+            ).fetchone()
+            job = db.execute('SELECT id FROM jobs WHERE dedupe=?', (dedupe_key,)).fetchone()
+        return (
+            dict(admission) if admission is not None else None,
+            job['id'] if job is not None else None,
+        )
+
+    def init_readonly_deliveries_schema(self):
+        """Ensure readonly_deliveries table exists in the Pool database."""
+        with self.db() as db:
+            db.execute(
+                'CREATE TABLE IF NOT EXISTS readonly_deliveries '
+                '(job TEXT PRIMARY KEY, delivery_key TEXT NOT NULL, state TEXT NOT NULL, '
+                'token TEXT, lease_until REAL, receipt_id TEXT)'
+            )
+
+    def claim_readonly_delivery(self, job, key, lease):
+        """Atomically claim outbox and readonly_deliveries lease for ``job``."""
+        now, token = time.time(), uuid.uuid4().hex
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            delivery = db.execute('SELECT * FROM readonly_deliveries WHERE job=?', (job,)).fetchone()
+            if delivery is not None:
+                if delivery['delivery_key'] != key:
+                    raise ValueError('delivery_binding_mismatch')
+                if delivery['state'] == 'sending' and delivery['lease_until'] <= now:
+                    db.execute(
+                        "UPDATE readonly_deliveries SET state='unknown' WHERE job=? AND state='sending'",
+                        (job,),
+                    )
+                    return {'state': 'unknown'}
+                return {'state': delivery['state'], 'receipt_id': delivery['receipt_id']}
+            outbox = db.execute(
+                'SELECT acknowledged,lease_token,lease_until FROM outbox WHERE job=?',
+                (job,),
+            ).fetchone()
+            if outbox is None or outbox['acknowledged']:
+                raise ValueError('unclaimed_outbox_required')
+            if outbox['lease_until'] is not None and outbox['lease_until'] > now:
+                return {'state': 'busy'}
+            db.execute(
+                'UPDATE outbox SET lease_token=?,lease_until=? WHERE job=?',
+                (token, now + lease, job),
+            )
+            db.execute(
+                'INSERT INTO readonly_deliveries VALUES (?,?,?,?,?,NULL)',
+                (job, key, 'sending', token, now + lease),
+            )
+        return {'state': 'claimed', 'token': token}
+
+    def mark_readonly_delivery_unknown(self, job, token):
+        """Park an in-flight sending delivery as unknown."""
+        with self.db() as db:
+            db.execute(
+                "UPDATE readonly_deliveries SET state='unknown' "
+                "WHERE job=? AND token=? AND state='sending'",
+                (job, token),
+            )
+
+    def acknowledge_readonly_delivery(self, job, key, token, receipt_id):
+        """Atomically acknowledge outbox and readonly_deliveries in a single transaction."""
+        now = time.time()
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            delivery = db.execute('SELECT * FROM readonly_deliveries WHERE job=?', (job,)).fetchone()
+            outbox = db.execute('SELECT * FROM outbox WHERE job=?', (job,)).fetchone()
+            if (
+                delivery is None
+                or outbox is None
+                or delivery['state'] != 'sending'
+                or delivery['delivery_key'] != key
+                or delivery['token'] != token
+                or delivery['lease_until'] <= now
+                or outbox['lease_token'] != token
+                or outbox['lease_until'] <= now
+                or outbox['acknowledged']
+            ):
+                return False
+            db.execute(
+                'UPDATE outbox SET acknowledged=1,receipt_id=?,delivered=? WHERE job=?',
+                (receipt_id, now, job),
+            )
+            db.execute(
+                "UPDATE readonly_deliveries SET state='delivered',receipt_id=? WHERE job=?",
+                (receipt_id, job),
+            )
+        return True
+
+    def get_readonly_delivery(self, job, *, expire_sending=False):
+        """Return the readonly_deliveries row for ``job`` as a dict, expiring expired sends if requested."""
+        with self.db() as db:
+            record = db.execute('SELECT * FROM readonly_deliveries WHERE job=?', (job,)).fetchone()
+            if record is not None and expire_sending and record['state'] == 'sending' and record['lease_until'] <= time.time():
+                db.execute(
+                    "UPDATE readonly_deliveries SET state='unknown' "
+                    "WHERE job=? AND state='sending' AND lease_until<=?",
+                    (job, time.time()),
+                )
+                record = db.execute('SELECT * FROM readonly_deliveries WHERE job=?', (job,)).fetchone()
+        return dict(record) if record is not None else None
+
+    def reconcile_readonly_delivery(self, job, key, receipt_id):
+        """Atomically reconcile an unknown readonly delivery with an authoritative receipt_id."""
+        now = time.time()
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            current = db.execute('SELECT * FROM readonly_deliveries WHERE job=?', (job,)).fetchone()
+            outbox = db.execute('SELECT * FROM outbox WHERE job=?', (job,)).fetchone()
+            if current['state'] == 'delivered':
+                return {'state': 'delivered', 'receipt_id': current['receipt_id']}
+            if (
+                current['state'] != 'unknown'
+                or current['delivery_key'] != key
+                or outbox is None
+                or outbox['acknowledged']
+            ):
+                return {'state': 'unknown'}
+            if (
+                outbox['lease_token'] not in (None, current['token'])
+                and outbox['lease_until'] is not None
+                and outbox['lease_until'] > now
+            ):
+                return {'state': 'busy'}
+            db.execute(
+                'UPDATE outbox SET acknowledged=1,receipt_id=?,delivered=? WHERE job=?',
+                (receipt_id, now, job),
+            )
+            db.execute(
+                "UPDATE readonly_deliveries SET state='delivered',receipt_id=? WHERE job=?",
+                (receipt_id, job),
+            )
+        return {'state': 'delivered', 'receipt_id': receipt_id}
+
     def run_once(self, command, timeout=300, lease=60, max_output=1048576, max_file=67108864):
         if timeout <= 0 or lease <= 0 or max_output <= 0 or max_file <= 0:
             raise ValueError('budgets must be positive')

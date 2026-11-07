@@ -98,8 +98,7 @@ class ColleagueDispatch:
         if canonical is None:
             raise PermissionError("authenticated_owner_required")
         owner = json.loads(canonical)
-        with self.pool.db() as db:
-            row = db.execute("SELECT payload,status,result FROM jobs WHERE id=?", (job_id,)).fetchone()
+        row = self.pool.job_record(job_id)
         if row is None:
             return None
         payload = json.loads(row["payload"])

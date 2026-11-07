@@ -53,8 +53,7 @@ def verify_internal_result(pool, job_id):
     """
     if not isinstance(job_id, str) or not _ID.fullmatch(job_id):
         raise HandoffEvidenceError("invalid_job")
-    with pool.db() as db:
-        row = db.execute("SELECT status,attempt,payload,result,origin FROM jobs WHERE id=?", (job_id,)).fetchone()
+    row = pool.job_record(job_id)
     if row is None or row["status"] != "completed" or row["origin"] is not None:
         raise HandoffEvidenceError("internal_completed_job_required")
     attempt = row["attempt"]

@@ -44,10 +44,7 @@ class ReadOnlyDelivery:
             raise ValueError('receipt_capable_transport_required')
         self.queue, self.owner = queue, queue.runtime._owner(owner)
         self.transport, self.lease = transport, lease
-        with self.queue.pool.db() as db:
-            db.execute('CREATE TABLE IF NOT EXISTS readonly_deliveries '
-                       '(job TEXT PRIMARY KEY, delivery_key TEXT NOT NULL, state TEXT NOT NULL, '
-                       'token TEXT, lease_until REAL, receipt_id TEXT)')
+        self.queue.pool.init_readonly_deliveries_schema()
 
     def _view(self, job):
         view = self.queue.inspect_completion(owner=self.owner, job_id=job)
@@ -56,9 +53,7 @@ class ReadOnlyDelivery:
         if view['state'] in ('failed', 'cancelled'):
             # Fixed wording from trusted queue terminal state, never model text.
             # It is a primary status update, not a colleague's successful reply.
-            with self.queue.pool.db() as db:
-                row = db.execute('SELECT j.payload,j.status,o.receipt FROM jobs j '
-                                 'JOIN outbox o ON o.job=j.id WHERE j.id=?', (job,)).fetchone()
+            row = self.queue.pool.job_outbox_record(job)
             payload = json.loads(row['payload'])
             receipt = json.loads(row['receipt'])
             if (row['status'] != view['state'] or receipt.get('job') != job
@@ -135,48 +130,13 @@ class ReadOnlyDelivery:
                 'job_id': view['job_id'], 'receipt_id': receipt_id}
 
     def _claim(self, job, key):
-        now, token = time.time(), uuid.uuid4().hex
-        with self.queue.pool.db() as db:
-            db.execute('BEGIN IMMEDIATE')
-            delivery = db.execute('SELECT * FROM readonly_deliveries WHERE job=?', (job,)).fetchone()
-            if delivery is not None:
-                if delivery['delivery_key'] != key:
-                    raise ValueError('delivery_binding_mismatch')
-                if delivery['state'] == 'sending' and delivery['lease_until'] <= now:
-                    db.execute("UPDATE readonly_deliveries SET state='unknown' WHERE job=? AND state='sending'", (job,))
-                    return {'state': 'unknown'}
-                return {'state': delivery['state'], 'receipt_id': delivery['receipt_id']}
-            outbox = db.execute('SELECT acknowledged,lease_token,lease_until FROM outbox WHERE job=?', (job,)).fetchone()
-            if outbox is None or outbox['acknowledged']:
-                raise ValueError('unclaimed_outbox_required')
-            if outbox['lease_until'] is not None and outbox['lease_until'] > now:
-                return {'state': 'busy'}
-            db.execute('UPDATE outbox SET lease_token=?,lease_until=? WHERE job=?', (token, now + self.lease, job))
-            db.execute('INSERT INTO readonly_deliveries VALUES (?,?,?,?,?,NULL)',
-                       (job, key, 'sending', token, now + self.lease))
-        return {'state': 'claimed', 'token': token}
+        return self.queue.pool.claim_readonly_delivery(job, key, self.lease)
 
     def _unknown(self, job, token):
-        with self.queue.pool.db() as db:
-            db.execute("UPDATE readonly_deliveries SET state='unknown' "
-                       "WHERE job=? AND token=? AND state='sending'", (job, token))
+        self.queue.pool.mark_readonly_delivery_unknown(job, token)
 
     def _ack_send(self, job, key, token, receipt_id):
-        now = time.time()
-        with self.queue.pool.db() as db:
-            db.execute('BEGIN IMMEDIATE')
-            delivery = db.execute('SELECT * FROM readonly_deliveries WHERE job=?', (job,)).fetchone()
-            outbox = db.execute('SELECT * FROM outbox WHERE job=?', (job,)).fetchone()
-            if (delivery is None or outbox is None or delivery['state'] != 'sending'
-                    or delivery['delivery_key'] != key or delivery['token'] != token
-                    or delivery['lease_until'] <= now or outbox['lease_token'] != token
-                    or outbox['lease_until'] <= now or outbox['acknowledged']):
-                return False
-            db.execute('UPDATE outbox SET acknowledged=1,receipt_id=?,delivered=? WHERE job=?',
-                       (receipt_id, now, job))
-            db.execute("UPDATE readonly_deliveries SET state='delivered',receipt_id=? WHERE job=?",
-                       (receipt_id, job))
-        return True
+        return self.queue.pool.acknowledge_readonly_delivery(job, key, token, receipt_id)
 
     def deliver(self, job):
         """Attempt one send; duplicate calls never blindly send a second time."""
@@ -215,21 +175,13 @@ class ReadOnlyDelivery:
             return {'state': view['state'], 'job_id': job}
         p, origin = view['presentation'], view['origin']
         key = p['delivery_key']
-        with self.queue.pool.db() as db:
-            record = db.execute('SELECT * FROM readonly_deliveries WHERE job=?', (job,)).fetchone()
+        record = self.queue.pool.get_readonly_delivery(job, expire_sending=True)
         if record is None:
             return {'state': 'not_attempted', 'job_id': job}
         if record['delivery_key'] != key:
             raise ValueError('delivery_binding_mismatch')
         if record['state'] == 'delivered':
             return self._outcome(view, record['receipt_id'])
-        if record['state'] == 'sending' and record['lease_until'] <= time.time():
-            with self.queue.pool.db() as db:
-                db.execute("UPDATE readonly_deliveries SET state='unknown' "
-                           "WHERE job=? AND state='sending' AND lease_until<=?", (job, time.time()))
-                record = db.execute('SELECT * FROM readonly_deliveries WHERE job=?', (job,)).fetchone()
-            if record['state'] == 'delivered':
-                return self._outcome(view, record['receipt_id'])
         if record['state'] != 'unknown':
             return {'state': record['state'], 'job_id': job}
         try:
@@ -239,22 +191,7 @@ class ReadOnlyDelivery:
         receipt_id = self._receipt(receipt, origin, key)
         if receipt_id is None:
             return {'state': 'unknown', 'job_id': job}
-        now = time.time()
-        with self.queue.pool.db() as db:
-            db.execute('BEGIN IMMEDIATE')
-            current = db.execute('SELECT * FROM readonly_deliveries WHERE job=?', (job,)).fetchone()
-            outbox = db.execute('SELECT * FROM outbox WHERE job=?', (job,)).fetchone()
-            if current['state'] == 'delivered':
-                receipt_id = current['receipt_id']
-            elif (current['state'] != 'unknown' or current['delivery_key'] != key or outbox is None
-                  or outbox['acknowledged']):
-                return {'state': 'unknown', 'job_id': job}
-            elif (outbox['lease_token'] not in (None, current['token'])
-                  and outbox['lease_until'] is not None and outbox['lease_until'] > now):
-                return {'state': 'busy', 'job_id': job}
-            else:
-                db.execute('UPDATE outbox SET acknowledged=1,receipt_id=?,delivered=? WHERE job=?',
-                           (receipt_id, now, job))
-                db.execute("UPDATE readonly_deliveries SET state='delivered',receipt_id=? WHERE job=?",
-                           (receipt_id, job))
-        return self._outcome(view, receipt_id)
+        reconciled = self.queue.pool.reconcile_readonly_delivery(job, key, receipt_id)
+        if reconciled['state'] != 'delivered':
+            return {'state': reconciled['state'], 'job_id': job}
+        return self._outcome(view, reconciled['receipt_id'])

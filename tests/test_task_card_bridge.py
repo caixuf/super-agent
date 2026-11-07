@@ -498,11 +498,13 @@ def test_single_source_of_truth_for_cardkit2_schema():
     assert offenders == [], f"Bespoke CardKit 2.0 schema construction found outside canonical renderer: {offenders}"
 
 
-def test_no_raw_pool_db_sql_leakage_in_plugins_or_runtime():
-    """Architectural gate: plugins/ and runtime/ must use Pool contract methods, never raw SQL on pool.db."""
+def test_no_raw_pool_db_sql_leakage():
+    """Architectural gate: all modules in agentcore/ (except pool.py), plugins/, and runtime/ must use Pool contract methods, never raw SQL on pool.db."""
     repo_root = Path(__file__).resolve().parent.parent
     forbidden_patterns = (
         "pool.db()",
+        "root_pool.db()",
+        "durable_pool.db()",
         "FROM card_outbox",
         "UPDATE card_outbox",
         "INTO card_outbox",
@@ -512,22 +514,38 @@ def test_no_raw_pool_db_sql_leakage_in_plugins_or_runtime():
         "FROM origin_repairs",
         "FROM jobs",
         "UPDATE jobs",
+        "FROM ops_alert_outbox",
+        "UPDATE ops_alert_outbox",
+        "INTO ops_alert_outbox",
+        "FROM ops_alert_episodes",
+        "FROM ops_health_conditions",
+        "FROM readonly_admissions",
+        "UPDATE readonly_admissions",
+        "INTO readonly_admissions",
+        "FROM readonly_deliveries",
+        "UPDATE readonly_deliveries",
+        "INTO readonly_deliveries",
     )
     offenders = []
     guarded_files = [
+        *(repo_root / "agentcore").rglob("*.py"),
         *(repo_root / "plugins").rglob("*.py"),
         *(repo_root / "runtime").rglob("*.py"),
-        repo_root / "agentcore" / "completion_delivery.py",
-        repo_root / "agentcore" / "completion_backfill.py",
     ]
     for py in guarded_files:
         rel = py.relative_to(repo_root).as_posix()
+        if rel == "agentcore/pool.py":
+            continue
         text = py.read_text(encoding="utf-8")
         for idx, line in enumerate(text.splitlines(), 1):
             for pat in forbidden_patterns:
                 if pat in line:
                     offenders.append(f"{rel}:{idx} ({pat})")
     assert offenders == [], f"Cross-module raw SQL against pool.db found in guarded modules: {offenders}"
+
+
+def test_no_raw_pool_db_sql_leakage_in_plugins_or_runtime():
+    test_no_raw_pool_db_sql_leakage()
 
 
 def test_single_source_of_truth_for_unicode_unescape():

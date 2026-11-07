@@ -78,10 +78,7 @@ class WorkflowRuntime:
 
     @staticmethod
     def _find(pool, child_key):
-        with pool.db() as db:
-            row = db.execute('SELECT id,dedupe,payload,origin,status,attempt FROM jobs WHERE dedupe=?',
-                             (child_key,)).fetchone()
-            return dict(row) if row else None
+        return pool.job_by_dedupe(child_key)
 
     @staticmethod
     def _verify_binding(row, workflow, stage, expected_payload):
@@ -132,9 +129,7 @@ class WorkflowRuntime:
             self._verify_binding(row, workflow, stage, expected)
             if row['status'] not in _TERMINAL:
                 raise WorkflowBindingError('child_not_terminal')
-            with pool.db() as db:
-                receipt = db.execute('SELECT receipt,acknowledged,receipt_id FROM outbox WHERE job=?',
-                                     (stage['child_id'],)).fetchone()
+            receipt = pool.outbox_record(stage['child_id'])
             if receipt is None:
                 return {'state': 'internal_receipt_missing', 'stage': stage['ordinal']}
             try:
