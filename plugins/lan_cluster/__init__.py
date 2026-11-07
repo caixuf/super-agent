@@ -32,6 +32,8 @@ def register(ctx):
     if ctx.get_config("enabled", False) is not True:
         return
     engine = _engine(ctx)
+    # The engine owns the cluster semantics: an absent node map is an empty
+    # cluster, a configured one must be valid. Validate it once, up front.
     engine.normalize_nodes(ctx.get_config("nodes", None))
 
     def handle_list(args, *, session_id=None, **_kwargs):

@@ -120,9 +120,17 @@ def _clean_text(value: Any, *, field: str, max_len: int) -> str:
 
 
 def normalize_nodes(raw: Any) -> dict[str, dict[str, Any]]:
-    """Validate and normalize administrator-configured LAN production nodes."""
-    if not isinstance(raw, dict) or not raw:
-        raise ValueError("lan_nodes_required")
+    """Validate and normalize administrator-configured LAN production nodes.
+
+    An absent or empty map describes no node **yet**: that is an empty
+    cluster, not a broken configuration, so it normalizes to an empty catalog.
+    A map that *is* configured must still be valid — every entry is checked and
+    a malformed one is refused.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("lan_nodes_must_be_mapping")
     normalized: dict[str, dict[str, Any]] = {}
     for node_id, entry in raw.items():
         if not isinstance(node_id, str) or not NODE_ID_RE.fullmatch(node_id):
@@ -317,6 +325,8 @@ def probe_node(
 ) -> dict[str, Any]:
     """Probe a configured LAN production node across SSH and HTTP health surfaces."""
     catalog = normalize_nodes(raw_nodes)
+    if not catalog:
+        raise ValueError("lan_nodes_required")
     if not isinstance(node_id, str) or node_id not in catalog:
         raise ValueError("unknown_node_id")
     spec = catalog[node_id]
@@ -407,6 +417,8 @@ def invoke_node_rpc(
 ) -> dict[str, Any]:
     """Execute a resumable protocol_version=2 RPC against a remote LAN node agent."""
     catalog = normalize_nodes(raw_nodes)
+    if not catalog:
+        raise ValueError("lan_nodes_required")
     if not isinstance(node_id, str) or node_id not in catalog:
         raise ValueError("unknown_node_id")
     spec = catalog[node_id]

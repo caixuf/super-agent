@@ -128,10 +128,29 @@ def test_invoke_node_rpc_persists_session_affinity_and_supports_reset(tmp_path: 
 
 
 def test_normalize_nodes_rejects_invalid_specs():
-    with pytest.raises(ValueError, match="lan_nodes_required"):
-        normalize_nodes({})
+    with pytest.raises(ValueError, match="lan_nodes_must_be_mapping"):
+        normalize_nodes(["not-a-mapping"])
     with pytest.raises(ValueError, match="invalid_node_id"):
         normalize_nodes({"BAD_ID": {"display_name": "Bad"}})
+
+
+def test_absent_or_empty_node_map_is_an_empty_cluster():
+    """没配节点就是空集群，不是坏配置 —— 工具要在位，列得出「一个都没有」。
+
+    「配置了集群就必须有节点」这条判例只约束**已配置**的映射：
+    缺省映射代表运维还没描述集群，和畸形映射是两件事。
+    """
+    assert normalize_nodes(None) == {}
+    assert normalize_nodes({}) == {}
+    listed = list_nodes(None)
+    assert listed["ok"] is True
+    assert listed["count"] == 0
+    assert listed["nodes"] == []
+    with pytest.raises(ValueError, match="lan_nodes_required"):
+        probe_node(None, "prod-runner")
+    with pytest.raises(ValueError, match="lan_nodes_required"):
+        invoke_node_rpc(None, "/tmp/lan-sessions.json", node_id="prod-runner",
+                        session_key="group:test", request_id="req-test")
 
 
 def _rpc(state, runner, operation="submit", **kwargs):
