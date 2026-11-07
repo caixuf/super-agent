@@ -153,8 +153,12 @@ cd install && PYTHONPATH=$PWD python3 setup_memory.py \
 - 现场版是**仓内没有的站点增强版**（仓内这 4 个技能只有 `8a1a3f0 Initial public release` 一次提交），
   官方安装器按设计覆盖了它们。
 - **备份完整**：`~/.hermes/skill-backups/<name>.20261107-193706.62754/`。
-- **需要运维方决策**：把现场增强版合并回仓内（或把仓内版本升到 1.1.0），
-  否则以后每次官方安装都会再覆盖一次；否则就只能从备份回填，等于回到「现场手写」的老路。
+- **处置：已把现场增强版提升回仓内**（见 §12）。依据是上游自己的政策 ——
+  `5114086` 新增的 `_sync_profile_skills()` 写明
+  *「profile 里的技能副本永远不能盖住 release」*：
+  仓内是唯一真相，profile 副本只是部署产物。
+  保留在 profile 里既会被官方安装器覆盖，也会被受管路径覆盖，等于每次部署都丢一次。
+  下一次官方安装即可把提升后的版本原样推下去 —— 现场现在已是提升后的内容。
 
 ### 4.5 【分叉】worker / memory 单元的 `--python` 用 `/usr/bin/python3`，不是私有 venv
 
@@ -474,7 +478,7 @@ PYTHONPATH=/home/caixuf/.hermes/agentcore python3 -m agentcore.completion_backfi
 
 ```bash
 python3 -m pytest tests/ -q
-# 3048 passed, 59 skipped in 589.02s (0:09:49)   退出码 0
+# 3048 passed, 59 skipped in 577.39s (0:09:37)   退出码 0
 ```
 
 对比部署前基线 `3036 passed / 59 skipped`：**+10** 来自本次新增/改写的用例
@@ -633,3 +637,66 @@ systemctl --user restart hermes-gateway-default.service
   `research-before-build` / `skill-distillation` / `wake-storm-guard` 补回那一节），
   而不是从备份回填到 profile —— 回填等于回到「profile 副本盖住 release」的老路，
   下一次官方安装和受管路径都会再覆盖一次。
+
+---
+
+## 12. 把现场增强版技能提升回仓内（2026-11-07 21:1x）
+
+§4.4 记的那件事按上游政策收尾了。
+
+### 12.1 依据
+
+上游提交 `5114086` 新增的 `_sync_profile_skills()` 写明：
+
+> *Refresh existing profile-local copies of repo skills so they never shadow the release.*
+
+即 **仓内是唯一真相，profile 里的技能副本只是部署产物，永远不许盖住 release**。
+官方安装器与受管路径覆盖 profile 技能，是同一条政策的两处实现 —— 所以
+「4 个现场增强版技能被官方安装器覆盖」从来不是意外，而是**它们本来就不该待在 profile 里**。
+
+正确处置不是从备份回填到 profile（那等于回到老路，下次部署照样丢），
+而是**把它们提升回仓内**，让官方安装器把提升后的版本原样推下去。
+
+### 12.2 提升了什么
+
+| 技能 | 提升前（仓内） | 提升后（仓内 = 现场） | 关键增量 |
+| :--- | :--- | :--- | :--- |
+| `im-card-markdown` | v1.0.0，1 个文件 | **v1.1.0，4 个文件** | 「When to Use」「排查纪律」「五、时有时无不是渲染问题：先数卡片生产方」「六、修第三方集成的缺陷：先数安装位」「七、验收」；新增 `references/` 三件套（card-sidecar-deploy / im-streaming-modes / streaming-card-sidecar） |
+| `research-before-build` | v1.0.0，87 行 | **v1.1.0**，新增「第 0 类：本仓运维文档」与「一之一：隔了多轮再答时，先重读基线而不是凭印象」 | 描述同步为「五条线」 |
+| `skill-distillation` | v1.0.0 | **v1.1.0**，新增「一之二：会话中途就要落盘：验证过的事实不进记忆，下一轮就是重新猜」 | 区分「查证了」与「推理出来了」 |
+| `wake-storm-guard` | v1.0.0 | **v1.1.0**，新增「回执会过期」与「系统注入的通知不是用户消息」 | 旧回执不当新证据；别让回执抢答 |
+| `illustrated-doc-rendering` | v2.0.0（96 行） | **不变** | 仓内本来就更���（含「交付与渐进式交付」段），本次**不**动 |
+
+### 12.3 提升时的中性化与版本
+
+- **业务字面量中性化**：`im-card-markdown/references/` 两份文档里有 4 处消息平台的产品名，
+  按仓内既有的中性口径改成「IM 平台」（仓内 v1.0.0 本来就用「IM 卡片」）。
+  中立性门禁 `tests/test_repo_neutrality.py` 复验通过（17 passed）。
+- **版本号**：内容有增长的三个升到 `1.1.0`（`im-card-markdown` 现场本来就是 1.1.0）；
+  `im-card-markdown` 的 `description` 里「四条线」同步为「五条线」（描述是匹配用的）。
+- **扫描结论**：4 份现场技能中 3 份完全干净（无禁用词、无内网/实验网段、无 `/home/<用户名>` 指纹）；
+  `im-card-markdown` 仅有上述业务字面量，已中性化。
+
+### 12.4 落地与复验
+
+```bash
+bash install/install.sh --hermes-home /home/caixuf/.hermes     # EXIT=0
+```
+
+官方安装器把这 4 个技能判为 `CONFLICT`（先备份再替换），`illustrated-doc-rendering` 判为 `UNCHANGED`。
+复验：现场 5 个技能与仓内**逐文件一致**；`im-card-markdown` 的 3 个 `references/` 已落位；
+现场版本号 `im-card-markdown 1.1.0` / `research-before-build 1.1.0` / `skill-distillation 1.1.0` /
+`wake-storm-guard 1.1.0` / `illustrated-doc-rendering 2.0.0`。
+
+本次官方自动备份：`~/.hermes/skill-backups/<name>.20261107-211602.387959/`。
+加上 §4.4 记的首次备份 `*.20261107-193706.62754/`，**两份现场增强版都在**。
+
+### 12.5 收尾状态
+
+至此，本次部署留下的三项运维方决策全部落定：
+
+1. **现场增强版技能** → 已提升回仓内（§12），以后官方安装不会再丢内容。
+2. **`task-progress` 保持关闭** → 现场显式关闭，官方契约不反转，维持关闭。
+3. **`~/.local/bin/hermes` 指向退役的 v0.22.2** → 官方入口已对齐到在役 v0.22.5；
+   PATH 上那个链接本身属宿主环境配置，**未改动**（改它不在本次部署授权范围内），
+   已在 §4.1 留痕。
