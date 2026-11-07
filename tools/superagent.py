@@ -352,7 +352,6 @@ def _apply_keep_patches(hermes_root: Path) -> list[dict[str, Any]]:
 def _hermes_python() -> Path | None:
     candidates = [
         Path.home() / ".hermes" / "tools" / "python-3.14.9+20261021-linux-x64" / "bin" / "python3.14",
-        Path("/home/caixuf/.hermes/tools/python-3.14.9+20261021-linux-x64/bin/python3.14"),
     ]
     for path in candidates:
         if path.is_file():
@@ -411,7 +410,15 @@ def _candidate_version(work: Path) -> subprocess.CompletedProcess[str]:
 
 
 def _sync_candidate_dependencies(work: Path) -> subprocess.CompletedProcess[str]:
-    return _run_candidate(work, ["pm", "install", "--extra", "all"], timeout=3600)
+    # An extras-only install does not select the lockfile's tool roots. On a
+    # fresh home the PM activation check therefore fails before venv sync,
+    # even when unrelated system copies of the tools happen to be on PATH.
+    tools = _run_candidate(work, ["pm", "install", "--tools-only"], timeout=3600)
+    if tools.returncode != 0:
+        return tools
+    deps = _run_candidate(work, ["pm", "install", "--extra", "all"], timeout=3600)
+    return subprocess.CompletedProcess(deps.args, deps.returncode,
+        (tools.stdout or "") + (deps.stdout or ""), (tools.stderr or "") + (deps.stderr or ""))
 
 
 def _smoke_candidate(work: Path) -> dict[str, Any]:
@@ -476,7 +483,12 @@ def build_clean_hermes_candidate(args: argparse.Namespace, plan: dict[str, Any])
     if python_bin is None:
         return {"status": "blocked", "reason": "hermes_python_missing"}
     (work / ".hermes-candidate-python").write_text(str(python_bin) + "\n", encoding="utf-8")
-    synced = _sync_candidate_dependencies(work)
+    try:
+        synced = _sync_candidate_dependencies(work)
+    except RuntimeError as exc:
+        if str(exc) != "candidate_command_timeout":
+            raise
+        return {"status": "blocked", "reason": "candidate_command_timeout", "path": str(work)}
     (work / "candidate-pm-install.log").write_text(
         synced.stdout + synced.stderr, encoding="utf-8")
     if synced.returncode != 0:
@@ -489,7 +501,12 @@ def build_clean_hermes_candidate(args: argparse.Namespace, plan: dict[str, Any])
         return {"status": "blocked", "reason": str(exc), "path": str(work),
                 "head": head, "preserved_patches": patches,
                 "card_patches": card_patches}
-    smoke = _smoke_candidate(work)
+    try:
+        smoke = _smoke_candidate(work)
+    except RuntimeError as exc:
+        if str(exc) != "candidate_command_timeout":
+            raise
+        return {"status": "blocked", "reason": "candidate_command_timeout", "path": str(work)}
     (work / "candidate-smoke.log").write_text(
         json.dumps(smoke, ensure_ascii=False, indent=2), encoding="utf-8")
     if not smoke["ok"]:
@@ -517,14 +534,21 @@ def _publish_candidate_launcher(work: Path) -> None:
         f"ensure_install_launchers(__import__('pathlib').Path({str(work)!r}), "
         f"__import__('pathlib').Path({str(work / '.hermes' / 'bin')!r}))"
     )
-    proc = _run([str(python_bin), "-I", "-c", bootstrap], cwd=work,
-                env=_candidate_env(work))
+    try:
+        proc = _run([str(python_bin), "-I", "-c", bootstrap], cwd=work,
+                    env=_candidate_env(work), timeout=120)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("candidate_launcher_publish_timeout") from None
     if proc.returncode != 0 or not launcher.is_file():
         raise RuntimeError("candidate_launcher_publish_failed")
     text = launcher.read_text(encoding="utf-8")
     if str(work) not in text:
         raise RuntimeError("candidate_launcher_not_rebound")
-    run = _run([str(launcher), "--version"], cwd=work, env=_candidate_env(work))
+    try:
+        run = _run([str(launcher), "--version"], cwd=work,
+                   env=_candidate_env(work), timeout=120)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("candidate_launcher_smoke_timeout") from None
     if run.returncode != 0 or CANDIDATE_TAG.removeprefix("v") not in (run.stdout + run.stderr):
         raise RuntimeError("candidate_launcher_smoke_failed")
 

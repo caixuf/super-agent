@@ -123,18 +123,20 @@ def test_durable_dispatch_accelerated_delivery_interval():
 
 
 def test_format_boost_status_content():
-    """Verify format_boost_status returns formatted markdown with 100+ slots and 50ms metrics."""
-    text = format_boost_status()
-    assert "Super Agent 加速执行状态报告" in text
-    assert "50ms" in text
-    assert "20ms" in text
-    assert "1.00s" in text
-    assert "128" in text
-    assert "120" in text
-    assert "cases" in text
-    assert "dev" in text
-    assert "test" in text
-    assert "FlowCoro" in text
+    class Context:
+        def __init__(self, enabled, interval):
+            self.enabled, self.interval = enabled, interval
+        def get_config(self, key, default=None):
+            return {'deliver_completions': self.enabled,
+                    'delivery_interval': self.interval}.get(key, default)
+
+    text = format_boost_status({'dev': object(), 'analysis': object()}, Context(True, 2.5))
+    assert 'analysis、dev' in text
+    assert '2.50 秒' in text
+    assert '未测量' in text
+    assert '120' not in text and '10x' not in text
+    assert '未启用' in format_boost_status({}, Context(False, 2.5))
+    assert '未知' in format_boost_status()
 
 
 def test_durable_dispatch_registers_boost_command(tmp_path):
@@ -168,11 +170,12 @@ def test_durable_dispatch_registers_boost_command(tmp_path):
     register(ctx)
 
     assert "boost" in commands
-    assert "100+" in commands["boost"]["description"] or "并发槽位" in commands["boost"]["description"]
+    assert "调度角色" in commands["boost"]["description"]
     
     # Execute the registered handler
     output = commands["boost"]["handler"]("")
     assert isinstance(output, str)
-    assert "Super Agent 加速执行状态报告" in output
-    assert "50ms" in output
-    assert "128" in output
+    assert "Super Agent 调度配置" in output
+    assert "analysis" in output
+    assert "未启用" in output
+    assert "未测量" in output

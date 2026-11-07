@@ -34,7 +34,7 @@ def main():
     parser.add_argument("--user", required=True)
     parser.add_argument("--agent", required=True)
     parser.add_argument("--profile", required=True)
-    parser.add_argument("--embed-url", default="")
+    parser.add_argument("--embed-url", default="", help="optional embedding endpoint; omit for keyword-only memory recall")
     parser.add_argument("--fusion", choices=("interleave", "rrf"), default="interleave")
     parser.add_argument("--in-process", action="store_true", help="Run both stores in-process without subprocesses")
     args = parser.parse_args()
@@ -54,7 +54,7 @@ def main():
             raise ValueError("private memory directory required")
         if not (root / "coding_memory_cv.db").is_file():
             raise ValueError("memory database unavailable")
-        embed_fn = None
+        embed_fn = lambda texts: None
         if args.embed_url:
             from agentcore.memory.bge_sidecar import make_embedder
             embed_fn = make_embedder(args.embed_url, dimension=1024)

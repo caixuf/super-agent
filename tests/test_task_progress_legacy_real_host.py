@@ -10,7 +10,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_legacy_host_posts_and_edits_existing_session_without_post_message(tmp_path):
+@pytest.mark.parametrize('transport', ['host', 'legacy'])
+def test_host_posts_and_safely_edits_existing_session_without_post_message(tmp_path, transport):
     host = os.environ.get('HERMES_SOURCE')
     if not host:
         pytest.skip('set HERMES_SOURCE for installed-host route integration')
@@ -33,7 +34,8 @@ from gateway.run import GatewayRunner
 from gateway.session import SessionSource
 from hermes_cli.plugins import PluginContext, PluginManager
 from hermes_cli.plugins_manifest import PluginManifest
-root, host, home = map(Path, sys.argv[1:])
+root, host, home = map(Path, sys.argv[1:4])
+transport = sys.argv[4]
 def load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
@@ -41,6 +43,9 @@ def load(name, path):
     spec.loader.exec_module(module)
     return module
 plugin = load('_real_legacy_progress', root / 'plugins/task_progress/__init__.py')
+if transport == 'legacy':
+    legacy = load('_forced_legacy_messages', root / 'plugins/task_progress/legacy_messages.py')
+    plugin._message_transport = lambda: legacy
 feishu = load('_real_legacy_feishu', host / 'plugins/platforms/feishu/adapter.py')
 runner = GatewayRunner(GatewayConfig())
 runner._running = True
@@ -68,8 +73,12 @@ async def check():
     assert adapter.send.call_args.kwargs['metadata']['expect_edits'] is True
     edited = await asyncio.to_thread(plugin._edit_to_session, ctx, entry.session_key,
                                      'card-1', 'Completed progress')
-    assert edited.get('ok'), edited
-    assert adapter.edit_message.await_count == 1
+    if callable(getattr(feishu, 'card_renders_markdown', None)):
+        assert edited.get('ok'), edited
+        assert adapter.edit_message.await_count == 1
+    else:
+        assert edited.get('error') == 'edit_unsupported', edited
+        assert adapter.edit_message.await_count == 0
     assert adapter.send.await_count == 1, 'edit must not post a second message'
     ctx._manager = SimpleNamespace(home_path=home / 'unserved-profile')
     refused = await asyncio.to_thread(plugin._post_to_session, ctx, entry.session_key, 'wrong profile')
@@ -79,7 +88,7 @@ asyncio.run(check())
 print('real-legacy-route-passed')
 '''
     result = subprocess.run([os.environ.get('HERMES_PYTHON', sys.executable), '-c', script,
-                             str(ROOT), host, str(home)], env=env, cwd=tmp_path,
+                             str(ROOT), host, str(home), transport], env=env, cwd=tmp_path,
                             capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'real-legacy-route-passed' in result.stdout

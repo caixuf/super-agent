@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 import pytest
 
 from agentcore.lan_cluster import (
+    _bounded_rpc_runner,
     invoke_node_rpc,
     list_nodes,
     normalize_nodes,
@@ -130,4 +132,85 @@ def test_normalize_nodes_rejects_invalid_specs():
         normalize_nodes({})
     with pytest.raises(ValueError, match="invalid_node_id"):
         normalize_nodes({"BAD_ID": {"display_name": "Bad"}})
+
+
+def _rpc(state, runner, operation="submit", **kwargs):
+    return invoke_node_rpc(SAMPLE_NODES, state, node_id="prod-runner",
+                           session_key="group:test", request_id="req-test",
+                           operation=operation, prompt="test", runner=runner, **kwargs)
+
+
+@pytest.mark.parametrize("contents", ['{broken', '[]'])
+def test_invalid_session_state_is_preserved(tmp_path, contents):
+    state = tmp_path / "lan_sessions.json"
+    state.write_text(contents)
+    def no_call(*args, **kwargs):
+        pytest.fail("must not invoke transport for corrupt state")
+    with pytest.raises(ValueError, match="lan_sessions_invalid"):
+        _rpc(tmp_path, no_call)
+    assert state.read_text() == contents
+
+
+@pytest.mark.parametrize("exit_code,body,error", [
+    (1, '{"ok": true}', "transport_exit_nonzero"),
+    (0, '{"ok": "false"}', "invalid_transport_response"),
+    (0, '{}', "invalid_transport_response"),
+])
+def test_untrustworthy_submit_response_is_unknown(tmp_path, exit_code, body, error):
+    result = _rpc(tmp_path, lambda cmd, **kw: subprocess.CompletedProcess(cmd, exit_code, body, ""))
+    assert result["ok"] is False
+    assert result["error"] == error
+    assert result["outcome_unknown"] is True
+    assert result["retryable"] is False
+
+
+@pytest.mark.parametrize("operation,retryable", [("submit", False), ("cancel", False), ("status", True)])
+def test_timeout_retry_depends_on_operation(tmp_path, operation, retryable):
+    def timeout(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 1)
+    result = _rpc(tmp_path, timeout, operation=operation)
+    assert result["ok"] is False
+    assert result["retryable"] is retryable
+    assert result["outcome_unknown"] is (not retryable)
+
+
+def test_context_limit_rejects_before_creating_session(tmp_path):
+    with pytest.raises(ValueError, match="invalid_context"):
+        _rpc(tmp_path, lambda *a, **k: None, context="x" * 100_001)
+    assert not (tmp_path / "lan_sessions.json").exists()
+
+
+def test_explicit_remote_failure_is_not_success(tmp_path):
+    result = _rpc(tmp_path, lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, '{"ok": false}', ""))
+    assert result["ok"] is False
+
+
+def test_default_rpc_pumps_both_streams_while_sending_large_input(tmp_path):
+    code = ("import sys,json; sys.stderr.write('e'*100000); sys.stderr.flush(); "
+            "data=json.load(sys.stdin); print(json.dumps({'ok':True,'length':len(data['context'])}))")
+    nodes = {'probe': {'agent_rpc_cmd': [sys.executable, '-c', code]}}
+    result = invoke_node_rpc(nodes, tmp_path, node_id='probe', session_key='s', request_id='r',
+                             operation='submit', prompt='test', context='x' * 100000)
+    assert result['ok'] is True
+    assert result['remote']['length'] == 100000
+
+
+@pytest.mark.parametrize('stream', ['stdout', 'stderr'])
+@pytest.mark.parametrize('operation', ['submit', 'status'])
+def test_default_rpc_limits_unbounded_output(tmp_path, stream, operation):
+    code = ("import sys; sys.stdin.read(); "
+            f"sys.{stream}.write('x'*1200000); sys.{stream}.flush()")
+    nodes = {'probe': {'agent_rpc_cmd': [sys.executable, '-c', code]}}
+    result = invoke_node_rpc(nodes, tmp_path, node_id='probe', session_key='s', request_id='r',
+                             operation=operation, prompt='test')
+    assert result['ok'] is False and result['error'] == 'transport_output_limit'
+    assert result['retryable'] is (operation == 'status')
+    assert result['outcome_unknown'] is (operation == 'submit')
+
+
+def test_bounded_rpc_timeout_terminates_process():
+    code = "import time; time.sleep(30)"
+    with pytest.raises(subprocess.TimeoutExpired):
+        _bounded_rpc_runner([sys.executable, '-c', code], input='{}', capture_output=True,
+                            text=True, timeout=0.2)
 

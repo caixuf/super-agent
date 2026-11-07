@@ -52,19 +52,7 @@ def pending_addresses(pool: Pool, *, limit: int = PARK_SCAN_LIMIT) -> list[tuple
     """Pending ``(job, origin)`` pairs in delivery order, without claiming anything."""
     if limit < 1:
         raise ValueError('limit must be positive')
-    with pool.db() as db:
-        rows = db.execute(
-            'SELECT outbox.job AS job, jobs.origin AS origin '
-            'FROM outbox LEFT JOIN jobs ON jobs.id = outbox.job '
-            'WHERE outbox.acknowledged=0 ORDER BY outbox.rowid LIMIT ?', (limit,)).fetchall()
-    addresses = []
-    for row in rows:
-        try:
-            address = json.loads(row['origin']) if row['origin'] else None
-        except (TypeError, ValueError):
-            address = None
-        addresses.append((row['job'], address))
-    return addresses
+    return pool.pending_outbox_addresses(limit=limit)
 
 
 def parked_jobs(pool: Pool, *, profile: Optional[str] = None,

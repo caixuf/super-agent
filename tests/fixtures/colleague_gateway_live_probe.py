@@ -91,7 +91,9 @@ def test_adapter_against_real_gateway(harness, tmp_path):
                 if receipt['state'] == 'terminal':
                     assert receipt['result']['completed'] is True, receipt
                     assert 'NATIVE_ACK_' in receipt['result']['final_response'], receipt
-                    assert receipt['reservation'] == 'awaiting_quiescence_evidence'
+                    assert receipt['reservation'] == 'turn_released_background_unconfirmed'
+                    assert registry.work_status(supervisor=supervisor, member_id='alice',
+                                                generation=1)['tracked_open'] == 1
                     assert 'messages' not in receipt['result'] and 'last_reasoning' not in receipt['result']
                     return
                 await asyncio.sleep(.1)
@@ -176,7 +178,9 @@ def test_bootstrap_binding_dispatch_query_end_to_end(harness, tmp_path):
                     if status["state"] == "terminal":
                         assert status["result"]["completed"] is True, status
                         assert "NATIVE_ACK_" in status["result"]["final_response"], status
-                        assert status["reservation"] == "awaiting_quiescence_evidence"
+                        assert status["reservation"] == "turn_released_background_unconfirmed"
+                        assert registry.work_status(supervisor=supervisor, member_id="alice",
+                                                    generation=1)["tracked_open"] == 1
                         return
                     await asyncio.sleep(.1)
                 raise AssertionError(status)
@@ -266,7 +270,9 @@ def test_dispatch_through_official_host_connection(harness, tmp_path):
                 if receipt['state'] == 'terminal':
                     assert receipt['result']['completed'] is True, receipt
                     assert 'NATIVE_ACK_' in receipt['result']['final_response'], receipt
-                    assert receipt['reservation'] == 'awaiting_quiescence_evidence'
+                    assert receipt['reservation'] == 'turn_released_background_unconfirmed'
+                    assert registry.work_status(supervisor=Supervisor('team'), member_id='alice',
+                                                generation=1)['tracked_open'] == 1
                     break
                 time.sleep(.1)
             else:

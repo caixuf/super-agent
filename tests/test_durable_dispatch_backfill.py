@@ -540,6 +540,76 @@ def test_backfill_poller_reports_nothing_when_the_queue_is_clean(tmp_path):
         callback()
 
 
+def test_slow_card_creation_does_not_block_completion_poller(monkeypatch):
+    import threading
+    from types import SimpleNamespace
+    entered, release, delivered = threading.Event(), threading.Event(), threading.Event()
+    class Service:
+        task_cards_enabled = True
+        def drain_cards(self, transport, **kwargs):
+            entered.set()
+            assert release.wait(5)
+        def sync_running_cards(self, transport, **kwargs):
+            pass
+        def inspect_card_health(self, **kwargs):
+            return {'create_unknown': 0, 'terminal_unknown': 0, 'parked': 0, 'progress_unknown': 0,
+                    'stale_progress': 0, 'delayed': 0, 'bridge_terminal_unknown': 0, 'bridge_terminal_stale': 0}
+        def drain_delivery(self, transport, **kwargs):
+            if entered.wait(3):
+                delivered.set()
+            return {'status': 'empty', 'delivered': 0, 'outcomes': []}
+    transport = SimpleNamespace(card_bridge=object(), card_creator=lambda **kw: None)
+    module = SimpleNamespace(create_transport=lambda ctx, service: transport)
+    loader = SimpleNamespace(exec_module=lambda obj: None)
+    monkeypatch.setattr(plugin.importlib.util, 'spec_from_file_location', lambda *a, **kw: SimpleNamespace(loader=loader))
+    monkeypatch.setattr(plugin.importlib.util, 'module_from_spec', lambda spec: module)
+    context = Context({'deliver_completions': True, 'delivery_interval': 1.0,
+                       'delivery_transport_file': '/isolated/transport.py', 'report_delivery_health': False})
+    thread = plugin.start_backfill(context, Service())
+    try:
+        assert entered.wait(3)
+        assert delivered.wait(3)
+    finally:
+        release.set()
+        for callback in context.unload_callbacks:
+            callback()
+    assert not thread.is_alive()
+
+
+def test_card_poller_reports_aggregate_health_without_task_details(monkeypatch, caplog):
+    import threading
+    from types import SimpleNamespace
+    inspected = threading.Event()
+    class Service:
+        task_cards_enabled = True
+        def drain_cards(self, transport, **kwargs): pass
+        def sync_running_cards(self, transport, **kwargs): pass
+        def inspect_card_health(self, **kwargs):
+            inspected.set()
+            return {'create_unknown': 1, 'terminal_unknown': 0, 'parked': 0, 'progress_unknown': 0,
+                    'stale_progress': 0, 'delayed': 0, 'bridge_terminal_unknown': 0, 'bridge_terminal_stale': 0}
+        def drain_delivery(self, transport, **kwargs):
+            return {'status': 'empty', 'delivered': 0, 'outcomes': []}
+    transport = SimpleNamespace(card_bridge=object(), card_creator=lambda **kw: None)
+    module = SimpleNamespace(create_transport=lambda ctx, service: transport)
+    loader = SimpleNamespace(exec_module=lambda obj: None)
+    monkeypatch.setattr(plugin.importlib.util, 'spec_from_file_location', lambda *a, **kw: SimpleNamespace(loader=loader))
+    monkeypatch.setattr(plugin.importlib.util, 'module_from_spec', lambda spec: module)
+    context = Context({'deliver_completions': True, 'delivery_interval': 1.0,
+                       'delivery_transport_file': '/isolated/transport.py', 'report_delivery_health': False})
+    thread = plugin.start_backfill(context, Service())
+    try:
+        assert inspected.wait(3)
+        deadline = time.monotonic() + 3
+        while 'card delivery requires attention' not in caplog.text and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert 'create_unknown=1' in caplog.text
+    finally:
+        for callback in context.unload_callbacks:
+            callback()
+    assert not thread.is_alive()
+
+
 def test_backlog_warning_is_rate_limited_even_when_outcomes_alternate():
     limiter = plugin._BacklogWarningLimiter(interval=60)
     parked = {'parked': 2, 'notable': 0}

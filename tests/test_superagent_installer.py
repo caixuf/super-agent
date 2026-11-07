@@ -27,6 +27,76 @@ def _load_installer():
     return module
 
 
+def test_candidate_python_uses_current_home_or_path_not_another_user(tmp_path, monkeypatch):
+    module = _load_installer()
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    monkeypatch.setattr(module.shutil, 'which', lambda name: '/usr/bin/python3')
+    assert module._hermes_python() == Path('/usr/bin/python3')
+
+
+@pytest.mark.parametrize('tools_exit', [0, 1])
+def test_candidate_installs_tools_before_python_dependencies(tmp_path, monkeypatch, tools_exit):
+    module = _load_installer()
+    calls = []
+    def run(work, args, timeout):
+        calls.append(args)
+        code = tools_exit if len(calls) == 1 else 0
+        return subprocess.CompletedProcess(args, code, 'output', '')
+    monkeypatch.setattr(module, '_run_candidate', run)
+    result = module._sync_candidate_dependencies(tmp_path)
+    assert calls[0] == ['pm', 'install', '--tools-only']
+    if tools_exit:
+        assert len(calls) == 1 and result.returncode == tools_exit
+    else:
+        assert calls[1] == ['pm', 'install', '--extra', 'all']
+        assert result.returncode == 0 and result.stdout == 'outputoutput'
+
+
+@pytest.mark.parametrize('timeout_call', [1, 2])
+def test_candidate_launcher_timeout_is_bounded_and_reported(tmp_path, monkeypatch, timeout_call):
+    module = _load_installer()
+    launcher = tmp_path / '.hermes/bin/hermes'
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(str(tmp_path))
+    monkeypatch.setattr(module, '_candidate_python', lambda work: Path('/usr/bin/python3'))
+    calls = []
+    def run(cmd, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == timeout_call:
+            raise subprocess.TimeoutExpired(cmd, kwargs['timeout'])
+        return subprocess.CompletedProcess(cmd, 0, '', '')
+    monkeypatch.setattr(module, '_run', run)
+    with pytest.raises(RuntimeError, match='candidate_launcher_.*_timeout'):
+        module._publish_candidate_launcher(tmp_path)
+    assert all(call['timeout'] == 120 for call in calls)
+
+
+@pytest.mark.parametrize('phase', ['dependencies', 'smoke'])
+def test_candidate_command_timeout_reports_blocked(tmp_path, monkeypatch, phase):
+    module = _load_installer()
+    monkeypatch.setattr(module, '_managed_root', lambda args: tmp_path)
+    def run(cmd, **kwargs):
+        if cmd[1] == 'clone':
+            Path(cmd[-1]).mkdir(parents=True)
+            return subprocess.CompletedProcess(cmd, 0, '', '')
+        return subprocess.CompletedProcess(cmd, 0, module.CANDIDATE_COMMIT, '')
+    monkeypatch.setattr(module, '_run', run)
+    monkeypatch.setattr(module, '_apply_keep_patches', lambda work: [])
+    monkeypatch.setattr(module, '_legacy_patch_state', lambda work: [])
+    monkeypatch.setattr(module, '_hermes_python', lambda: Path('/usr/bin/python3'))
+    def timeout(work):
+        raise RuntimeError('candidate_command_timeout')
+    if phase == 'dependencies':
+        monkeypatch.setattr(module, '_sync_candidate_dependencies', timeout)
+    else:
+        monkeypatch.setattr(module, '_sync_candidate_dependencies',
+                            lambda work: subprocess.CompletedProcess([], 0, '', ''))
+        monkeypatch.setattr(module, '_publish_candidate_launcher', lambda work: None)
+        monkeypatch.setattr(module, '_smoke_candidate', timeout)
+    result = module.build_clean_hermes_candidate(None, {})
+    assert result['status'] == 'blocked' and result['reason'] == 'candidate_command_timeout'
+
+
 def _seal_test_release(release, version):
     module = _load_installer()
     (release / "release.json").write_text(json.dumps({
@@ -458,18 +528,30 @@ def test_uninstall_removes_managed_enable_entries_but_keeps_comments_and_unrelat
     assert not Path(manifest["managed_root"]).exists()
 
 
-def test_candidate_builder_is_separate_and_does_not_touch_live_hermes(tmp_path):
-    """Candidate generation must not inspect or mutate the live Hermes checkout."""
+def test_candidate_builder_is_separate_and_does_not_touch_live_hermes(tmp_path, monkeypatch):
+    """A failed clone must not reuse stale candidate data or touch the live checkout."""
+    import shlex
+    real_git = shutil.which('git')
+    if not real_git:
+        pytest.skip('git is required to build the installation plan')
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    git = bin_dir / 'git'
+    git.write_text('#!/bin/sh\nif [ "$1" = clone ]; then exit 128; fi\nexec '
+                   + shlex.quote(real_git) + ' "$@"\n')
+    git.chmod(0o755)
+    monkeypatch.setenv('PATH', str(bin_dir) + os.pathsep + os.environ.get('PATH', ''))
     profile = _seed_profile(tmp_path)
+    profile_before = {name: (profile / name).read_bytes() for name in ('config.yaml', '.env')}
     live_adapter = tmp_path / ".hermes/hermes-agent/plugins/platforms/feishu/adapter.py"
     before = live_adapter.read_bytes()
     stale = tmp_path / ".hermes/superagent/demo/hermes/v0.22.5-bf0203a794a0"
     stale.mkdir(parents=True)
     (stale / "sentinel").write_text("old")
     proc = _run(tmp_path, "candidate-hermes", check=False)
-    # In an offline test this may fail to clone; either way the live tree and
-    # profile are untouched and no stale candidate is silently reused.
+    assert json.loads(proc.stdout)['reason'] == 'candidate_clone_failed'
     assert live_adapter.read_bytes() == before
+    assert all((profile / name).read_bytes() == contents for name, contents in profile_before.items())
     assert not (stale / "sentinel").exists()
 
 

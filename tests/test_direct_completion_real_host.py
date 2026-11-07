@@ -11,6 +11,8 @@ def test_real_host_routes_directly_without_a_model_turn(tmp_path):
     host = Path(os.environ.get('HERMES_SOURCE', Path.home()/'.hermes/hermes-agent'))
     runtime = host/'.venv/bin/python'
     if not runtime.is_file():
+        runtime = host/'venv/bin/python'
+    if not runtime.is_file():
         pytest.skip('Hermes host interpreter unavailable')
     engine = Path(__file__).resolve().parents[1]
     code = r'''
@@ -94,3 +96,95 @@ print(json.dumps(dict(passed=True,text_sends=1,file_sends=1,profile_checks=len(c
     assert result.returncode == 0, result.stderr[-5000:]+result.stdout[-1000:]
     proof = json.loads(result.stdout.strip().splitlines()[-1])
     assert proof['passed'] and proof['model_turns'] == 0 and proof['file_sends'] == 1
+
+
+def test_real_host_resolver_uses_real_profile_ownership_guard(tmp_path):
+    host = Path(os.environ.get('HERMES_SOURCE', Path.home()/'.hermes/hermes-agent'))
+    runtime = host/'.venv/bin/python'
+    if not runtime.is_file():
+        runtime = host/'venv/bin/python'
+    if not runtime.is_file():
+        pytest.skip('Hermes host interpreter unavailable')
+    code = r'''
+import sys
+from pathlib import Path
+from types import SimpleNamespace as NS
+sys.path.insert(0,sys.argv[1])
+from gateway.config import Platform
+from gateway.session import SessionSource
+from gateway.run_plugin_injection import GatewayPluginInjectionMixin
+from gateway.plugin_messages import resolve
+from hermes_constants import get_routing_process_hermes_home
+source=SessionSource(platform=Platform.FEISHU,chat_id='chat')
+class Runner(GatewayPluginInjectionMixin):
+    config=NS(multiplex_profiles=False)
+    _primary_profile_name='test'
+    session_store=NS(lookup_by_session_key=lambda key:NS(origin={}) if key=='route' else None)
+    def _restored_source(self,entry): return source
+    def _delivery_adapter_for(self,source): return object()
+    def _thread_metadata_for_source(self,source): return {}
+runner=Runner()
+home=get_routing_process_hermes_home()
+target,refusal=resolve(runner,session_key='route',route=None,plugin_home=home,plugin_id='probe')
+assert target is not None and target.chat_id=='chat' and refusal is None
+target,refusal=resolve(runner,session_key='route',route=None,plugin_home=Path(sys.argv[2])/'other',plugin_id='probe')
+assert target is None and refusal['error']=='no_conversation'
+'''
+    result = subprocess.run([str(runtime), '-c', code, str(host), str(tmp_path)],
+                            env=dict(os.environ, HERMES_HOME=str(tmp_path/'home')),
+                            capture_output=True,text=True,timeout=30)
+    assert result.returncode == 0, result.stderr[-3000:]
+
+
+def test_real_plugin_context_registers_card_intent_from_bound_session(tmp_path):
+    host = Path(os.environ.get('HERMES_SOURCE', Path.home()/'.hermes/hermes-agent'))
+    runtime = host/'.venv/bin/python'
+    if not runtime.is_file():
+        runtime = host/'venv/bin/python'
+    if not runtime.is_file():
+        pytest.skip('Hermes host interpreter unavailable')
+    engine = Path(__file__).resolve().parents[1]
+    code = r'''
+import importlib.util,json,os,sys
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],sys.argv[2]]
+from gateway.session_context import set_session_vars,clear_session_vars
+from hermes_cli import config as config_mod
+from hermes_cli.plugins import PluginContext,PluginManager,PluginManifest
+from hermes_cli.plugins_state import save_plugin_setting
+from hermes_cli.profiles import get_active_profile_name
+from tools.registry import registry
+from agentcore.pool import Pool
+home=Path(sys.argv[3]);home.mkdir(parents=True,exist_ok=True)
+engine=Path(sys.argv[2]);queue=home/'queue';source=home/'source.txt';source.write_text('sample')
+config_mod.save_config({'plugins':{'entries':{'durable-dispatch':{}}}},merge_existing=True)
+settings=dict(enabled=True,engine_root=str(engine),queue_root=str(queue),allowed_roots=[str(home)],
+    deliver_completions=True,direct_delivery_enabled=True,task_lifecycle_cards_enabled=True,
+    report_delivery_health=False,delivery_interval=1,
+    delivery_transport_file=str(engine/'runtime/hermes_completion_transport.py'))
+for key,value in settings.items():save_plugin_setting('durable-dispatch',(key,),value)
+spec=importlib.util.spec_from_file_location('card_plugin',engine/'plugins/durable_dispatch/__init__.py')
+plugin=importlib.util.module_from_spec(spec);spec.loader.exec_module(plugin)
+manifest=PluginManifest(name='durable-dispatch',version='0.2.0',description='test',author='test',path=engine/'plugins/durable_dispatch')
+manager=PluginManager(scope_key=str(home));ctx=PluginContext(manifest,manager);stops=[];ctx.on_unload=stops.append
+try:
+    plugin.register(ctx)
+    assert registry.get_entry('durable_submit',scope=manager.scope_key) is not None
+    tokens=set_session_vars(platform='feishu',chat_id='chat',session_key='route',session_id='session',profile=get_active_profile_name())
+    try:
+        raw=registry.dispatch('durable_submit',{'goal':'test','request_key':'key','sources':[{'path':str(source)}]},scope=manager.scope_key,session_id='session')
+        result=json.loads(raw)
+    finally:clear_session_vars(tokens)
+    assert result['ok'] and result['card_requested']
+    with Pool(queue).db() as db:
+        row=db.execute('SELECT c.state,j.origin FROM card_outbox c JOIN jobs j ON j.id=c.job WHERE c.job=?',(result['task_id'],)).fetchone()
+        assert row is not None and row['state']=='pending'
+        origin=json.loads(row['origin'])
+        assert origin['route']=='route' and origin['channel']=='feishu' and origin['chat']=='chat'
+finally:
+    for stop in stops:stop()
+'''
+    result = subprocess.run([str(runtime), '-c', code, str(host), str(engine), str(tmp_path/'home')],
+                            env=dict(os.environ, HERMES_HOME=str(tmp_path/'home')),
+                            capture_output=True,text=True,timeout=40)
+    assert result.returncode == 0, result.stderr[-3000:]

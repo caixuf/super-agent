@@ -32,8 +32,8 @@ _BOUND_ROUTE = (
     ('chat', 'HERMES_SESSION_CHAT_ID'),
     ('thread', 'HERMES_SESSION_THREAD_ID'),
 )
-_ENGINE_MODULES = ('pool.py', 'ops_alerts.py', 'completion_delivery.py',
-                   'completion_backfill.py')
+_ENGINE_MODULES = ('pool.py', 'ops_alerts.py', 'delivery_sanitizer.py',
+                   'completion_delivery.py', 'completion_backfill.py')
 _ENGINE_MODULE_NAMES = tuple(name[:-3] for name in _ENGINE_MODULES)
 _DEFAULT_DELIVERY_INTERVAL = 1.0
 #: Durable ops-health scope for the completion queue: one episode per stuck backlog.
@@ -72,7 +72,8 @@ def _engine_modules(engine_root=None):
                 for name in _ENGINE_MODULE_NAMES}
     except ModuleNotFoundError as error:
         if error.name not in ('agentcore', 'agentcore.pool', 'agentcore.completion_backfill',
-                              'agentcore.completion_delivery', 'agentcore.ops_alerts'):
+                              'agentcore.completion_delivery', 'agentcore.delivery_sanitizer',
+                              'agentcore.ops_alerts'):
             raise
     if not isinstance(engine_root, str) or not Path(engine_root).is_absolute():
         raise ValueError('engine_root is required when the engine package is unavailable')
@@ -271,7 +272,7 @@ class DispatchService:
                  require_delivery_route=False, role='analysis', display_name=None,
                  display_label=None, duty=None, target_host=None, model_tier=None,
                  liveness_ledger=None, liveness_path=None, engine_root=None,
-                 cross_session_status=False):
+                 cross_session_status=False, task_cards_enabled=False):
         if not isinstance(profile, str) or not profile:
             raise ValueError('profile identity required')
         if not isinstance(root, str) or not Path(root).is_absolute():
@@ -330,6 +331,9 @@ class DispatchService:
         self._liveness_path = liveness_path
         self._engine_root = engine_root
         self.cross_session_status = bool(cross_session_status)
+        if type(task_cards_enabled) is not bool:
+            raise ValueError('task_cards_enabled must be boolean')
+        self.task_cards_enabled = task_cards_enabled
 
     def _resolve_liveness(self):
         if self._liveness_ledger is not None:
@@ -434,7 +438,10 @@ class DispatchService:
         origin = self._origin(session_id)
         if self.require_delivery_route and not origin.get('route'):
             raise PermissionError('addressable submitting conversation required before dispatch')
-        job = self.pool.submit(dedupe, payload, replay_safe=True, max_tries=2,origin=origin)
+        card_requested = (self.task_cards_enabled and origin.get('channel') == 'feishu'
+                          and bool(origin.get('route')) and bool(origin.get('chat')))
+        options = {'request_card': True} if card_requested else {}
+        job = self.pool.submit(dedupe, payload, replay_safe=True, max_tries=2, origin=origin, **options)
         ledger = self._resolve_liveness()
         if ledger is not None:
             try:
@@ -446,7 +453,120 @@ class DispatchService:
                   'next_action': 'Return the task ID to the user and finish this turn. Do not poll.'}
         if ignored_sources:
             result['sources_ignored'] = ignored_sources
+        if card_requested:
+            result['card_requested'] = True
         return result
+
+    def drain_cards(self, transport, *, limit=20, not_before=None, stop_event=None):
+        """Process bounded durable create intents without holding a queue DB lock during I/O."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError('invalid card batch limit')
+        if not_before is not None and (isinstance(not_before, bool)
+                or not isinstance(not_before, (int, float)) or not 0 <= not_before < float('inf')):
+            raise ValueError('invalid card not_before')
+        bridge, creator = getattr(transport, 'card_bridge', None), getattr(transport, 'card_creator', None)
+        if bridge is None or not callable(creator):
+            raise ValueError('card transport unavailable')
+        rows = self.pool.pending_card_creations(limit=limit, not_before=not_before)
+        outcomes = []
+        for row in rows:
+            if stop_event is not None and stop_event.is_set():
+                break
+            state, error = 'pending', None
+            try:
+                origin = json.loads(row['origin'])
+                payload = json.loads(row['payload'])
+                if (not isinstance(origin, dict) or origin.get('profile') != self.profile
+                        or origin.get('channel') != 'feishu' or not origin.get('route') or not origin.get('chat')
+                        or not isinstance(payload, dict) or payload.get('_colleague_role') != self.role
+                        or not isinstance(payload.get('goal'), str)):
+                    state, error = 'parked', 'invalid_card_origin'
+                else:
+                    bound = bridge.bind_task(row['job'], origin, payload['goal'], self.role,
+                                             payload.get('_colleague_name') or self.display_name)
+                    if not bound.get('ok'):
+                        state, error = 'parked', 'card_binding_conflict'
+                    else:
+                        result = bridge.create_initial(row['job'], creator)
+                        if result.get('ok') is True:
+                            reconcile = getattr(transport, 'reconcile_card', None)
+                            state = 'sent'
+                            if callable(reconcile):
+                                checked = reconcile(row['job'])
+                                if isinstance(checked, dict) and checked.get('terminal') is True:
+                                    final = checked.get('result')
+                                    patch = final.get('patch_result') if isinstance(final, dict) else None
+                                    confirmed = (isinstance(final, dict) and final.get('ok') is True
+                                                 and (final.get('already_finalized') is True
+                                                      or isinstance(patch, dict) and patch.get('ok') is True))
+                                    if not confirmed:
+                                        if isinstance(patch, dict) and patch.get('not_sent') is True:
+                                            state, error = 'pending', 'card_patch_not_sent'
+                                        else:
+                                            state, error = 'unknown', 'card_patch_unknown'
+                        elif result.get('not_sent') is True:
+                            error = 'card_not_sent'
+                        else:
+                            state, error = 'unknown', 'card_create_unknown'
+            except Exception as exc:
+                error = type(exc).__name__
+                logging.getLogger(__name__).warning('card backfill failed: %s', error)
+            self.pool.update_card_creation_state(row['job'], state, error)
+            outcomes.append({'task_id': row['job'], 'state': state, 'error': error})
+        return outcomes
+
+    def sync_running_cards(self, transport, *, limit=20, not_before=None, stop_event=None):
+        """Publish one running transition per task; fence an interrupted patch."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError('invalid card batch limit')
+        if not_before is not None and (isinstance(not_before, bool)
+                or not isinstance(not_before, (int, float)) or not 0 <= not_before < float('inf')):
+            raise ValueError('invalid card not_before')
+        bridge = getattr(transport, 'card_bridge', None)
+        if bridge is None:
+            raise ValueError('card transport unavailable')
+        rows = self.pool.pending_running_card_jobs(limit=limit, not_before=not_before)
+        outcomes = []
+        for row in rows:
+            if stop_event is not None and stop_event.is_set():
+                break
+            job = row['job']
+            if not self.pool.claim_running_card_progress(job):
+                continue
+            state, error = 'unknown', 'card_progress_unknown'
+            try:
+                result = bridge.update_progress(job, status='running', phase='执行进程已启动')
+                patch = result.get('patch_result') if isinstance(result, dict) else None
+                if isinstance(result, dict) and result.get('error') == 'already_finalized':
+                    state, error = 'terminal', None
+                elif isinstance(patch, dict) and patch.get('ok') is True:
+                    state, error = 'sent', None
+                elif (isinstance(result, dict) and result.get('skipped_throttle') is True
+                      or isinstance(patch, dict) and patch.get('not_sent') is True):
+                    state, error = 'pending', 'card_progress_not_sent'
+            except Exception as exc:
+                logging.getLogger(__name__).warning('card progress failed: %s', type(exc).__name__)
+            self.pool.update_running_card_progress(job, state, error)
+            outcomes.append({'task_id': job, 'state': state, 'error': error})
+        return outcomes
+
+    def inspect_card_health(self, *, not_before=None, now=None, bridge=None):
+        """Return aggregate operator health without task contents or destinations."""
+        if not_before is not None and (isinstance(not_before, bool)
+                or not isinstance(not_before, (int, float)) or not 0 <= not_before < float('inf')):
+            raise ValueError('invalid card not_before')
+        current = time.time() if now is None else now
+        counts = self.pool.card_outbox_health_counts(not_before=not_before, now=current)
+        counts['bridge_terminal_unknown'] = 0
+        counts['bridge_terminal_stale'] = 0
+        if bridge is not None:
+            inspect = getattr(bridge, 'terminal_health', None)
+            if not callable(inspect):
+                raise ValueError('card bridge health unavailable')
+            terminal = inspect(stale_before=current - 90)
+            counts['bridge_terminal_unknown'] = terminal['unknown']
+            counts['bridge_terminal_stale'] = terminal['stale_sending']
+        return counts
 
     def drain_delivery(self, transport, *, limit=50, lease=60, not_before=None):
         """Deliver routable completions once; unaddressable receipts stay pending."""
@@ -457,21 +577,19 @@ class DispatchService:
         owner = self._owner(session_id)
         if not isinstance(job, str) or not re.fullmatch('[0-9a-f]{32}', job):
             raise PermissionError('task unavailable in this session')
-        with self.pool.db() as db:
-            row = db.execute('SELECT payload,origin FROM jobs WHERE id=?', (job,)).fetchone()
-            repaired = db.execute('SELECT origin FROM origin_repairs WHERE job=?',(job,)).fetchone()
+        row = self.pool.job_ownership_record(job)
         if row is None:
             raise PermissionError('task unavailable in this session')
         proof = json.loads(row['payload']).get('_dispatch_owner')
         if proof == owner:return
         # Only explicit administrative provenance can recover old CLI work.
-        if proof is None and repaired is not None and repaired['origin']==row['origin']:
+        if proof is None and row['repaired_origin'] is not None and row['repaired_origin']==row['origin']:
             origin = json.loads(row['origin'])
             if origin.get('profile')==self.profile and origin.get('session')==session_id:return
         if allow_cross_session:
             try:
                 origin = json.loads(row['origin']) if row['origin'] else {}
-                if origin.get('profile') == self.profile or not origin.get('profile'):
+                if isinstance(origin, dict) and origin.get('profile') == self.profile:
                     return
             except Exception:
                 pass
@@ -793,6 +911,9 @@ def start_backfill(ctx, service):
         if not callable(inject):
             return None
         transport = InjectionTransport(inject, service.profile)
+    if service.task_cards_enabled and (getattr(transport, 'card_bridge', None) is None
+                                       or not callable(getattr(transport, 'card_creator', None))):
+        raise ValueError('task cards require a compatible direct transport')
     report_health = ctx.get_config('report_delivery_health', True) is not False
     health_modules = None
     fault_grace = None
@@ -834,10 +955,40 @@ def start_backfill(ctx, service):
 
     thread = threading.Thread(target=loop, name='durable-dispatch-backfill', daemon=True)
     thread.start()
+    card_thread = None
+    if service.task_cards_enabled:
+        def card_loop():
+            warning_limiter = _BacklogWarningLimiter()
+            next_inspection = 0.0
+            while not stop.is_set():
+                try:
+                    service.drain_cards(transport, not_before=not_before, stop_event=stop)
+                    service.sync_running_cards(transport, not_before=not_before, stop_event=stop)
+                    now = time.monotonic()
+                    if now >= next_inspection:
+                        next_inspection = now + _DELIVERY_WARNING_INTERVAL
+                        health = service.inspect_card_health(not_before=not_before, bridge=transport.card_bridge)
+                        warning = {'parked': health['parked'], 'notable': sum(health.values())}
+                        if warning_limiter.should_warn(warning, now):
+                            logging.getLogger(__name__).warning(
+                                'card delivery requires attention: create_unknown=%d terminal_unknown=%d parked=%d '
+                                'progress_unknown=%d stale_progress=%d delayed=%d '
+                                'bridge_terminal_unknown=%d bridge_terminal_stale=%d',
+                                health['create_unknown'], health['terminal_unknown'], health['parked'], health['progress_unknown'],
+                                health['stale_progress'], health['delayed'], health['bridge_terminal_unknown'],
+                                health['bridge_terminal_stale'])
+                except Exception as exc:
+                    logging.getLogger(__name__).warning('card backfill pass failed: %s', type(exc).__name__)
+                if stop.wait(interval):
+                    break
+        card_thread = threading.Thread(target=card_loop, name='durable-dispatch-card-backfill', daemon=True)
+        card_thread.start()
 
     def _stop():
         stop.set()
         thread.join(timeout=max(1.0, interval))
+        if card_thread is not None:
+            card_thread.join(timeout=max(1.0, interval))
 
     on_unload = getattr(ctx, 'on_unload', None)
     if callable(on_unload):
@@ -881,46 +1032,24 @@ If the user asks to look at changes, check logs, run a command or inspect the re
 
 
 def format_boost_status(services=None, ctx=None) -> str:
-    """Format acceleration status, 100+ dynamic slots, and queue latency metrics."""
-    poll_ms = 50
-    reap_ms = 20
-    delivery_sec = 1.0
-    if ctx is not None:
+    """Describe configured dispatch capabilities without inventing runtime metrics."""
+    lines = ["**Super Agent 调度配置**"]
+    if isinstance(services, dict) and services:
+        lines.append("已配置角色：" + "、".join(sorted(services)))
+    else:
+        lines.append("已配置角色：未知")
+    if ctx is None:
+        lines.append("完成回执投递：未知")
+    elif ctx.get_config('deliver_completions', False) is True:
         try:
-            delivery_sec = _delivery_interval(ctx)
-        except Exception:
-            delivery_sec = _DEFAULT_DELIVERY_INTERVAL
-
-    lines = [
-        "🚀 **Super Agent 加速执行状态报告 (System Boost Status)**",
-        "",
-        "⚡ **执行加速与延迟优化 (Latency & Throughput)**:",
-        f"• 队列轮询延迟 (Queue Poll): `{poll_ms}ms` (提升 10x 响应速度)",
-        f"• 状态机收割延迟 (Event Reap): `{reap_ms}ms`",
-        f"• 回执回流投递周期 (Delivery Interval): `{delivery_sec:.2f}s`",
-        "• 批量出队吞吐 (Batch Claim Size): `32` tasks / pass",
-        "",
-        "👥 **并发槽位规模 (Concurrency Slots: 100+ 目标达成)**:",
-        "• ColleaguePool 动态槽位上限: `128` slots (满足 100+ 子 Agent 弹性迸发)",
-        "• 远程分布式工作节点容量: `120` 物理并发槽位 (10 大专业领域服务)",
-        "• 本地研发工作节点容量: `12` 物理并发槽位",
-        "",
-        "🏢 **集群分布式专业领域守护拓扑**:",
-        "• `cases` (仿真用例生成与边界扩增): 16 slots [remote]",
-        "• `dev` (通用代码开发与执行): 16 slots [remote] + 8 slots [local]",
-        "• `test` (容器回归与自动化测试): 16 slots [remote]",
-        "• `replay` (数据回灌对账与时序诊断): 16 slots [remote]",
-        "• `reviewer` (代码审阅与脱窗防护): 12 slots [remote]",
-        "• `triage` (状态机跳转与失败定性): 12 slots [remote]",
-        "• `architect` (需求拆解与架构契约): 8 slots [remote]",
-        "• `ops` (基础设施与告警运维): 8 slots [remote]",
-        "• `maintainer` (系统维护与存活性排障): 8 slots [remote]",
-        "• `analysis` (主 Bot 汇总与证据分析): 8 slots [remote] + 4 slots [local]",
-        "",
-        "🛡️ **稳定性与隔离保障**:",
-        "• 任务隔离: FlowCoro / SQLite WAL + 独立 Scratch Worktree 零文件踩踏",
-        "• 存活性双重门禁: PID + 心跳租约保护，无锁脱窗与超时自动回收",
-    ]
+            interval = _delivery_interval(ctx)
+        except (TypeError, ValueError):
+            lines.append("完成回执投递：已启用，轮询周期配置无效")
+        else:
+            lines.append(f"完成回执投递：已启用，配置轮询周期 {interval:.2f} 秒")
+    else:
+        lines.append("完成回执投递：未启用")
+    lines.append("实际工作节点、可用并发和性能指标：未测量")
     return "\n".join(lines)
 
 
@@ -934,13 +1063,20 @@ def register(ctx):
     require_route = ctx.get_config('require_delivery_route',ctx.get_config('deliver_completions',False))
     liveness_path = ctx.get_config('liveness_db') or None
     cross_session = ctx.get_config('cross_session_status', ctx.get_config('allow_cross_session_status', False))
+    task_cards = ctx.get_config('task_lifecycle_cards_enabled', False)
+    if type(task_cards) is not bool:
+        raise ValueError('task_lifecycle_cards_enabled must be boolean')
+    if task_cards and (ctx.get_config('deliver_completions', False) is not True
+                       or ctx.get_config('direct_delivery_enabled', False) is not True
+                       or not ctx.get_config('delivery_transport_file', '')):
+        raise ValueError('task cards require direct completion delivery')
     service = DispatchService(ctx.get_config('queue_root'), ctx.profile_name,
                               ctx.get_config('allowed_roots'),
                               denied_globs=ctx.get_config('denied_globs', []),
                               pool_type=pool_type, delivery=delivery,require_delivery_route=require_route,
                               role='analysis', display_name='主 Bot 汇总', display_label='汇总',
                               liveness_path=liveness_path, engine_root=ctx.get_config('engine_root'),
-                              cross_session_status=cross_session)
+                              cross_session_status=cross_session, task_cards_enabled=task_cards)
     services = {'analysis':service}
     colleagues = ctx.get_config('colleagues',{})
     if not isinstance(colleagues,dict) or len(colleagues)>24:
@@ -965,7 +1101,7 @@ def register(ctx):
             model_tier=settings.get('model_tier'),
             liveness_path=liveness_path,
             engine_root=ctx.get_config('engine_root'),
-            cross_session_status=cross_session)
+            cross_session_status=cross_session, task_cards_enabled=task_cards)
         if candidate.pool.root.resolve() in seen_roots:
             raise ValueError('colleague queues must be distinct')
         seen_roots.add(candidate.pool.root.resolve()); services[role]=candidate
@@ -1031,7 +1167,7 @@ def register(ctx):
                 return format_boost_status(services=services, ctx=ctx)
             register_command(
                 "boost", _cmd_boost,
-                "显示系统加速状态、100+并发槽位及轮询延迟指标",
+                "显示已配置的调度角色和回执投递设置",
                 args_hint="[status]"
             )
 

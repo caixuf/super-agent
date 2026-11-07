@@ -20,6 +20,7 @@ class ColleaguePluginRealHost(unittest.TestCase):
             home.mkdir(parents=True, mode=0o700)
             settings = {"enabled": True, "team_id": "team", "primary_id": "leader",
                         "primary_name": "Leader", "registry_path": str(home / "team.sqlite"),
+                        "engine_root": str(ROOT),
                         "gateway_dispatch": {"enabled": True}}
             (home / "config.yaml").write_text(json.dumps({"plugins": {"load_timeout_seconds": 45,
                 "entries": {"colleague-team": {"settings": settings}}}}))

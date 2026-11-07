@@ -359,110 +359,59 @@ def build_task_completion_card(
     docx_url: str = None,
     color_template: str = None
 ) -> dict:
-    """官方唯一卡片规范：与直接对话机器人的 CardKit 2.0 企业级工业卡片 100% 字节级对齐。
-    
+    """官方唯一卡片规范：委托给 cardkit2_renderer.build_cardkit2_payload 单一真相源。
+
     包含：
     1. myai_colorful 炫彩 AI 官方徽标
     2. indigo (处理完成) / wathet (处理中) / carmine (异常) 官方标准色谱
     3. blue-50 语义背景色块主推区 (带 12px 呼吸感边距)
     4. grey-50 统计与护栏注脚栏
     """
-    bot_name = role_name or "智能助手"
+    from agentcore.cardkit2_renderer import build_cardkit2_payload
+    from agentcore.delivery_sanitizer import sanitize_card_text
+
+    bot_name = sanitize_card_text(role_name or "智能助手") or "智能助手"
     finalize = status in ("completed", "PASS")
     is_failed = status in ("failed", "cancelled", "ERROR")
-
-    if is_failed:
-        header_template = "carmine"
-        header_title = f"{bot_name} · 执行未通过"
-        main_bg = "red-50"
-    elif finalize:
-        header_template = color_template or "indigo"
-        header_title = f"{bot_name} · 处理完成"
-        main_bg = "blue-50"
-    else:
-        header_template = "wathet"
-        header_title = f"{bot_name} · 处理中"
-        main_bg = "turquoise-50"
+    status_suffix = "执行未通过" if is_failed else ("处理完成" if finalize else "处理中")
 
     # 组装纯净正文（主推内容）
     body_parts = []
     if title:
-        body_parts.append(f"**任务目标**：{title}")
+        body_parts.append(f"**任务目标**：{sanitize_card_text(title)}")
     if task_id:
-        body_parts.append(f"**任务编号**：`{task_id}`")
+        body_parts.append(f"**任务编号**：`{sanitize_card_text(task_id)}`")
     body_parts.append("────────────────")
-    if summary and summary.strip():
-        body_parts.append(summary.strip())
+    if summary and str(summary).strip():
+        body_parts.append(sanitize_card_text(summary))
     if metrics:
         body_parts.append("\n**关键指标**：")
         for k, v in metrics.items():
-            body_parts.append(f"- **{k}**: {v}")
+            body_parts.append(f"- **{sanitize_card_text(k)}**: {sanitize_card_text(v)}")
     if docx_url:
         body_parts.append(f"\n📄 **在线文档主交付物**：[{docx_url}]({docx_url})")
 
     main_text = "\n".join(body_parts)
 
-    elements: list[dict[str, Any]] = [
-        # 核心主推块（带语义背景色与边距）
-        {
-            "tag": "column_set",
-            "flex_mode": "none",
-            "background_style": main_bg,
-            "columns": [{
-                "tag": "column",
-                "width": "weighted",
-                "weight": 1,
-                "vertical_align": "top",
-                "background_style": main_bg,
-                "elements": [{"tag": "markdown", "content": main_text or " "}],
-            }],
-        }
-    ]
-
-    # 统计与护栏注脚块（grey-50 底色）
     footer_items = [
         f"状态: {'✅ PASS' if finalize else '⚠️ 异常'}",
         "出站交付护栏 100% 路径脱敏",
-        "附件随附于下方"
+        "附件随附于下方",
     ]
     if metrics and "平均单任务时延" in metrics:
         footer_items.insert(0, f"耗时: {metrics['平均单任务时延']}")
 
-    elements.append({
-        "tag": "column_set",
-        "flex_mode": "none",
-        "background_style": "grey-50",
-        "columns": [{
-            "tag": "column",
-            "width": "weighted",
-            "weight": 1,
-            "vertical_align": "top",
-            "background_style": "grey-50",
-            "elements": [{"tag": "markdown", "content": "<font color='grey'>" + "  |  ".join(footer_items) + "</font>"}],
-        }],
-    })
-
-    return {
-        "schema": "2.0",
-        "config": {
-            "wide_screen_mode": True,
-            "update_multi": True,
-        },
-        "header": {
-            "title": {"tag": "plain_text", "content": header_title},
-            "subtitle": {"tag": "plain_text", "content": "Super Agent 企业智能助手"},
-            "template": header_template,
-            "icon": {
-                "tag": "standard_icon",
-                "token": "myai_colorful",
-            },
-        },
-        "body": {
-            "direction": "vertical",
-            "padding": "12px 12px 12px 12px",
-            "elements": elements,
-        },
-    }
+    return build_cardkit2_payload(
+        main_text or " ",
+        is_terminal=finalize or is_failed,
+        is_failed=is_failed,
+        title=bot_name,
+        subtitle="Super Agent 企业智能助手",
+        icon_token="myai_colorful",
+        status_suffix=status_suffix,
+        color_template=color_template,
+        footer_notes=footer_items,
+    )
 
 
 class FeishuCompletionSender:
@@ -774,15 +723,17 @@ def colleague_card_payload(view) -> dict:
                 })
         if d1_buttons:
             elements.append({"tag": "action", "actions": d1_buttons})
-    return {
-        "schema": "2.0",
-        "config": {"wide_screen_mode": True, "update_multi": True},
-        "header": {
-            "title": {"tag": "plain_text", "content": title},
-            "template": header_color,
-        },
-        "elements": elements,
-    }
+    from agentcore.cardkit2_renderer import build_cardkit2_payload
+    payload = build_cardkit2_payload(
+        body[:3500],
+        is_terminal=state in ("done", "failed", "cancelled"),
+        is_failed=state in ("failed", "cancelled"),
+        title=title,
+        status_suffix="",
+        color_template=header_color,
+    )
+    payload["elements"] = elements
+    return payload
 
 
 

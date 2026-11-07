@@ -136,7 +136,11 @@ class RoleRegistry:
 
 
 class ToolRegistry:
-    """Manages available tools and maps role boundaries to tool access."""
+    """Bind registered tools to a scratch directory; roles do not restrict access.
+
+    Role descriptions are prompts, not an authorization policy. Custom tools are
+    trusted code, and the built-in path checks are not an OS security sandbox.
+    """
 
     def __init__(self, base_tools: Optional[Mapping[str, Callable]] = None):
         self._tools: Dict[str, Callable] = dict(base_tools or {})
@@ -175,7 +179,7 @@ class ToolRegistry:
         self._tools[name] = fn
 
     def get_tools_for_role(self, role_spec: RoleSpec, worktree: Path) -> Dict[str, Callable]:
-        """Bind worktree to available tools matching role permissions."""
+        """Bind registered tools; role_spec does not filter or authorize them."""
         bound: Dict[str, Callable] = {}
         for name, fn in self._tools.items():
             # Bind worktree if first parameter is worktree
@@ -183,9 +187,11 @@ class ToolRegistry:
             sig = inspect.signature(fn)
             params = list(sig.parameters.keys())
             if params and params[0] in ("worktree", "scratch_dir", "cwd"):
-                def _wrapper(fn=fn, *args, **kwargs):
-                    return fn(worktree, *args, **kwargs)
-                bound[name] = _wrapper
+                def _bind(tool):
+                    def _wrapper(*args, **kwargs):
+                        return tool(worktree, *args, **kwargs)
+                    return _wrapper
+                bound[name] = _bind(fn)
             else:
                 bound[name] = fn
         return bound
@@ -447,9 +453,8 @@ class ColleaguePool:
         
         # Epoch fencing map: task_id -> current epoch token
         self._task_epochs: Dict[str, int] = {}
-        
-        # Task results store: task_id -> result
-        self._task_results: Dict[str, Dict[str, Any]] = {}
+        self._task_tokens: Dict[str, str] = {}
+        self._next_epoch = 0
         self._completed_count = 0
         self._failed_count = 0
 
@@ -532,10 +537,12 @@ class ColleaguePool:
             self._active_slots[slot_id] = slot
 
             # Monotonic epoch generation for attempt fencing
-            current_epoch = self._task_epochs.get(task_id, 0) + 1
+            self._next_epoch += 1
+            current_epoch = self._next_epoch
             self._task_epochs[task_id] = current_epoch
 
             token = attempt_token or uuid.uuid4().hex
+            self._task_tokens[task_id] = token
 
             try:
                 context = slot.morph(
@@ -553,6 +560,9 @@ class ColleaguePool:
                 )
                 return context
             except BaseException:
+                if self._task_epochs.get(task_id) == current_epoch:
+                    self._task_epochs.pop(task_id, None)
+                    self._task_tokens.pop(task_id, None)
                 slot.demorph(cleanup_scratch=True)
                 self._active_slots.pop(slot_id, None)
                 self._idle_slot_ids.add(slot_id)
@@ -564,6 +574,10 @@ class ColleaguePool:
         with self._cv:
             slot = self._active_slots.pop(slot_id, None)
             if slot is not None:
+                context = slot.context
+                if context is not None and self._task_epochs.get(context.task_id) == context.epoch:
+                    self._task_epochs.pop(context.task_id, None)
+                    self._task_tokens.pop(context.task_id, None)
                 slot.demorph(cleanup_scratch=cleanup_scratch)
                 self._idle_slot_ids.add(slot_id)
                 self._cv.notify_all()
@@ -597,20 +611,12 @@ class ColleaguePool:
         """Commit task result with attempt fencing (epoch token validation)."""
         with self._cv:
             expected_epoch = self._task_epochs.get(task_id)
-            if expected_epoch != epoch:
+            if expected_epoch != epoch or self._task_tokens.get(task_id) != attempt_token:
                 logger.warning(
-                    "Attempt fencing rejected stale commit for task %s: current epoch %s != commit epoch %s",
+                    "Attempt fencing rejected commit for task %s (current epoch %s, commit epoch %s; epoch or token mismatch)",
                     task_id, expected_epoch, epoch,
                 )
                 return False
-
-            self._task_results[task_id] = {
-                "status": status,
-                "epoch": epoch,
-                "attempt": attempt_token,
-                "result": result,
-                "committed_at": time.time(),
-            }
 
             # If durable pool is attached, record terminal status with attempt fence
             if self.durable_pool is not None:
@@ -663,15 +669,21 @@ class ColleaguePool:
         adm_timeout = admission_timeout if admission_timeout is not None else timeout
         
         def _execute_in_slot(cancel_token: Optional[CancellationToken] = None) -> Dict[str, Any]:
-            context = self.acquire_slot(
-                role=role,
-                task_id=tid,
-                goal=goal,
-                timeout=timeout,
-                context_data=payload,
-                attempt_token=attempt_token,
-                cancel_token=cancel_token,
-            )
+            try:
+                context = self.acquire_slot(
+                    role=role,
+                    task_id=tid,
+                    goal=goal,
+                    timeout=timeout,
+                    context_data=payload,
+                    attempt_token=attempt_token,
+                    cancel_token=cancel_token,
+                )
+            except BaseException:
+                if claim_lock_fd is not None:
+                    with contextlib.suppress(OSError):
+                        os.close(claim_lock_fd)
+                raise
             slot = self._slots[context.slot_id]
             slot.state = SlotState.EXECUTING
             start_time = time.monotonic()
@@ -701,8 +713,13 @@ class ColleaguePool:
                     "evidence": evidence,
                     "duration_s": time.monotonic() - start_time,
                 }
+                if not self.commit_task_result(tid, context.epoch, context.attempt_token, final_result, status="completed"):
+                    slot.state = SlotState.FAILED
+                    with self._cv:
+                        self._failed_count += 1
+                    return {"ok": False, "task_id": tid, "attempt": context.attempt_token,
+                            "role": role, "error": "result_commit_rejected"}
                 slot.state = SlotState.COMPLETED
-                self.commit_task_result(tid, context.epoch, context.attempt_token, final_result, status="completed")
                 with self._cv:
                     self._completed_count += 1
                 return final_result
@@ -801,15 +818,19 @@ class ColleaguePool:
         """
         if self.durable_pool is None:
             raise RuntimeError("durable_pool_required_for_dispatch")
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
+            raise ValueError("batch_size must be a positive integer")
 
         stop = stop_event or threading.Event()
         stats = {"claimed": 0, "dispatched": 0}
         active_handles: List[ToolHandle] = []
 
         while not stop.is_set():
-            # Claim up to available idle slots
-            available = self.idle_count
+            # Include admitted tasks that have not acquired their slot yet.
+            active_handles = [h for h in active_handles if not h.done()]
+            available = min(self.idle_count, self.max_workers - len(active_handles))
             claim_count = min(available, batch_size)
+            queue_empty = False
             
             if claim_count > 0:
                 for _ in range(claim_count):
@@ -817,6 +838,7 @@ class ColleaguePool:
                         break
                     claim = self.durable_pool.claim(lease=self.lease_duration)
                     if claim is None:
+                        queue_empty = True
                         break
                     row, fd = claim
                     stats["claimed"] += 1
@@ -825,32 +847,40 @@ class ColleaguePool:
                         payload = json.loads(row["payload"])
                     except Exception:
                         payload = {}
+                    if not isinstance(payload, dict):
+                        payload = {}
                     
                     role = payload.get("role") or payload.get("member_id") or "cases"
                     goal = payload.get("goal") or payload.get("prompt") or f"Execute task {row['id']}"
 
-                    try:
-                        handle = self.submit_colleague_task(
-                            role=role,
-                            goal=goal,
-                            handler=handler,
-                            task_id=row["id"],
-                            attempt_token=row["attempt"],
-                            payload=payload,
-                            cleanup_scratch=cleanup_scratch,
-                            claim_lock_fd=fd,
-                        )
-                        active_handles.append(handle)
-                        stats["dispatched"] += 1
-                    except BaseException:
-                        os.close(fd)
-                        raise
+                    # submit_colleague_task owns the claim descriptor, including
+                    # admission and slot-acquisition failures.
+                    handle = self.submit_colleague_task(
+                        role=role,
+                        goal=goal,
+                        handler=handler,
+                        task_id=row["id"],
+                        attempt_token=row["attempt"],
+                        payload=payload,
+                        cleanup_scratch=cleanup_scratch,
+                        claim_lock_fd=fd,
+                    )
+                    active_handles.append(handle)
+                    stats["dispatched"] += 1
 
             # Event-driven reaping of active handles
             active_handles = [h for h in active_handles if not h.done()]
             
-            if not active_handles and drain:
+            if not active_handles and drain and queue_empty:
                 break
+
+            if not active_handles and drain:
+                # All slots may be in use by callers outside this dispatcher.
+                # Wait for a release instead of spinning while no claim is possible.
+                if claim_count == 0:
+                    with self._cv:
+                        self._cv.wait(timeout=0.05)
+                continue
 
             with self._cv:
                 if not active_handles and not stop.is_set():

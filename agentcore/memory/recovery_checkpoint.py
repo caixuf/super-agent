@@ -56,6 +56,30 @@ class RecoveryCheckpoint:
             if journal._anchor(source,meta,seq)!=record['token']:
                 raise ViewInvalid('memory_recovery_history_changed')
 
+    def diagnose(self,source):
+        """Read-only comparison; never authorizes replacing or resetting a witness."""
+        record=self.record
+        if record is None:
+            raise ViewInvalid('memory_recovery_checkpoint_missing')
+        identity=record.get('source_identity')
+        if (not isinstance(identity,list) or len(identity)!=3 or not isinstance(identity[0],str)
+                or type(identity[1]) is not int or type(identity[2]) is not int):
+            raise ViewInvalid('memory_recovery_checkpoint_invalid')
+        with journal._transaction(source):
+            meta=journal._validate(source)
+            actual=journal._identity(source)
+            if len(actual)!=3:
+                raise ViewInvalid('memory_recovery_source_identity_unavailable')
+            seq=record['seq']
+            in_range=meta['floor']<=seq<=meta['latest']
+            checks=dict(binding_matches=principal()==self.binding==record['binding'],
+                source_path_matches=identity[0]==actual[0],device_matches=identity[1]==actual[1],
+                inode_matches=identity[2]==actual[2],epoch_matches=record['epoch']==meta['epoch'],
+                schema_version_matches=record['schema_version']==source.execute('PRAGMA schema_version').fetchone()[0],
+                sequence_in_range=in_range,
+                anchor_matches=in_range and journal._anchor(source,meta,seq)==record['token'])
+        return {'ok':all(checks.values()),'checks':checks}
+
     def save(self,consumer,batch):
         record=dict(version=1,binding=self.binding,source_identity=list(consumer.source_identity),
                     epoch=consumer.epoch,schema_version=consumer.schema_version,
@@ -82,3 +106,38 @@ class RecoveryCheckpoint:
         finally:
             if temporary is not None:temporary.unlink(missing_ok=True)
         self.record=record
+
+
+def main():
+    """Run a read-only, content-free witness comparison for operators."""
+    import argparse
+    import sqlite3
+    from .config import MemoryConfig,configure
+    parser=argparse.ArgumentParser(description='Read-only memory recovery witness diagnostic')
+    parser.add_argument('--data-dir',type=Path,required=True)
+    parser.add_argument('--checkpoint',type=Path,required=True)
+    parser.add_argument('--user',required=True)
+    parser.add_argument('--agent',required=True)
+    args=parser.parse_args()
+    if (not args.data_dir.is_absolute() or not args.data_dir.is_dir()
+            or not args.checkpoint.is_absolute()
+            or any(not isinstance(v,str) or not v.strip() or len(v)>512 for v in (args.user,args.agent))):
+        parser.error('absolute existing data directory, checkpoint and bounded principal required')
+    try:
+        configure(MemoryConfig(data_dir=args.data_dir,default_user=args.user,default_agent=args.agent))
+        witness=RecoveryCheckpoint(args.checkpoint)
+        path=get_config().db_path().resolve(strict=True)
+        conn=sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=5)
+        try:
+            conn.execute('PRAGMA query_only=ON')
+            result=witness.diagnose(conn)
+        finally:
+            conn.close()
+    except Exception as exc:
+        result={'ok':False,'error':'diagnostic_unavailable','error_type':type(exc).__name__}
+    print(json.dumps(result,sort_keys=True))
+    return 0 if result['ok'] else 1
+
+
+if __name__=='__main__':
+    raise SystemExit(main())

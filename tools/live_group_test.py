@@ -44,16 +44,27 @@ def get_tenant_access_token(app_id, app_secret):
         raise RuntimeError(f"Failed to get tenant token: {data}")
     return data["tenant_access_token"]
 
-def send_text_message(token, text):
+def send_card_message(token, card_payload):
     url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
     payload = {
         "receive_id": CHAT_ID,
-        "msg_type": "text",
-        "content": json.dumps({"text": text}, ensure_ascii=False)
+        "msg_type": "interactive",
+        "content": json.dumps(card_payload, ensure_ascii=False),
     }
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     res = requests.post(url, json=payload, headers=headers, timeout=10)
     return res.json()
+
+
+def patch_card_message(token, message_id, card_payload):
+    url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}"
+    payload = {
+        "content": json.dumps(card_payload, ensure_ascii=False),
+    }
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    res = requests.patch(url, json=payload, headers=headers, timeout=10)
+    return res.json()
+
 
 def upload_and_send_image(token, image_path):
     # 1. upload image
@@ -183,10 +194,12 @@ def test_5_decoupled_task_card_and_cross_session_status():
         prog = bridge.update_progress(test_task_id, status="running", phase="正在执行阶段一文字提炼", progress=0.6, elapsed=8.5)
         assert prog["ok"] is True
 
-        # 终态转绿结算
-        fin = bridge.finalize(test_task_id, status="completed", summary="文字结论毫秒直达，卡片转绿交付", elapsed=15.2)
+        # 终态转靛蓝（indigo + blue-50）工业卡片结算
+        fin = bridge.finalize(test_task_id, status="completed", summary="文字结论毫秒直达，工业标准卡片交付", elapsed=15.2)
         assert fin["ok"] is True
-        assert fin["card_payload"]["header"]["template"] == "green"
+        assert fin["card_payload"]["header"]["template"] == "indigo"
+        assert fin["card_payload"]["header"]["icon"] == {"tag": "standard_icon", "token": "myai_colorful"}
+        assert fin["card_payload"]["body"]["elements"][0]["background_style"] == "blue-50"
 
     return {
         "status": "PASS",
@@ -242,9 +255,20 @@ def main():
 - 结论: {t5['summary']}
 """
 
-    print("[*] 正在向群聊发送结构化实测报告...")
-    send_text_message(token, report_text)
-    print("[*] 结构化实测报告发送成功！")
+    print("[*] 正在向群聊发送统一规范的 CardKit 2.0 工业实测卡片...")
+    from agentcore.cardkit2_renderer import build_cardkit2_payload
+    report_card = build_cardkit2_payload(
+        report_text,
+        is_terminal=True,
+        is_failed=False,
+        title="Super Agent 架构与能力实测",
+        subtitle="Super Agent 企业智能助手",
+        icon_token="myai_colorful",
+        status_suffix="处理完成",
+        footer_notes=["状态: ✅ PASS", "卡片渲染唯一真相源已对齐"],
+    )
+    send_card_message(token, report_card)
+    print("[*] 统一规范工业卡片发送成功！")
 
     print("[*] 正在向群聊推送无头出图高清架构渲染图...")
     upload_and_send_image(token, t4["png_path"])

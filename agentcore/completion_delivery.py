@@ -29,6 +29,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
+from agentcore.delivery_sanitizer import unwrap_and_unescape_text
 from agentcore.ops_alerts import DeliveryReceipt, _receipt_status
 from agentcore.pool import Pool
 
@@ -184,12 +185,7 @@ def _summary(result: Any, *, limit: int = MAX_SUMMARY_CHARS) -> tuple[str, bool]
     if not text:
         text = 'completed'
 
-    # Unescape any leaked unicode escape sequences (e.g. \u6838\u9a8c)
-    if "\\u" in text or "\\U" in text:
-        try:
-            text = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), text)
-        except Exception:
-            pass
+    text = unwrap_and_unescape_text(text)
 
     if len(text) <= limit:
         return text, False
@@ -312,10 +308,10 @@ def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS,
 def _colleague_identity(pool: Pool, job: str) -> tuple[str | None, str | None, str | None]:
     """Host-persisted colleague binding for a completion; never parsed from model text."""
     try:
-        with pool.db() as db:
-            row = db.execute('SELECT payload FROM jobs WHERE id=?', (job,)).fetchone()
-        payload = json.loads(row['payload']) if row and row['payload'] else {}
+        payload = pool.job_payload(job) or {}
     except (TypeError, ValueError, KeyError):
+        return None, None, None
+    if not isinstance(payload, dict):
         return None, None, None
     role = payload.get('_colleague_role')
     name = payload.get('_colleague_name')
@@ -422,9 +418,7 @@ def inspect_pending(pool: Pool, *, limit: int = 20,
     if limit < 1:
         raise ValueError('limit must be positive')
     rows = []
-    with pool.db() as db:
-        pending = db.execute('SELECT job,receipt FROM outbox WHERE acknowledged=0 '
-                             'ORDER BY rowid LIMIT ?', (limit,)).fetchall()
+    pending = pool.unacknowledged_outbox_rows(limit=limit)
     for row in pending:
         try:
             message = build_message(json.loads(row['receipt']), limit=max_summary)

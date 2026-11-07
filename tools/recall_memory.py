@@ -23,7 +23,8 @@ def main():
     p.add_argument("--profile", required=True)
     p.add_argument("--limit", type=int, default=5)
     p.add_argument("--embed-dim", type=int, default=1024)
-    p.add_argument("--embed-url", default=os.environ.get("SUPERAGENT_MEMORY_EMBED_URL", ""))
+    p.add_argument("--embed-url", default=os.environ.get("SUPERAGENT_MEMORY_EMBED_URL", ""),
+                   help="optional embedding endpoint; omit for keyword-only recall")
     args = p.parse_args()
     if args.query_text is not None and args.query is not None:
         p.error("query must be supplied only once")
@@ -42,7 +43,10 @@ def main():
         raise ValueError("private memory directory required")
     if not (root / "coding_memory_cv.db").is_file():
         raise ValueError("memory database unavailable")
-    embed_fn = None
+    # Without an explicitly configured endpoint, stay local and deterministic.
+    # MemoryConfig's None otherwise enables a potentially slow implicit Ollama
+    # lookup, which can exceed the caller's subprocess deadline before fallback.
+    embed_fn = lambda texts: None
     if args.embed_url:
         from agentcore.memory.bge_sidecar import make_embedder
         embed_fn = make_embedder(args.embed_url, dimension=args.embed_dim)

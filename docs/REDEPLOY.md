@@ -125,7 +125,44 @@ python3 install/setup_worker.py --profile-home ~/.hermes/profiles/<name> \
 `--skip-memory` 可跳过。已有 provider、存储和历史积压不会自动迁移；需完成有备份的迁移与
 真实模型评估，不能把文件安装或服务启动当成生产自动记忆已验收。
 
-## 4.1 定时 AI 作业：用 autotask 契约，不写自由提示词
+直接运行 `recall_memory.py` 或 `recall_combined.py` 时，未指定 `--embed-url` 将使用关键词排序，
+不会隐式访问向量服务。前者还可通过 `SUPERAGENT_MEMORY_EMBED_URL` 设置端点；组合命令需显式
+传入 `--embed-url`。生产配置依赖语义排序时应核对端点参数及服务健康状态。
+
+恢复见证不匹配时，可在正确的 profile 身份和有权读取的账户下运行只读诊断：
+
+```bash
+python3 -m agentcore.memory.recovery_checkpoint \
+  --data-dir /absolute/private-memory-directory \
+  --checkpoint /absolute/private-state/checkpoint.json \
+  --user PROFILE_USER --agent PROFILE_AGENT
+```
+
+该命令使用该数据目录下的默认 `coding_memory_cv.db`，只输出不含路径、内容、设备号和序列值的
+布尔比较；退出码 0 表示所有现有见证检查匹配，1 表示不匹配或无法诊断。只读诊断不修改源库或
+检查点，不证明见证点之后的历史完整，也不授权重绑定、删除检查点或绕过恢复保护。
+
+## 4.1 可选任务生命周期卡片
+
+在隔离实例完成测试后，可在 `durable-dispatch` 插件配置中同时设置
+`deliver_completions: true`、`direct_delivery_enabled: true`、绝对路径形式的
+`delivery_transport_file`（指向该版本的 `runtime/hermes_completion_transport.py`）以及
+`task_lifecycle_cards_enabled: true`。需要宿主适配器支持稳定消息 UUID 与卡片接口；
+缺少兼容传输对象时插件拒绝启用；适配器不兼容时建卡会保留待重试。默认关闭，历史任务不会补建卡片。只有保存了完整平台、
+会话路由和群地址的新任务会登记建卡意图；其他会话仍按普通任务处理。
+
+初始卡片和终态更新由后台消费者处理，`delivery_not_before` 同样限制建卡与完成回执。
+执行进程启动后推送一次运行态，不推断百分比；终态消息与卡片分别投递。运行态是队列观察到的
+一次状态，不是实时存活证明。卡片创建或更新结果不确定时，记录
+保留为 `unknown`，必须先核实平台消息和目标会话，再由运维处理，不应直接删除记录重发。
+后台线程每分钟检查建卡与运行态的未知、停放、超时和积压数量，并以聚合计数写入限频告警；
+该告警不包含任务正文或会话地址，也不替代平台侧核实。
+已确认完成回执与卡片终态更新分别记录；桥接数据库中的终态未知或长时间在途也会计入告警，
+以覆盖两份记录之间的中断窗口。桥接计数按 profile 汇总，不受 `delivery_not_before` 过滤，
+共享桥接数据库的队列可能重复报告，不能把这些计数相加作为任务总数。
+切换开关后重试旧的相同请求键可能触发去重冲突，应为新工作使用新请求键。
+
+## 4.2 定时 AI 作业：用 autotask 契约，不写自由提示词
 
 `tools/autotask/` 把定时作业拆成五段：`collect`（只读输入）/ `judge`（唯一需要模型判断的一句）/
 `write`（固定产物路径，只允许 `state/` 或 `skills/candidates/`）/ `report`（可判定的 `ok`/`fail`）/

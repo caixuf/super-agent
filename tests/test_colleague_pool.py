@@ -77,6 +77,26 @@ def test_worktree_isolation_and_escape_prevention(tmp_path):
     pool.close()
 
 
+@pytest.mark.parametrize('backend', ['stdlib', 'flowcoro'])
+def test_bound_tools_accept_positional_and_keyword_arguments_without_escape(tmp_path, backend):
+    if backend == 'flowcoro':
+        pytest.importorskip('flowcoro_py')
+    pool = ColleaguePool(max_workers=1, backend=backend, scratch_root=tmp_path / 'scratch')
+    def handler(ctx):
+        assert ctx.execute_tool('write_file', 'nested/a.txt', 'content') == 'wrote 7 bytes to nested/a.txt'
+        assert ctx.execute_tool('read_file', 'nested/a.txt') == 'content'
+        assert ctx.execute_tool('read_file', path='nested/a.txt') == 'content'
+        assert ctx.execute_tool('list_dir', 'nested') == ['a.txt']
+        with pytest.raises(PermissionError):
+            ctx.execute_tool('read_file', '../../outside')
+        return {'passed': True}
+    try:
+        result = pool.run_task(role='dev', goal='test tools', handler=handler)
+        assert result['ok'] and result['output']['passed']
+    finally:
+        pool.close()
+
+
 def test_bounded_backpressure_and_capacity_limit(tmp_path):
     """Verify bounded backpressure: submissions/acquisitions respect capacity bounds."""
     pool = ColleaguePool(max_workers=2, scratch_root=tmp_path / "scratch")
@@ -322,6 +342,124 @@ def test_backend_interoperability(tmp_path, backend):
     res = pool.run_task(role="backend", goal="Check backend", handler=lambda ctx: {"backend": backend})
     assert res["ok"] is True
     assert res["output"]["backend"] == backend
+    pool.close()
+
+
+def test_durable_drain_continues_after_a_fast_completed_batch(tmp_path, monkeypatch):
+    durable = Pool(tmp_path / 'queue')
+    jobs = [durable.submit('fast-' + str(i), {'role': 'cases', 'goal': 'test'})
+            for i in range(3)]
+    pool = ColleaguePool(durable, max_workers=1)
+    submit = pool.submit_colleague_task
+
+    def complete_before_return(**kwargs):
+        handle = submit(**kwargs)
+        handle.result(timeout=5)
+        return handle
+
+    monkeypatch.setattr(pool, 'submit_colleague_task', complete_before_return)
+    stats = pool.dispatch_from_durable_pool(handler=lambda ctx: 'ok', batch_size=1, drain=True)
+    assert stats == {'claimed': 3, 'dispatched': 3}
+    assert all(durable.status(job)['status'] == 'completed' for job in jobs)
+    pool.close()
+
+
+def test_durable_dispatch_handles_non_mapping_payload(tmp_path):
+    durable = Pool(tmp_path / 'queue')
+    job = durable.submit('non-mapping', ['unexpected'])
+    pool = ColleaguePool(durable, max_workers=1)
+    assert pool.dispatch_from_durable_pool(handler=lambda ctx: 'ok', drain=True)['dispatched'] == 1
+    assert durable.status(job)['status'] == 'completed'
+    pool.close()
+
+
+def test_claim_lock_is_closed_when_slot_acquisition_fails(tmp_path, monkeypatch):
+    pool = ColleaguePool(max_workers=1, scratch_root=tmp_path / 'scratch')
+    fd = os.open(tmp_path / 'lock', os.O_CREAT | os.O_RDWR, 0o600)
+    def fail(*args, **kwargs):
+        raise RuntimeError('cannot acquire slot')
+    monkeypatch.setattr(pool, 'acquire_slot', fail)
+    handle = pool.submit_colleague_task('cases', 'test', claim_lock_fd=fd)
+    with pytest.raises(RuntimeError, match='cannot acquire slot'):
+        handle.result(timeout=5)
+    with pytest.raises(OSError):
+        os.fstat(fd)
+    pool.close()
+
+
+def test_dispatch_preserves_admission_error_without_double_closing_lock(tmp_path, monkeypatch):
+    durable = Pool(tmp_path / 'queue')
+    durable.submit('job', {'role': 'cases'})
+    pool = ColleaguePool(durable, max_workers=1)
+    def fail(*args, **kwargs):
+        raise RuntimeError('scheduler unavailable')
+    monkeypatch.setattr(pool._scheduler, 'submit', fail)
+    with pytest.raises(RuntimeError, match='scheduler unavailable'):
+        pool.dispatch_from_durable_pool(drain=True)
+    pool.close()
+
+
+def test_durable_dispatch_counts_admitted_tasks_before_slots_are_acquired(tmp_path, monkeypatch):
+    durable = Pool(tmp_path / 'queue')
+    for i in range(4):
+        durable.submit('job-' + str(i), {'role': 'cases'})
+    pool = ColleaguePool(durable, max_workers=2)
+    stop = threading.Event()
+    descriptors = []
+    checks = []
+
+    class Pending:
+        def done(self):
+            checks.append(1)
+            if len(checks) >= 12:
+                stop.set()
+            return False
+
+    def pending_submit(**kwargs):
+        descriptors.append(kwargs['claim_lock_fd'])
+        return Pending()
+
+    monkeypatch.setattr(pool, 'submit_colleague_task', pending_submit)
+    try:
+        stats = pool.dispatch_from_durable_pool(batch_size=1, stop_event=stop)
+        assert stats == {'claimed': 2, 'dispatched': 2}
+    finally:
+        for fd in descriptors:
+            os.close(fd)
+        pool.close()
+
+
+def test_drain_waits_when_an_external_caller_occupies_the_only_slot(tmp_path, monkeypatch):
+    durable = Pool(tmp_path / 'queue')
+    job = durable.submit('job', {'role': 'cases'})
+    pool = ColleaguePool(durable, max_workers=1)
+    external = pool.acquire_slot('cases', 'external', 'hold')
+    waited = threading.Event()
+    original_wait = pool._cv.wait
+    def record_wait(timeout=None):
+        waited.set()
+        return original_wait(timeout)
+    monkeypatch.setattr(pool._cv, 'wait', record_wait)
+    results = []
+    thread = threading.Thread(target=lambda: results.append(pool.dispatch_from_durable_pool(
+        handler=lambda ctx: 'ok', drain=True)))
+    thread.start()
+    try:
+        assert waited.wait(2), 'dispatcher must wait when no slot is available'
+    finally:
+        pool.release_slot(external.slot_id)
+        thread.join(timeout=5)
+        pool.close()
+    assert not thread.is_alive()
+    assert results[0]['dispatched'] == 1
+    assert durable.status(job)['status'] == 'completed'
+
+
+@pytest.mark.parametrize('size', [0, -1, True, 1.5])
+def test_durable_dispatch_rejects_invalid_batch_size(tmp_path, size):
+    pool = ColleaguePool(Pool(tmp_path / 'queue'), max_workers=1)
+    with pytest.raises(ValueError, match='batch_size'):
+        pool.dispatch_from_durable_pool(batch_size=size, drain=True)
     pool.close()
 
 
@@ -590,6 +728,41 @@ def test_durable_pool_attempt_fencing_rejection(tmp_path):
     )
     assert committed is False
     colleague_pool.close()
+
+
+def test_fencing_checks_token_and_releases_per_task_bookkeeping(tmp_path):
+    pool = ColleaguePool(max_workers=2, scratch_root=tmp_path / 'scratch')
+    first = pool.acquire_slot('reviewer', 'same-job', 'first')
+    assert not pool.commit_task_result('same-job', first.epoch, 'wrong-token', {})
+    pool.release_slot(first.slot_id)
+    assert not pool.commit_task_result('same-job', first.epoch, first.attempt_token, {})
+    second = pool.acquire_slot('reviewer', 'same-job', 'second')
+    assert second.epoch > first.epoch
+    assert not pool.commit_task_result('same-job', first.epoch, first.attempt_token, {})
+    assert pool.commit_task_result('same-job', second.epoch, second.attempt_token, {})
+    pool.release_slot(second.slot_id)
+    assert not pool._task_epochs and not pool._task_tokens
+    pool.close()
+
+
+def test_rejected_terminal_commit_is_not_reported_as_success(tmp_path, monkeypatch):
+    pool = ColleaguePool(max_workers=1, scratch_root=tmp_path / 'scratch')
+    monkeypatch.setattr(pool, 'commit_task_result', lambda *args, **kwargs: False)
+    result = pool.run_task('reviewer', 'test', handler=lambda ctx: 'done')
+    assert result['ok'] is False and result['error'] == 'result_commit_rejected'
+    assert pool.completed_count == 0 and pool.failed_count == 1
+    pool.close()
+
+
+def test_releasing_old_attempt_does_not_clear_new_fence(tmp_path):
+    pool = ColleaguePool(max_workers=2, scratch_root=tmp_path / 'scratch')
+    old = pool.acquire_slot('reviewer', 'job', 'old')
+    new = pool.acquire_slot('reviewer', 'job', 'new')
+    pool.release_slot(old.slot_id)
+    assert pool.commit_task_result('job', new.epoch, new.attempt_token, {})
+    pool.release_slot(new.slot_id)
+    assert not pool._task_epochs and not pool._task_tokens
+    pool.close()
 
 
 def test_drain_waits_for_queued_tasks_in_scheduler(tmp_path):

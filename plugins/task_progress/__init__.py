@@ -436,6 +436,11 @@ def _post_to_session(ctx, session_key: str, text: str, *, allow_bound_context=Fa
     target, error = _resolve_target(ctx, session_key)
     if target is None:
         return {"ok": False, "error": error or "no_conversation"}
+    # The host's generic post marks an interim send, but does not declare
+    # that this progress message will be edited. Preserve routing metadata
+    # while asking compatible adapters to create an editable message.
+    if getattr(target, 'live', None) is None and hasattr(target, 'metadata'):
+        target.metadata = {**(target.metadata or {}), 'expect_edits': True}
     return _run_on_loop(plugin_messages.post(target, text, plugin_id=ctx.plugin_id))
 
 

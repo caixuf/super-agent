@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 import socket
 import sqlite3
+import subprocess
+import sys
 import time
 import threading
 
@@ -65,6 +67,59 @@ def test_restart_validates_external_witness_and_rejects_older_source_backup(engi
         with pytest.raises((ViewInvalid,journal.JournalError)):ServingMemory(path)
         assert RecoveryCheckpoint(path).record['seq']>0
     finally:backup.close();source.close()
+
+
+def test_readonly_recovery_diagnostic_identifies_changed_inode_without_rebinding(engine,tmp_path):
+    source,_=seed(engine)
+    checkpoint=tmp_path/'private/state.json'
+    serving=ServingMemory(checkpoint,initialize=True)
+    serving.close(); source.close()
+    record=json.loads(checkpoint.read_text())
+    record['source_identity'][2]+=1
+    checkpoint.write_text(json.dumps(record)); checkpoint.chmod(0o600)
+    before=checkpoint.read_bytes()
+    from agentcore.memory.config import get_config
+    cfg=get_config()
+    command=[sys.executable,'-m','agentcore.memory.recovery_checkpoint',
+             '--data-dir',str(cfg.data_dir),'--checkpoint',str(checkpoint),
+             '--user',cfg.default_user,'--agent',cfg.default_agent]
+    completed=subprocess.run(command,capture_output=True,text=True,timeout=20)
+    output=json.loads(completed.stdout)
+    assert completed.returncode == 1 and output['ok'] is False
+    assert output['checks']['inode_matches'] is False
+    assert all(value for name,value in output['checks'].items() if name!='inode_matches')
+    assert str(tmp_path) not in completed.stdout and '独立' not in completed.stdout
+    assert checkpoint.read_bytes()==before
+
+
+def test_readonly_recovery_diagnostic_valid_witness(engine,tmp_path):
+    source,_=seed(engine)
+    checkpoint=tmp_path/'private/state.json'
+    serving=ServingMemory(checkpoint,initialize=True)
+    serving.close()
+    try:
+        result=RecoveryCheckpoint(checkpoint).diagnose(source)
+        assert result['ok'] and all(result['checks'].values())
+    finally:
+        source.close()
+
+
+def test_recovery_diagnostic_hides_corrupt_witness_content(engine,tmp_path):
+    source,_=seed(engine)
+    checkpoint=tmp_path/'private/state.json'
+    serving=ServingMemory(checkpoint,initialize=True)
+    serving.close(); source.close()
+    checkpoint.write_text('sensitive arbitrary content'); checkpoint.chmod(0o600)
+    from agentcore.memory.config import get_config
+    cfg=get_config()
+    command=[sys.executable,'-m','agentcore.memory.recovery_checkpoint',
+             '--data-dir',str(cfg.data_dir),'--checkpoint',str(checkpoint),
+             '--user',cfg.default_user,'--agent',cfg.default_agent]
+    completed=subprocess.run(command,capture_output=True,text=True,timeout=20)
+    assert completed.returncode==1
+    assert json.loads(completed.stdout)=={'ok':False,'error':'diagnostic_unavailable','error_type':'ViewInvalid'}
+    assert 'sensitive' not in completed.stdout and str(tmp_path) not in completed.stdout
+    assert checkpoint.read_text()=='sensitive arbitrary content'
 
 
 def test_corrupt_checkpoint_cannot_be_reinitialized_over_existing_history(tmp_path):

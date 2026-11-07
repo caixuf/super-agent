@@ -84,6 +84,285 @@ def test_register_opt_in_and_bounded_submission(tmp_path):
     assert 'end_line' not in payload['sources'][0], 'runner must choose the actual end of a short file'
 
 
+def test_card_consumer_recovers_completion_delivered_before_binding(tmp_path):
+    from types import SimpleNamespace
+    from runtime.hermes_completion_transport import create_transport
+    origin = {'route': 'route', 'channel': 'feishu', 'chat': 'chat'}
+    service = plugin.DispatchService(str(tmp_path / 'queue'), 'test-profile', [str(tmp_path)], role='dev',
+                                     route_provider=lambda _: origin, task_cards_enabled=True)
+    result = service.submit('session', {'goal': 'test', 'request_key': 'key'})
+    assert result['card_requested'] is True
+    job = result['task_id']
+    claim, fd = service.pool.claim()
+    try:
+        assert service.pool.finish(job, claim['attempt'], True, {'summary': 'finished'})
+    finally:
+        os.close(fd)
+    ctx = Context({'direct_delivery_enabled': True, 'engine_root': str(REPO)})
+    ctx.plugin_id, ctx._manager = 'durable-dispatch', SimpleNamespace(home_path=str(tmp_path))
+    transport = create_transport(ctx, service)
+    transport.sender = lambda *args, **kwargs: {'ok': True, 'message_id': 'completion'}
+    assert service.drain_delivery(transport)['delivered'] == 1
+    created, patched = [], []
+    transport.card_creator = lambda **kw: created.append(kw) or {'ok': True, 'message_id': 'card'}
+    transport.card_bridge.sender = lambda **kw: patched.append(kw) or {'ok': True, 'message_id': 'card'}
+    assert service.drain_cards(transport)[0]['state'] == 'sent'
+    assert len(created) == 1 and len(patched) == 1
+    assert transport.card_bridge.get_card(job)['status'] == 'completed'
+    assert service.drain_cards(transport) == []
+
+
+def test_terminal_card_definite_patch_refusal_is_retried(tmp_path):
+    from types import SimpleNamespace
+    from runtime.hermes_completion_transport import create_transport
+    service = plugin.DispatchService(str(tmp_path / 'queue'), 'test-profile', [str(tmp_path)], role='dev',
+        route_provider=lambda _: {'route': 'r', 'channel': 'feishu', 'chat': 'c'}, task_cards_enabled=True)
+    job = service.submit('s', {'goal': 'test', 'request_key': 'key'})['task_id']
+    claim, fd = service.pool.claim()
+    try:
+        assert service.pool.finish(job, claim['attempt'], True, {'summary': 'done'})
+    finally:
+        os.close(fd)
+    ctx = Context({'direct_delivery_enabled': True, 'engine_root': str(REPO)})
+    ctx.plugin_id, ctx._manager = 'durable-dispatch', SimpleNamespace(home_path=str(tmp_path))
+    transport = create_transport(ctx, service)
+    creates, patches = [], []
+    transport.card_creator = lambda **kw: creates.append(kw) or {'ok': True, 'message_id': 'm'}
+    def patch(**kwargs):
+        patches.append(kwargs)
+        return {'ok': False, 'not_sent': True} if len(patches) == 1 else {'ok': True, 'message_id': 'm'}
+    transport.card_bridge.sender = patch
+    assert service.drain_cards(transport)[0]['state'] == 'pending'
+    assert service.drain_cards(transport)[0]['state'] == 'sent'
+    assert len(creates) == 1 and len(patches) == 2
+
+
+@pytest.mark.parametrize('definitely_unsent', [True, False])
+def test_accepted_completion_persists_terminal_patch_failure(tmp_path, definitely_unsent):
+    from types import SimpleNamespace
+    from runtime.hermes_completion_transport import create_transport
+    service = plugin.DispatchService(str(tmp_path / 'queue'), 'test-profile', [str(tmp_path)], role='dev',
+        route_provider=lambda _: {'route': 'r', 'channel': 'feishu', 'chat': 'c'}, task_cards_enabled=True)
+    job = service.submit('s', {'goal': 'test', 'request_key': 'key'})['task_id']
+    ctx = Context({'direct_delivery_enabled': True, 'engine_root': str(REPO)})
+    ctx.plugin_id, ctx._manager = 'durable-dispatch', SimpleNamespace(home_path=str(tmp_path))
+    transport = create_transport(ctx, service)
+    text_calls, patch_calls = [], []
+    transport.sender = lambda *a, **kw: text_calls.append(1) or {'ok': True, 'message_id': 'text'}
+    transport.card_creator = lambda **kw: {'ok': True, 'message_id': 'm'}
+    def patch(**kwargs):
+        patch_calls.append(kwargs)
+        if len(patch_calls) == 1:
+            return {'ok': False, 'not_sent': True} if definitely_unsent else {'ok': False}
+        return {'ok': True, 'message_id': 'm'}
+    transport.card_bridge.sender = patch
+    assert service.drain_cards(transport)[0]['state'] == 'sent'
+    claim, fd = service.pool.claim()
+    try:
+        assert service.pool.finish(job, claim['attempt'], True, {'summary': 'done'})
+    finally:
+        os.close(fd)
+    assert service.drain_delivery(transport)['delivered'] == 1
+    with service.pool.db() as db:
+        row = db.execute('SELECT state,error FROM card_outbox WHERE job=?', (job,)).fetchone()
+    assert row['state'] == ('pending' if definitely_unsent else 'unknown')
+    if definitely_unsent:
+        assert service.drain_cards(transport)[0]['state'] == 'sent'
+        assert len(patch_calls) == 2
+    else:
+        assert service.inspect_card_health()['terminal_unknown'] == 1
+        # Model a crash after the bridge persisted uncertainty but before the
+        # queue health update: the bridge itself must remain observable.
+        with service.pool.db() as db:
+            db.execute("UPDATE card_outbox SET state='sent',error=NULL WHERE job=?", (job,))
+        health = service.inspect_card_health(bridge=transport.card_bridge)
+        assert health['terminal_unknown'] == 0 and health['bridge_terminal_unknown'] == 1
+        assert service.drain_cards(transport) == []
+        assert len(patch_calls) == 1
+    assert len(text_calls) == 1
+
+
+def test_card_consumer_fences_unknown_and_retries_definite_refusal(tmp_path):
+    from types import SimpleNamespace
+    from agentcore.task_card_bridge import TaskCardBridge
+    origin = {'route': 'route', 'channel': 'feishu', 'chat': 'chat'}
+    service = plugin.DispatchService(str(tmp_path / 'queue'), 'p', [str(tmp_path)], role='dev',
+                                     route_provider=lambda _: origin, task_cards_enabled=True)
+    first = service.submit('s', {'goal': 'first', 'request_key': 'first'})['task_id']
+    second = service.submit('s', {'goal': 'second', 'request_key': 'second'})['task_id']
+    bridge = TaskCardBridge(tmp_path / 'cards', profile='p')
+    calls = []
+    def creator(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return {'ok': False, 'not_sent': True}
+        if len(calls) == 2:
+            raise TimeoutError('uncertain')
+        return {'ok': True, 'message_id': 'm'}
+    transport = SimpleNamespace(card_bridge=bridge, card_creator=creator)
+    outcomes = service.drain_cards(transport)
+    assert [o['state'] for o in outcomes] == ['pending', 'unknown']
+    assert service.drain_cards(transport)[0]['state'] == 'sent'
+    assert service.drain_cards(transport) == []
+    with service.pool.db() as db:
+        states = {row['job']: row['state'] for row in db.execute('SELECT job,state FROM card_outbox')}
+    assert states == {first: 'sent', second: 'unknown'}
+    assert len(calls) == 3
+
+
+def test_parallel_card_consumers_create_one_message(tmp_path):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+    from agentcore.task_card_bridge import TaskCardBridge
+    origin = {'route': 'route', 'channel': 'feishu', 'chat': 'chat'}
+    service = plugin.DispatchService(str(tmp_path / 'queue'), 'p', [str(tmp_path)], role='dev',
+                                     route_provider=lambda _: origin, task_cards_enabled=True)
+    job = service.submit('s', {'goal': 'test', 'request_key': 'key'})['task_id']
+    calls = []
+    def creator(**kwargs):
+        calls.append(kwargs)
+        time.sleep(.05)
+        return {'ok': True, 'message_id': 'm'}
+    transport = SimpleNamespace(card_bridge=TaskCardBridge(tmp_path / 'cards', profile='p'), card_creator=creator)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(lambda _: service.drain_cards(transport), range(2)))
+    assert len(calls) == 1
+    with service.pool.db() as db:
+        assert db.execute('SELECT state FROM card_outbox WHERE job=?', (job,)).fetchone()[0] == 'sent'
+
+
+def test_card_consumer_respects_delivery_cutover(tmp_path):
+    import time
+    from types import SimpleNamespace
+    from agentcore.task_card_bridge import TaskCardBridge
+    service = plugin.DispatchService(str(tmp_path / 'queue'), 'p', [str(tmp_path)], role='dev',
+        route_provider=lambda _: {'route': 'r', 'channel': 'feishu', 'chat': 'c'}, task_cards_enabled=True)
+    job = service.submit('s', {'goal': 'test', 'request_key': 'key'})['task_id']
+    calls = []
+    transport = SimpleNamespace(card_bridge=TaskCardBridge(tmp_path / 'cards', profile='p'),
+        card_creator=lambda **kw: calls.append(kw) or {'ok': True, 'message_id': 'm'})
+    assert service.drain_cards(transport, not_before=time.time() + 60) == []
+    assert not calls
+    with service.pool.db() as db:
+        assert db.execute('SELECT state FROM card_outbox WHERE job=?', (job,)).fetchone()[0] == 'pending'
+
+
+def test_card_consumer_stops_before_next_create(tmp_path):
+    import threading
+    from types import SimpleNamespace
+    from agentcore.task_card_bridge import TaskCardBridge
+    service = plugin.DispatchService(str(tmp_path / 'queue'), 'p', [str(tmp_path)], role='dev',
+        route_provider=lambda _: {'route': 'r', 'channel': 'feishu', 'chat': 'c'}, task_cards_enabled=True)
+    for key in ('one', 'two'):
+        service.submit('s', {'goal': 'test', 'request_key': key})
+    stop = threading.Event()
+    calls = []
+    def creator(**kwargs):
+        calls.append(kwargs)
+        stop.set()
+        return {'ok': True, 'message_id': 'm'}
+    transport = SimpleNamespace(card_bridge=TaskCardBridge(tmp_path / 'cards', profile='p'), card_creator=creator)
+    assert len(service.drain_cards(transport, stop_event=stop)) == 1
+    assert len(calls) == 1
+    with service.pool.db() as db:
+        assert db.execute("SELECT COUNT(*) FROM card_outbox WHERE state='pending'").fetchone()[0] == 1
+
+
+def test_running_card_transition_is_fenced_across_consumers(tmp_path):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+    from agentcore.task_card_bridge import TaskCardBridge
+    service = plugin.DispatchService(str(tmp_path / 'queue'), 'p', [str(tmp_path)], role='dev',
+        route_provider=lambda _: {'route': 'r', 'channel': 'feishu', 'chat': 'c'}, task_cards_enabled=True)
+    job = service.submit('s', {'goal': 'test', 'request_key': 'key'})['task_id']
+    patches = []
+    def patch(**kwargs):
+        patches.append(kwargs)
+        time.sleep(.05)
+        return {'ok': True, 'message_id': 'm'}
+    bridge = TaskCardBridge(tmp_path / 'cards', profile='p', sender=patch, min_update_interval=0)
+    transport = SimpleNamespace(card_bridge=bridge, card_creator=lambda **kw: {'ok': True, 'message_id': 'm'})
+    assert service.drain_cards(transport)[0]['state'] == 'sent'
+    claim, fd = service.pool.claim()
+    try:
+        # A claim with no executor PID is a startup window, not proof of running.
+        assert service.sync_running_cards(transport) == []
+        with service.pool.db() as db:
+            db.execute('UPDATE jobs SET pid=? WHERE id=?', (os.getpid(), job))
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(lambda _: service.sync_running_cards(transport), range(2)))
+        assert len(patches) == 1
+        assert bridge.get_card(job)['status'] == 'running'
+        assert service.sync_running_cards(transport) == []
+        with service.pool.db() as db:
+            assert db.execute('SELECT progress_state FROM card_outbox WHERE job=?', (job,)).fetchone()[0] == 'sent'
+    finally:
+        os.close(fd)
+
+
+def test_unknown_running_patch_is_not_retried(tmp_path):
+    from types import SimpleNamespace
+    from agentcore.task_card_bridge import TaskCardBridge
+    service = plugin.DispatchService(str(tmp_path / 'queue'), 'p', [str(tmp_path)], role='dev',
+        route_provider=lambda _: {'route': 'r', 'channel': 'feishu', 'chat': 'c'}, task_cards_enabled=True)
+    job = service.submit('s', {'goal': 'test', 'request_key': 'key'})['task_id']
+    calls = []
+    def patch(**kwargs):
+        calls.append(kwargs)
+        raise TimeoutError()
+    transport = SimpleNamespace(card_bridge=TaskCardBridge(tmp_path / 'cards', profile='p', sender=patch),
+                                card_creator=lambda **kw: {'ok': True, 'message_id': 'm'})
+    service.drain_cards(transport)
+    claim, fd = service.pool.claim()
+    try:
+        with service.pool.db() as db:
+            db.execute('UPDATE jobs SET pid=? WHERE id=?', (os.getpid(), job))
+        assert service.sync_running_cards(transport)[0]['state'] == 'unknown'
+        assert service.sync_running_cards(transport) == []
+        assert len(calls) == 1
+    finally:
+        os.close(fd)
+
+
+def test_card_health_reports_aggregate_without_task_data(tmp_path):
+    service = plugin.DispatchService(str(tmp_path / 'queue'), 'p', [str(tmp_path)], role='dev',
+        route_provider=lambda _: {'route': 'private-route', 'channel': 'feishu', 'chat': 'private-chat'},
+        task_cards_enabled=True)
+    jobs = [service.submit('s', {'goal': 'private-goal', 'request_key': str(i)})['task_id'] for i in range(5)]
+    with service.pool.db() as db:
+        db.execute("UPDATE card_outbox SET state='unknown',error='private-error' WHERE job=?", (jobs[0],))
+        db.execute("UPDATE card_outbox SET state='parked' WHERE job=?", (jobs[1],))
+        db.execute("UPDATE card_outbox SET state='sent',progress_state='unknown' WHERE job=?", (jobs[2],))
+        db.execute("UPDATE card_outbox SET state='sent',progress_state='sending',updated=? WHERE job=?", (1, jobs[3]))
+        db.execute("UPDATE jobs SET created=? WHERE id=?", (1, jobs[4]))
+    health = service.inspect_card_health(now=200)
+    assert health == {'create_unknown': 1, 'terminal_unknown': 0, 'parked': 1, 'progress_unknown': 1,
+                      'stale_progress': 1, 'delayed': 1, 'bridge_terminal_unknown': 0,
+                      'bridge_terminal_stale': 0}
+    assert 'private' not in str(health)
+    assert service.inspect_card_health(now=200, not_before=2)['delayed'] == 0
+
+
+def test_card_health_filters_use_state_indexes(tmp_path):
+    service = plugin.DispatchService(str(tmp_path / 'queue'), 'p', [str(tmp_path)], role='dev')
+    with service.pool.db() as db:
+        for predicate, expected in [("c.state='unknown'", 'state=?'),
+                                    ("c.progress_state='unknown'", 'progress_state=?'),
+                                    ("c.progress_state='sending' AND c.updated<90", 'progress_state=?')]:
+            rows = db.execute('EXPLAIN QUERY PLAN SELECT COUNT(*) FROM card_outbox c '
+                              'JOIN jobs j ON j.id=c.job WHERE ' + predicate).fetchall()
+            assert any('SEARCH c USING' in row['detail'] and expected in row['detail'] for row in rows)
+
+
+def test_card_configuration_requires_direct_transport(tmp_path):
+    ctx = Context({'enabled': True, 'queue_root': str(tmp_path / 'queue'),
+                   'allowed_roots': [str(tmp_path)], 'task_lifecycle_cards_enabled': True})
+    with pytest.raises(ValueError, match='direct completion'):
+        plugin.register(ctx)
+
+
 def test_missing_identity_and_model_spoofing_are_denied(tmp_path, monkeypatch):
     context, args = make_context(tmp_path)
     monkeypatch.setenv('HERMES_SESSION_ID', 'environment-is-not-dispatch-proof')
@@ -657,5 +936,15 @@ def test_cross_session_status_permission(tmp_path):
     assert status_cross['ok'] is True
     assert status_cross['task_id'] == task_id_shared
     assert status_cross['status'] == 'queued'
+
+    # An absent or foreign origin is not evidence of same-profile ownership.
+    pool = plugin.Pool(settings_shared['queue_root'])
+    unowned = pool.submit('legacy-unowned', {'goal': 'private'})
+    foreign = pool.submit('foreign-owner', {'goal': 'private'},
+                          origin={'profile': 'another-profile', 'session': 'owner'})
+    for job in (unowned, foreign):
+        assert call(ctx_shared, 'status', {'task_id': job}, session_id='session-delta')['ok'] is False
+        assert call(ctx_shared, 'cancel', {'task_id': job}, session_id='session-delta')['ok'] is False
+        assert pool.status(job)['status'] == 'queued'
 
 

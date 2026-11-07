@@ -33,12 +33,18 @@ class Server:
                 return {"code": 230001}
             return {"code": 0, "data": {"items": [self.messages[message_id]]}}
         body = json.loads(request.data.decode())
-        text = json.loads(body["content"])["text"]
+        parsed_content = json.loads(body["content"])
         self.sent.append(body)
         message_id = "om_%d" % len(self.sent)
-        self.messages[message_id] = {
-            "message_id": message_id, "chat_id": body["receive_id"], "deleted": False,
-            "body": {"content": json.dumps({"text": text}, ensure_ascii=False)}}
+        if body.get("msg_type") == "interactive":
+            self.messages[message_id] = {
+                "message_id": message_id, "chat_id": body["receive_id"], "deleted": False,
+                "body": {"content": body["content"]}}
+        else:
+            text = parsed_content["text"]
+            self.messages[message_id] = {
+                "message_id": message_id, "chat_id": body["receive_id"], "deleted": False,
+                "body": {"content": json.dumps({"text": text}, ensure_ascii=False)}}
         return {"code": 0, "data": {"message_id": message_id}}
 
 
@@ -128,6 +134,13 @@ def test_the_drain_refuses_to_run_without_credentials(tmp_path, monkeypatch, cap
     assert json.loads(capsys.readouterr().out)["error"] == "feishu_credentials_missing"
 
 
+def test_build_respects_explicit_attachment_environment(tmp_path, server):
+    from agentcore.colleague_delivery_cli import DeliverableTransport
+    _, transport = build(tmp_path, profile='team',
+                         env=dict(ENV, FEISHU_DELIVER_ATTACHMENTS='1'), opener=Opener(server))
+    assert isinstance(transport, DeliverableTransport)
+
+
 def test_files_are_described_in_the_body_and_never_uploaded(tmp_path, drain, server):
     path = tmp_path / "report.txt"
     path.write_text("detail", encoding="utf-8")
@@ -135,7 +148,7 @@ def test_files_are_described_in_the_body_and_never_uploaded(tmp_path, drain, ser
     code, outcomes = drain(tmp_path)
     assert code == 0 and outcomes["outcomes"][0]["status"] == "delivered"
     text = json.loads(server.sent[0]["content"])["text"]
-    assert str(path) in text and "未上传" in text
+    assert str(path) not in text and path.name in text and "未上传" in text
 
 
 def test_render_states_the_colleague_the_truncation_and_the_files():
@@ -160,19 +173,43 @@ def test_text_only_adapter_keeps_artifacts_out_of_the_delivered_message():
 
     _TextOnly(Capture()).deliver({"route": "r"}, {"task_id": "t", "artifacts": ["/tmp/a"]},
                                  idempotency_key="t")
-    assert seen[0]["artifacts"] == [] and seen[0]["artifact_paths"] == ["/tmp/a"]
+    assert seen[0]["artifacts"] == [] and seen[0]["artifact_paths"] == ["a"]
 
 
-def test_deliverable_transport_sanitizes_paths_and_uploads_artifacts(tmp_path):
+def test_text_only_redacts_summary_and_keeps_retry_stable(tmp_path):
+    seen = []
+    class Capture:
+        def deliver(self, address, message, *, idempotency_key):
+            seen.append(message)
+            return {'accepted': True, 'event_id': idempotency_key, 'receipt_id': 'r'}
+    file = tmp_path / '报告.txt'
+    file.write_text('private')
+    message = {'task_id': 't', 'summary': f'结果在 {file}', 'artifacts': [str(file)]}
+    adapter = _TextOnly(Capture())
+    adapter.deliver({}, message, idempotency_key='t')
+    file.unlink()
+    adapter.deliver({}, message, idempotency_key='t')
+    assert seen[0] == seen[1]
+    assert str(file) not in seen[0]['summary']
+    assert seen[0]['artifact_paths'] == ['报告.txt']
+
+
+def test_deliverable_transport_passes_attempt_artifacts_to_durable_transport(tmp_path):
     from agentcore.colleague_delivery_cli import DeliverableTransport
 
-    html_file = tmp_path / "review.html"
+    attempt_id = 'a' * 32
+    attempt_dir = tmp_path / attempt_id
+    attempt_dir.mkdir()
+    html_file = attempt_dir / "review.html"
     html_file.write_text("<h1>Review</h1>")
-    png_file = tmp_path / "arch.png"
+    png_file = attempt_dir / "arch.png"
     png_file.write_bytes(b"\x89PNG\r\n\x1a\n")
 
     delivered_messages = []
     class MockCompletion:
+        attempt_root = tmp_path
+        attempt_provider = staticmethod(lambda job: attempt_id)
+
         def deliver(self, address, message, *, idempotency_key):
             delivered_messages.append((address, message, idempotency_key))
             return {"accepted": True, "event_id": idempotency_key, "receipt_id": "rec_1"}
@@ -212,11 +249,57 @@ def test_deliverable_transport_sanitizes_paths_and_uploads_artifacts(tmp_path):
     # Local path should be replaced by friendly placeholder
     assert str(html_file) not in sent_msg["summary"]
     assert str(png_file) not in sent_msg["summary"]
-    assert "📎 [文件附件已随附上传: review.html]" in sent_msg["summary"]
-    assert "📷 [图片附件已随附上传: arch.png]" in sent_msg["summary"]
+    assert "📎 [文件附件候选: review.html]" in sent_msg["summary"]
+    assert "📷 [图片附件候选: arch.png]" in sent_msg["summary"]
 
     # Feishu upload actions should be triggered for both files
-    assert ("upload_file", str(html_file)) in feishu_actions
-    assert ("upload_image", str(png_file)) in feishu_actions
-    assert any(a[0] == "send_file" and a[3] == "file_key_test" for a in feishu_actions)
-    assert any(a[0] == "send_image" and a[3] == "img_key_test" for a in feishu_actions)
+    assert sent_msg['artifacts'] == [str(html_file), str(png_file)]
+    assert feishu_actions == []  # The durable transport owns the send journal.
+
+
+def test_attachment_failure_is_fenced_and_not_acknowledged(tmp_path):
+    from agentcore.colleague_delivery_cli import DeliverableTransport
+    from agentcore.direct_completion import DirectCompletionTransport
+
+    attempt = 'b' * 32
+    directory = tmp_path / 'attempts' / attempt
+    directory.mkdir(parents=True)
+    report = directory / 'report.txt'
+    report.write_text('report')
+    calls = []
+
+    def sender(address, item, *, idempotency_key):
+        calls.append(item['kind'])
+        if item['kind'] == 'file':
+            return None  # Could have sent: fence it instead of blindly retrying.
+        return {'ok': True, 'message_id': 'm1'}
+
+    direct = DirectCompletionTransport(tmp_path / 'direct', profile='team', sender=sender,
+        render=render, attempt_root=tmp_path / 'attempts', attempt_provider=lambda _: attempt)
+    transport = DeliverableTransport(direct, None)
+    address = {'profile': 'team', 'route': 'gateway'}
+    message = {'task_id': 't1', 'summary': str(report), 'status': 'completed'}
+    assert transport.deliver(address, message, idempotency_key='t1')['deferred'] is True
+    report.unlink()  # A retry must reuse the staged plan even after cleanup.
+    assert transport.deliver(address, message, idempotency_key='t1')['deferred'] is True
+    assert calls == ['text', 'file']
+
+
+def test_build_respects_card_delivery_and_emits_canonical_cardkit2(tmp_path, server):
+    from agentcore.completion_delivery import deliver_pending
+    pool, _ = _queue(tmp_path, summary="canonical card report")
+    _, transport = build(
+        tmp_path,
+        profile="team",
+        env=dict(ENV, FEISHU_DELIVER_CARD="1"),
+        opener=Opener(server),
+    )
+    outcomes = deliver_pending(pool, transport, limit=5)
+    assert outcomes[0]["status"] == "delivered"
+    assert len(server.sent) == 1
+    assert server.sent[0]["msg_type"] == "interactive"
+    card = json.loads(server.sent[0]["content"])
+    assert card["schema"] == "2.0"
+    assert card["header"]["template"] == "indigo"
+    assert card["header"]["icon"]["token"] == "myai_colorful"
+    assert card["body"]["elements"][0]["background_style"] == "blue-50"

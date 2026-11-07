@@ -3,8 +3,8 @@
 Nothing sends by itself: the host runs this after the queue holds terminal
 receipts. It refuses to start without credentials, sends at most once per
 delivery key, and reports ``delivery_unknown`` rather than retrying an
-ambiguous send. Attachments are not implemented here: a receipt with artifacts
-raises and stays pending.
+ambiguous send. Attachment delivery is opt-in and uses the durable transport's
+owning-attempt validation, snapshots and per-operation journal.
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def render(message):
         text += "\n（已截断，完整报告见任务结果）"
     files = message.get("artifact_paths") or []
     if files:
-        text += "\n附件（未上传，路径）:\n" + "\n".join(str(f) for f in files)
+        text += "\n附件（未上传）:\n" + "\n".join(str(f) for f in files)
     return text[:MAX_TEXT]
 
 #: Statuses that mean the host must look, not that the drain failed to run.
@@ -44,21 +44,22 @@ _ATTENTION = {"delivery_unknown", "ack_unknown", "sent_ack_rejected", "delivery_
 class _TextOnly:
     """Attachments are described in the body; upload is not implemented here.
 
-    ``DirectCompletionTransport`` stages every path in ``artifacts`` and would fail
-    on the first one forever. Moving them to a descriptive field keeps the receipt
-    deliverable and says plainly where the files are.
+    ``DirectCompletionTransport`` stages every path in ``artifacts``. When uploads
+    are disabled, display file names without exposing private host directories.
     """
 
     def __init__(self, transport):
         self.transport = transport
 
     def deliver(self, address, message, *, idempotency_key):
-        body = dict(message, artifacts=[], artifact_paths=list(message.get("artifacts") or []))
+        summary, _ = sanitize_and_extract_artifacts(message.get('summary', ''))
+        names = [Path(str(path)).name for path in message.get('artifacts') or []]
+        body = dict(message, summary=summary, artifacts=[], artifact_paths=names)
         return self.transport.deliver(address, body, idempotency_key=idempotency_key)
 
 
 class DeliverableTransport:
-    """Deliver sanitized text and upload attached/extracted artifacts directly to Feishu."""
+    """Use the durable transport for both text and attempt-owned attachments."""
 
     def __init__(self, completion_transport, feishu_transport):
         self.completion_transport = completion_transport
@@ -66,56 +67,46 @@ class DeliverableTransport:
 
     def deliver(self, address, message, *, idempotency_key):
         summary = message.get("summary", "")
-        sanitized_summary, detected = sanitize_and_extract_artifacts(summary)
+        attempt = self.completion_transport.attempt_provider(idempotency_key)
+        allowed_dir = None
+        if (isinstance(attempt, str) and len(attempt) == 32
+                and all(c in '0123456789abcdef' for c in attempt)):
+            allowed_dir = self.completion_transport.attempt_root / attempt
+        sanitized_summary, detected = sanitize_and_extract_artifacts(
+            summary, base_dir=allowed_dir, allow_nonexistent=True)
 
         # Merge explicitly declared artifacts with detected ones
-        existing_artifacts = list(message.get("artifacts") or [])
-        for p in existing_artifacts:
-            ext = Path(p).suffix.lower()
-            kind = "image" if ext in {".png", ".jpg", ".jpeg", ".webp"} else "file"
-            if not any(d.get("path") == str(p) for d in detected):
-                detected.append({"kind": kind, "path": str(p), "name": Path(p).name})
-
-        # Deliver sanitized primary text receipt
-        clean_msg = dict(message, summary=sanitized_summary, artifacts=[], artifact_paths=[])
-        res = self.completion_transport.deliver(address, clean_msg, idempotency_key=idempotency_key)
-
-        # Upload and deliver real artifacts as Feishu chat attachments
-        if res and res.get("accepted") and self.feishu_transport:
-            for idx, art in enumerate(detected):
-                art_key = f"{idempotency_key}_art_{idx}"
-                try:
-                    p = Path(art["path"])
-                    if not p.exists() or not p.is_file():
-                        continue
-                    if art["kind"] == "image":
-                        img_key = self.feishu_transport.upload_image(str(p))
-                        self.feishu_transport.send_image(origin=address, delivery_key=art_key, image_key=img_key)
-                    else:
-                        file_key = self.feishu_transport.upload_file(str(p))
-                        self.feishu_transport.send_file(origin=address, delivery_key=art_key, file_key=file_key)
-                except Exception:
-                    # Best-effort artifact upload; never fails the core receipt delivery
-                    pass
-        return res
+        files = list(message.get("artifacts") or [])
+        for art in detected:
+            if art['path'] not in files and len(files) < 8:
+                files.append(art['path'])
+        clean_msg = dict(message, summary=sanitized_summary, artifacts=files, artifact_paths=[])
+        return self.completion_transport.deliver(address, clean_msg, idempotency_key=idempotency_key)
 
 
-def build(root, *, profile, journal=None, env=None, opener=None, deliver_attachments=None):
+def build(root, *, profile, journal=None, env=None, opener=None,
+          deliver_attachments=None, deliver_card=None):
     """Return ``(pool, completion_transport)``, or ``None`` without credentials."""
     root = Path(root)
     transport = from_env(journal or root / "feishu" / "sends.db", env, opener)
     if transport is None:
         return None
+    pool = Pool(str(root))
+    source_env = os.environ if env is None else env
+    use_card = deliver_card if deliver_card is not None else (
+        source_env.get("FEISHU_DELIVER_CARD", "0") == "1"
+    )
     completion = DirectCompletionTransport(
         root / "direct", profile=profile, sender=FeishuCompletionSender(transport),
         render=render, attempt_root=root / "attempts",
-        attempt_provider=lambda key: None)
+        attempt_provider=lambda key: pool.status(key).get('attempt'),
+        card=use_card)
     
     use_attachments = deliver_attachments if deliver_attachments is not None else (
-        os.environ.get("FEISHU_DELIVER_ATTACHMENTS", "0") == "1"
+        source_env.get("FEISHU_DELIVER_ATTACHMENTS", "0") == "1"
     )
     adapter = DeliverableTransport(completion, transport) if use_attachments else _TextOnly(completion)
-    return Pool(str(root)), adapter
+    return pool, adapter
 
 
 def main(argv=None):
@@ -126,9 +117,12 @@ def main(argv=None):
     parser.add_argument("--limit", type=int, default=5, help="receipts to try this run")
     parser.add_argument("--deliver-attachments", action="store_true", default=None,
                         help="upload and deliver real chat attachments for artifacts")
+    parser.add_argument("--deliver-card", action="store_true", default=None,
+                        help="deliver completions using canonical CardKit 2.0 interactive cards")
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     built = build(args.root, profile=args.profile, journal=args.journal,
-                  deliver_attachments=args.deliver_attachments)
+                  deliver_attachments=args.deliver_attachments,
+                  deliver_card=args.deliver_card)
     if built is None:
         print(json.dumps({"ok": False, "error": "feishu_credentials_missing"}))
         return 2

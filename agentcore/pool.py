@@ -132,12 +132,24 @@ class Pool:
             CREATE TABLE IF NOT EXISTS outbox (
               job TEXT PRIMARY KEY, receipt TEXT NOT NULL,
               acknowledged INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS card_outbox (
+              job TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT 'pending',
+              error TEXT, updated REAL NOT NULL, progress_state TEXT NOT NULL DEFAULT 'pending');
+            CREATE INDEX IF NOT EXISTS card_outbox_pending_order
+              ON card_outbox(state, updated, job);
             CREATE TABLE IF NOT EXISTS origin_repairs (
               job TEXT PRIMARY KEY, payload_sha256 TEXT NOT NULL,
               origin TEXT NOT NULL, proof_id TEXT NOT NULL,
               proof_sha256 TEXT NOT NULL, created REAL NOT NULL);
             ''')
             db.execute('BEGIN IMMEDIATE')
+            card_columns = {r[1] for r in db.execute('PRAGMA table_info(card_outbox)')}
+            if 'progress_state' not in card_columns:
+                db.execute("ALTER TABLE card_outbox ADD COLUMN progress_state TEXT NOT NULL DEFAULT 'pending'")
+            db.execute('CREATE INDEX IF NOT EXISTS card_outbox_progress_order '
+                       'ON card_outbox(state, progress_state, updated, job)')
+            db.execute('CREATE INDEX IF NOT EXISTS card_outbox_progress_health '
+                       'ON card_outbox(progress_state, updated, job)')
             columns = {r[1] for r in db.execute('PRAGMA table_info(jobs)')}
             for name, kind in [('pid', 'INTEGER'), ('pid_start', 'TEXT'), ('deadline', 'REAL'),
                                ('origin', 'TEXT'), ('containment_token', 'TEXT'),
@@ -164,7 +176,8 @@ class Pool:
             finally:
                 db.close()
 
-    def submit(self, key, payload, dependencies=(), replay_safe=False, max_tries=2, origin=None):
+    def submit(self, key, payload, dependencies=(), replay_safe=False, max_tries=2, origin=None,
+               request_card=False):
         """Enqueue work. ``origin`` is the addressable ownership to persist with it.
 
         A completion can only be routed back to the conversation that submitted the
@@ -174,16 +187,24 @@ class Pool:
         dependencies = tuple(dependencies)
         if not key or max_tries < 1:
             raise ValueError('dedupe key and positive max_tries required')
+        if type(request_card) is not bool:
+            raise ValueError('request_card must be boolean')
         origin = normalize_origin(origin)
+        if request_card:
+            address = json.loads(origin) if origin else {}
+            if (address.get('channel') != 'feishu' or not address.get('route')
+                    or not address.get('chat')):
+                raise ValueError('card requires a bound messaging origin')
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             existing = db.execute('SELECT * FROM jobs WHERE dedupe=?', (key,)).fetchone()
             serialized = json.dumps(payload, sort_keys=True)
             if existing:
                 old_deps = {r[0] for r in db.execute('SELECT dependency FROM deps WHERE job=?', (existing['id'],))}
+                old_card = db.execute('SELECT 1 FROM card_outbox WHERE job=?', (existing['id'],)).fetchone() is not None
                 if (existing['payload'] != serialized or old_deps != set(dependencies)
                         or existing['replay_safe'] != bool(replay_safe) or existing['max_tries'] != max_tries
-                        or existing['origin'] != origin):
+                        or existing['origin'] != origin or old_card != request_card):
                     raise ValueError('dedupe key reused with different task')
                 return existing['id']
             for dependency in dependencies:
@@ -193,6 +214,8 @@ class Pool:
             db.execute('INSERT INTO jobs(id,dedupe,payload,max_tries,replay_safe,created,origin) '
                        'VALUES(?,?,?,?,?,?,?)',
                        (job, key, serialized, max_tries, bool(replay_safe), time.time(), origin))
+            if request_card:
+                db.execute('INSERT INTO card_outbox(job,updated) VALUES(?,?)', (job, time.time()))
             db.executemany('INSERT INTO deps VALUES(?,?)', [(job, d) for d in set(dependencies)])
             return job
 
@@ -1028,6 +1051,156 @@ class Pool:
             row = db.execute('SELECT acknowledged,receipt_id,delivered FROM outbox WHERE job=?',
                              (job,)).fetchone()
         return dict(row) if row is not None else None
+
+    def outbox_receipt(self, job):
+        """Return the parsed terminal receipt for ``job`` from outbox, or None."""
+        with self.db() as db:
+            row = db.execute('SELECT receipt FROM outbox WHERE job=?', (job,)).fetchone()
+        return json.loads(row['receipt']) if row is not None else None
+
+    def record_card_finalization_state(self, job, state, error):
+        """Record terminal card finalization status in card_outbox without raw SQL leakage."""
+        with self.db() as db:
+            db.execute(
+                "UPDATE card_outbox SET state=?,error=?,updated=? "
+                "WHERE job=? AND state IN ('pending','sent')",
+                (state, error, time.time(), job),
+            )
+
+    def pending_card_creations(self, *, limit=20, not_before=None):
+        """Return bounded pending card creation intents with job origin and payload."""
+        with self.db() as db:
+            return [
+                dict(row)
+                for row in db.execute(
+                    'SELECT c.job,j.origin,j.payload FROM card_outbox c '
+                    'JOIN jobs j ON j.id=c.job WHERE c.state=? '
+                    'AND (? IS NULL OR j.created>=?) ORDER BY c.updated,c.job LIMIT ?',
+                    ('pending', not_before, not_before, limit),
+                ).fetchall()
+            ]
+
+    def update_card_creation_state(self, job, state, error=None):
+        """Transition a pending card creation row to ``state``."""
+        with self.db() as db:
+            db.execute(
+                'UPDATE card_outbox SET state=?,error=?,updated=? WHERE job=? AND state=?',
+                (state, error, time.time(), job, 'pending'),
+            )
+
+    def pending_running_card_jobs(self, *, limit=20, not_before=None):
+        """Retire terminal rows and return running jobs eligible for a progress card update."""
+        with self.db() as db:
+            db.execute(
+                "UPDATE card_outbox SET progress_state='terminal' WHERE job IN "
+                "(SELECT c.job FROM card_outbox c JOIN jobs j ON j.id=c.job "
+                "WHERE c.state='sent' AND c.progress_state='pending' "
+                "AND j.status IN ('completed','failed','cancelled') LIMIT 100)"
+            )
+            return [
+                dict(row)
+                for row in db.execute(
+                    "SELECT c.job FROM card_outbox c JOIN jobs j ON j.id=c.job "
+                    "WHERE c.state='sent' AND c.progress_state='pending' "
+                    "AND j.status='running' AND j.pid IS NOT NULL AND j.cancel=0 "
+                    "AND (? IS NULL OR j.created>=?) ORDER BY c.updated,c.job LIMIT ?",
+                    (not_before, not_before, limit),
+                ).fetchall()
+            ]
+
+    def claim_running_card_progress(self, job):
+        """Atomically claim the running progress update for ``job``."""
+        with self.db() as db:
+            claimed = db.execute(
+                "UPDATE card_outbox SET progress_state='sending',updated=? WHERE job=? "
+                "AND state='sent' AND progress_state='pending' AND EXISTS "
+                "(SELECT 1 FROM jobs WHERE id=? AND status='running' AND pid IS NOT NULL AND cancel=0)",
+                (time.time(), job, job),
+            ).rowcount
+        return bool(claimed)
+
+    def update_running_card_progress(self, job, state, error=None):
+        """Complete a claimed running progress update for ``job``."""
+        with self.db() as db:
+            db.execute(
+                "UPDATE card_outbox SET progress_state=?,error=?,updated=? "
+                "WHERE job=? AND progress_state='sending'",
+                (state, error, time.time(), job),
+            )
+
+    def card_outbox_health_counts(self, *, not_before=None, now=None):
+        """Return consistent snapshot counts for card_outbox health states."""
+        current = time.time() if now is None else now
+        checks = (
+            ('create_unknown', "c.state='unknown' AND (c.error IS NULL OR c.error<>'card_patch_unknown')", ()),
+            ('terminal_unknown', "c.state='unknown' AND c.error='card_patch_unknown'", ()),
+            ('parked', "c.state='parked'", ()),
+            ('progress_unknown', "c.progress_state='unknown'", ()),
+            ('stale_progress', "c.progress_state='sending' AND c.updated<?", (current - 90,)),
+            ('delayed', "c.state='pending' AND j.created<?", (current - 120,)),
+        )
+        counts = {}
+        with self.db() as db:
+            db.execute('BEGIN')
+            for name, condition, values in checks:
+                counts[name] = db.execute(
+                    'SELECT COUNT(*) FROM card_outbox c JOIN jobs j ON j.id=c.job WHERE '
+                    + condition + ' AND (? IS NULL OR j.created>=?)',
+                    (*values, not_before, not_before),
+                ).fetchone()[0]
+        return counts
+
+    def job_ownership_record(self, job):
+        """Return payload, origin, and repaired origin for ``job``, or None."""
+        with self.db() as db:
+            row = db.execute('SELECT payload,origin FROM jobs WHERE id=?', (job,)).fetchone()
+            repaired = db.execute('SELECT origin FROM origin_repairs WHERE job=?', (job,)).fetchone()
+        if row is None:
+            return None
+        return {
+            'payload': row['payload'],
+            'origin': row['origin'],
+            'repaired_origin': repaired['origin'] if repaired is not None else None,
+        }
+
+    def job_payload(self, job):
+        """Return the parsed JSON payload dict for ``job``, or None."""
+        with self.db() as db:
+            row = db.execute('SELECT payload FROM jobs WHERE id=?', (job,)).fetchone()
+        return json.loads(row['payload']) if row and row['payload'] else None
+
+    def unacknowledged_outbox_rows(self, *, limit=20):
+        """Return bounded ``[{'job': ..., 'receipt': ...}, ...]`` rows from outbox where acknowledged=0."""
+        if limit < 1:
+            raise ValueError('limit must be positive')
+        with self.db() as db:
+            return [
+                dict(row)
+                for row in db.execute(
+                    'SELECT job,receipt FROM outbox WHERE acknowledged=0 ORDER BY rowid LIMIT ?',
+                    (limit,),
+                ).fetchall()
+            ]
+
+    def pending_outbox_addresses(self, *, limit=500):
+        """Return bounded ``(job, parsed_origin)`` pairs for unacknowledged outbox rows."""
+        if limit < 1:
+            raise ValueError('limit must be positive')
+        with self.db() as db:
+            rows = db.execute(
+                'SELECT outbox.job AS job, jobs.origin AS origin '
+                'FROM outbox LEFT JOIN jobs ON jobs.id = outbox.job '
+                'WHERE outbox.acknowledged=0 ORDER BY outbox.rowid LIMIT ?',
+                (limit,),
+            ).fetchall()
+        addresses = []
+        for row in rows:
+            try:
+                address = json.loads(row['origin']) if row['origin'] else None
+            except (TypeError, ValueError):
+                address = None
+            addresses.append((row['job'], address))
+        return addresses
 
     def run_once(self, command, timeout=300, lease=60, max_output=1048576, max_file=67108864):
         if timeout <= 0 or lease <= 0 or max_output <= 0 or max_file <= 0:

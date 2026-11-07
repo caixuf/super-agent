@@ -12,11 +12,14 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import errno
 import fcntl
 import json
 import os
 from pathlib import Path
 import re
+import selectors
+import signal
 import subprocess
 import time
 from typing import Any, Callable
@@ -29,6 +32,82 @@ CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 SESSION_KEY_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,200}$")
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 VALID_OPERATIONS = frozenset({"submit", "status", "cancel", "reset"})
+_RPC_STDOUT_LIMIT = 1024 * 1024
+_RPC_STDERR_LIMIT = 128 * 1024
+
+
+class _RpcOutputLimit(Exception):
+    pass
+
+
+def _bounded_rpc_runner(cmd, *, input, capture_output, text, timeout):
+    """Exchange stdio concurrently with bounded memory and a single deadline."""
+    payload = input.encode('utf-8')
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, start_new_session=True, bufsize=0)
+    deadline = time.monotonic() + timeout
+    buffers = {'stdout': bytearray(), 'stderr': bytearray()}
+    streams = (proc.stdin, proc.stdout, proc.stderr)
+    selector = selectors.DefaultSelector()
+    failed = True
+    try:
+        for stream in streams:
+            os.set_blocking(stream.fileno(), False)
+        selector.register(proc.stdin, selectors.EVENT_WRITE, 'stdin')
+        selector.register(proc.stdout, selectors.EVENT_READ, 'stdout')
+        selector.register(proc.stderr, selectors.EVENT_READ, 'stderr')
+        offset = 0
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            for key, _ in selector.select(remaining):
+                stream, name = key.fileobj, key.data
+                if name == 'stdin':
+                    try:
+                        count = os.write(stream.fileno(), payload[offset:offset + 65536])
+                    except BlockingIOError:
+                        continue
+                    except BrokenPipeError:
+                        count = 0
+                        offset = len(payload)
+                    offset += count
+                    if offset >= len(payload):
+                        selector.unregister(stream)
+                        stream.close()
+                else:
+                    try:
+                        chunk = os.read(stream.fileno(), 65536)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(stream)
+                        stream.close()
+                        continue
+                    buf = buffers[name]
+                    limit = _RPC_STDOUT_LIMIT if name == 'stdout' else _RPC_STDERR_LIMIT
+                    if len(buf) + len(chunk) > limit:
+                        raise _RpcOutputLimit(name)
+                    buf.extend(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        code = proc.wait(timeout=remaining)
+        failed = False
+        return subprocess.CompletedProcess(cmd, code, buffers['stdout'].decode('utf-8', errors='replace'),
+                                           buffers['stderr'].decode('utf-8', errors='replace'))
+    finally:
+        selector.close()
+        if failed:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        for stream in streams:
+            if not stream.closed:
+                stream.close()
+        if failed:
+            proc.wait()
 
 
 def _clean_text(value: Any, *, field: str, max_len: int) -> str:
@@ -270,20 +349,21 @@ def _locked_sessions(state_dir: Path, *, timeout_s: float = 10.0):
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 acquired = True
                 break
-            except (BlockingIOError, OSError):
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EINTR):
+                    raise
                 if time.monotonic() - start_time >= timeout_s:
                     raise TimeoutError(f"lan_sessions_lock_timeout_{timeout_s}s")
                 time.sleep(0.05)
         sessions_file = state_dir / "lan_sessions.json"
-        try:
-            data = (
-                json.loads(sessions_file.read_text(encoding="utf-8"))
-                if sessions_file.exists()
-                else {}
-            )
+        if sessions_file.exists():
+            try:
+                data = json.loads(sessions_file.read_text(encoding="utf-8"))
+            except ValueError as exc:
+                raise ValueError('lan_sessions_invalid') from exc
             if not isinstance(data, dict):
-                data = {}
-        except (OSError, ValueError):
+                raise ValueError('lan_sessions_invalid')
+        else:
             data = {}
         yield data
         tmp = sessions_file.with_suffix(".tmp")
@@ -323,7 +403,7 @@ def invoke_node_rpc(
     prompt: str = "",
     context: str = "",
     timeout_s: float = 60.0,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> dict[str, Any]:
     """Execute a resumable protocol_version=2 RPC against a remote LAN node agent."""
     catalog = normalize_nodes(raw_nodes)
@@ -339,6 +419,8 @@ def invoke_node_rpc(
         raise ValueError("invalid_request_id")
     if operation not in VALID_OPERATIONS:
         raise ValueError("invalid_operation")
+    if operation == "submit" and (not isinstance(context, str) or len(context) > 100_000):
+        raise ValueError("invalid_context")
 
     state_path = Path(state_dir)
     if not state_path.is_absolute():
@@ -376,7 +458,7 @@ def invoke_node_rpc(
             raise ValueError("invalid_prompt")
         payload.update(
             prompt=prompt,
-            context=context if isinstance(context, str) else "",
+            context=context,
             session_id=sid,
             model=spec["remote_model"],
             allow_files=True,
@@ -385,23 +467,24 @@ def invoke_node_rpc(
     started = time.monotonic()
     timeout_s = max(5.0, min(float(timeout_s), 550.0))
     try:
-        proc = runner(
+        proc = (runner if runner is not None else _bounded_rpc_runner)(
             cmd,
             input=json.dumps(payload, ensure_ascii=False),
             capture_output=True,
             text=True,
             timeout=timeout_s,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.TimeoutExpired, _RpcOutputLimit) as exc:
         return {
             "ok": False,
             "node_id": node_id,
             "session_id": sid,
             "request_id": request_id,
-            "error": "transport_timeout"
-            if isinstance(exc, subprocess.TimeoutExpired)
-            else "transport_error",
-            "retryable": True,
+            "error": ("transport_timeout" if isinstance(exc, subprocess.TimeoutExpired)
+                      else "transport_output_limit" if isinstance(exc, _RpcOutputLimit)
+                      else "transport_error"),
+            "retryable": operation == 'status',
+            "outcome_unknown": operation in ('submit', 'cancel'),
             "transport_metrics": {
                 "control_seconds": round(time.monotonic() - started, 4)
             },
@@ -415,14 +498,25 @@ def invoke_node_rpc(
             "session_id": sid,
             "request_id": request_id,
             "error": "invalid_transport_response",
-            "retryable": True,
+            "retryable": operation == 'status',
+            "outcome_unknown": operation in ('submit', 'cancel'),
             "transport_metrics": {
                 "control_seconds": round(time.monotonic() - started, 4)
             },
         }
 
+    if proc.returncode != 0 or type(parsed.get('ok')) is not bool:
+        return {
+            'ok': False, 'node_id': node_id, 'session_id': sid, 'request_id': request_id,
+            'operation': operation,
+            'error': 'transport_exit_nonzero' if proc.returncode != 0 else 'invalid_transport_response',
+            'retryable': operation == 'status',
+            'outcome_unknown': operation in ('submit', 'cancel'),
+            'transport_metrics': {'control_seconds': round(time.monotonic() - started, 4)},
+        }
+
     return {
-        "ok": bool(parsed.get("ok", proc.returncode == 0)),
+        "ok": parsed['ok'],
         "node_id": node_id,
         "session_id": sid,
         "request_id": request_id,

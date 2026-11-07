@@ -22,6 +22,45 @@ def test_concurrent_dedupe_and_claim(tmp_path):
     os.close(winners[0][1])
 
 
+def test_card_intent_is_atomic_deduplicated_and_origin_bound(tmp_path):
+    pool = Pool(tmp_path)
+    origin = {'profile': 'p', 'session': 's', 'route': 'r', 'channel': 'feishu', 'chat': 'c'}
+    with ThreadPoolExecutor(8) as executor:
+        ids = list(executor.map(lambda _: pool.submit('one', {'goal': 'check'}, origin=origin,
+                                                      request_card=True), range(16)))
+    assert len(set(ids)) == 1
+    with pool.db() as db:
+        rows = db.execute('SELECT job,state FROM card_outbox').fetchall()
+        assert [(r['job'], r['state']) for r in rows] == [(ids[0], 'pending')]
+    with pytest.raises(ValueError, match='dedupe key reused'):
+        pool.submit('one', {'goal': 'check'}, origin=origin, request_card=False)
+    restarted = Pool(tmp_path)
+    with restarted.db() as db:
+        assert db.execute('SELECT state FROM card_outbox WHERE job=?', (ids[0],)).fetchone()[0] == 'pending'
+
+
+def test_card_intent_rejects_incomplete_origin_without_enqueuing(tmp_path):
+    pool = Pool(tmp_path)
+    with pytest.raises(ValueError, match='bound messaging origin'):
+        pool.submit('one', {'goal': 'check'}, origin={'profile': 'p', 'session': 's', 'route': 'r'},
+                    request_card=True)
+    with pool.db() as db:
+        assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM card_outbox').fetchone()[0] == 0
+
+
+def test_card_progress_column_migrates_existing_queue(tmp_path):
+    pool = Pool(tmp_path)
+    origin = {'profile': 'p', 'session': 's', 'route': 'r', 'channel': 'feishu', 'chat': 'c'}
+    job = pool.submit('one', {'goal': 'check'}, origin=origin, request_card=True)
+    with pool.db() as db:
+        db.execute('DROP INDEX card_outbox_progress_order')
+        db.execute('DROP INDEX card_outbox_progress_health')
+        db.execute('ALTER TABLE card_outbox DROP COLUMN progress_state')
+    with Pool(tmp_path).db() as db:
+        assert db.execute('SELECT progress_state FROM card_outbox WHERE job=?', (job,)).fetchone()[0] == 'pending'
+
+
 def test_dependency_failure_and_fenced_finish(tmp_path):
     p = Pool(tmp_path)
     first = p.submit('a', {})

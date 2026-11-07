@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import sqlite3
 import stat
+import tempfile
 
 
 class DirectCompletionTransport:
@@ -43,12 +44,17 @@ class DirectCompletionTransport:
 
     def _stage(self, path, attempt):
         source = Path(path)
-        allowed = (self.attempt_root/attempt).resolve()
+        attempt_dir = self.attempt_root/attempt
+        allowed = attempt_dir.resolve()
         resolved = source.resolve(strict=True)
-        if (not allowed.is_relative_to(self.attempt_root) or resolved.parent != allowed
+        if (attempt_dir.is_symlink() or allowed.parent != self.attempt_root or resolved.parent != allowed
                 or source.name.startswith('.') or source.is_symlink()):
             raise ValueError('artifact outside the owning attempt')
-        directory_fd = os.open(allowed, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        root_fd = os.open(self.attempt_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            directory_fd = os.open(attempt, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+        finally:
+            os.close(root_fd)
         try:
             fd = os.open(source.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
         finally:
@@ -66,12 +72,40 @@ class DirectCompletionTransport:
         directory = self.root/'files'/digest
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         target = directory/source.name
+        def existing_snapshot():
+            try:
+                existing_fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            except FileNotFoundError:
+                return False
+            with os.fdopen(existing_fd, 'rb') as existing:
+                if (not stat.S_ISREG(os.fstat(existing.fileno()).st_mode)
+                        or existing.read(len(raw) + 1) != raw):
+                    raise ValueError('artifact snapshot conflict')
+            return True
+        if existing_snapshot():
+            return dict(kind='file', path=str(target), name=source.name, sha256=digest)
+        # Publish only fully written snapshots. Creating the final pathname
+        # first exposes partial bytes to concurrent deliveries and leaves a
+        # poisoned snapshot if the writer dies before completing the write.
+        fd, temporary = tempfile.mkstemp(prefix='.snapshot-', dir=directory)
         try:
-            with target.open('xb') as out:
-                target.chmod(0o600); out.write(raw); out.flush(); os.fsync(out.fileno())
-        except FileExistsError:
-            if target.read_bytes() != raw:
-                raise ValueError('artifact snapshot conflict')
+            with os.fdopen(fd, 'wb') as out:
+                out.write(raw)
+                out.flush()
+                os.fsync(out.fileno())
+            try:
+                os.link(temporary, target, follow_symlinks=False)
+            except FileExistsError:
+                if not existing_snapshot():
+                    raise ValueError('artifact snapshot disappeared')
+            else:
+                dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+        finally:
+            os.unlink(temporary)
         return dict(kind='file', path=str(target), name=source.name, sha256=digest)
 
     def _operation(self, address, item, key):
@@ -96,13 +130,18 @@ class DirectCompletionTransport:
             response = self.sender(address, item, idempotency_key=key)
         except Exception:
             response = None
-        receipt = response.get('message_id') if isinstance(response, dict) and response.get('ok') is True else None
-        if not isinstance(receipt, str) or not receipt.strip():
+        reported_id = response.get('message_id') if isinstance(response, dict) else None
+        not_sent = response.get('not_sent') if isinstance(response, dict) else None
+        valid_flag = not_sent is None or type(not_sent) is bool
+        receipt = (reported_id if isinstance(response, dict) and response.get('ok') is True
+                   and valid_flag and not_sent is not True else None)
+        if not isinstance(receipt, str) or not receipt.strip() or len(receipt) > 512:
             receipt = None
         # Only an explicit pre-send refusal permits another attempt. Adapter
         # errors may be post-send failures and must remain unknown.
-        state = 'sent' if receipt else ('rejected' if isinstance(response, dict)
-                                       and response.get('not_sent') is True else 'unknown')
+        unsent = (isinstance(response, dict) and response.get('ok') is False
+                  and not_sent is True and reported_id is None)
+        state = 'sent' if receipt else ('rejected' if unsent else 'unknown')
         with self.db() as db:
             db.execute('UPDATE operations SET state=?,receipt_id=? WHERE key=?', (state, receipt, key))
         return receipt

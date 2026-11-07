@@ -59,6 +59,27 @@ def test_unknown_file_result_is_not_resent_after_restart(tmp_path):
     assert calls == ['text', 'file']
 
 
+@pytest.mark.parametrize('response', [
+    {'ok': True, 'not_sent': True, 'message_id': 'm'},
+    {'ok': False, 'not_sent': True, 'message_id': 'm'},
+    {'not_sent': True},
+    {'ok': True, 'not_sent': 'yes', 'message_id': 'm'},
+    {'ok': True, 'message_id': 'm' * 513},
+])
+def test_contradictory_sender_receipt_is_unknown_and_not_retried(tmp_path, response):
+    calls = []
+    def sender(*args, **kwargs):
+        calls.append(1)
+        return response
+    transport, message, _ = make_transport(tmp_path, sender)
+    message['artifacts'] = []
+    assert transport.deliver(ADDRESS, message, idempotency_key='job')['deferred']
+    assert transport.inspect()[0]['state'] == 'unknown'
+    restarted, _, _ = make_transport(tmp_path, sender)
+    assert restarted.deliver(ADDRESS, message, idempotency_key='job')['deferred']
+    assert len(calls) == 1
+
+
 def test_definite_presend_refusal_retries_only_unsent_part_with_staged_bytes(tmp_path):
     calls = []
     def sender(address, item, **kwargs):
@@ -75,7 +96,38 @@ def test_definite_presend_refusal_retries_only_unsent_part_with_staged_bytes(tmp
     assert calls == ['text', 'file', 'file']
 
 
-@pytest.mark.parametrize('kind', ['foreign_attempt', 'symlink', 'oversize'])
+def test_concurrent_snapshot_publication_exposes_only_complete_file(tmp_path, monkeypatch):
+    transport, _, file = make_transport(tmp_path, lambda *a, **kw: None)
+    barrier = threading.Barrier(2)
+    original_link = os.link
+    def synchronized_link(src, dst, **kwargs):
+        barrier.wait(timeout=5)
+        return original_link(src, dst, **kwargs)
+    monkeypatch.setattr(os, 'link', synchronized_link)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(transport._stage, file, ATTEMPT) for _ in range(2)]
+        snapshots = [future.result(timeout=10) for future in futures]
+    assert snapshots[0] == snapshots[1]
+    assert Path(snapshots[0]['path']).read_bytes() == b'verified report'
+    assert not list(Path(snapshots[0]['path']).parent.glob('.snapshot-*'))
+
+
+def test_failed_snapshot_publish_leaves_no_partial_final(tmp_path, monkeypatch):
+    transport, _, file = make_transport(tmp_path, lambda *a, **kw: None)
+    def fail(*args, **kwargs):
+        raise OSError('simulated publish failure')
+    with monkeypatch.context() as patch:
+        patch.setattr(os, 'link', fail)
+        with pytest.raises(OSError, match='simulated publish failure'):
+            transport._stage(file, ATTEMPT)
+    staged = list((tmp_path / 'delivery' / 'files').rglob('*'))
+    assert not any(path.is_file() for path in staged)
+    result = transport._stage(file, ATTEMPT)
+    assert Path(result['path']).read_bytes() == b'verified report'
+
+
+@pytest.mark.parametrize('kind', ['foreign_attempt', 'symlink', 'attempt_symlink', 'oversize'])
 def test_invalid_attachment_prevents_even_summary_delivery(tmp_path, kind):
     calls = []
     transport, message, file = make_transport(tmp_path, lambda *a, **kw: calls.append(a))
@@ -85,6 +137,12 @@ def test_invalid_attachment_prevents_even_summary_delivery(tmp_path, kind):
         message['artifacts'] = [str(other/'private.md')]
     elif kind == 'symlink':
         file.unlink(); file.symlink_to('/etc/hostname')
+    elif kind == 'attempt_symlink':
+        file.unlink()
+        file.parent.rmdir()
+        other = tmp_path/'attempts'/('b'*32)
+        other.mkdir(); (other/'report.md').write_text('other job')
+        file.parent.symlink_to(other, target_is_directory=True)
     else:
         with file.open('wb') as out:
             out.truncate(16*1024*1024+1)

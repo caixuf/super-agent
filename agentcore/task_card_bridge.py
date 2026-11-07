@@ -7,36 +7,73 @@ the task's entire lifecycle (queued -> running -> progressive delivery -> termin
 from __future__ import annotations
 
 from contextlib import contextmanager
+from collections import OrderedDict
+import fcntl
+from functools import wraps
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
 import sqlite3
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from agentcore.cardkit2_renderer import build_cardkit2_payload
+from agentcore.delivery_sanitizer import sanitize_and_extract_artifacts, sanitize_card_text
+
 logger = logging.getLogger(__name__)
+_MAX_THROTTLE_ENTRIES = 1024
 
 # Zero-emoji engineering indicators conforming to Super Agent UX discipline
 STATUS_LABELS = {
     "queued": "排队中",
     "running": "执行中",
     "progressive": "渐进交付中",
-    "completed": "已完成",
-    "failed": "执行失败",
+    "completed": "处理完成",
+    "failed": "执行未通过",
     "cancelled": "已取消",
 }
 
 STATUS_HEADERS = {
-    "queued": ("wathet", "任务状态 · 排队中"),
-    "running": ("wathet", "任务状态 · 执行中"),
-    "progressive": ("blue", "任务状态 · 渐进交付中"),
-    "completed": ("green", "任务状态 · 顺利完成"),
-    "failed": ("carmine", "任务状态 · 执行未通过"),
-    "cancelled": ("grey", "任务状态 · 已取消"),
+    "queued": ("wathet", "排队中"),
+    "running": ("wathet", "执行中"),
+    "progressive": ("wathet", "渐进交付中"),
+    "completed": ("indigo", "处理完成"),
+    "failed": ("carmine", "执行未通过"),
+    "cancelled": ("carmine", "已取消"),
 }
+
+
+def _serialize_task(method):
+    """Serialize mutations and sends across bridge instances with bounded lock files."""
+    @wraps(method)
+    def wrapped(self, task_id, *args, **kwargs):
+        if not isinstance(task_id, str) or not task_id or len(task_id) > 512:
+            raise ValueError('task_id required')
+        lock_dir = self.root / 'locks'
+        lock_dir.mkdir(mode=0o700, exist_ok=True)
+        stripe = hashlib.sha256(task_id.encode('utf-8')).digest()[0] % 64
+        fd = os.open(lock_dir / ('%02x.lock' % stripe),
+                     os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            deadline = time.monotonic() + self.lock_timeout
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError('task_card_lock_timeout') from None
+                    time.sleep(min(.05, remaining))
+            return method(self, task_id, *args, **kwargs)
+        finally:
+            os.close(fd)
+    return wrapped
 
 
 def _render_progress_bar(progress: float, width: int = 12) -> str:
@@ -47,75 +84,40 @@ def _render_progress_bar(progress: float, width: int = 12) -> str:
     return f"[{'■' * filled}{'□' * empty}]"
 
 
-def _sanitize_card_text(text: Any) -> str:
-    """Ensure user-facing text is cleanly decoded, unescaped, and unwrapped from raw JSON."""
-    if text is None:
-        return ""
-    if not isinstance(text, str):
-        if isinstance(text, dict):
-            for key in ("summary", "final_text", "report", "output"):
-                val = text.get(key)
-                if isinstance(val, str) and val.strip():
-                    return _sanitize_card_text(val)
-            if isinstance(text.get("result"), dict):
-                return _sanitize_card_text(text["result"])
-        try:
-            text = json.dumps(text, ensure_ascii=False)
-        except Exception:
-            text = str(text)
+def _finite_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
-    # 1. Unescape \uXXXX unicode escape sequences
-    if "\\u" in text or "\\U" in text:
-        try:
-            text = re.sub(
-                r'\\u([0-9a-fA-F]{4})',
-                lambda m: chr(int(m.group(1), 16)),
-                text
-            )
-        except Exception:
-            pass
 
-    # 2. If it's a JSON string representing a dict, unwrap human-readable content
-    stripped = text.strip()
-    # Check if string starts with prefix like "结果: {"
-    json_start = stripped.find("{")
-    if json_start != -1 and stripped.endswith("}"):
-        candidate_json = stripped[json_start:]
-        try:
-            parsed = json.loads(candidate_json)
-            if isinstance(parsed, dict):
-                for _ in range(3):
-                    if isinstance(parsed.get("result"), dict):
-                        parsed = parsed["result"]
-                    elif isinstance(parsed.get("checkpoint"), dict):
-                        parsed = parsed["checkpoint"]
-                for key in ("summary", "final_text", "report", "output"):
-                    val = parsed.get(key)
-                    if isinstance(val, str) and val.strip():
-                        prefix = stripped[:json_start].strip()
-                        human_val = _sanitize_card_text(val)
-                        return f"{prefix}\n{human_val}".strip() if prefix else human_val
-        except Exception:
-            pass
-
-    return text.strip()
+_sanitize_card_text = sanitize_card_text
 
 
 class TaskCardBridge:
     """Manages the decoupled lifecycle of task-bound cards."""
 
     def __init__(self, root: Path | str, *, profile: str, sender: Optional[Any] = None,
-                 min_update_interval: float = 1.2):
+                 min_update_interval: float = 1.2, lock_timeout: float = 30.0):
+        if not _finite_number(lock_timeout) or lock_timeout <= 0:
+            raise ValueError('lock_timeout must be positive and finite')
+        if not _finite_number(min_update_interval) or min_update_interval < 0:
+            raise ValueError('min_update_interval must be nonnegative and finite')
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.profile = profile
         self.sender = sender
+        self.lock_timeout = float(lock_timeout)
         self.min_update_interval = float(min_update_interval)
-        self._last_patched: Dict[str, float] = {}
+        self._last_patched: OrderedDict[str, float] = OrderedDict()
+        self._throttle_lock = threading.Lock()
         self._init_db()
 
     def _init_db(self) -> None:
         with self.db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS task_cards (
                     task_id TEXT PRIMARY KEY,
@@ -123,6 +125,7 @@ class TaskCardBridge:
                     route TEXT NOT NULL,
                     chat_id TEXT NOT NULL,
                     channel TEXT NOT NULL,
+                    thread_id TEXT NOT NULL DEFAULT '',
                     message_id TEXT,
                     role TEXT NOT NULL,
                     display_name TEXT NOT NULL,
@@ -132,24 +135,80 @@ class TaskCardBridge:
                     progress REAL DEFAULT 0.0,
                     elapsed REAL DEFAULT 0.0,
                     summary TEXT,
+                    error_text TEXT NOT NULL DEFAULT '',
                     artifacts_json TEXT,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
-                    finalized INTEGER NOT NULL DEFAULT 0
+                    finalized INTEGER NOT NULL DEFAULT 0,
+                    patch_state TEXT NOT NULL DEFAULT 'idle',
+                    create_state TEXT NOT NULL DEFAULT 'idle'
                 )
             """)
+            columns = {row[1] for row in conn.execute('PRAGMA table_info(task_cards)')}
+            if 'patch_state' not in columns:
+                conn.execute("ALTER TABLE task_cards ADD COLUMN patch_state TEXT NOT NULL DEFAULT 'idle'")
+                # The legacy schema recorded no send outcome. Do not infer that
+                # an existing message has no in-flight or ambiguous update.
+                conn.execute("UPDATE task_cards SET patch_state=CASE "
+                             "WHEN message_id IS NOT NULL AND message_id<>'' THEN 'unknown' "
+                             "WHEN finalized=1 THEN 'unsent' ELSE 'idle' END")
+            if 'thread_id' not in columns:
+                conn.execute("ALTER TABLE task_cards ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''")
+            if 'error_text' not in columns:
+                conn.execute("ALTER TABLE task_cards ADD COLUMN error_text TEXT NOT NULL DEFAULT ''")
+            if 'create_state' not in columns:
+                conn.execute("ALTER TABLE task_cards ADD COLUMN create_state TEXT NOT NULL DEFAULT 'idle'")
+                # Older rows have no durable record of an initial send. A missing
+                # message ID does not prove that no create request reached the host.
+                conn.execute("UPDATE task_cards SET create_state=CASE WHEN message_id IS NOT NULL "
+                             "AND message_id<>'' THEN 'sent' ELSE 'unknown' END")
+            conn.execute('CREATE INDEX IF NOT EXISTS task_card_terminal_health '
+                         'ON task_cards(profile, finalized, patch_state, updated_at)')
 
     @contextmanager
     def db(self):
         db_path = self.root / "task_cards.db"
         conn = sqlite3.connect(db_path, timeout=30)
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA synchronous=FULL")
         try:
             with conn:
                 yield conn
         finally:
             conn.close()
+
+    def _send_patch(self, task_id: str, address: dict, message_id: str, payload: dict) -> dict:
+        """Complete a write-ahead patch; uncertain results remain fenced across restarts."""
+        try:
+            result = self.sender(address=address, message_id=message_id, card_payload=payload)
+        except Exception as exc:
+            logger.warning('TaskCardBridge patch outcome unknown for %s (%s)', task_id, type(exc).__name__)
+            result = {'ok': False, 'error': 'patch_outcome_unknown', 'error_type': type(exc).__name__}
+        if not isinstance(result, dict):
+            result = {'ok': False, 'error': 'patch_outcome_unknown'}
+        reported_id = result.get('message_id')
+        not_sent = result.get('not_sent')
+        if ((not_sent is not None and type(not_sent) is not bool)
+                or (not_sent is True and (result.get('ok') is not False or reported_id is not None))):
+            result = {'ok': False, 'error': 'patch_outcome_unknown'}
+            reported_id = None
+        confirmed = (result.get('ok') is True and result.get('not_sent') is not True
+                     and reported_id == message_id)
+        definitely_unsent = (result.get('ok') is False and result.get('not_sent') is True
+                             and reported_id is None)
+        if result.get('ok') is True and not confirmed:
+            result = {'ok': False, 'error': 'patch_receipt_mismatch'}
+        state = 'idle' if confirmed else ('unsent' if definitely_unsent else 'unknown')
+        with self.db() as conn:
+            conn.execute("UPDATE task_cards SET patch_state=? WHERE task_id=? AND profile=? AND patch_state='sending'",
+                         (state, task_id, self.profile))
+        if confirmed:
+            with self._throttle_lock:
+                self._last_patched[task_id] = time.monotonic()
+                self._last_patched.move_to_end(task_id)
+                while len(self._last_patched) > _MAX_THROTTLE_ENTRIES:
+                    self._last_patched.popitem(last=False)
+        return result
 
     def build_card_payload(
         self,
@@ -165,9 +224,17 @@ class TaskCardBridge:
         artifacts: Optional[List[str]] = None,
         error_msg: str = "",
     ) -> Dict[str, Any]:
-        """Construct a clean, responsive CardKit 2.0 payload bound to the task."""
-        template, title_text = STATUS_HEADERS.get(status, ("wathet", f"任务状态 · {status}"))
+        """Construct the canonical CardKit 2.0 industrial card payload bound to the task.
+
+        Delegates to ``agentcore.cardkit2_renderer.build_cardkit2_payload`` as the
+        single source of truth (myai_colorful icon, wathet/indigo/carmine palette,
+        turquoise-50/blue-50/red-50 main column_set, and grey-50 footer).
+        """
+        template, status_suffix = STATUS_HEADERS.get(
+            status, ("wathet", _sanitize_card_text(status) or "处理中")
+        )
         now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+        clean_role = _sanitize_card_text(role_name) or "智能助手"
 
         # Trim goal for clean card presentation
         clean_goal = _sanitize_card_text(goal or "").replace("\r\n", "\n")
@@ -175,10 +242,13 @@ class TaskCardBridge:
             clean_goal = clean_goal[:277] + "..."
 
         body_lines = [
-            f"**任务编号**：`{task_id}`",
-            f"**指派角色**：{role_name}",
+            f"**任务编号**：`{_sanitize_card_text(task_id)}`",
+            f"**指派角色**：{clean_role}",
             f"**任务目标**：{clean_goal}",
         ]
+
+        is_terminal = status in ("completed", "failed", "cancelled")
+        is_failed = status in ("failed", "cancelled")
 
         if status in ("queued", "running", "progressive"):
             body_lines.append("────────────────")
@@ -192,7 +262,7 @@ class TaskCardBridge:
             if status == "queued":
                 body_lines.append("ℹ️ 等待后台 Worker 队列空闲调度...")
             else:
-                body_lines.append("⚡ 后台 Worker 正在全速执行中，文字结论将优先直达。")
+                body_lines.append("后台任务已进入执行阶段，文字结论将优先直达。")
 
         elif status == "completed":
             body_lines.append("────────────────")
@@ -204,7 +274,7 @@ class TaskCardBridge:
             if artifacts:
                 body_lines.append("**产出制品（Phase 2）**：")
                 for art in artifacts:
-                    body_lines.append(f"- `{Path(art).name}`: {art}")
+                    body_lines.append(f"- `{Path(art).name}`")
 
         elif status in ("failed", "cancelled"):
             body_lines.append("────────────────")
@@ -213,30 +283,26 @@ class TaskCardBridge:
             fail_desc = _sanitize_card_text(error_msg or summary or "任务未达到预期终态或已取消")
             body_lines.append(f"**未完成说明**：\n{fail_desc}")
 
-        body_lines.append("")
-        body_lines.append(f"<font color='grey'>状态更新于 {now_str} · 卡片与任务严格解耦绑定</font>")
-
-        elements = [
-            {
-                "tag": "markdown",
-                "content": "\n".join(body_lines),
-            },
+        footer_notes = [
+            f"状态: {'✅ PASS' if status == 'completed' else ('⚠️ ' + status_suffix if is_failed else status_suffix)}",
+            "出站交付护栏 100% 路径脱敏",
+            f"更新于 {now_str} · 卡片与任务严格解耦绑定",
         ]
 
-        return {
-            "schema": "2.0",
-            "header": {
-                "template": template,
-                "title": {
-                    "tag": "plain_text",
-                    "content": title_text,
-                },
-            },
-            "body": {
-                "elements": elements,
-            },
-        }
+        return build_cardkit2_payload(
+            "\n".join(body_lines),
+            is_terminal=is_terminal,
+            is_failed=is_failed,
+            title=clean_role,
+            subtitle="Super Agent 企业智能助手",
+            elapsed=elapsed if elapsed > 0.0 else None,
+            icon_token="myai_colorful",
+            status_suffix=status_suffix,
+            color_template=template,
+            footer_notes=footer_notes,
+        )
 
+    @_serialize_task
     def bind_task(
         self,
         task_id: str,
@@ -251,28 +317,115 @@ class TaskCardBridge:
         route = str(origin.get("route") or "")
         chat_id = str(origin.get("chat") or "")
         channel = str(origin.get("channel") or "feishu")
+        thread_id = str(origin.get('thread') or '')
 
         with self.db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
             conn.execute("""
-                INSERT OR REPLACE INTO task_cards (
-                    task_id, profile, route, chat_id, channel, message_id,
+                INSERT OR IGNORE INTO task_cards (
+                    task_id, profile, route, chat_id, channel, thread_id, message_id,
                     role, display_name, goal, status, phase, progress, elapsed,
                     summary, artifacts_json, created_at, updated_at, finalized
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', '已提交排队', 0.0, 0.0, NULL, NULL, ?, ?, 0)
-            """, (task_id, self.profile, route, chat_id, channel, message_id,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', '已提交排队', 0.0, 0.0, NULL, NULL, ?, ?, 0)
+            """, (task_id, self.profile, route, chat_id, channel, thread_id, message_id,
                   role, display_name, goal, now, now))
+            conn.row_factory = sqlite3.Row
+            row = conn.execute('SELECT * FROM task_cards WHERE task_id=?', (task_id,)).fetchone()
+            binding = (row['profile'], row['route'], row['chat_id'], row['channel'], row['thread_id'],
+                       row['role'], row['display_name'], row['goal'])
+            if binding != (self.profile, route, chat_id, channel, thread_id, role, display_name, goal):
+                return {'ok': False, 'error': 'binding_conflict'}
+            current_id = row['message_id']
+            if message_id and current_id and message_id != current_id:
+                return {'ok': False, 'error': 'message_id_conflict'}
+            if message_id and not current_id:
+                conn.execute("UPDATE task_cards SET message_id=?, create_state='sent', updated_at=? WHERE task_id=?",
+                             (message_id, now, task_id))
+                current_id = message_id
+            elif message_id and current_id:
+                conn.execute("UPDATE task_cards SET create_state='sent' WHERE task_id=?", (task_id,))
 
         card_payload = self.build_card_payload(
-            task_id, display_name, goal, "queued", phase="已提交排队"
+            task_id, display_name, goal, row['status'], phase=row['phase'] or '',
+            progress=row['progress'] or 0.0, elapsed=row['elapsed'] or 0.0,
+            summary=row['summary'] or '', artifacts=json.loads(row['artifacts_json'] or '[]'),
+            error_msg=row['error_text'] or ''
         )
-        return {"ok": True, "task_id": task_id, "message_id": message_id, "card_payload": card_payload}
+        return {"ok": True, "task_id": task_id, "message_id": current_id, "card_payload": card_payload}
 
-    def set_message_id(self, task_id: str, message_id: str) -> None:
-        """Associate a real messaging platform message_id once emitted."""
+    @_serialize_task
+    def create_initial(self, task_id: str, creator: Any) -> Dict[str, Any]:
+        """Create one card; fence ambiguous sends until an operator resolves them.
+
+        The creator accepts address, card_payload and delivery_key keyword arguments.
+        It must return an explicit message_id on success or not_sent=True only if
+        no create request could have reached the platform.
+        """
+        if not callable(creator):
+            raise ValueError('creator required')
         with self.db() as conn:
-            conn.execute("UPDATE task_cards SET message_id=?, updated_at=? WHERE task_id=?",
-                         (message_id, time.time(), task_id))
+            conn.execute('BEGIN IMMEDIATE')
+            conn.row_factory = sqlite3.Row
+            row = conn.execute('SELECT * FROM task_cards WHERE task_id=? AND profile=?',
+                               (task_id, self.profile)).fetchone()
+            if row is None:
+                return {'ok': False, 'error': 'task_not_found'}
+            if row['message_id']:
+                return {'ok': True, 'message_id': row['message_id'], 'already_created': True}
+            if row['create_state'] not in ('idle', 'unsent'):
+                return {'ok': False, 'error': 'previous_create_unknown'}
+            address = {'profile': self.profile, 'route': row['route'],
+                       'chat': row['chat_id'], 'channel': row['channel']}
+            if row['thread_id']:
+                address['thread'] = row['thread_id']
+            payload = self.build_card_payload(
+                task_id, row['display_name'], row['goal'], row['status'], phase=row['phase'] or '',
+                progress=row['progress'] or 0.0, elapsed=row['elapsed'] or 0.0,
+                summary=row['summary'] or '', artifacts=json.loads(row['artifacts_json'] or '[]'),
+                error_msg=row['error_text'] or '')
+            conn.execute("UPDATE task_cards SET create_state='sending' WHERE task_id=? AND profile=?",
+                         (task_id, self.profile))
+        delivery_key = hashlib.sha256((self.profile + '\0' + task_id).encode('utf-8')).hexdigest()
+        try:
+            result = creator(address=address, card_payload=payload, delivery_key=delivery_key)
+        except Exception as exc:
+            logger.warning('TaskCardBridge create outcome unknown for %s (%s)', task_id, type(exc).__name__)
+            result = None
+        message_id = result.get('message_id') if isinstance(result, dict) else None
+        not_sent = result.get('not_sent') if isinstance(result, dict) else None
+        valid_flag = not_sent is None or type(not_sent) is bool
+        confirmed = (isinstance(result, dict) and result.get('ok') is True
+                     and valid_flag and not_sent is not True
+                     and isinstance(message_id, str) and bool(message_id.strip()) and len(message_id) <= 512)
+        unsent = (isinstance(result, dict) and result.get('ok') is False
+                  and not_sent is True and message_id is None)
+        with self.db() as conn:
+            if confirmed:
+                conn.execute("UPDATE task_cards SET message_id=?, create_state='sent', "
+                             "patch_state=CASE WHEN patch_state IN ('idle','unsent') THEN 'idle' ELSE patch_state END, "
+                             "updated_at=? WHERE task_id=? AND profile=? AND create_state='sending'",
+                             (message_id, time.time(), task_id, self.profile))
+            else:
+                conn.execute("UPDATE task_cards SET create_state=? WHERE task_id=? AND profile=? "
+                             "AND create_state='sending'",
+                             ('unsent' if unsent else 'unknown', task_id, self.profile))
+        if confirmed:
+            return {'ok': True, 'message_id': message_id}
+        return {'ok': False, 'not_sent': True, 'error': 'create_not_sent'} if unsent else {
+            'ok': False, 'error': 'create_outcome_unknown'}
 
+    @_serialize_task
+    def set_message_id(self, task_id: str, message_id: str) -> bool:
+        """Associate a platform message once; never silently replace an existing ID."""
+        if not isinstance(message_id, str) or not message_id:
+            raise ValueError('message_id required')
+        with self.db() as conn:
+            result = conn.execute("UPDATE task_cards SET message_id=?, create_state='sent', updated_at=? WHERE task_id=? "
+                                  "AND profile=? AND (message_id IS NULL OR message_id='' OR message_id=?)",
+                                  (message_id, time.time(), task_id, self.profile, message_id))
+            return result.rowcount == 1
+
+    @_serialize_task
     def update_progress(
         self,
         task_id: str,
@@ -285,44 +438,53 @@ class TaskCardBridge:
     ) -> Dict[str, Any]:
         """Update live execution progress and patch the card in place."""
         now = time.time()
-        last_t = self._last_patched.get(task_id, 0.0)
-        if not force_sync and (now - last_t) < self.min_update_interval:
-            return {"ok": True, "skipped_throttle": True}
+        if status not in ('queued', 'running', 'progressive'):
+            return {'ok': False, 'error': 'invalid_progress_status'}
+        if (not _finite_number(progress) or not 0 <= progress <= 1
+                or not _finite_number(elapsed) or elapsed < 0):
+            return {'ok': False, 'error': 'invalid_progress_values'}
 
         with self.db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
             row = conn.execute(
-                "SELECT role, display_name, goal, message_id, route, chat_id, channel FROM task_cards WHERE task_id=?",
-                (task_id,)
+                "SELECT role, display_name, goal, message_id, route, chat_id, channel, finalized, patch_state, thread_id FROM task_cards WHERE task_id=? AND profile=?",
+                (task_id, self.profile)
             ).fetchone()
             if not row:
                 return {"ok": False, "error": "task_not_found"}
+            if row[7]:
+                return {'ok': False, 'error': 'already_finalized'}
+            with self._throttle_lock:
+                last_t = self._last_patched.get(task_id)
+            if not force_sync and last_t is not None and (time.monotonic() - last_t) < self.min_update_interval:
+                return {"ok": True, "skipped_throttle": True}
+            card_payload = self.build_card_payload(
+                task_id, row[1], row[2], status, phase=phase, progress=progress, elapsed=elapsed)
 
             conn.execute("""
                 UPDATE task_cards
                 SET status=?, phase=?, progress=?, elapsed=?, updated_at=?
-                WHERE task_id=?
-            """, (status, phase, progress, elapsed, now, task_id))
+                WHERE task_id=? AND profile=?
+            """, (status, phase, progress, elapsed, now, task_id, self.profile))
+            will_patch = bool(row[3] and self.sender and callable(self.sender))
+            blocked = will_patch and row[8] not in ('idle', 'unsent')
+            if will_patch and not blocked:
+                conn.execute("UPDATE task_cards SET patch_state='sending' WHERE task_id=? AND profile=?",
+                             (task_id, self.profile))
 
-        role, display_name, goal, message_id, route, chat_id, channel = row
-        card_payload = self.build_card_payload(
-            task_id, display_name, goal, status, phase=phase, progress=progress, elapsed=elapsed
-        )
-
+        role, display_name, goal, message_id, route, chat_id, channel, _, _, thread_id = row
         patch_result = None
-        if message_id and self.sender and callable(self.sender):
-            try:
-                patch_result = self.sender(
-                    address={"route": route, "chat": chat_id, "channel": channel, "profile": self.profile},
-                    message_id=message_id,
-                    card_payload=card_payload,
-                )
-                self._last_patched[task_id] = now
-            except Exception as e:
-                logger.warning("TaskCardBridge patch failed for %s: %s", task_id, e)
-                patch_result = {"ok": False, "error": str(e)}
+        if blocked:
+            patch_result = {'ok': False, 'error': 'previous_patch_unknown'}
+        elif will_patch:
+            address = {"route": route, "chat": chat_id, "channel": channel, "profile": self.profile}
+            if thread_id:
+                address['thread'] = thread_id
+            patch_result = self._send_patch(task_id, address, message_id, card_payload)
 
         return {"ok": True, "task_id": task_id, "card_payload": card_payload, "patch_result": patch_result}
 
+    @_serialize_task
     def finalize(
         self,
         task_id: str,
@@ -334,47 +496,85 @@ class TaskCardBridge:
         error_msg: str = "",
     ) -> Dict[str, Any]:
         """Finalize the card upon terminal outcome (turn-green contract)."""
+        if status not in ('completed', 'failed', 'cancelled'):
+            return {'ok': False, 'error': 'invalid_terminal_status'}
+        if not _finite_number(elapsed) or elapsed < 0:
+            return {'ok': False, 'error': 'invalid_elapsed'}
+        if artifacts is not None and (not isinstance(artifacts, list) or len(artifacts) > 8
+                or any(not isinstance(path, str) or not path or len(path) > 4096 for path in artifacts)):
+            return {'ok': False, 'error': 'invalid_artifacts'}
         now = time.time()
         with self.db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
             row = conn.execute(
-                "SELECT role, display_name, goal, message_id, route, chat_id, channel FROM task_cards WHERE task_id=?",
-                (task_id,)
+                "SELECT role, display_name, goal, message_id, route, chat_id, channel, finalized, patch_state, thread_id, status, summary, artifacts_json, elapsed, error_text FROM task_cards WHERE task_id=? AND profile=?",
+                (task_id, self.profile)
             ).fetchone()
             if not row:
                 return {"ok": False, "error": "task_not_found"}
+            if row[7]:
+                same = (row[10] == status and (row[11] or '') == (summary or '')
+                        and json.loads(row[12] or '[]') == (artifacts or [])
+                        and row[13] == elapsed and (row[14] or '') == (error_msg or ''))
+                if not same:
+                    return {'ok': False, 'error': 'already_finalized'}
+                if row[8] != 'unsent':
+                    if row[8] != 'idle':
+                        return {'ok': True, 'finalized': True,
+                                'patch_result': {'ok': False, 'error': 'previous_patch_unknown'}}
+                    return {'ok': True, 'finalized': True, 'already_finalized': True}
+            card_payload = self.build_card_payload(
+                task_id, row[1], row[2], status, elapsed=elapsed,
+                summary=summary, artifacts=artifacts, error_msg=error_msg)
 
             conn.execute("""
                 UPDATE task_cards
-                SET status=?, summary=?, artifacts_json=?, elapsed=?, updated_at=?, finalized=1
-                WHERE task_id=?
-            """, (status, summary, json.dumps(artifacts or []), elapsed, now, task_id))
+                SET status=?, summary=?, error_text=?, artifacts_json=?, elapsed=?, updated_at=?, finalized=1
+                WHERE task_id=? AND profile=?
+            """, (status, summary, error_msg, json.dumps(artifacts or []), elapsed, now, task_id, self.profile))
+            will_patch = bool(row[3] and self.sender and callable(self.sender))
+            blocked = will_patch and row[8] not in ('idle', 'unsent')
+            if will_patch and not blocked:
+                conn.execute("UPDATE task_cards SET patch_state='sending' WHERE task_id=? AND profile=?",
+                             (task_id, self.profile))
 
-        role, display_name, goal, message_id, route, chat_id, channel = row
-        card_payload = self.build_card_payload(
-            task_id, display_name, goal, status, elapsed=elapsed,
-            summary=summary, artifacts=artifacts, error_msg=error_msg
-        )
+            elif not will_patch and row[8] in ('idle', 'unsent'):
+                conn.execute("UPDATE task_cards SET patch_state='unsent' WHERE task_id=? AND profile=?",
+                             (task_id, self.profile))
 
+        role, display_name, goal, message_id, route, chat_id, channel, _, _, thread_id = row[:10]
         patch_result = None
-        if message_id and self.sender and callable(self.sender):
-            try:
-                patch_result = self.sender(
-                    address={"route": route, "chat": chat_id, "channel": channel, "profile": self.profile},
-                    message_id=message_id,
-                    card_payload=card_payload,
-                )
-                self._last_patched[task_id] = now
-            except Exception as e:
-                logger.warning("TaskCardBridge finalize patch failed for %s: %s", task_id, e)
-                patch_result = {"ok": False, "error": str(e)}
+        if blocked:
+            patch_result = {'ok': False, 'error': 'previous_patch_unknown'}
+        elif will_patch:
+            address = {"route": route, "chat": chat_id, "channel": channel, "profile": self.profile}
+            if thread_id:
+                address['thread'] = thread_id
+            patch_result = self._send_patch(task_id, address, message_id, card_payload)
 
+        with self._throttle_lock:
+            self._last_patched.pop(task_id, None)
         return {"ok": True, "task_id": task_id, "finalized": True, "card_payload": card_payload, "patch_result": patch_result}
 
     def get_card(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Query stored card status and metadata."""
         with self.db() as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute("SELECT * FROM task_cards WHERE task_id=?", (task_id,)).fetchone()
+            row = conn.execute("SELECT * FROM task_cards WHERE task_id=? AND profile=?",
+                               (task_id, self.profile)).fetchone()
             if not row:
                 return None
             return dict(row)
+
+    def terminal_health(self, *, stale_before: float) -> Dict[str, int]:
+        """Count fenced terminal patches without exposing task contents or addresses."""
+        if not _finite_number(stale_before):
+            raise ValueError('stale_before must be finite')
+        with self.db() as conn:
+            conn.execute('BEGIN')
+            unknown = conn.execute("SELECT COUNT(*) FROM task_cards WHERE profile=? AND finalized=1 "
+                                   "AND patch_state='unknown'", (self.profile,)).fetchone()[0]
+            stale = conn.execute("SELECT COUNT(*) FROM task_cards WHERE profile=? AND finalized=1 "
+                                 "AND patch_state='sending' AND updated_at<?",
+                                 (self.profile, stale_before)).fetchone()[0]
+        return {'unknown': unknown, 'stale_sending': stale}
