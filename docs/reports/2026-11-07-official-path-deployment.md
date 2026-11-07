@@ -1007,3 +1007,117 @@ $ hermes gateway status
 `~/super_agent` 从 7.2G 降到 452M。删除全部走 `mavis-trash` 可恢复通道，
 暂存区在 `~/.local/share/Trash`（约 6.1G），**未清空**，可随时回退。
 
+
+## 16. 上游更新同步与再部署（2026-11-08 00:2x）
+
+### 16.1 上游这次改了什么
+
+上游在 `origin/main` 上新增 3 个提交（`4a7a839` 与 `e268734` 同内容、origin/gitlab 双源，
+`a80a20a` 做同步）：
+
+| 文件 | 改动 | 对本实例是否生效 |
+|---|---|---|
+| `install/configure_defaults.py` | +1 行：把 `lan-cluster` 加进 `platform_toolsets` 保证列表 | **生效**（本轮唯一落地的改动，见 §16.3） |
+| `tools/redeploy_check.py` | `lan-cluster` 进受控插件集；新增「`state_dir` 必须是绝对路径」判定 | **生效**（复验门禁变严，现场已满足） |
+| `install/worker/dev_exec_runner.py` | +7 行：`_hermes_bin()` 增加 `~/super_agent/*/hermes-current/...` 查找 | 不生效：它只服务**受管布局**（`install/setup_profile.py:113`），本实例的 worker 跑的是 `agentcore.pool`（`PYTHONPATH=~/.hermes/agentcore`），现场 `install/` 只有 3 个文件、无 `install/worker/` |
+| `tools/superagent.py` | +61 行：绑定同事 profile 收敛（`_sync_bound_colleague_profiles`）、`localvec.engine_root` 兜底 | 不生效：受管布局的安装器，本实例走 `install/install.sh` |
+| `docker/clean_room_check.sh` | +240 行：新增第⑧步（caixuf 高手绑定 / 同事团队 / LAN 集群协议 / 受管单根收敛 端到端实测） | 仅验证用 |
+| `docker/Dockerfile` | apt 源换阿里云镜像 | 仅构建用 |
+
+### 16.2 与本地提交的关系：互补，不冲突
+
+- rebase 到 `a80a20a` **零冲突**；
+- `tools/redeploy_check.py` 两边都改了同一片区域：上游加 `lan-cluster` / `state_dir` 判定，
+  本地 `bc1ec3e` 加 `hermes_source_tree()`（把门禁指向真正在跑的树）——**两份都在**，
+  互不覆盖；
+- 现场配置**早就满足**新版门禁：`plugins.entries.lan-cluster.settings` 里
+  `engine_root=/home/caixuf/.hermes/agentcore`、`state_dir=/home/caixuf/.hermes/agentcore-state/lan-cluster`
+  （绝对路径、有 `agentcore` 子目录）。
+
+### 16.3 现场再部署：一个命令，唯一改动是 `lan_cluster` 进工具集
+
+```bash
+HERMES_AGENT_DIR=/home/caixuf/super_agent/default/hermes/v0.22.5-bf0203a794a0 \
+PATH=$HERMES_AGENT_DIR/.hermes/bin:$PATH \
+bash install/install.sh --hermes-home /home/caixuf/.hermes
+# EXIT=0
+# 日志：~/super_agent/migration-backups/official-install-postupdate-20261108-002228.log
+```
+
+`config.yaml` **不再逐字节零改动** —— 与 §13 那次不同，这次上游改了 `configure_defaults.py`，
+所以有一处**官方预期内**的增量：
+
+```diff
+  cli:
+    - hermes-cli
+    - memory_bridge
+    - task_status
+    - durable_dispatch
+    - markdown_delivery
+    - colleague_catalog
+    - colleague_team
++   - lan_cluster
+  telegram: （同样 +1 行）
+  discord / whatsapp / slack / signal / homeassistant / qqbot / yuanbao: （同样 +1 行）
+```
+
+**只有这一处**：`lan_cluster` 被加进 9 个 `platform_toolsets` 列表（9041 → 9185 字节）。
+其余全部「已一致」，没有别的副作用。语义上是把 lan-cluster 工具集**显式挂到各平台的工具选择里**，
+与 §10.1 记的「lan-cluster 靠工具面清单验收」是一致的补齐。
+
+再部署后复验：
+
+- 部署副本与仓内**逐字节一致**：`runtime/hermes_frontdesk_policy.py`、
+  `agentcore/lan_cluster.py`、`agentcore/pool.py`、`plugins/lan_cluster/__init__.py`；
+- 6 个服务全 `active`；网关 `running`、code `0.22.5`、IM 平台 `connected`、`needs_attention=false`；
+- `hermes tools list`：24 个工具注册、7 个插件工具集全 `✓ enabled`。
+
+### 16.4 官方干净室验证通过 —— 「这次好部署了吗」的权威答案
+
+```bash
+bash docker/verify.sh HEAD
+# == 干净检出 HEAD → /tmp/super-agent-ctx.XXXXXX（749 个文件）
+# == 构建镜像 super-agent-check:a80a20a
+# == 退出码 0 （干净室部署通过）
+```
+
+`docker/verify.sh` 先把 `HEAD` **导出成干净检出**（`git archive`，不含工作区改动），
+用它当构建上下文，`docker run --rm --network none` 跑 `docker/clean_room_check.sh`。
+所以绿的是**那个提交**，不是本机工作区。
+
+8 步全 `[PASS]`，退出码 **0**：
+
+| 步骤 | 结果 |
+|---|---|
+| ① 仓自检（业务无关门禁 + 引擎单测） | 单测通过（**2974 passed**，容器内环境） |
+| ② 包安装 | `pip install` 成功；从 **site-packages** 导入（不是仓内源码）；随包 `.so` 已在包内 |
+| ③ `--dry-run` 零副作用 | 退出码 0，**未创建任何文件** |
+| ④ 真实安装（模拟「没有 Hermes CLI 的新机器」） | 安装器退出码 0；身份骨架字节一致；`agentcore/toolsets/runtime/patches/tools` 全部落位；**15 个插件目录 + 清单 + 已启用**全部 PASS（含 `lan-cluster`、`colleague-team`、`task-progress`）；`localvec` provider 落位；具名技能落位；派工契约 8/8；未动现场身份；`examples/` 没被装成生产技能；缺 Hermes CLI 或补丁目标时**明确失败**；⑩ 段变量全部展开 |
+| ④b 私有运行时真实渲染（离线 Chromium） | 真实浏览器生成含图 PNG（24793 字节） |
+| ⑤ 幂等 | 重跑退出码 0；识别出 **305 处「已一致」**；重跑后文件集合未变 |
+| ⑥ 合成生效身份 | 退出码 0；占位符全替换；注入点恰好 1 处；体积符合预期 |
+| ⑦ 引擎端到端（写入 → 汇合 → 召回，离线嵌入） | `pending=0 hits=1 empty_reason=None` → `SMOKE_OK` |
+| ⑧ **新增**：高手绑定与同事团队 / LAN 集群 / 受管单根收敛 | `{"caixuf_bound": true, "roster_count": 5, "lan_rpc_ok": true, "single_root_converged": true}` |
+
+第⑧步尤其关键：它真的建了 4 个同事角色、招了 `caixuf` 等 5 人并授权、
+跑通了一次 LAN 节点 RPC（含 `lan_sessions.json` 落盘），
+还在临时目录里跑了一次受管单根 `tools/superagent.py install` 并校验路径收敛。
+
+### 16.5 回归
+
+宿主全量：`python3 -m pytest -q` → **2967 passed / 148 skipped / 0 failed**（433.39s）。
+（容器内 2974 passed，差 7 个是环境相关的用例。）
+
+### 16.6 上游**没有**解决的（仍然挂着）
+
+1. `scripts/ops/uninstall-legacy.sh` 仍硬性要求 `~/super_agent/default/current` 存在 ——
+   本次上游**没有**改这个脚本，§15.5 记的分歧依旧；
+2. host 集成测试夹具仍缺（退役树删后 89 个用例转 skip），本次上游也没提供。
+
+### 16.7 这次「好部署了」的准确边界
+
+| 场景 | 结论 |
+|---|---|
+| **从零部署**（空 HOME + 本仓源码） | ✅ 官方干净室链路一次过，退出码 0 |
+| **现场再部署**（本实例） | ✅ 一个命令、EXIT=0、除 `lan_cluster` 外零副作用、幂等 |
+| **从零到本实例这套完整拓扑** | ⚠️ 仍需人工：凭据落地、真实消息通道与卡片视觉验收、host 集成测试夹具 |
