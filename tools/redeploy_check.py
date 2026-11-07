@@ -253,14 +253,56 @@ def check_install(result):
             result.ok("every installed plugin is enabled")
 
 
+def hermes_source_tree() -> Path:
+    """The Hermes source tree this instance actually runs.
+
+    ``HERMES_AGENT_DIR`` wins. Otherwise the installed Hermes is resolved
+    from the ``hermes`` on PATH: the standard layout keeps it at
+    ``~/.hermes/hermes-agent``, but an instance may install it elsewhere, and
+    a gate that verifies a tree nobody runs verifies nothing.
+    """
+    override = os.environ.get("HERMES_AGENT_DIR")
+    if override:
+        return Path(override).expanduser()
+    launcher = shutil.which("hermes")
+    if launcher:
+        resolved = Path(launcher).resolve()
+        for candidate in resolved.parents:
+            if (candidate / "hermes_cli").is_dir():
+                return candidate
+    return Path.home() / ".hermes" / "hermes-agent"
+
+
+def _modified_files(agent: Path, files) -> list[str]:
+    """Which of ``files`` the installed tree already carries as modifications."""
+    try:
+        proc = subprocess.run(["git", "-C", str(agent), "diff", "--name-only", "--"] + list(files),
+                              capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
 def check_patches(result):
     print("\n== ③ Feishu patches on a pristine Hermes export")
-    agent = Path(os.path.expanduser(os.environ.get("HERMES_AGENT_DIR", "~/.hermes/hermes-agent")))
+    agent = hermes_source_tree()
     if not (agent / "gateway").is_dir():
         result.skip("patch sequence", "no Hermes source tree at %s" % agent)
         return
     files = ["gateway/stream_consumer.py", "gateway/stream_consumer_transport.py",
              "plugins/platforms/feishu/adapter.py"]
+    # These checks prove the patches APPLY to a clean Hermes. An installed tree
+    # that already carries them cannot show that, and re-applying on top of an
+    # applied patch is not the same test — say so instead of reporting a
+    # failure that looks like a broken patch.
+    modified = _modified_files(agent, files)
+    if modified:
+        result.skip("patch sequence",
+                    "the installed Hermes tree already carries the patches (%s); "
+                    "this check needs a pristine export" % ", ".join(modified))
+        return
     with tempfile.TemporaryDirectory() as scratch:
         tree = Path(scratch)
         for relative in files:
@@ -271,8 +313,11 @@ def check_patches(result):
             (tree / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, tree / relative)
         env = dict(os.environ, HERMES_AGENT_DIR=str(tree))
+        # The list mirrors the official patch sequence in install/install.sh.
+        # ``patch_card_markdown_native.py`` is deliberately absent: upstream
+        # marks it legacy and the official installer must not apply it.
         for script in ("apply_feishu_card_replies.py", "patch_card_finalize.py",
-                       "patch_card_markdown_native.py", "patch_feishu_update_retry.py"):
+                       "patch_feishu_update_retry.py"):
             path = REPO / "patches" / script
             check = run([sys.executable, str(path), "--check"], env=env)
             if check.returncode not in (0, 1):
@@ -303,7 +348,7 @@ def check_card_roundtrip(result):
     Needs HERMES_FEISHU_ADAPTER to point at a patched adapter; the tests skip otherwise.
     """
     print("\n== ③b card round-trip on the patched adapter", flush=True)
-    agent = Path(os.path.expanduser(os.environ.get("HERMES_AGENT_DIR", "~/.hermes/hermes-agent")))
+    agent = hermes_source_tree()
     adapter = agent / "plugins/platforms/feishu/adapter.py"
     if not adapter.is_file():
         result.skip("card round-trip", "no patched adapter at %s" % adapter)
