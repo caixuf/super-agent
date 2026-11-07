@@ -460,6 +460,32 @@ def test_plugin_defaults_enable_markdown_delivery_with_credentials_path(tmp_path
     assert not outbox.stat().st_mode & 0o077
 
 
+def test_plugin_defaults_enable_lan_cluster_with_its_own_state_dir(tmp_path):
+    """局域网集群工具面要有总开关；没有节点时是空集群，工具仍要在位。
+
+    ``lan_node_rpc`` 需要一个自己的绝对状态目录，否则每次调用都会以
+    ``absolute_state_dir_required`` 失败 —— 工具在位但必然报错不算恢复。
+    """
+    import yaml
+    home = tmp_path / "profile"
+    home.mkdir()
+    config = home / "config.yaml"
+    config.write_text("plugins:\n  enabled: [lan-cluster]\n")
+    engine = tmp_path / "current"
+    engine.symlink_to(REPO_ROOT, target_is_directory=True)
+    proc = subprocess.run(["python3", str(REPO_ROOT / "install/plugin_defaults.py"),
+                           "--config", str(config), "--home", str(home), "--engine-root", str(engine),
+                           "--profile", "p1"], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    settings = yaml.safe_load(config.read_text())["plugins"]["entries"]["lan-cluster"]["settings"]
+    assert settings["enabled"] is True
+    assert settings["engine_root"] == str(engine)
+    state_dir = home / "agentcore-state" / "lan-cluster"
+    assert settings["state_dir"] == str(state_dir)
+    assert state_dir.is_dir()
+    assert not state_dir.stat().st_mode & 0o077
+
+
 def test_plugin_defaults_markdown_delivery_never_overwrites_an_existing_entry(tmp_path):
     """现场已有条目（含显式关闭）属于部署方，默认安装不得改写。"""
     import yaml

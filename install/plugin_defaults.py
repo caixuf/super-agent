@@ -114,6 +114,11 @@ def defaults(home: Path, engine: Path, profile: str, env_file: Path | None = Non
         "markdown-delivery": {"enabled": True, **engine_settings,
                               "outbox_root": str(home / "agentcore-state" / "markdown-outbox"),
                               "env_file": credentials},
+        # An empty cluster is a valid cluster: the tools exist so an operator can
+        # list and probe the nodes that are actually there. The RPC session
+        # state needs an absolute directory of its own.
+        "lan-cluster": {"enabled": True, **engine_settings,
+                        "state_dir": str(home / "agentcore-state" / "lan-cluster")},
     }
 
 
@@ -195,6 +200,8 @@ def main(argv=None):
                 _private_directory(home / "agentcore-state" / "colleague-team")
             if "markdown-delivery" in names:
                 _private_directory(home / "agentcore-state" / "markdown-outbox")
+            if "lan-cluster" in names:
+                _private_directory(home / "agentcore-state" / "lan-cluster")
             config_text._backup(args.config)
             config_text._write_atomic(args.config, changed)
             for name in names:
