@@ -131,11 +131,15 @@ def profile_readiness(home: Path):
         # code is imported, no settings value or credential is printed.
         if gated and settings.get("enabled") is True:
             if name in {"colleague-catalog", "colleague-team", "durable-dispatch",
-                        "illustrated-delivery", "markdown-delivery", "memory-bridge",
-                        "task-progress", "task-status"}:
+                        "illustrated-delivery", "lan-cluster", "markdown-delivery",
+                        "memory-bridge", "task-progress", "task-status"}:
                 root = settings.get("engine_root")
                 if not isinstance(root, str) or not Path(root).is_absolute() or not (Path(root) / "agentcore").is_dir():
                     issues.append("absolute_engine_root_with_agentcore_required")
+            if name == "lan-cluster":
+                state_dir = settings.get("state_dir")
+                if not isinstance(state_dir, str) or not Path(state_dir).is_absolute():
+                    issues.append("absolute_state_dir_required")
             if name == "colleague-team":
                 for key in ("team_id", "primary_id"):
                     if not isinstance(settings.get(key), str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", settings[key]):

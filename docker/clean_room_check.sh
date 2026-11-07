@@ -107,11 +107,16 @@ for f in toolsets/pi_executor/__init__.py runtime/hermes-agent.service \
   if [ -f "$P/agentcore/$f" ]; then pass "落位 agentcore/$f"; else bad "缺失 agentcore/$f"; fi
 done
 
-for name in durable-dispatch illustrated-delivery localvec longtask-guard markdown-delivery \
-            memory-bridge capability-alert-outbox; do
+for name in capability-alert-outbox colleague-catalog colleague-team durable-dispatch \
+            illustrated-delivery lan-cluster local-model-grounding \
+            localvec longtask-guard markdown-delivery memory-bridge task-progress \
+            task-status write-guard; do
   if [ -d "$P/plugins/$name" ]; then pass "插件目录 $name"; else bad "插件目录缺失 $name"; fi
 done
-for name in durable-dispatch illustrated-delivery longtask-guard markdown-delivery memory-bridge capability-alert-outbox write-guard; do
+for name in capability-alert-outbox colleague-catalog colleague-team durable-dispatch \
+            illustrated-delivery lan-cluster local-model-grounding \
+            longtask-guard markdown-delivery memory-bridge task-progress \
+            task-status write-guard; do
   if [ -f "$P/plugins/$name/plugin.yaml" ]; then pass "插件清单 $name"; else bad "插件清单缺失 $name"; fi
   if grep -qE "^[[:space:]]*- $name$" "$P/config.yaml" 2>/dev/null; then
     pass "插件已启用 $name"
@@ -282,6 +287,235 @@ if out="$(cd /tmp && python3 "$REPO/docker/engine_smoke.py" 2>&1)"; then
 else
   printf '%s\n' "$out" | indent
   bad "引擎端到端失败"
+fi
+
+# --------------------------------------------------------------------------- #
+step "⑧ 高手绑定（caixuf）与同事团队 / 局域网集群 / 受管单根安装端到端实测"
+if out="$(cd /tmp && "$P/agentcore/.superagent-venv/bin/python" - "$P" "$REPO" <<'PY'
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import yaml
+
+profile_dir = Path(sys.argv[1])
+repo_dir = Path(sys.argv[2])
+engine_dir = profile_dir / "agentcore"
+sys.path.insert(0, str(engine_dir))
+
+cfg = yaml.safe_load((profile_dir / "config.yaml").read_text(encoding="utf-8"))
+entries = cfg["plugins"]["entries"]
+for req in ("colleague-catalog", "colleague-team", "illustrated-delivery", "lan-cluster",
+            "markdown-delivery", "task-progress", "task-status"):
+    assert req in entries, f"missing plugin entry {req}"
+    assert entries[req]["settings"].get("enabled") is True, f"{req} not enabled"
+    if "engine_root" in entries[req]["settings"]:
+        assert entries[req]["settings"]["engine_root"] == str(engine_dir), f"{req} engine_root mismatch"
+
+class DummyCtx:
+    def __init__(self, settings, profile_name="dockercheck"):
+        self.plugin_config = settings
+        self.profile_name = profile_name
+        self.tools = {}
+        self.hooks = {}
+        self.prompts = {}
+        self.unloads = []
+    def get_config(self, key, default=None):
+        cur = self.plugin_config
+        for part in key.split("."):
+            if not isinstance(cur, dict) or part not in cur:
+                return default
+            cur = cur[part]
+        return cur
+    def register_tool(self, **kw):
+        self.tools[kw["name"]] = kw["handler"]
+    def register_hook(self, name, fn):
+        self.hooks.setdefault(name, []).append(fn)
+    def register_system_prompt_section(self, *args, **kw):
+        self.prompts[kw.get("id") or (args[0] if args else "default")] = (args, kw)
+    def on_unload(self, fn):
+        self.unloads.append(fn)
+
+def load_plugin(plugin_folder, mod_name):
+    init_py = profile_dir / "plugins" / plugin_folder / "__init__.py"
+    spec = importlib.util.spec_from_file_location(mod_name, init_py)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+# 1. Colleague Catalog
+cat_ctx = DummyCtx(entries["colleague-catalog"]["settings"])
+load_plugin("colleague-catalog", "_clean_colleague_catalog").register(cat_ctx)
+cat_res = json.loads(cat_ctx.tools["colleague_catalog"]({}, session_id="sess-clean-1"))
+assert cat_res["ok"] is True and len(cat_res["colleagues"]) >= 1, f"catalog failed: {cat_res}"
+
+# 2. Colleague Team & Expert caixuf binding
+team_settings = dict(entries["colleague-team"]["settings"])
+team_ctx = DummyCtx(team_settings, profile_name=team_settings["primary_id"])
+load_plugin("colleague-team", "_clean_colleague_team").register(team_ctx)
+
+for role_id, label, duty in (
+    ("caixuf_expert", "首席架构与全栈主程高手", "负责复杂架构收敛、全栈开发与多同事协同攻坚"),
+    ("architect", "架构师", "负责系统架构设计与模块边界审阅"),
+    ("backend", "后端主程", "负责核心引擎与插件实现"),
+    ("reviewer", "代码审阅", "负责代码质量与门禁把关"),
+):
+    def_res = json.loads(team_ctx.tools["colleague_define_role"]({
+        "role_id": role_id,
+        "label": label,
+        "duty": duty,
+        "boundaries": ["遵守零硬编码中立红线"],
+        "request_id": f"req-def-{role_id}",
+    }, session_id="sess-clean-1"))
+    assert def_res["ok"] is True, f"define_role {role_id} failed: {def_res}"
+
+hire_caixuf = json.loads(team_ctx.tools["colleague_hire"]({
+    "member_id": "caixuf",
+    "role_id": "caixuf_expert",
+    "display_name": "caixuf（首席高手）",
+    "request_id": "req-hire-caixuf",
+}, session_id="sess-clean-1"))
+assert hire_caixuf["ok"] is True and hire_caixuf["member_id"] == "caixuf", f"hire caixuf failed: {hire_caixuf}"
+
+for cid, rid, dname in (
+    ("architect", "architect", "架构师"),
+    ("backend", "backend", "后端主程"),
+    ("reviewer", "reviewer", "代码审阅"),
+):
+    r = json.loads(team_ctx.tools["colleague_hire"]({
+        "member_id": cid,
+        "role_id": rid,
+        "display_name": dname,
+        "request_id": f"req-hire-{cid}",
+    }, session_id="sess-clean-1"))
+    assert r["ok"] is True, f"hire {cid} failed: {r}"
+
+grant_res = json.loads(team_ctx.tools["colleague_grant"]({
+    "member_id": "caixuf",
+    "enabled": True,
+    "request_id": "req-grant-caixuf",
+}, session_id="sess-clean-1"))
+assert grant_res["ok"] is True, f"grant failed: {grant_res}"
+
+list_res = json.loads(team_ctx.tools["colleague_list"]({}, session_id="sess-clean-1"))
+assert list_res["ok"] is True, f"list failed: {list_res}"
+roster_ids = {c["member_id"] for c in list_res["members"]}
+assert {"caixuf", "architect", "backend", "reviewer"}.issubset(roster_ids), f"missing roster ids: {roster_ids}"
+assert Path(team_settings["registry_path"]).is_file(), "registry.db not created"
+
+# 3. LAN Cluster RPC & Session Affinity with caixuf expert node
+lan_settings = dict(entries["lan-cluster"]["settings"])
+lan_settings["nodes"] = {
+    "caixuf": {
+        "display_name": "caixuf-expert-node",
+        "role": "expert-dev",
+        "description": "Local loopback expert dev node",
+        "capabilities": ["coding", "architecture", "review"],
+        "agent_rpc_cmd": [
+            sys.executable, "-c",
+            "import json, sys; req = json.loads(sys.stdin.read()); "
+            "print(json.dumps({'ok': True, 'protocol_version': 2, 'node': 'caixuf', "
+            "'session_id': req.get('session_id') or 'sess-caixuf-1', "
+            "'summary': 'executed:' + req.get('prompt', '')}))"
+        ],
+    }
+}
+lan_ctx = DummyCtx(lan_settings)
+load_plugin("lan-cluster", "_clean_lan_cluster").register(lan_ctx)
+
+nodes_res = json.loads(lan_ctx.tools["lan_node_list"]({}, session_id="sess-clean-1"))
+assert nodes_res["ok"] is True and any(n["node_id"] == "caixuf" for n in nodes_res["nodes"]), f"lan_node_list failed: {nodes_res}"
+
+rpc_res = json.loads(lan_ctx.tools["lan_node_rpc"]({
+    "node_id": "caixuf",
+    "request_id": "req-rpc-caixuf-1",
+    "operation": "submit",
+    "prompt": "verify-clean-room-caixuf-binding",
+    "session_key": "clean-room-affinity",
+}, session_id="sess-clean-1"))
+assert rpc_res["ok"] is True and rpc_res["remote"].get("summary") == "executed:verify-clean-room-caixuf-binding", f"lan_node_rpc failed: {rpc_res}"
+assert (Path(lan_settings["state_dir"]) / "lan_sessions.json").is_file(), "lan_sessions.json not persisted"
+
+# 4. Single-root superagent.py install + bound colleague profile convergence
+with tempfile.TemporaryDirectory(prefix="superagent-single-root-") as tmp:
+    tmp_root = Path(tmp)
+    managed_root = tmp_root / "super_agent" / "caixuf"
+    profiles_root = tmp_root / ".hermes" / "profiles"
+    caixuf_home = profiles_root / "caixuf"
+    arch_home = profiles_root / "architect"
+    hermes_src = tmp_root / "hermes-src"
+    for d in (caixuf_home, arch_home / "plugins" / "localvec", hermes_src / "plugins" / "platforms" / "feishu"):
+        d.mkdir(parents=True, exist_ok=True)
+    (hermes_src / "plugins" / "platforms" / "feishu" / "adapter.py").write_text("# fake adapter\n", encoding="utf-8")
+    (caixuf_home / ".env").write_text("TOKEN=local-test-only\n", encoding="utf-8")
+    # Minimal hermes tree markers + config with legacy paths and bound colleague
+    (caixuf_home / "config.yaml").write_text(yaml.safe_dump({
+        "model": {"default": "gpt-5.4"},
+        "memory": {"provider": "localvec", "localvec": {
+            "engine_root": "/home/caixuf/.hermes/superagent/caixuf/current",
+            "combined_entity_db": "/home/caixuf/.hermes/superagent/caixuf/state/entity-rules/combined_rules.db",
+        }},
+        "plugins": {
+            "enabled": ["colleague-team", "durable-dispatch"],
+            "disabled": [],
+            "entries": {
+                "colleague-team": {"settings": {
+                    "enabled": True,
+                    "engine_root": "/home/caixuf/.hermes/superagent/caixuf/current",
+                    "registry_path": "/home/caixuf/.hermes/superagent/caixuf/state/colleague-team/registry.sqlite",
+                    "gateway_dispatch": {
+                        "enabled": True,
+                        "tool_backend": {"members": [{"profile": "architect", "home": str(arch_home)}]},
+                    },
+                }},
+                "durable-dispatch": {"settings": {
+                    "enabled": True,
+                    "engine_root": "/home/caixuf/.hermes/superagent/caixuf/current",
+                    "queue_root": "/home/caixuf/.hermes/superagent/caixuf/state/analysis-queue",
+                    "allowed_roots": [str(repo_dir)],
+                }},
+            },
+        },
+    }), encoding="utf-8")
+    (arch_home / "config.yaml").write_text(yaml.safe_dump({
+        "memory": {"provider": "localvec", "localvec": {
+            "engine_root": "/home/caixuf/.hermes/superagent/caixuf/current",
+        }},
+    }), encoding="utf-8")
+    proc = subprocess.run([
+        sys.executable, str(repo_dir / "tools" / "superagent.py"),
+        "--profile", "caixuf",
+        "--root", str(tmp_root / "super_agent"),
+        "--profile-home", str(caixuf_home),
+        "--hermes-root", str(hermes_src),
+        "install",
+    ], capture_output=True, text=True, check=True)
+    install_out = json.loads(proc.stdout)
+    assert install_out["status"] == "installed"
+    assert (managed_root / "current").is_symlink()
+    migrated_main = yaml.safe_load((caixuf_home / "config.yaml").read_text(encoding="utf-8"))
+    migrated_arch = yaml.safe_load((arch_home / "config.yaml").read_text(encoding="utf-8"))
+    assert migrated_main["memory"]["localvec"]["engine_root"] == str(managed_root / "current")
+    assert migrated_main["memory"]["localvec"]["combined_entity_db"] == str(managed_root / "state" / "entity-rules" / "combined_rules.db")
+    assert migrated_arch["memory"]["localvec"]["engine_root"] == str(managed_root / "current")
+    assert (arch_home / "plugins" / "localvec").resolve() == (managed_root / "current" / "plugins" / "localvec").resolve()
+
+print(json.dumps({
+    "caixuf_bound": True,
+    "roster_count": len(roster_ids),
+    "lan_rpc_ok": True,
+    "single_root_converged": True,
+}))
+PY
+)"; then
+  printf '%s\n' "$out" | indent
+  pass "caixuf 高手绑定、同事团队协同、LAN 集群协议与单根收敛全部验证通过"
+else
+  printf '%s\n' "$out" | tail -25 | indent
+  bad "高手绑定或单根收敛实测失败"
 fi
 
 # --------------------------------------------------------------------------- #

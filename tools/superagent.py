@@ -1078,6 +1078,7 @@ def _migrated_config_text(original: str, args: argparse.Namespace, managed: dict
             f"{home_prefix}/.local/state/agentcore/liveness.db": managed["liveness_db"],
             f"{home_prefix}/.local/state/agentcore/cards": cards_root,
             f"{home_prefix}/.local/state/agentcore/colleague-team/registry.sqlite": managed["colleague_registry"],
+            f"{home_prefix}/.local/state/agentcore/queue/{profile}": str(state_parent / "colleague-queues"),
             f"{home_prefix}/.hermes/superagent/{profile}/state/analysis-queue": managed["queue_root"],
             f"{home_prefix}/.hermes/superagent/{profile}/state/dev-queue": dev_queue_root,
             f"{home_prefix}/.hermes/superagent/{profile}/state/memory-spool": managed["memory_spool"],
@@ -1085,6 +1086,9 @@ def _migrated_config_text(original: str, args: argparse.Namespace, managed: dict
             f"{home_prefix}/.hermes/superagent/{profile}/state/liveness.db": managed["liveness_db"],
             f"{home_prefix}/.hermes/superagent/{profile}/state/cards": cards_root,
             f"{home_prefix}/.hermes/superagent/{profile}/state/colleague-team/registry.sqlite": managed["colleague_registry"],
+            f"{home_prefix}/.hermes/superagent/{profile}/state": str(state_parent),
+            f"{home_prefix}/.hermes/superagent/{profile}/current": managed["engine_root"],
+            f"AGENTCORE_ROOT={home_prefix}/.hermes/superagent/{profile}/current": f"AGENTCORE_ROOT={managed['engine_root']}",
         })
     mapping = {old: new for old, new in raw_mapping.items() if old != new}
     updated = _migrate_owned_path_scalars(original, mapping)
@@ -1116,6 +1120,59 @@ def migrate_config(args: argparse.Namespace, plan: dict[str, Any], *, quiet: boo
         print(json.dumps({"status": "migrated" if updated != original else "unchanged",
                           "config": str(config)}, indent=2))
     return 0
+
+
+def _sync_bound_colleague_profiles(profile_home: Path, release: Path, args: argparse.Namespace, plan: dict[str, Any]) -> None:
+    """Keep same-host bound colleague profiles aligned with the active release and managed paths."""
+    import re
+    import yaml
+
+    try:
+        config = yaml.safe_load((profile_home / "config.yaml").read_text(encoding="utf-8")) or {}
+    except Exception:
+        return
+    if not isinstance(config, dict):
+        return
+    dispatch = ((config.get("plugins") or {}).get("entries") or {}).get("colleague-team", {}).get("settings", {}).get("gateway_dispatch") or {}
+    if not isinstance(dispatch, dict) or dispatch.get("enabled") is not True:
+        return
+    members: list[dict[str, Any]] = []
+    for backend_key in ("tool_backend", "safe_backend"):
+        backend = dispatch.get(backend_key)
+        if isinstance(backend, dict) and isinstance(backend.get("members"), list):
+            members.extend(m for m in backend["members"] if isinstance(m, dict))
+    seen: set[str] = set()
+    for member in members[:64]:
+        name, raw = member.get("profile"), member.get("home")
+        if not isinstance(name, str) or name in seen or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name):
+            continue
+        seen.add(name)
+        member_home = Path(raw) if isinstance(raw, str) else Path("")
+        try:
+            if (not member_home.is_absolute() or member_home.name != name
+                    or member_home.resolve().parent != profile_home.resolve().parent
+                    or not member_home.is_dir()):
+                continue
+        except OSError:
+            continue
+        plugins_dir = member_home / "plugins"
+        if plugins_dir.is_dir():
+            present_plugins = [p for p in plan.get("plugins", []) if (plugins_dir / p).exists() or (plugins_dir / p).is_symlink()]
+            present_providers = [p for p in plan.get("memory_providers", []) if (plugins_dir / p).exists() or (plugins_dir / p).is_symlink()]
+            if present_plugins or present_providers:
+                try:
+                    _relink_plugins(member_home, release, present_plugins, plan.get("external_plugins", []), present_providers)
+                except Exception:
+                    pass
+        member_cfg = member_home / "config.yaml"
+        if member_cfg.is_file():
+            try:
+                orig = member_cfg.read_text(encoding="utf-8")
+                migrated = _migrated_config_text(orig, args, plan["managed_paths"])
+                if migrated != orig:
+                    _write_text_atomic(member_cfg, migrated)
+            except Exception:
+                pass
 
 
 
@@ -1266,6 +1323,7 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     _enable_plugins(profile_home, plugins)
     _apply_official_plugin_defaults(profile_home, root / "current", args.profile)
     _purge_legacy_plugins(profile_home)
+    _sync_bound_colleague_profiles(profile_home, release, args, plan)
     if plan.get("card_implementation") == "release-cardkit":
         _disable_legacy_card_producer(profile_home)
     runtime_configuration = _apply_runtime_drop_ins(
@@ -1681,10 +1739,13 @@ def _recall_diagnostics_observation(profile_home: Path, managed_current: Path | 
                         binding["plugin"] = "unmanaged"
                     else:
                         binding["plugin"] = "missing"
+                    localvec_cfg = data.get("memory", {}).get("localvec", {})
                     if isinstance(command, list):
                         roots = [x.split("=", 1)[1] for x in command if isinstance(x, str) and x.startswith("AGENTCORE_ROOT=")]
                         direct = [x for x in command if isinstance(x, str) and x.endswith("/tools/recall_entity.py")]
                         candidates = roots + direct
+                        if not candidates and isinstance(localvec_cfg, dict) and isinstance(localvec_cfg.get("engine_root"), str):
+                            candidates = [localvec_cfg["engine_root"]]
                         if len(candidates) == 1 and Path(candidates[0]).is_absolute():
                             resolved = Path(candidates[0]).resolve()
                             binding["engine"] = "matched" if resolved == release or resolved.is_relative_to(release) else "mismatched"

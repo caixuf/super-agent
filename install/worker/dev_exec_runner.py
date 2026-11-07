@@ -76,7 +76,12 @@ def _hermes_bin() -> str | None:
     # 1. Follow the newest managed release first so worker turns never hit an
     # unmanaged or mid-update ~/.local/bin/hermes wrapper.
     home = _profile_home().parent.parent
-    raw_candidates = list((home / "superagent").glob("*/hermes/*/.hermes/bin/hermes"))
+    user_home = home.parent if home.name == ".hermes" else Path.home()
+    raw_candidates = (
+        list((user_home / "super_agent").glob("*/hermes-current/.hermes/bin/hermes"))
+        + list((user_home / "super_agent").glob("*/hermes/*/.hermes/bin/hermes"))
+        + list((home / "superagent").glob("*/hermes/*/.hermes/bin/hermes"))
+    )
     valid_candidates = [p for p in raw_candidates if p.is_file()]
     if valid_candidates:
         valid_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)

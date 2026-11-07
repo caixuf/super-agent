@@ -19,7 +19,8 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HOME=/root
 
-RUN apt-get update && apt-get install -y --no-install-recommends git chromium \
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null || true \
+    && apt-get update && apt-get install -y --no-install-recommends git chromium \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/super-agent

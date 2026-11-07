@@ -207,5 +207,18 @@ def test_remote_ssh_host_routes_to_colleague_profile(monkeypatch):
     assert "HERMES_SESSION_CHAT_ID=colleague-reviewer-" in captured["cmd"][6]
 
 
+def test_hermes_bin_discovers_single_root_super_agent_release(monkeypatch, tmp_path):
+    module = _module()
+    monkeypatch.delenv("DEV_HERMES_BIN", raising=False)
+    profile_home = tmp_path / ".hermes" / "profiles" / "caixuf"
+    profile_home.mkdir(parents=True)
+    managed_bin = tmp_path / "super_agent" / "caixuf" / "hermes-current" / ".hermes" / "bin" / "hermes"
+    managed_bin.parent.mkdir(parents=True)
+    managed_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    monkeypatch.setattr(module, "_profile_home", lambda: profile_home)
+    assert module._hermes_bin() == str(managed_bin)
+
+
+
 
 
