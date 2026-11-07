@@ -141,13 +141,21 @@
 
 ### 10.1 本实例的逐项状态（bot1，2026-11-07）
 
+部署口径：走官方 `install/install.sh --hermes-home ~/.hermes` 单一写者路径，
+详见 `docs/reports/2026-11-07-official-path-deployment.md`。
+
 | 扩展 | 状态 | 依据 |
 | :--- | :--- | :--- |
 | E02 的 `toolsets/pi_executor` | **关闭** | 随包安装但本实例未配置目标执行器；未做真跑回读，不承诺性能收益 |
-| E02 的 `plugins/local_model_grounding` | **关闭** | 该插件只做 HTTP 客户端；它需要的 `POST /decide` + `POST /encode` 模型网关脚本在另一台直连网线的机器上（仓库只提供客户端，不提供该网关），且本机没有判别模型。**缺后端就不开**，不静默降级成半开 |
+| E02 的 `plugins/local_model_grounding` | **关闭** | 该插件只做 HTTP 客户端；它需要的 `POST /decide` + `POST /encode` 模型网关脚本在另一台直连网线的机器上（仓库只提供客户端，不提供该网关），且本机没有判别模型。**缺后端就不开**，不静默降级成半开。**注意**：它仍在 `plugins.enabled` 列表里（`hermes plugins list` 显示 `enabled`），但**没有** `plugins.entries.local_model_grounding` 条目 → 总开关缺省 false → 工具面不出现。列表与实际不一致，排查时以工具面为准 |
 | E01 夜间复盘与定时作业 | **未验收** | 随包能力在位，但本实例未声明时区/预算/重试口径，未做手动验通 |
 | E03 代码图谱与文档渲染 | **随包，未做能力面验收** | 属辅助工具，不当运行主干 |
 | E04 学习、蒸馏与记忆可塑性 | **关闭** | 记忆侧只启用「捕获 + 召回」；自动写入与策略自动晋升须单独授权与验收 |
+| `plugins/markdown_delivery`（D05 文档交付） | **支持** | 官方默认写入 `settings.enabled: true` + `engine_root`；实测工具面出现 `md_deliver` / `md_resolve` |
+| `plugins/lan_cluster`（D06 局域网集群） | **支持（空集群）** | 官方默认写入 `settings.enabled: true` + `engine_root` + `state_dir`；实测工具面出现 `lan_node_list` / `lan_node_probe` / `lan_node_rpc`。本实例**未配置 `nodes`**（无局域网生产节点），故 `lan_node_list` 返回空集群，probe/rpc 返回 `lan_nodes_required`。节点名册属部署方配置，不由默认安装生成 |
+| `plugins/colleague_team`（同事团队） | **配置就位，生命周期未验收** | 官方默认写入 `enabled: true` + `team_id` + `registry_path`；工具面出现 `colleague_*`。官方就绪门禁报 `[OPEN] colleague-team: real provisioning and lifecycle integration is not established` |
+| `plugins/task_progress` | **关闭** | 现场 `plugins.entries.task-progress.settings.enabled: false`（历史显式关闭）。官方默认安装**永不反转**显式关闭，故保持关闭；就绪门禁如实报 `[OPEN] task-progress: missing: enabled`。是否打开属运维方决策 |
+| `plugins/durable_dispatch` / `memory_bridge` / `task_status` / `colleague_catalog` | **支持** | 工具面出现 `durable_*` / `memory_*` / `task_status` / `colleague_catalog`；worker 与 memory 单元由官方 `setup_worker.py` / `setup_memory.py` 重生成并 active |
 
 判定口径：`plugins.entries.<id>.settings.enabled` 为 true **且** 其依赖后端在同一环境
 实测可达，才算该能力开启。仅在 `plugins.enabled` 列表里出现不算。
