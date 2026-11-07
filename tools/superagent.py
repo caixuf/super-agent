@@ -1150,21 +1150,38 @@ def _sync_bound_colleague_profiles(profile_home: Path, release: Path, args: argp
         member_home = Path(raw) if isinstance(raw, str) else Path("")
         try:
             if (not member_home.is_absolute() or member_home.name != name
-                    or member_home.resolve().parent != profile_home.resolve().parent
-                    or not member_home.is_dir()):
+                    or member_home.resolve().parent != profile_home.resolve().parent):
                 continue
+            if member_home.is_symlink() or (member_home.exists() and not member_home.is_dir()):
+                continue
+            member_home.mkdir(parents=True, exist_ok=True)
+            (member_home / "workspace").mkdir(parents=True, exist_ok=True)
+            plugins_dir = member_home / "plugins"
+            plugins_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             continue
-        plugins_dir = member_home / "plugins"
-        if plugins_dir.is_dir():
-            present_plugins = [p for p in plan.get("plugins", []) if (plugins_dir / p).exists() or (plugins_dir / p).is_symlink()]
-            present_providers = [p for p in plan.get("memory_providers", []) if (plugins_dir / p).exists() or (plugins_dir / p).is_symlink()]
-            if present_plugins or present_providers:
-                try:
-                    _relink_plugins(member_home, release, present_plugins, plan.get("external_plugins", []), present_providers)
-                except Exception:
-                    pass
+        desired_plugins: set[str] = set()
         member_cfg = member_home / "config.yaml"
+        if member_cfg.is_file():
+            try:
+                cfg = yaml.safe_load(member_cfg.read_text(encoding="utf-8")) or {}
+                if isinstance(cfg, dict):
+                    enabled = (cfg.get("plugins") or {}).get("enabled")
+                    if isinstance(enabled, list):
+                        desired_plugins.update(p for p in enabled if isinstance(p, str))
+            except Exception:
+                pass
+        try:
+            desired_plugins.update(p.name for p in plugins_dir.iterdir() if p.exists() or p.is_symlink())
+        except OSError:
+            pass
+        present_plugins = [p for p in plan.get("plugins", []) if p in desired_plugins]
+        present_providers = [p for p in plan.get("memory_providers", []) if p == "localvec" or p in desired_plugins or (plugins_dir / p).exists() or (plugins_dir / p).is_symlink()]
+        if present_plugins or present_providers:
+            try:
+                _relink_plugins(member_home, release, present_plugins, plan.get("external_plugins", []), present_providers)
+            except Exception:
+                pass
         if member_cfg.is_file():
             try:
                 orig = member_cfg.read_text(encoding="utf-8")
@@ -1241,7 +1258,7 @@ def _stage_release(plan: dict[str, Any]) -> Path:
         # install/ carries the managed worker runner (install/worker/dev_exec_runner.py).
         # Without it the profile dev-runner.json has to point at a hand-maintained
         # copy and upgrades can never replace the execution engine.
-        for name in ("agentcore", "skills", "toolsets", "tools", "runtime", "patches", "install", "overlay"):
+        for name in ("agentcore", "skills", "toolsets", "tools", "runtime", "patches", "install", "overlay", "identity"):
             if (REPO / name).is_dir():
                 _copy_tree(REPO / name, staged / name)
         managed_sources = [*PLUGIN_SOURCES, *(Path(p) for p in plan.get("external_plugins", []))]

@@ -173,6 +173,8 @@ def test_install_uses_one_root_and_idempotent_plugin_links(tmp_path):
     assert (release / "patches/patch_frontdesk_boundary.py").is_file()
     assert (release / "runtime/hermes_frontdesk_policy.py").is_file()
     assert (release / "runtime/hermes_frontdesk_turn.py").is_file()
+    assert (release / "identity/SOUL.generic.md").is_file()
+    assert (release / "identity/agents").is_dir()
     plugins = yaml.safe_load((profile / "config.yaml").read_text())["plugins"]["enabled"]
     assert "task-status" in plugins
     assert (profile / "plugins/task-status").is_symlink()
@@ -1744,10 +1746,67 @@ def test_install_syncs_bound_colleague_profiles_and_engine_root_bindings(tmp_pat
         managed_root / "state" / "entity-rules" / "combined.db"
     )
     assert (colleague / "plugins" / "localvec").is_symlink()
+    assert (colleague / "workspace").is_dir()
     module = _load_installer()
     obs = module._recall_diagnostics_observation(profile, managed_root / "current")
     assert obs["disk_bindings"]["demo"] == {"plugin": "matched", "engine": "matched"}
     assert obs["disk_bindings"]["architect"] == {"plugin": "matched", "engine": "matched"}
+
+
+def test_install_provisions_newly_provisioned_colleague_workspace_and_plugins(tmp_path):
+    profile = _seed_profile(tmp_path)
+    colleague = tmp_path / ".hermes" / "profiles" / "analyst"
+    colleague.mkdir(parents=True)
+    (colleague / "config.yaml").write_text(
+        yaml.safe_dump({
+            "memory": {
+                "provider": "localvec",
+                "localvec": {
+                    "engine_root": f"{tmp_path}/.hermes/superagent/demo/current",
+                },
+            },
+            "plugins": {
+                "enabled": ["task-status"],
+            },
+        }),
+        encoding="utf-8",
+    )
+    (profile / "config.yaml").write_text(
+        yaml.safe_dump({
+            "memory": {"provider": "localvec", "localvec": {"engine_root": f"{tmp_path}/.hermes/superagent/demo/current"}},
+            "plugins": {
+                "enabled": [],
+                "disabled": [],
+                "entries": {
+                    "colleague-team": {
+                        "settings": {
+                            "enabled": True,
+                            "gateway_dispatch": {
+                                "enabled": True,
+                                "tool_backend": {
+                                    "members": [{"profile": "analyst", "home": str(colleague)}],
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    _run(tmp_path, "--root", str(tmp_path / "super_agent"), "install", check=True)
+    managed_root = tmp_path / "super_agent" / "demo"
+    release = managed_root / "current"
+    assert (colleague / "workspace").is_dir()
+    assert (colleague / "plugins").is_dir()
+    assert (colleague / "plugins" / "localvec").is_symlink()
+    assert (colleague / "plugins" / "localvec").resolve() == (release / "plugins" / "localvec").resolve()
+    assert (colleague / "plugins" / "task-status").is_symlink()
+    assert (colleague / "plugins" / "task-status").resolve() == (release / "plugins" / "task_status").resolve()
+    module = _load_installer()
+    obs = module._recall_diagnostics_observation(profile, release)
+    assert obs["disk_bindings"]["analyst"] == {"plugin": "matched", "engine": "matched"}
+
 
 
 
