@@ -479,6 +479,7 @@ PYTHONPATH=/home/caixuf/.hermes/agentcore python3 -m agentcore.completion_backfi
 ```bash
 python3 -m pytest tests/ -q
 # 3048 passed, 59 skipped in 577.39s (0:09:37)   退出码 0
+# （这是清除旧版本**之前**的最后一轮；清理后的数字见 §14.3）
 ```
 
 对比部署前基线 `3036 passed / 59 skipped`：**+10** 来自本次新增/改写的用例
@@ -700,3 +701,155 @@ bash install/install.sh --hermes-home /home/caixuf/.hermes     # EXIT=0
 3. **`~/.local/bin/hermes` 指向退役的 v0.22.2** → 官方入口已对齐到在役 v0.22.5；
    PATH 上那个链接本身属宿主环境配置，**未改动**（改它不在本次部署授权范围内），
    已在 §4.1 留痕。
+
+---
+
+## 13. 清除旧版本：现场只留官方路径的产物（2026-11-07 21:3x）
+
+迁移完成、验收通过之后，现场还压着一整套**迁移前**的产物：退役的 Hermes 树、受管布局的
+release 快照、旧 card sidecar、旧布局的 profile 目录、以及几个旧版工具运行时。
+既然已经全面对标官方路径，这些就是死重量 —— 而且每一件都可能让后来人踩坑
+（PATH 上的 `hermes` 指向退役树、`plugins list` 与 profile 里的旧技能打架、
+旧 sidecar 的状态目录被误当成在用）。
+
+### 13.1 顺序：先改引用点，再删东西
+
+删之前先把所有引用点改掉 —— 否则会在半路弄坏一个还在跑的东西。
+
+| # | 引用点 | 处置 |
+| :-- | :--- | :--- |
+| 1 | `~/.local/bin/hermes` → 退役 v0.22.2 树 | 改指在役官方 v0.22.5（`hermes --version` 现在报 `v0.22.5 · bf0203a794a0`） |
+| 2 | 网关单元 PATH 首项 `hermes-agent/node_modules/.bin` | 移除（候选树没有 node_modules；`~/.hermes/node/bin` 与 `~/.hermes/tools/node-26.7.0-linux-x64/bin` 仍在 PATH 里，node 工具链不缺） |
+| 3 | `hermes-feishu-card-sidecar.service` | 移除（`disabled` + `inactive` 的死单元；卡片已由网关原生补丁承担） |
+
+### 13.2 删除清单（每一件都先验证过可恢复）
+
+| 对象 | 体积 | 为什么安全 |
+| :--- | --: | :--- |
+| `~/.hermes/hermes-agent`（退役 Hermes v0.22.2 树） | 2.2G | 迁移备份 `migration-backups/.../hermes-home/hermes-agent` 有完整副本；运行中进程不碰它 |
+| `~/.hermes/tools/python-3.14.7+20260901-linux-x64` | 401M | `tools/facts.json` 声明的活动版本是 `python-3.14.9+20261021`；旧版无引用，备份里有 |
+| `~/.hermes/tools/node-26.12.1-linux-x64` | 230M | 活动版本是 `node-26.7.0-linux-x64`；同上 |
+| `~/.hermes/tools/uv-0.12.3-linux-x64` | 54M | 活动版本是 `uv-0.13.5-linux-x64`；同上 |
+| `~/.hermes/tools/hfc-5.0.13` + `hfc-terminal-ack-20261102`（旧 sidecar 的两个 venv） | 82M | 只被已停用的 sidecar 单元引用；卡片已由网关原生补丁承担（见 `docs/handoff/2026-11-01-hfc-cutover-runbook.md`） |
+| `~/.hermes/hfc-bot1.yaml`、`~/.hermes_feishu_card/`（旧 sidecar 的配置与状态） | 4K | 新架构（候选树 + 官方补丁）源码里**零引用**；checkpoint 是 11-06 的旧 sidecar 状态 |
+| `~/super_agent/default/releases/{10b55bb,5331261,dc398f7,e0e86f8}` | 36M | 受管布局的 release 快照。**内容按 blob 哈希逐文件核对过，全部能在本仓 git 历史里找到** —— 快照只是仓库内容的历史拷贝 |
+| `~/super_agent/default/current`（指向 5331261 的符号链接） | — | 已确认无配置、无单元、无运行中进程引用 |
+| `~/super_agent/default/backups/`、`external-plugins/`、`install-manifest.json` | 11M | 受管布局自己的产物；该布局不再是本实例的部署职责 |
+| `~/.hermes/profiles/`（旧布局 profile 目录） | 4.6M | 旧布局的 `config.yaml`（过期快照）、`SOUL.md` 副本、`skills/`（v1.0.0 旧副本）、`plugins/`（与新布局无差集）、`agentcore/`（旧引擎拷贝）、空 `sessions/`、`memories/`、`cron/` |
+| `~/.hermes/config.yaml.bak.ccp-pro.*`、`config.yaml.before-memory-defaults`、`~/.hermes/backups/` | 11M | 受管布局时期的快照（10-31～11-06）；备份里有 |
+
+**保留**（有理由，不属于「旧版本」）：
+
+- `~/super_agent/default/hermes/v0.22.5-bf0203a794a0` —— **在役宿主树**，网关就跑它。
+- `~/super_agent/default/hermes-current` —— 指向在役宿主树的符号链接。
+- `~/.hermes/config.yaml.before-defaults` —— **今天官方安装器自己写的**备份（官方写者的行为）。
+- `~/.hermes/skill-backups/` —— 两份现场增强版技能原件（§12 已把它们提升进仓，但留着不亏）。
+- `~/super_agent/migration-backups/`（6.8G）与 `~/super_agent/backups/`（15M）—— **本次部署的回退物料**。
+  它们不是「在跑的旧版本」，是回退底本。**要连它们一起清掉，说一声即可**。
+
+### 13.3 复验
+
+```bash
+bash install/install.sh --hermes-home /home/caixuf/.hermes     # EXIT=0
+```
+
+- **`config.yaml` 逐字节零改动**。
+- 插件启用路径因 `~/.hermes/hermes-agent` 不复存在，从「官方 CLI 入口」切到安装器自带的
+  备用分支 —— 实测**行为完全等价**（12 个已启用插件全部识别为「已启用」，无写入）。
+  这是一次意外的等价性验证。
+- 重启后：6 个服务全 active（含 `ccp-sse-watchdog`）；网关 `running`、IM 平台 `connected`、
+  `needs_attention=false`、code `0.22.5`；插件工具集仍 7 个在位；就绪门禁退出码 0。
+- 网关日志里唯一一条 ERROR 是**旧进程**被 SIGTERM 时的收尾噪音（`Event loop is closed`），
+  新进程启动与重连无任何异常。
+
+**净释放**：`~/.hermes` 7.7G → **4.8G**（-2.9G），`~/super_agent/default` 472M → **436M**。
+
+---
+
+## 14. 清除旧版本暴露出来的两个真问题（2026-11-07 21:4x）
+
+删掉退役树之后，有两处**仓内代码**开始依赖一个已经不存在的东西。
+它们平时看不见，因为退役树一直在替它们兜底。
+
+### 14.1 frontdesk 策略硬编码了退役树的 venv
+
+`runtime/hermes_frontdesk_policy.py` 原来这样兜底找 `ruamel.yaml`：
+
+```python
+venv_lib = Path.home() / ".hermes/hermes-agent/venv/lib"   # ← 退役树
+```
+
+那个 venv 里的 ruamel 是策略唯一的 YAML 1.1 来源。退役树一删，策略就退到
+`import yaml`（PyYAML）—— 而 **PyYAML 既不认 YAML 1.1 的 `y`/`n` 布尔，也不拒绝重复键**，
+和宿主的 `hermes_yaml`（ruamel，YAML 1.1 + 拒绝重复键）语义不一致。
+换句话说：策略在**不同的规则**下读配置，读出来的可能不是宿主的策略。
+
+**这不是一次「路径失效」，是策略本来就有一个兜底分支在悄悄降级。**
+仓里的两条用例正是为这个写的（`test_bad_policy_fails_closed_without_echoing_config`
+要求重复键必须失败关闭，`test_policy_matches_host_yaml_booleans_without_an_undeclared_pyyaml_dependency`
+要求没有 PyYAML 也要认 `y`/`n`），删树之前它们是被退役 venv 兜住的。
+
+**修法**：让解析链与宿主对齐，而不是找一个替代品。
+
+| 顺序 | 解析器 | 语义 |
+| :-- | :--- | :--- |
+| 1 | 宿主自己的 `hermes_yaml` | 与宿主**完全一致**（生产走这条） |
+| 2 | `ruamel.yaml`（`version=(1,1)`、`allow_duplicate_keys=False`） | 与宿主一致 |
+| 3 | PyYAML，但**校正到宿主语义**：私有 loader 补上 `y`/`n` 布尔、重复键直接报错 | 与宿主一致 |
+| 4 | 自带的窄解析器（只读 `superagent:` 块，YAML 1.1 布尔、重复键报错） | 没有 YAML 库时的最后手段 |
+
+第 3 层没有直接弃用 PyYAML，是因为它本来就能解析整个配置（测试里用 JSON 写配置），
+只是两条规则要补齐；私有 loader 只影响这个模块，别处不受影响。
+
+**落地**：官方 `patches/patch_frontdesk_boundary.py --apply` 把修好的策略刷进宿主树
+（同时补上了此前缺失的 `boost` 命令，宿主树副本现在与仓内**逐字节一致**，
+`--check` 报 `installed`）；官方安装器把部署副本 `~/.hermes/agentcore/runtime/` 刷新。
+
+**线上影响评估：零。** 网关运行时 `hermes_yaml` 与 `ruamel.yaml` 都可用（实测），
+走的永远是第 1 层；现场 `config.yaml` 没有顶层 `superagent:` 键 → 策略读出
+`enabled=false` → 本来就不拦任何工具。worker 侧有 PyYAML，且第 3 层已校正语义。
+
+### 14.2 复验门禁指向了退役树
+
+`tools/redeploy_check.py` 的宿主默认值也是 `~/.hermes/hermes-agent`：
+
+- **改**：新增 `hermes_source_tree()` —— `HERMES_AGENT_DIR` 优先，否则从 PATH 上的 `hermes`
+  反解出真正的安装目录（`<tree>/.hermes/bin/hermes` → `<tree>`），最后才回落到标准布局。
+  现在它解析到的就是**在役的官方 v0.22.5 树**。
+- **顺带暴露的门禁自身问题**（一并修）：
+  - 门禁 ③ 步查的 `patch_card_markdown_native.py` 是**上游已标 legacy** 的补丁，
+    官方安装器明确不许跑它（`tests/test_install_script.py` 有断言）→ 从门禁清单里去掉，
+    与官方补丁序列对齐；
+  - 门禁 ③ 步的语义是「对**干净**的 Hermes 导出应用补丁」。在役宿主树已经带补丁，
+    在它上面再应用一遍不是同一个测试 → 现在会识别出来并**如实跳过并写明原因**，
+    而不是报一个看起来像「补丁坏了」的假失败。
+
+### 14.3 必须说清楚的一个代价：host 集成测试的覆盖下降
+
+退役树同时还充当着**仓内 host 集成测试的宿主夹具**。删掉它之后：
+
+| | 清理前 | 清理后 |
+| :--- | --: | --: |
+| passed | 3048 | 2963（+3 为本节修好的用例，+4 为本节新增的门禁用例） |
+| skipped | 59 | 148 |
+| failed | 0 | 0 |
+
+新增的 89 个 skip 全部是**需要真实 Hermes 宿主**的集成用例（44 个不同用例，
+部分参数化）：`test_live_card_lifecycle_regression`（13）、
+`test_colleague_hermes_staging`（11）、`test_frontdesk_boundary` 的宿主集成段、
+`test_durable_dispatch*`、`test_card_24_elements` 等。
+
+- 按仓自己的规矩，这些是**环境缺口导致的 skip，不是通过**（*"A skip is not a pass."*）。
+- 把它们指向在役官方树会**失败 27 个** —— 实测：在役树带的是官方补丁集，
+  不带旧契约里的 `venv` 与若干宿主夹具。**所以不能简单改个默认值了事。**
+- 要恢复这层覆盖，正路是**专门搭一份「打了补丁的宿主夹具」**供测试用
+  （仓里已有 `patches/` + `verify.sh` 的干净室链路可用），而不是把退役树留着当夹具。
+- 这一步**没有做**：它是一次独立的测试基础设施投入，不该塞进一次部署收尾。
+  已在这里留痕，需要时单独开工。
+
+### 14.4 仍然保留的退役路径（有意为之）
+
+`tools/superagent.py` 的 `DEFAULT_HERMES = ~/.hermes/hermes-agent` **保留不动** ——
+那是**受管布局自己的安装目标**（`superagent.sh` 就把 Hermes 装在那里），
+不是本实例在用的路径；受管布局是仓里官方提供的另一种布局，上游仍在维护它
+（`5114086` 就在改它）。本实例不走这条路，所以这个默认值不影响任何在用的东西。
