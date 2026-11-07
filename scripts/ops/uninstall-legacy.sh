@@ -2,8 +2,13 @@
 # ==============================================================================
 # uninstall-legacy.sh — 配置漂移对账与纠偏（幂等）
 #
-# 单一真相源：受管 release 的 current 软链。服务的 PYTHONPATH / engine_root /
-# launcher 一旦指向工作区源码或固定版本快照，就是漂移。
+# 单一真相源：受管 release 的 current 软链，或官方 install/install.sh 装出来的
+# ${HERMES_HOME}/agentcore。服务的 PYTHONPATH / engine_root / launcher 一旦指向
+# 工作区源码或固定版本快照，就是漂移。
+#
+# 布局判定规则与 agentcore/profile_spec.py 同源（见 scripts/ops/_layout.sh）：
+# 显式 AGENTCORE_ENGINE_ROOT > 受管 current > ${HERMES_HOME}/agentcore；
+# 真相源确实不存在时仍然拒绝继续。
 #
 # 用法：
 #   ./uninstall-legacy.sh                 只读对账（默认，不改任何东西）
@@ -23,6 +28,10 @@ HERMES_HOME="${AGENTCORE_HERMES_HOME:-${HOME}/.hermes}"
 SYSTEMD_DIR="${HOME}/.config/systemd/user"
 BACKUP_ROOT="${MANAGED_ROOT}/state/drift-backups"
 INSTALLER="${AGENTCORE_INSTALLER:-${WORKTREE_REPO}/tools/superagent.py}"
+
+# 共用的「布局 / 真相源」解析（判定规则与 agentcore/profile_spec.py 同源）
+# shellcheck source=scripts/ops/_layout.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_layout.sh"
 
 MODE="report"
 case "${1:-}" in
@@ -50,19 +59,29 @@ if [[ "${MODE}" == "rollback" ]]; then
     exit 0
 fi
 
-printf '模式=%s profile=%s 真相源=%s\n' "${MODE}" "${PROFILE_NAME}" "${CURRENT}"
-[[ -d "${CURRENT}" ]] || { printf '受管 current 不存在，拒绝继续\n' >&2; exit 1; }
+printf '模式=%s profile=%s\n' "${MODE}" "${PROFILE_NAME}"
+if ! resolve_layout; then
+    exit 1
+fi
+layout_report
 
-step "[1/5] 服务代码来源：工作区 vs 受管 current"
+step "[1/5] 服务代码来源：工作区 vs 真相源"
+# systemd unit 里工作区路径有两种写法：展开后的绝对路径，或 %h / %H 展开符。
+# 两种都要认，否则「指向工作区」这种漂移会从眼皮底下漏过去。
+# PYTHONPATH 与 WorkingDirectory 都算「服务代码来源」：只修前者，工作目录仍在工作区。
+WORKTREE_REPO_SPEC="${WORKTREE_REPO/#${HOME}/%h}"
 if [[ -d "${SYSTEMD_DIR}" ]]; then
-    mapfile -t units < <(grep -rlE "PYTHONPATH=.*${WORKTREE_REPO}" "${SYSTEMD_DIR}" 2>/dev/null || true)
-    if (( ${#units[@]} == 0 )); then note '无服务 PYTHONPATH 指向工作区'; else
+    mapfile -t units < <(grep -rlE "(PYTHONPATH|WorkingDirectory)=.*(${WORKTREE_REPO}|${WORKTREE_REPO_SPEC})" "${SYSTEMD_DIR}" 2>/dev/null || true)
+    if (( ${#units[@]} == 0 )); then note '无服务 PYTHONPATH / WorkingDirectory 指向工作区'; else
         for u in "${units[@]}"; do
-            drift "PYTHONPATH 指向工作区: ${u}"
-            note "  应改为: ${CURRENT}"
+            drift "服务代码来源指向工作区: ${u}"
+            note "  应改为: ${TRUTH_SOURCE}"
             if [[ "${MODE}" == "apply" ]]; then
                 backup_unit "${u}"
-                sed -i "s|PYTHONPATH=${WORKTREE_REPO}|PYTHONPATH=${CURRENT}|g" "${u}"
+                sed -i "s|PYTHONPATH=${WORKTREE_REPO_SPEC}|PYTHONPATH=${TRUTH_SOURCE}|g" "${u}"
+                sed -i "s|PYTHONPATH=${WORKTREE_REPO}|PYTHONPATH=${TRUTH_SOURCE}|g" "${u}"
+                sed -i "s|WorkingDirectory=${WORKTREE_REPO_SPEC}|WorkingDirectory=${TRUTH_SOURCE}|g" "${u}"
+                sed -i "s|WorkingDirectory=${WORKTREE_REPO}|WorkingDirectory=${TRUTH_SOURCE}|g" "${u}"
                 note "  已纠偏（备份 ${BACKUP_DIR}）"
             fi
         done
@@ -94,6 +113,8 @@ if [[ -f "${cfg_a}" && -f "${cfg_b}" ]]; then
         note "  B=${cfg_b}"
         note '  本脚本不自动合并（可能有意为之），请由部署清单指定唯一来源'
     fi
+else
+    note '只有一份 config.yaml（单写者布局：profile 就是 home 本身，无二义）'
 fi
 
 step "[4/5] 散落覆盖配置 (proxy.env)"
@@ -107,14 +128,34 @@ while IFS= read -r f; do
         mv "${f}" "${f}.bak-legacy-$(date +%Y%m%d%H%M%S)"
         note '  已归档'
     fi
-done < <(find "${HERMES_HOME}/profiles" -maxdepth 4 -name proxy.env -type f 2>/dev/null || true)
+done < <(
+    while IFS= read -r root; do
+        [[ -d "${root}" ]] || continue
+        if [[ "${root}" == "${HERMES_HOME}" ]]; then
+            find "${root}" -maxdepth 1 -name proxy.env -type f 2>/dev/null || true
+        else
+            find "${root}" -maxdepth 4 -name proxy.env -type f 2>/dev/null || true
+        fi
+    done < <(layout_proxy_env_roots)
+)
 if (( found == 0 )); then note '无散落 proxy.env'; fi
 
-step "[5/5] 受管 doctor 验证"
-if [[ -f "${INSTALLER}" ]]; then
-    python3 "${INSTALLER}" --root "${AGENTCORE_ROOT}" --profile "${PROFILE_NAME}" doctor 2>&1 | head -25 || true
+step "[5/5] 验证"
+verify_label="$(layout_verification_command | sed -n '1p')"
+verify_cmd="$(layout_verification_command | sed -n '2p')"
+note "验证方式=${verify_label}"
+if [[ "${verify_label}" == "受管 doctor" ]]; then
+    if [[ -f "${INSTALLER}" ]]; then
+        eval "${verify_cmd}" 2>&1 | head -25 || true
+    else
+        note '安装器不可用，跳过 doctor'
+    fi
 else
-    note '安装器不可用，跳过 doctor'
+    if [[ -x "${HERMES_HOME}/agentcore/.superagent-venv/bin/python" ]]; then
+        eval "${verify_cmd}" 2>&1 | head -25 || note '就绪门禁未全绿（见上方逐项状态）'
+    else
+        note '官方就绪门禁不可用（缺 .superagent-venv），跳过'
+    fi
 fi
 
 step '结果'
