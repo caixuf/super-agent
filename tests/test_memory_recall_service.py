@@ -170,6 +170,8 @@ def test_pending_health_exposes_only_known_reason_codes(engine,tmp_path):
 
 def test_delta_payload_limit_restores_source_limit_and_withdraws_readiness(engine):
     source,fid=seed(engine);view=MemoryReadView(source,max_delta_bytes=4096)
+    if not hasattr(source, "getlimit"):
+        pytest.skip("sqlite3.Connection.getlimit requires Python 3.11+")
     limit=source.getlimit(sqlite3.SQLITE_LIMIT_LENGTH)
     try:
         text='x'*8192
