@@ -110,8 +110,9 @@ def cmd_install(spec_path: Path, unit_dir: Path, activate: bool, dry_run: bool) 
     runner_config_path = spec.get_profile_home() / "worker" / "dev-runner.json"
     if not dry_run and not runner_config_path.exists():
         runner_config_path.parent.mkdir(parents=True, exist_ok=True)
+        runner_script = str(spec.get_engine_root() / "install" / "worker" / "dev_exec_runner.py")
         runner_config_path.write_text(
-            json.dumps({"command": [spec.python_bin, "-m", "agentcore.dev_runner"]}, indent=2),
+            json.dumps([spec.python_bin, runner_script], indent=2),
             encoding="utf-8"
         )
         print(f"[CREATE] Initial runner config at {runner_config_path}")

@@ -48,7 +48,7 @@ def test_candidate_installs_tools_before_python_dependencies(tmp_path, monkeypat
     if tools_exit:
         assert len(calls) == 1 and result.returncode == tools_exit
     else:
-        assert calls[1] == ['pm', 'install', '--extra', 'all']
+        assert calls[1] == ['pm', 'install', '--extra', 'all', '--extra', 'feishu']
         assert result.returncode == 0 and result.stdout == 'outputoutput'
 
 
@@ -509,6 +509,8 @@ exit 0
     entries = config["plugins"]["entries"]
     # 官方默认能力：总开关就位，工具面不再为空。
     assert entries["markdown-delivery"]["settings"]["enabled"] is True
+    assert entries["markdown-delivery"]["settings"]["engine_root"] == str(
+        tmp_path / ".hermes" / "superagent" / "demo" / "current")
     assert entries["colleague-team"]["settings"]["enabled"] is True
     assert entries["markdown-delivery"]["settings"]["outbox_root"].endswith(
         "agentcore-state/markdown-outbox")
@@ -1620,5 +1622,66 @@ def test_sync_profile_skills_refreshes_existing_local_skill_copy(tmp_path):
     synced = module._sync_profile_skills(profile, release)
     assert synced == ["illustrated-doc-rendering"]
     assert (local_skill / "SKILL.md").read_text(encoding="utf-8") == "# updated skill with progressive delivery\n"
+
+
+def test_migrate_config_heals_legacy_dual_root_paths_for_any_home(tmp_path):
+    profile = _seed_profile(tmp_path)
+    target_root = tmp_path / "super_agent"
+    legacy_root = tmp_path / ".hermes" / "superagent" / "demo"
+    config = profile / "config.yaml"
+    config.write_text(
+        f"plugins:\n  entries:\n    durable-dispatch:\n      settings:\n"
+        f"        engine_root: {legacy_root}/current\n"
+        f"        queue_root: {legacy_root}/state/analysis-queue\n"
+        f"        cards_root: {tmp_path}/.local/state/agentcore/cards\n"
+        f"        liveness_db: {legacy_root}/state/liveness.db\n",
+        encoding="utf-8",
+    )
+    env = dict(os.environ, HOME=str(tmp_path))
+    env.pop("HERMES_HOME", None)
+    proc = subprocess.run(
+        [
+            sys.executable, str(TOOL),
+            "--profile", "demo",
+            "--profile-home", str(profile),
+            "--root", str(target_root),
+            "migrate-config",
+        ],
+        env=env, text=True, capture_output=True, check=True,
+    )
+    assert json.loads(proc.stdout)["status"] == "migrated"
+    migrated = yaml.safe_load(config.read_text(encoding="utf-8"))["plugins"]["entries"]["durable-dispatch"]["settings"]
+    assert migrated["engine_root"] == str(target_root / "demo" / "current")
+    assert migrated["queue_root"] == str(target_root / "demo" / "state" / "analysis-queue")
+    assert migrated["cards_root"] == str(target_root / "demo" / "state" / "cards")
+    assert migrated["liveness_db"] == str(target_root / "demo" / "state" / "liveness.db")
+
+
+def test_doctor_detects_missing_feishu_pm_extra_when_feishu_enabled(tmp_path):
+    import hashlib
+    profile = _seed_profile(tmp_path)
+    _run(tmp_path, "install", check=True)
+    (profile / "config.yaml").write_text(
+        "platforms:\n  feishu:\n    enabled: true\n    card_replies: false\nplugins:\n  enabled: []\n  disabled: []\n",
+        encoding="utf-8",
+    )
+    hermes_root = (tmp_path / ".hermes/hermes-agent").resolve()
+    install_key = hashlib.sha256(str(hermes_root).encode("utf-8")).hexdigest()[:16]
+    facts_path = tmp_path / ".hermes" / "installs" / install_key / "facts.json"
+    facts_path.parent.mkdir(parents=True, exist_ok=True)
+    facts_path.write_text(json.dumps({"extras": ["all"]}), encoding="utf-8")
+
+    broken = _run(tmp_path, "doctor")
+    assert broken.returncode == 1
+    report = json.loads(broken.stdout)
+    assert report["status"] == "broken"
+    assert report["feishu_dependency_observation"]["status"] == "missing_feishu_extra"
+
+    facts_path.write_text(json.dumps({"extras": ["all", "feishu"]}), encoding="utf-8")
+    ready = _run(tmp_path, "doctor", check=True)
+    report_ok = json.loads(ready.stdout)
+    assert report_ok["status"] == "ready"
+    assert report_ok["feishu_dependency_observation"]["status"] == "configured"
+
 
 

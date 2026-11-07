@@ -3,7 +3,7 @@
 
 The entire Super Agent installation lives under one removable root:
 
-    ~/.hermes/superagent/<profile>/
+    ~/super_agent/<profile>/
       current -> releases/<version>/
       releases/<version>/       # code, skills, toolsets, runtime, patches
       state/                    # queues, ledgers, memory spool
@@ -159,7 +159,7 @@ def _managed_plugin_sources(args: argparse.Namespace | None = None) -> list[Path
 
 
 def _external_plugin_root(args: argparse.Namespace | None = None) -> Path:
-    base = _managed_root(args) if args is not None else DEFAULT_ROOT / "caixuf"
+    base = _managed_root(args) if args is not None else DEFAULT_ROOT / "default"
     return base / "external-plugins"
 
 
@@ -178,11 +178,13 @@ def _snapshot_external_plugins(args: argparse.Namespace) -> list[Path]:
     snapshot = _external_plugin_root(args)
     snapshot.mkdir(parents=True, exist_ok=True)
     copied = []
+    profile_name = getattr(args, "profile", "default")
     for name in sorted(_EXTERNAL_PLUGIN_NAMES):
         target = snapshot / name
         candidates = [
             _profile_home(args) / "plugins" / name,
-            Path.home() / ".hermes" / "profiles" / "caixufcanary" / "plugins" / name,
+            Path.home() / ".hermes" / "profiles" / f"{profile_name}canary" / "plugins" / name,
+            Path.home() / ".hermes" / "profiles" / "default" / "plugins" / name,
         ]
         source = next((p for p in candidates if p.is_dir() and not p.is_symlink()), None)
         if source is None:
@@ -413,10 +415,12 @@ def _sync_candidate_dependencies(work: Path) -> subprocess.CompletedProcess[str]
     # An extras-only install does not select the lockfile's tool roots. On a
     # fresh home the PM activation check therefore fails before venv sync,
     # even when unrelated system copies of the tools happen to be on PATH.
+    # Include `--extra feishu` explicitly because Hermes PM does not bundle
+    # `feishu` (`lark_oapi`) inside `--extra all`.
     tools = _run_candidate(work, ["pm", "install", "--tools-only"], timeout=3600)
     if tools.returncode != 0:
         return tools
-    deps = _run_candidate(work, ["pm", "install", "--extra", "all"], timeout=3600)
+    deps = _run_candidate(work, ["pm", "install", "--extra", "all", "--extra", "feishu"], timeout=3600)
     return subprocess.CompletedProcess(deps.args, deps.returncode,
         (tools.stdout or "") + (deps.stdout or ""), (tools.stderr or "") + (deps.stderr or ""))
 
@@ -697,9 +701,11 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "managed_paths": {
             "engine_root": str(root / "current"),
             "queue_root": str(root / "state" / "analysis-queue"),
+            "dev_queue_root": str(root / "state" / "dev-queue"),
             "memory_spool": str(root / "state" / "memory-spool"),
             "markdown_outbox": str(root / "state" / "markdown-outbox"),
             "liveness_db": str(root / "state" / "liveness.db"),
+            "cards_root": str(root / "state" / "cards"),
             "colleague_registry": str(root / "state" / "colleague-team" / "registry.sqlite"),
         },
     }
@@ -1058,18 +1064,41 @@ def _migrate_plugin_engine_roots(original: str, legacy_roots: Sequence[str], man
 
 def _migrated_config_text(original: str, args: argparse.Namespace, managed: dict[str, str]) -> str:
     """Compute the exact migration without touching the profile."""
-    mapping = {
-        "/home/caixuf/.local/state/agentcore/analysis-queue": managed["queue_root"],
-        "/home/caixuf/.local/state/agentcore/memory-spool": managed["memory_spool"],
-        "/home/caixuf/.local/state/agentcore/markdown-outbox": managed["markdown_outbox"],
-        "/home/caixuf/.local/state/agentcore/liveness.db": managed["liveness_db"],
-        "/home/caixuf/.local/state/agentcore/colleague-team/registry.sqlite": managed["colleague_registry"],
-    }
+    profile = getattr(args, "profile", "default")
+    state_parent = Path(managed["liveness_db"]).parent
+    cards_root = managed.get("cards_root", str(state_parent / "cards"))
+    dev_queue_root = managed.get("dev_queue_root", str(state_parent / "dev-queue"))
+    raw_mapping: dict[str, str] = {}
+    for home_prefix in {str(Path.home()), "/home/caixuf"}:
+        raw_mapping.update({
+            f"{home_prefix}/.local/state/agentcore/analysis-queue": managed["queue_root"],
+            f"{home_prefix}/.local/state/agentcore/dev-queue": dev_queue_root,
+            f"{home_prefix}/.local/state/agentcore/memory-spool": managed["memory_spool"],
+            f"{home_prefix}/.local/state/agentcore/markdown-outbox": managed["markdown_outbox"],
+            f"{home_prefix}/.local/state/agentcore/liveness.db": managed["liveness_db"],
+            f"{home_prefix}/.local/state/agentcore/cards": cards_root,
+            f"{home_prefix}/.local/state/agentcore/colleague-team/registry.sqlite": managed["colleague_registry"],
+            f"{home_prefix}/.hermes/superagent/{profile}/state/analysis-queue": managed["queue_root"],
+            f"{home_prefix}/.hermes/superagent/{profile}/state/dev-queue": dev_queue_root,
+            f"{home_prefix}/.hermes/superagent/{profile}/state/memory-spool": managed["memory_spool"],
+            f"{home_prefix}/.hermes/superagent/{profile}/state/markdown-outbox": managed["markdown_outbox"],
+            f"{home_prefix}/.hermes/superagent/{profile}/state/liveness.db": managed["liveness_db"],
+            f"{home_prefix}/.hermes/superagent/{profile}/state/cards": cards_root,
+            f"{home_prefix}/.hermes/superagent/{profile}/state/colleague-team/registry.sqlite": managed["colleague_registry"],
+        })
+    mapping = {old: new for old, new in raw_mapping.items() if old != new}
     updated = _migrate_owned_path_scalars(original, mapping)
     # A checkout can also be a knowledge source or an authorized workspace.
     # Move only explicit plugin engine roots; replacing every checkout-prefixed
     # path would silently redirect unrelated data into an incomplete release.
-    legacy_engines = ("/home/caixuf/code/super-agent", *getattr(args, "legacy_engine_root", ()))
+    candidate_legacy_engines = [
+        "/home/caixuf/code/super-agent",
+        str(Path.home() / "code" / "super-agent"),
+        str(Path.home() / ".hermes" / "superagent" / profile / "current"),
+        f"/home/caixuf/.hermes/superagent/{profile}/current",
+        *getattr(args, "legacy_engine_root", ()),
+    ]
+    legacy_engines = tuple(dict.fromkeys(p for p in candidate_legacy_engines if p != managed["engine_root"]))
     return _migrate_plugin_engine_roots(updated, legacy_engines, managed["engine_root"])
 
 
@@ -1235,7 +1264,7 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
                     rollback_backup=getattr(args, "_plugin_rollback_dir", None))
     migrate_config(args, plan, quiet=True)
     _enable_plugins(profile_home, plugins)
-    _apply_official_plugin_defaults(profile_home, Path(plan["release"]), args.profile)
+    _apply_official_plugin_defaults(profile_home, root / "current", args.profile)
     _purge_legacy_plugins(profile_home)
     if plan.get("card_implementation") == "release-cardkit":
         _disable_legacy_card_producer(profile_home)
@@ -1702,6 +1731,34 @@ def _feishu_card_observation(profile_home: Path, hermes_root) -> dict[str, Any]:
         return {"status": "unknown", "reason": "configuration_unavailable"}
 
 
+def _feishu_dependency_observation(profile_home: Path, hermes_root) -> dict[str, Any]:
+    """Verify that PM-managed Hermes environments include the feishu extra when Feishu is enabled."""
+    import yaml
+    try:
+        config = yaml.safe_load((profile_home / "config.yaml").read_text(encoding="utf-8")) or {}
+        platform = (config.get("platforms") or {}).get("feishu") or {}
+        if not isinstance(platform, dict) or platform.get("enabled") is not True:
+            return {"status": "not_requested"}
+        if not isinstance(hermes_root, str) or not Path(hermes_root).is_absolute():
+            return {"status": "unknown", "reason": "host_path_unavailable"}
+        resolved_root = Path(hermes_root).resolve()
+        install_key = hashlib.sha256(str(resolved_root).encode("utf-8")).hexdigest()[:16]
+        facts_path = Path.home() / ".hermes" / "installs" / install_key / "facts.json"
+        if not facts_path.is_file():
+            return {"status": "pm_facts_not_present", "install_key": install_key}
+        facts = json.loads(facts_path.read_text(encoding="utf-8"))
+        extras = facts.get("extras") if isinstance(facts, dict) else []
+        if not isinstance(extras, list):
+            extras = []
+        return {
+            "status": "configured" if "feishu" in extras else "missing_feishu_extra",
+            "install_key": install_key,
+            "extras": extras,
+        }
+    except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
+        return {"status": "unknown", "reason": "configuration_unavailable"}
+
+
 def _browser_observation(engine_root: Path) -> dict[str, Any]:
     try:
         if str(engine_root) not in sys.path:
@@ -1730,9 +1787,17 @@ def doctor(args: argparse.Namespace) -> int:
     )
     hash_ok = release_ok and manifest.get("tree_sha256") == _release_tree_hash(current.resolve())
     card_observation = _feishu_card_observation(profile_home, manifest.get("hermes_root"))
-    ok = release_ok and links_ok and hash_ok and card_observation["status"] not in ("mismatch", "unknown")
+    feishu_dep_observation = _feishu_dependency_observation(profile_home, manifest.get("hermes_root"))
+    ok = (
+        release_ok
+        and links_ok
+        and hash_ok
+        and card_observation["status"] not in ("mismatch", "unknown")
+        and feishu_dep_observation["status"] not in ("missing_feishu_extra", "unknown")
+    )
     print(json.dumps({"status": "ready" if ok else "broken",
                       "feishu_card_observation": card_observation,
+                      "feishu_dependency_observation": feishu_dep_observation,
                       "release_valid": release_ok, "plugin_links_valid": links_ok,
                       "release_hash_valid": hash_ok,
                       "status_scope": "managed_release_files_and_requested_card_host_files_only",

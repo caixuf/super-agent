@@ -120,7 +120,8 @@ def main():
     if len(sys.argv) not in (3, 4):
         raise ValueError("usage: configure_defaults.py CONFIG DEPLOY [ANALYSIS_ROOT]")
     config, deploy = map(Path, sys.argv[1:3])
-    deploy = deploy.resolve()
+    deploy.resolve(strict=True)
+    deploy = deploy.absolute()
     if not (deploy / "agentcore" / "liveness.py").is_file():
         raise ValueError("installed engine missing")
     original = config.read_text(encoding="utf-8")

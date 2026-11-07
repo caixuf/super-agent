@@ -261,10 +261,15 @@ class BusinessProfileSpec:
                 self.get_profile_home() / "state" / "autotask" / "proactive_hooks.db"
             )
         )
+        default_liveness = (
+            Path(self.managed_root) / "state" / "liveness.db"
+            if self.managed_root
+            else Path.home() / "super_agent" / self.profile_id / "state" / "liveness.db"
+        )
         liveness_db = str(
             self.resolve_path(
                 self.proactive_hooks.liveness_db,
-                Path.home() / ".local" / "state" / "agentcore" / "liveness.db"
+                default_liveness,
             )
         )
 
