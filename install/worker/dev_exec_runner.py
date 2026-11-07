@@ -73,23 +73,24 @@ def _hermes_bin() -> str | None:
     if explicit and Path(explicit).is_file():
         return explicit
 
-    # 1. Search PATH
-    on_path = shutil.which("hermes")
-    if on_path and Path(on_path).is_file():
-        return on_path
-
-    # 2. Search user local bin
-    local_bin = Path.home() / ".local" / "bin" / "hermes"
-    if local_bin.is_file():
-        return str(local_bin)
-
-    # 3. Follow the newest managed release instead of pinning one version string.
+    # 1. Follow the newest managed release first so worker turns never hit an
+    # unmanaged or mid-update ~/.local/bin/hermes wrapper.
     home = _profile_home().parent.parent
     raw_candidates = list((home / "superagent").glob("*/hermes/*/.hermes/bin/hermes"))
     valid_candidates = [p for p in raw_candidates if p.is_file()]
     if valid_candidates:
         valid_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return str(valid_candidates[0])
+
+    # 2. Search PATH
+    on_path = shutil.which("hermes")
+    if on_path and Path(on_path).is_file():
+        return on_path
+
+    # 3. Search user local bin
+    local_bin = Path.home() / ".local" / "bin" / "hermes"
+    if local_bin.is_file():
+        return str(local_bin)
 
     return None
 
