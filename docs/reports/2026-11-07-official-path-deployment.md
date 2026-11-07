@@ -356,12 +356,16 @@ code_sha = bf0203a794a07aac3ff764972ab9087baa4e4f4e     code_version = 0.22.5
   --profile-home /home/caixuf/.hermes --profile default
 ```
 
-退出码 0。逐项：9 项 `[CONFIGURED]`（均带「runtime probe still required」尾巴，
+退出码 **1**（不是 0 —— 见 §15.4 更正）。逐项：9 项 `[CONFIGURED]`（均带「runtime probe still required」尾巴，
 含 §10.1 补上的 `lan-cluster`）、
 durable-worker / memory-recall / memory-ingestion-worker / memory-store-alignment /
 completion-delivery 均为 `[CONFIGURED]`；**2 项 `[OPEN]`**：
 `task-progress: missing: enabled`（§4.2）与
 `colleague-team: real provisioning and lifecycle integration is not established`（需真实编制/生命周期验收）。
+
+退出码由 `tools/deployment_readiness.py:329` 决定：`return 0 if all(row[1] for row in results) else 1`。
+有 2 项 `[OPEN]` 就是 1 —— 与门禁自身「配置检查不构成端到端证明」的声明一致，
+**不表示本次部署失败**。
 
 门禁末尾自带声明：*Configuration checks are not proof of real model, platform or end-to-end delivery.*
 
@@ -409,7 +413,7 @@ PYTHONPATH=/home/caixuf/.hermes/agentcore python3 -m agentcore.completion_backfi
 
 | 物料 | 路径 |
 | :--- | :--- |
-| `~/.hermes` 全量备份 | `~/super_agent/migration-backups/migration-20261107-181933/hermes-home/` |
+| `~/.hermes` 备份（**配置/状态/引擎记录**，已裁掉旧版本二进制，见 §15.7） | `~/super_agent/migration-backups/migration-20261107-181933/hermes-home/`（93M） |
 | `~/super_agent/default` 全量备份 | `~/super_agent/migration-backups/migration-20261107-181933/managed-default/` |
 | 部署前配置快照 | `~/super_agent/migration-backups/pre-official-install-20261107-193657/config.yaml.before` |
 | 旧 systemd 单元 + runner.json | `~/super_agent/migration-backups/migration-20261107-181933/systemd-user/superseded-20261107-193922/` |
@@ -558,7 +562,7 @@ systemctl --user restart hermes-gateway-default.service
 - `~/.hermes/plugins/lan-cluster/__init__.py` 与
   `~/.hermes/agentcore/agentcore/lan_cluster.py` 均与仓内**逐字节相同**；
 - 插件工具集 7 个在位，`lan_node_list` / `lan_node_probe` / `lan_node_rpc` 注册在位（共 24 个插件工具）；
-- 官方就绪门禁新增一行：`[CONFIGURED] lan-cluster: configured; runtime probe still required`，退出码 0；
+- 官方就绪门禁新增一行：`[CONFIGURED] lan-cluster: configured; runtime probe still required`，退出码 1（2 项 `[OPEN]`，见 §6.5）；
 - 网关 `running`、IM 平台 `connected`、`needs_attention=false`。
 
 ### 10.4 与本次部署的关系
@@ -605,7 +609,7 @@ systemctl --user restart hermes-gateway-default.service
   ```
 
 - 复验：5 个服务全 active；网关 `running`、IM 平台 `connected`、`needs_attention=false`；
-  插件工具集仍 7 个在位；就绪门禁退出码 0；重启后无异常日志；
+  插件工具集仍 7 个在位；就绪门禁退出码 1（2 项 `[OPEN]`，见 §6.5）；重启后无异常日志；
   `agentcore/pool.py`、`runtime/hermes_completion_transport.py`、
   `plugins/durable_dispatch/__init__.py` 与仓内**逐字节一致**。
 - `install/configure_delivery.py` **不进部署位**是官方设计（安装器直接从仓里调它），
@@ -758,7 +762,7 @@ bash install/install.sh --hermes-home /home/caixuf/.hermes     # EXIT=0
   备用分支 —— 实测**行为完全等价**（12 个已启用插件全部识别为「已启用」，无写入）。
   这是一次意外的等价性验证。
 - 重启后：6 个服务全 active（含 `ccp-sse-watchdog`）；网关 `running`、IM 平台 `connected`、
-  `needs_attention=false`、code `0.22.5`；插件工具集仍 7 个在位；就绪门禁退出码 0。
+  `needs_attention=false`、code `0.22.5`；插件工具集仍 7 个在位；就绪门禁退出码 1（2 项 `[OPEN]`，见 §6.5）。
 - 网关日志里唯一一条 ERROR 是**旧进程**被 SIGTERM 时的收尾噪音（`Event loop is closed`），
   新进程启动与重连无任何异常。
 
@@ -853,3 +857,153 @@ venv_lib = Path.home() / ".hermes/hermes-agent/venv/lib"   # ← 退役树
 那是**受管布局自己的安装目标**（`superagent.sh` 就把 Hermes 装在那里），
 不是本实例在用的路径；受管布局是仓里官方提供的另一种布局，上游仍在维护它
 （`5114086` 就在改它）。本实例不走这条路，所以这个默认值不影响任何在用的东西。
+
+## 15. 第二轮清除：PM 安装树与退役 HFC 残留（2026-11-07 22:1x）
+
+§13 删掉的是「退役 Hermes 树 + 它自带的工具/插件」。第二轮是顺着同一条线
+（现场只留官方路径的产物）继续往下挖，发现 **`~/.hermes/installs/` 下还躺着两棵
+旧 PM（Package Manager）安装树**，以及一批退役 HFC sidecar 的残留。
+
+### 15.1 触发：在役的其实是第三棵 PM 树
+
+顺着「网关到底跑在什么上」查下去，发现网关进程 `/proc/500100/maps` 里加载的
+Python 扩展全部来自：
+
+```
+/home/caixuf/.hermes/installs/45ee7a3705798cd0/environments/83fd4fe717954893898a15ce127638f6/venv/
+```
+
+而 `~/.hermes/installs/` 下实际有三棵：
+
+| PM 安装树 | 建立时间 | `packages.venv.extras` | venv 指向的解释器 | 状态 |
+|---|---|---|---|---|
+| `4a619b0ef625a866` | 2026-10-15 ~ 11-01 | 无该字段 | `tools/python-3.14.7+20260901` | **死**（解释器已在 §13 被删，venv 的 `bin/python` 是悬空软链） |
+| `726941d288782ca3` | 2026-11-01 | `[]` | 同上 | **死**（同上） |
+| `45ee7a3705798cd0` | 2026-11-06 | `["all", "feishu"]` | `tools/python-3.14.9+20261021` | **在役**（网关正在用） |
+
+前两棵是旧版本时期的 PM 安装：它们的 venv 全部软链到 §13 已删除的 `python-3.14.7`，
+`bin/python -V` 直接报 `No such file or directory` —— **本来就是死的**，
+留着只是白占 1.85G。`45ee7a3705798cd0` 是当前 `~/.hermes/tools/facts.json`
+声明的活动解释器（python `3.14.9`）构建的，字段结构也与上游 `c1d357d`
+（读 `packages.venv.extras`）对得上，是唯一活着的。
+
+在役树自证：`venv/bin/python -V` → `Python 3.14.9`；`import lark_oapi, agentcore` 均成功。
+
+### 15.2 本轮删了什么（全部走可恢复删除通道 `mavis-trash`）
+
+| 路径 | 体积 | 为什么是旧版本 |
+|---|---|---|
+| `~/.hermes/installs/4a619b0ef625a866/` | 1.5G | 旧 PM 安装树，venv 解释器已删，实为死树 |
+| `~/.hermes/installs/726941d288782ca3/` | 350M | 同上（extras 为空的那一代） |
+| `~/.hermes/.npm_lock_hash_4a619b0ef625` | 68B | 旧 PM 安装 id 对应的 lock 哈希标记 |
+| `~/.hermes/plugins/hfc-runtime-dependency/` | 844K | 退役 HFC sidecar 的 PM 依赖插件（`plugins.enabled` 里没有它） |
+| `~/.hermes/.hermes_feishu_card/` | 1.8M | 退役 HFC 的安装区 + `wheel-store`（两份 5.0.13 wheel） |
+| `~/.hermes/profiles/cli_profile/` + 空 `~/.hermes/profiles/` | 83B | CLI 自测跑出来的开发残留（`worker/dev-runner.json`） |
+| `~/.config/systemd/user/hermes-gateway.service` | 1.4K | 裸名（无 profile）网关单元，disabled + inactive，已被 §15.5 的官方单元名取代 |
+
+**卡片能力没有被这次删除碰到**：现役卡片走的是引擎原生的
+`agentcore/card_markdown.py`（`_CARD_V2_ENV = "HERMES_FEISHU_CARD_V2"`），
+网关单元的 drop-in `super-agent-cards.conf` 照旧带 `HERMES_FEISHU_CARD_V2=1`；
+退役 HFC 的 wheel 从未被在役进程加载（`/proc/500100/maps` 里 `hermes_feishu_streaming_card` 命中数 = 0）。
+
+### 15.3 刻意没动的（说明理由）
+
+- **`~/.hermes/cache/uv/`（1.4G）** —— 是**缓存**不是版本产物；根分区还剩 891G，
+  删它只会让下次重建 PM 环境需要重新下载，没有收益。保留。
+- **`~/.hermes/node/`（229M）、`~/.hermes/bin/`（86M）** —— `~/.hermes/node/bin` 在
+  **在役网关单元的 PATH** 里，`~/.hermes/bin` 是 CLI 装的 `uv`/`tirith`/browser 包装器，
+  都不是版本残留。
+- **`~/.hermes/tools/`（1.5G）** —— `facts.json` 声明的活动工具集（python 3.14.9 / node 26.7.0 /
+  npm 12.0.2 / uv 0.13.5 / chromium / ffmpeg / ripgrep / agent-browser / cua-driver）。
+
+### 15.4 更正：官方就绪门禁的退出码是 **1**，不是 0
+
+本报告早期版本（§6.5、§10、§13）写的是「退出码 0」，**那是记录错误**：
+当时把管道末尾的 `$?`（`tail` 的退出码）当成了脚本的退出码。
+`tools/deployment_readiness.py:329` 的判定是
+`return 0 if all(row[1] for row in results) else 1`，而现场有 2 项 `[OPEN]`
+（`task-progress` 按 §4.2 保持关闭、`colleague-team` 待真实编制），
+**所以退出码一直就是 1**，与本次清除无关。§6.5 / §10 / §13 三处已更正。
+
+### 15.5 分叉：官方 `install.sh` 写死的单元名 vs CLI 解析出的裸单元名
+
+现场在役的网关单元是 `hermes-gateway-default.service`。这个名字**是官方写死的**：
+
+```bash
+# install/install.sh  ⑫ 步（人工执行步骤）
+systemctl --user enable --now hermes-gateway-${PROFILE:-default}.service
+```
+
+但 Hermes CLI 自己解析单元名走的是另一套规则（`hermes_cli/gateway.py`）：
+
+- `get_service_name()` = `hermes-gateway` + `_profile_suffix()`；
+- `_profile_suffix()` 对「平台原生默认 home」（即 `~/.hermes`）返回**空串** → 裸名 `hermes-gateway`；
+- 只有当 home 是 `<root>/profiles/<name>` 时才返回 profile 名 → `hermes-gateway-default`。
+
+本实例的 profile `default` **就住在 `~/.hermes` 本身**（§13 已把旧的
+`~/.hermes/profiles/` 布局清掉），于是 CLI 永远解析出裸名 `hermes-gateway.service`，
+而 `install.sh` 又写死要用 `hermes-gateway-default.service`。**两者对不上**，
+直接后果是：
+
+```
+$ hermes gateway status
+○ hermes-gateway.service ... Active: inactive (dead)
+✗ User gateway service is stopped
+⚠ Gateway process is running for this profile, but the service is not active (PID 500100)
+```
+
+—— 明明网关跑得好好的（IM 平台 `connected`），CLI 却报「stopped」。
+这是**上游自身的不一致**（`install.sh` 的硬编码假设「profile 目录布局」），
+不是现场配错。处理方式：
+
+- 保留在役的 `hermes-gateway-default.service`（`install.sh` 明确要求启用的就是它）；
+- **删掉**那个从未启用的裸名单元 `hermes-gateway.service`：它既是旧版本残留，
+  也是一颗脚枪 —— 谁手滑 `systemctl --user start hermes-gateway.service`，
+  就会**起第二个网关实例去抢同一个 bot token**（上游 `update_cmd_fleet_verify.py`
+  对这种局面有专门的告警）。删掉后 `hermes gateway status` 的措辞会变，
+  但它本来就没在看真正在跑的那个单元。
+
+### 15.6 清除后的复验
+
+- 6 个服务全 `active`；网关 `running`、IM 平台 `connected`、`needs_attention=false`、code `0.22.5`；
+- `hermes plugins list --plain --no-bundled`：12 个插件 `enabled`、2 个 `not enabled`
+  （`task-progress` 按现场显式关闭、`hermes-feishu-card` 是上游自带且未启用）；
+- `hermes tools list`：7 个插件工具集全部 `✓ enabled`
+  （`colleague_catalog` / `colleague_team` / `durable_dispatch` / `lan_cluster` /
+  `markdown_delivery` / `memory_bridge` / `task_status`）；
+- 官方就绪门禁：14 行输出与清除前**逐行一致**，退出码 1（§15.4）；
+- 在役 PM 树 `45ee7a3705798cd0` 未被触碰，`venv/bin/python -V` → `Python 3.14.9`。
+
+### 15.7 迁移备份的裁剪（回滚能力保住了，旧版本本体没了）
+
+`~/super_agent/migration-backups/migration-20261107-181933/hermes-home/` 原本是迁移前的
+`~/.hermes` **全量快照**（6.8G），其中 **6.7G 是旧版本本体与现物的重复**：
+
+| 从备份里裁掉 | 体积 | 理由 |
+|---|---|---|
+| `hermes-agent/` | 2.2G | 退役的 v0.22.2 树 —— **旧版本本体** |
+| `tools/` | 2.2G | 旧工具集（python 3.14.7 / node 26.12.1 / uv 0.12.3 / `hfc-*`） |
+| `cache/` | 1.5G | 迁移前 uv 缓存的副本，现场仍在 |
+| `installs/` | 538M | 两棵已确认死亡的旧 PM 树（§15.1） |
+| `node/`、`bin/`、`lsp/` | 372M | 现场仍在用的同款副本 |
+
+备份从 6.8G → **93M**，保留下来的正是 §7.2 回滚步骤真正要用的东西：
+`config.yaml` / `config.yaml.before-memory-defaults` / `.env` / `auth.json` /
+`state.db` / `skills/` / `state/` / `var/` / `logs/` / `sessions/` / `memories/` /
+`plugins/` / `agentcore/`（旧引擎记录）以及 `managed-default/`、`systemd-user/`、
+`release-root-manifest/`、`baseline/`、`skills-misplaced/`。
+
+**一句话**：回滚「配置与状态」的能力完整保留；回滚「旧版本二进制」的能力被主动放弃 ——
+那正是「全面对标官方」要放弃的东西。
+
+### 15.8 本轮清除后的体积账
+
+| 位置 | 清除前 | 清除后 |
+|---|---|---|
+| `~/.hermes` | 4.8G | **3.7G** |
+| `~/super_agent` | 7.2G | **452M** |
+
+两轮清除合计（§13 + 本轮）把 `~/.hermes` 从 **7.7G 降到 3.7G**，
+`~/super_agent` 从 7.2G 降到 452M。删除全部走 `mavis-trash` 可恢复通道，
+暂存区在 `~/.local/share/Trash`（约 6.1G），**未清空**，可随时回退。
+
