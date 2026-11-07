@@ -649,9 +649,9 @@ def test_saved_platform_toolsets_include_default_task_status(tmp_path):
     text = config.read_text()
     values = yaml.safe_load(text)["platform_toolsets"]
     assert values["feishu"] == ["terminal", "task_status", "markdown_delivery",
-                                "colleague_catalog", "colleague_team"]
+                                "colleague_catalog", "colleague_team", "lan_cluster"]
     assert values["api_server"] == ["file", "web", "task_status", "markdown_delivery",
-                                    "colleague_catalog", "colleague_team"]
+                                    "colleague_catalog", "colleague_team", "lan_cluster"]
     assert "# retained" in text
     assert _run(home, "--skip-patch").returncode == 0
     assert config.read_text() == text

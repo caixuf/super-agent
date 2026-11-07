@@ -163,6 +163,7 @@ def main():
         ("markdown-delivery", "markdown_delivery"),
         ("colleague-catalog", "colleague_catalog"),
         ("colleague-team", "colleague_team"),
+        ("lan-cluster", "lan_cluster"),
     ):
         updated = ensure_toolset(updated, plugin, toolset)
     if updated == original:

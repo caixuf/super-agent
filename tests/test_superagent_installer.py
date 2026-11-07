@@ -691,6 +691,7 @@ def test_switch_uses_pm_bound_launcher_and_refuses_failed_smoke(tmp_path):
     with patch.object(module, "_legacy_patch_state", return_value=[{"in_place": False}]), \
          patch.object(module, "_smoke_candidate", return_value={"ok": True}), \
          patch.object(module, "_gateway_dependency_smoke", return_value={"ok": True}), \
+         patch.object(module, "_run", return_value=subprocess.CompletedProcess(["systemctl"], 0, "", "")), \
          patch.object(module.Path, "home", return_value=tmp_path):
         assert module.switch_gateway_source(args) == 0
     assert str(launcher) in unit.read_text()
@@ -1688,6 +1689,66 @@ def test_doctor_detects_missing_feishu_pm_extra_when_feishu_enabled(tmp_path):
     report_ok = json.loads(ready.stdout)
     assert report_ok["status"] == "ready"
     assert report_ok["feishu_dependency_observation"]["status"] == "configured"
+
+
+def test_install_syncs_bound_colleague_profiles_and_engine_root_bindings(tmp_path):
+    profile = _seed_profile(tmp_path)
+    colleague = tmp_path / ".hermes" / "profiles" / "architect"
+    (colleague / "plugins" / "localvec").mkdir(parents=True)
+    (colleague / "config.yaml").write_text(
+        yaml.safe_dump({
+            "memory": {
+                "provider": "localvec",
+                "localvec": {
+                    "engine_root": f"{tmp_path}/.hermes/superagent/demo/current",
+                    "combined_entity_db": f"{tmp_path}/.hermes/superagent/demo/state/entity-rules/combined.db",
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    (profile / "config.yaml").write_text(
+        yaml.safe_dump({
+            "memory": {
+                "provider": "localvec",
+                "localvec": {
+                    "engine_root": f"{tmp_path}/.hermes/superagent/demo/current",
+                    "combined_entity_db": f"{tmp_path}/.hermes/superagent/demo/state/entity-rules/combined.db",
+                },
+            },
+            "plugins": {
+                "enabled": [],
+                "disabled": [],
+                "entries": {
+                    "colleague-team": {
+                        "settings": {
+                            "enabled": True,
+                            "gateway_dispatch": {
+                                "enabled": True,
+                                "tool_backend": {
+                                    "members": [{"profile": "architect", "home": str(colleague)}],
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    _run(tmp_path, "--root", str(tmp_path / "super_agent"), "install", check=True)
+    managed_root = tmp_path / "super_agent" / "demo"
+    colleague_cfg = yaml.safe_load((colleague / "config.yaml").read_text(encoding="utf-8"))
+    assert colleague_cfg["memory"]["localvec"]["engine_root"] == str(managed_root / "current")
+    assert colleague_cfg["memory"]["localvec"]["combined_entity_db"] == str(
+        managed_root / "state" / "entity-rules" / "combined.db"
+    )
+    assert (colleague / "plugins" / "localvec").is_symlink()
+    module = _load_installer()
+    obs = module._recall_diagnostics_observation(profile, managed_root / "current")
+    assert obs["disk_bindings"]["demo"] == {"plugin": "matched", "engine": "matched"}
+    assert obs["disk_bindings"]["architect"] == {"plugin": "matched", "engine": "matched"}
+
 
 
 
