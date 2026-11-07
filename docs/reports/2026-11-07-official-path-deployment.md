@@ -898,7 +898,7 @@ Python 扩展全部来自：
 | `~/.hermes/.npm_lock_hash_4a619b0ef625` | 68B | 旧 PM 安装 id 对应的 lock 哈希标记 |
 | `~/.hermes/plugins/hfc-runtime-dependency/` | 844K | 退役 HFC sidecar 的 PM 依赖插件（`plugins.enabled` 里没有它） |
 | `~/.hermes/.hermes_feishu_card/` | 1.8M | 退役 HFC 的安装区 + `wheel-store`（两份 5.0.13 wheel） |
-| `~/.hermes/profiles/cli_profile/` + 空 `~/.hermes/profiles/` | 83B | CLI 自测跑出来的开发残留（`worker/dev-runner.json`） |
+| `~/.hermes/profiles/cli_profile/` + 空 `~/.hermes/profiles/` | 83B | CLI 的**临时 profile**（`hermes_cli/main.py` 的 `explicit_cli_profile`），每次跑 CLI 都会重建 —— **删了会再生**，见 §17.7 的更正 |
 | `~/.config/systemd/user/hermes-gateway.service` | 1.4K | 裸名（无 profile）网关单元，disabled + inactive，已被 §15.5 的官方单元名取代 |
 
 **卡片能力没有被这次删除碰到**：现役卡片走的是引擎原生的
@@ -1108,11 +1108,11 @@ bash docker/verify.sh HEAD
 宿主全量：`python3 -m pytest -q` → **2967 passed / 148 skipped / 0 failed**（433.39s）。
 （容器内 2974 passed，差 7 个是环境相关的用例。）
 
-### 16.6 上游**没有**解决的（仍然挂着）
+### 16.6 上游**没有**解决的（当时仍然挂着）
 
 1. `scripts/ops/uninstall-legacy.sh` 仍硬性要求 `~/super_agent/default/current` 存在 ——
-   本次上游**没有**改这个脚本，§15.5 记的分歧依旧；
-2. host 集成测试夹具仍缺（退役树删后 89 个用例转 skip），本次上游也没提供。
+   本次上游**没有**改这个脚本；**已在 §17 由我们补齐**（仓内改造，官方脚本在单写者布局上可用了）；
+2. host 集成测试夹具仍缺（退役树删后 89 个用例转 skip），本次上游也没提供 —— **仍未解决**。
 
 ### 16.7 这次「好部署了」的准确边界
 
@@ -1121,3 +1121,119 @@ bash docker/verify.sh HEAD
 | **从零部署**（空 HOME + 本仓源码） | ✅ 官方干净室链路一次过，退出码 0 |
 | **现场再部署**（本实例） | ✅ 一个命令、EXIT=0、除 `lan_cluster` 外零副作用、幂等 |
 | **从零到本实例这套完整拓扑** | ⚠️ 仍需人工：凭据落地、真实消息通道与卡片视觉验收、host 集成测试夹具 |
+
+## 17. 官方运维脚本的布局感知改造（2026-11-08 00:5x）
+
+§15.5 / §16.6 记的那条分叉收口了：仓内 `scripts/ops/` 的两个脚本**在本布局上直接拒绝运行**，
+于是本实例一直没有官方漂移对账工具。
+
+设计文档：`docs/superpowers/specs/2026-11-08-ops-scripts-layout-aware-design.md`
+
+### 17.1 改了什么
+
+| 文件 | 改动 |
+|---|---|
+| `scripts/ops/_layout.sh`（**新增**） | 共用的「布局 / 真相源」解析：显式 `AGENTCORE_ENGINE_ROOT` > 受管 `current` > `${HERMES_HOME}/agentcore` > 拒绝 |
+| `scripts/ops/uninstall-legacy.sh` | 门槛从「受管 current 不存在」改成「真相源不存在」；[1/5] 改对真相源比对；[3/5] 单写者布局不再误报；[4/5] 扫描根随布局；[5/5] 单写者布局改跑**官方就绪门禁** |
+| `scripts/ops/purge_and_rebuild_host.sh` | 同样的门槛；备份/归档清单随布局；[4/4] 单写者布局的重建**交回官方 `install/install.sh`**（单一写者），受管布局仍走受管安装器 |
+| `tests/test_ops_scripts.py`（**新增**） | 18 个用例，临时 HOME 沙箱 + `systemctl` 桩，绝不碰真实 profile 与真实 systemd 会话 |
+
+真相源判定规则与仓内 `agentcore/profile_spec.py:get_engine_root()` **同源**（显式 > 受管 `current`），
+只多了一条本仓 `install/install.sh` 自己造的 `DEPLOY_DIR`（`${HERMES_HOME}/agentcore`）。
+
+**安全边界没有放宽**：真相源确实不存在时仍然拒绝（退出码 1，原话从「受管 current 不存在」
+改成「真相源不存在」）；显式注入指向不存在的路径也拒绝（不许用兜底掩盖配置错误）；
+`--apply` 仍然先备份 unit、仍然不重启服务。
+
+### 17.2 顺带修掉的两个官方盲区
+
+改造过程中在实机上暴露出原脚本的两个匹配盲区，一并补上：
+
+1. **`%h` 展开符**：原脚本只 grep 展开后的绝对路径 `PYTHONPATH=.*${WORKTREE_REPO}`，
+   而 unit 里常写 `PYTHONPATH=%h/code/super-agent` —— 这类写法**原脚本看不见**。
+   现在两种写法都认（`%h` 形式与绝对路径形式）。
+2. **`WorkingDirectory` 不在原口径内**：原脚本只看 `PYTHONPATH`，unit 的
+   `WorkingDirectory=%h/code/super-agent` 同样是「服务代码来源指向工作区」。
+   现在检测与纠偏同时覆盖 `PYTHONPATH` 与 `WorkingDirectory`。
+
+另外给归档清单加了一道保险：**现场 config.yaml 指向的路径不进归档清单** ——
+归档的是死状态，不是活状态。
+
+### 17.3 实机只读对账：官方脚本报出了 2 处真漂移
+
+改造后第一次在实机跑只读对账（改之前脚本压根跑不起来）：
+
+```
+模式=report profile=default
+布局=install.sh
+真相源=/home/caixuf/.hermes/agentcore
+profile home=/home/caixuf/.hermes
+
+=== [1/5] 服务代码来源：工作区 vs 真相源 ===
+  [DRIFT] 服务代码来源指向工作区: /home/caixuf/.config/systemd/user/agentcore-worker@.service
+    应改为: /home/caixuf/.hermes/agentcore
+  [DRIFT] 服务代码来源指向工作区: /home/caixuf/.config/systemd/user/agentcore-memory@.service
+    应改为: /home/caixuf/.hermes/agentcore
+...
+  模式=report 漂移项=2
+```
+
+这两个是**模板单元**（`agentcore-worker@` / `agentcore-memory@`，当前 disabled），
+`PYTHONPATH` 与 `WorkingDirectory` 都指向工作区 `~/code/super-agent`；
+真正在跑的 profile 单元 `superagent-worker-default.service` /
+`superagent-memory-default.service` 指向 `~/.hermes/agentcore`，**没有漂移**。
+
+### 17.4 实机 `--apply` 纠偏结果
+
+```bash
+bash scripts/ops/uninstall-legacy.sh --apply
+```
+
+两个模板单元被纠偏为引擎真相源：
+
+| 字段 | 纠偏前 | 纠偏后 |
+|---|---|---|
+| `PYTHONPATH` | `%h/code/super-agent:%h/.config/agent-pool` | `/home/caixuf/.hermes/agentcore:%h/.config/agent-pool` |
+| `WorkingDirectory` | `%h/code/super-agent` | `/home/caixuf/.hermes/agentcore` |
+
+- 原件已备份到 `~/super_agent/default/state/drift-backups/backup_20261108005342|backup_20261108005406/`，
+  可用脚本自带的 `--rollback` 回退；
+- 纠偏后**再对账漂移项=0**；
+- 6 个服务全程 `active`，网关 `running` / `0.22.5` / IM 平台 `connected` / `needs_attention=false`，
+  未受影响（这两个模板单元本来就是 disabled）。
+
+`purge_and_rebuild_host.sh` 在本机的预演（dry-run，不改任何东西）：
+
+```
+布局=install.sh
+真相源=/home/caixuf/.hermes/agentcore
+=== [1/4] 备份业务火种（记忆 / 技能 / 配置） ===
+  [DRY-RUN] 将备份记忆 / 技能 / 配置
+=== [3/4] 归档散落配置与运行时状态（不删除，可回退） ===
+  [DRY-RUN] 将归档: /home/caixuf/.local/state/agentcore/liveness.db
+=== [4/4] 重建与验证 ===
+  [DRY-RUN] 将执行官方 install.sh 重建 + 官方就绪门禁（不重启服务）
+```
+
+（`~/.local/state/agentcore/liveness.db` 是**旧受管布局**的死状态 —— 现场配置指向的是
+`~/.hermes/var/liveness.db`，所以它在归档清单里是对的。）
+
+### 17.5 回归
+
+- 新增用例：`tests/test_ops_scripts.py` **18 passed**；
+- 仓内全量：`python3 -m pytest -q` → **2984 passed / 148 skipped / 0 failed**（446.67s）；
+  收集数 3132，比改造前的 3114 正好多 18（新增用例数），
+  一进一出都是 0 失败 —— 受管布局的原行为没有回归。
+
+### 17.6 更正 §15.2 的一处表述
+
+§15.2 把 `~/.hermes/profiles/cli_profile/` 记成「CLI 自测跑出来的开发残留」。
+**这个说法不准**：它是 Hermes CLI 自己的**临时 profile**
+（`hermes_cli/main.py` 的 `explicit_cli_profile`），每次跑 CLI 都会重新生成 ——
+删掉之后几个小时就又出现了。结论不变（它不是需要清理的东西），但**「删了会再生」**这一点
+必须写清楚，免得以后有人反复删、反复困惑。
+
+### 17.7 剩下的一条
+
+host 集成测试夹具仍缺（退役树删后 89 个用例转 skip）。它是**测试基础设施**，
+不是部署路径 —— 要恢复得另搭一份「打了官方补丁集的宿主夹具」，本次未做。
