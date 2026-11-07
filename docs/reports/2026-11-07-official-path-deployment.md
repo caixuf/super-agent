@@ -566,3 +566,69 @@ systemctl --user restart hermes-gateway-default.service
 - 替代方案（也完全官方）：把 `lan-cluster` 从 `plugin_defaults.py` 的 `defaults()` 里去掉，
   默认不启用。代价是 `lan_node_*` 工具面永远不出现，
   与设计 §4.1「恢复 D06 工具面」相反。**本次按设计选前者。**
+
+---
+
+## 11. 追加：合并上游 `5114086` 后的再部署（2026-11-07 21:0x）
+
+推送前 `git fetch` 发现 `origin/main` 多了一个本会话之外的新提交：
+
+```
+5114086 feat(deploy,cards): prune old releases on update, wire progressive delivery,
+        and refresh bound task cards
+```
+
+该提交动过 `agentcore/pool.py`、`runtime/hermes_completion_transport.py`、
+`plugins/durable_dispatch/__init__.py`、`install/configure_delivery.py`、
+`install/worker/dev_exec_runner.py`、`tools/superagent.py`、`tests/test_superagent_installer.py`。
+
+### 11.1 合并与再部署
+
+- **文件重叠**：与本次 4 个提交**零交集** → `git rebase origin/main` 干净通过，历史保持线性。
+- **必须再部署**：上游改了 `agentcore/pool.py`（worker 跑的就是它）、
+  `runtime/hermes_completion_transport.py`（**现场 `delivery_transport_file` 指向的部署副本**）、
+  `plugins/durable_dispatch/__init__.py`（在役插件副本）——
+  三者若不刷新，现场就是「代码已合并、跑的还是旧副本」的漂移。
+- 处置：重跑官方安装器（`EXIT=0`）+ 重启 worker / memory / gateway。
+
+  ```bash
+  bash install/install.sh --hermes-home /home/caixuf/.hermes     # EXIT=0
+  systemctl --user restart superagent-worker-default.service \
+                         superagent-memory-default.service \
+                         hermes-gateway-default.service
+  ```
+
+- 复验：5 个服务全 active；网关 `running`、IM 平台 `connected`、`needs_attention=false`；
+  插件工具集仍 7 个在位；就绪门禁退出码 0；重启后无异常日志；
+  `agentcore/pool.py`、`runtime/hermes_completion_transport.py`、
+  `plugins/durable_dispatch/__init__.py` 与仓内**逐字节一致**。
+- `install/configure_delivery.py` **不进部署位**是官方设计（安装器直接从仓里调它），
+  不是漏同步。
+
+### 11.2 两个交互点（本次合并暴露出来的）
+
+**① 上游「更新时清理旧 release」与本实例的只读冻结冲突**
+
+- `tools/superagent.py` 新增 `_prune_old_releases()`：删除 `root/releases/` 下所有非在役的
+  release 目录（受管布局的 `update` 与 `prune` 两个入口都会调）。
+- 本实例按设计 §5 步骤 7 把 `~/super_agent/default/releases/*` 冻结成只读（`555`），
+  **并且明确不删**。
+- 后果：`shutil.rmtree` 在只读目录上抛 `OSError`，而该函数**逐条 `except OSError: pass`**，
+  于是清理**静默无效**（输出仍是 `removed: []`，不撒谎，但也不解释原因）。
+- 判断：设计文档的冻结决定**晚于**上游这个提交（设计文档 §5 步骤 7 是今天 18:00 之后定的，
+  上游提交是 16:03），且更贴合本实例（回退底本优先于省空间）。
+  **本次保留冻结**，把这条交互写进记录，避免以后有人以为是清理逻辑坏了。
+  受管布局**不是 bot1 的主路径**，冻结不影响官方安装链路。
+  若将来要解除冻结：先解除 `chmod`、再让受管路径清理，别让清理在只读树上空跑。
+
+**② 上游对「profile 本地技能副本」的政策，反过来印证了本记录的 §4.4**
+
+- 同一提交新增 `_sync_profile_skills()`：*「Refresh existing profile-local copies of repo
+  skills so they never shadow the release.」*
+- 即上游的立场是：**profile 里的技能副本永远不能盖住 release，仓内是唯一真相**。
+- 本记录 §4.4 记录的「4 个现场增强版技能被官方安装器覆盖」因此**不是意外**：
+  官方安装器覆盖它们，与上游受管路径覆盖它们，是同一条政策的两处实现。
+- 结论不变且更强：**正确做法是把现场增强版合并回仓内**（`im-card-markdown` 升到 v1.1.0、
+  `research-before-build` / `skill-distillation` / `wake-storm-guard` 补回那一节），
+  而不是从备份回填到 profile —— 回填等于回到「profile 副本盖住 release」的老路，
+  下一次官方安装和受管路径都会再覆盖一次。
