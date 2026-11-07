@@ -94,7 +94,7 @@ def _rewrite(text: str, old: str, new: str, extra: list[tuple[str, str]] | None 
     shape = config_text._shape(lines)
     if shape["kind"] != "mapping":
         raise config_text.Unsupported("config must be a mapping")
-    changed: list[str] = []
+    changed: list[tuple[str, str]] = []
     prefix = old.rstrip("/") + "/"
 
     def replacement(value: str) -> str | None:
@@ -142,7 +142,7 @@ def _rewrite(text: str, old: str, new: str, extra: list[tuple[str, str]] | None 
                 key_name = config_text._strip_comment(key_line.split(":", 1)[0]).strip()
                 lines[key_index] = config_text._key_line(
                     setting_indent, key_name, json.dumps(target), comment)
-                changed.append("plugins.entries." + name + ".settings." + key_name)
+                changed.append(("plugins.entries." + name + ".settings." + key_name, target))
 
     # memory.localvec.recall_cmd list items
     localvec = _top_key(lines, "memory")
@@ -170,7 +170,7 @@ def _rewrite(text: str, old: str, new: str, extra: list[tuple[str, str]] | None 
                     lines[index] = config_text._with_comment(
                         " " * config_text._indent(item) + "- " + json.dumps(target),
                         comment)
-                    changed.append("memory.localvec.recall_cmd")
+                    changed.append(("memory.localvec.recall_cmd", target))
 
     if not changed:
         return text, []
@@ -203,8 +203,8 @@ def main(argv: list[str] | None = None) -> int:
         if not changed:
             print("  [--] 没有指向旧引擎内部的路径（保持原样）")
             return 0
-        for name in changed:
-            print("    [plan] " + name + " -> " + args.new_engine_root)
+        for name, target in changed:
+            print("    [plan] " + name + " -> " + target)
         if args.dry_run:
             return 0
         config_text._backup(args.config)

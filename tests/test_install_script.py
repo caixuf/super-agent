@@ -563,6 +563,31 @@ def test_migrate_engine_paths_dry_run_never_writes(tmp_path):
     assert not any(name.name.startswith("config.yaml.bak.") for name in tmp_path.iterdir())
 
 
+def test_migrate_engine_paths_plan_shows_the_real_target(tmp_path):
+    """计划行必须打印**真实**落盘值，不能一律印新引擎根。
+
+    ``--replace`` 处理的是引擎根之外的路径（精确替换），把它印成新引擎根会
+    让运维以为那个值会变成一个目录 —— 实际它是一个文件路径。
+    """
+    config = tmp_path / "config.yaml"
+    config.write_text("""plugins:
+  entries:
+    durable-dispatch:
+      settings:
+        engine_root: "/old/engine"
+        delivery_transport_file: "/elsewhere/transport.py"
+""")
+    proc = subprocess.run(["python3", str(REPO_ROOT / "install/migrate_engine_paths.py"),
+                           "--config", str(config),
+                           "--old-engine-root", "/old/engine",
+                           "--new-engine-root", "/new/engine",
+                           "--replace", "/elsewhere/transport.py=/new/engine/runtime/transport.py",
+                           "--dry-run"], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "settings.delivery_transport_file -> /new/engine/runtime/transport.py" in proc.stdout
+    assert "settings.delivery_transport_file -> /new/engine\n" not in proc.stdout
+
+
 def test_migrate_engine_paths_refuses_a_malformed_config(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text("plugins: {entries: {}}\n")
