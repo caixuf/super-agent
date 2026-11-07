@@ -11,6 +11,7 @@ import shutil
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 import pytest
 import yaml
@@ -1415,6 +1416,31 @@ def test_doctor_recall_observation_reports_missing_and_healthy_without_query(tmp
     assert result["sources"]["sample"]["status"] == "healthy"
     assert result["sources"]["sample-architect"] == {"status": "unknown", "reason": "not_observed"}
     assert "private text" not in repr(result)
+
+
+def test_doctor_recall_observation_supports_configured_diagnostic_path(tmp_path):
+    module = _load_installer()
+    profiles = tmp_path / "profiles"
+    main = profiles / "sample"
+    main.mkdir(parents=True)
+    report = tmp_path / "diag.json"
+    report.write_text(json.dumps({"at": time.time(), "code": "hit", "count": 1}))
+    report.chmod(0o600)
+    config = {"memory": {"localvec": {"diagnostic_path": str(report)}}}
+    (main / "config.yaml").write_text(yaml.safe_dump(config))
+    result = module._recall_diagnostics_observation(main)
+    assert result["sources"]["sample"]["status"] == "healthy"
+    assert result["sources"]["sample"]["count"] == 1
+
+
+def test_doctor_recall_observation_rejects_relative_diagnostic_path(tmp_path):
+    module = _load_installer()
+    main = tmp_path / "profiles" / "sample"
+    main.mkdir(parents=True)
+    config = {"memory": {"localvec": {"diagnostic_path": "relative/diag.json"}}}
+    (main / "config.yaml").write_text(yaml.safe_dump(config))
+    result = module._recall_diagnostics_observation(main)
+    assert result["sources"]["sample"] == {"status": "unknown", "reason": "configuration_unavailable"}
 
 
 def test_doctor_recall_observation_refuses_foreign_profile_home(tmp_path):

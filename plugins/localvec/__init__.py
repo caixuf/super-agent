@@ -92,6 +92,21 @@ def format_recall(rows, *, limit=3, max_chars=1800):
     return (header + '\n'.join(lines), len(lines)) if lines else ('', 0)
 
 
+def _write_recall_diagnostic(path_str: str, code: str, count: int) -> None:
+    try:
+        p = Path(path_str)
+        if not p.is_absolute():
+            return
+        p.parent.mkdir(parents=True, exist_ok=True)
+        temp = p.with_suffix(f".tmp.{os.getpid()}")
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"at": time.time(), "code": code, "count": count}, stream)
+        os.replace(temp, p)
+    except Exception:
+        pass
+
+
 def _config_block() -> dict[str, Any]:
     """Read trusted settings; unreadable is not an empty legacy configuration."""
     try:
@@ -157,6 +172,7 @@ class LocalVecProvider(MemoryProvider):
         self._identity_guard = None
         self._recall_slots = None
         self._config_failed = False
+        self._diagnostic_path: Optional[str] = None
 
     def _authorized(self):
         try:
@@ -205,6 +221,7 @@ class LocalVecProvider(MemoryProvider):
                                '--embed-url', self._cfg.get('embed_url', ''), '--limit', str(self._limit)]
                 child._limit, child._timeout = self._limit, self._timeout
                 child._session_id = sid
+                child._diagnostic_path = self._diagnostic_path
                 router = self._router
                 child._identity_guard = lambda: router.resolve(sid) == route
                 child._recall_slots = self._recall_slots
@@ -237,6 +254,7 @@ class LocalVecProvider(MemoryProvider):
         self._cfg = cfg
         self._config_failed = cfg.get('_config_unavailable') is True
         self._cmd = _cmd_template(cfg)
+        self._diagnostic_path = cfg.get("diagnostic_path") if isinstance(cfg.get("diagnostic_path"), str) and cfg.get("diagnostic_path") else None
         self._limit = int(cfg.get("limit") or 6)
         self._timeout = float(cfg.get("timeout_s") or 8)
         self._session_id = session_id if isinstance(session_id, str) else ""
@@ -500,6 +518,8 @@ class LocalVecProvider(MemoryProvider):
                                   timeout=self._timeout, cwd=self._cfg.get("cwd") or None)
         except Exception as exc:
             logger.debug("[localvec] 召回子进程失败：%s，尝试 SQLite FTS5 降级召回", exc)
+            if self._diagnostic_path:
+                _write_recall_diagnostic(self._diagnostic_path, "backend_query_failed", 0)
             fallback = self._fallback_sqlite_recall(query)
             if fallback:
                 with self._lock:
@@ -509,6 +529,8 @@ class LocalVecProvider(MemoryProvider):
             return False
         if proc.returncode != 0:
             logger.warning('[localvec] recall subprocess failed: exit_code=%s, 尝试 SQLite FTS5 降级召回', proc.returncode)
+            if self._diagnostic_path:
+                _write_recall_diagnostic(self._diagnostic_path, "backend_query_failed", 0)
             fallback = self._fallback_sqlite_recall(query)
             if fallback:
                 with self._lock:
@@ -522,14 +544,20 @@ class LocalVecProvider(MemoryProvider):
             res = json.loads(proc.stdout or "{}")
         except Exception as exc:
             logger.warning('[localvec] recall response is not JSON: %s', type(exc).__name__)
+            if self._diagnostic_path:
+                _write_recall_diagnostic(self._diagnostic_path, "backend_query_failed", 0)
             return False
         if (not isinstance(res, dict) or res.get('ok') is False
                 or not isinstance(res.get('results'), list)):
             logger.warning('[localvec] recall response has invalid shape')
+            if self._diagnostic_path:
+                _write_recall_diagnostic(self._diagnostic_path, "backend_query_failed", 0)
             return False
         rows = res.get("results") or []
         block, count = format_recall(rows, limit=self._limit,
                                     max_chars=int(self._cfg.get('max_chars') or 1800))
+        if self._diagnostic_path:
+            _write_recall_diagnostic(self._diagnostic_path, "hit" if count > 0 else "no_match", count)
         if not block:
             logger.debug("[localvec] 空召回（%s）", res.get("empty_reason") or "no_match")
             return True

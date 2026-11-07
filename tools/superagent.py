@@ -707,6 +707,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             "liveness_db": str(root / "state" / "liveness.db"),
             "cards_root": str(root / "state" / "cards"),
             "colleague_registry": str(root / "state" / "colleague-team" / "registry.sqlite"),
+            "recall_diagnostics_dir": str(root / "state" / "recall-diagnostics"),
         },
     }
 
@@ -1062,12 +1063,49 @@ def _migrate_plugin_engine_roots(original: str, legacy_roots: Sequence[str], man
     return original
 
 
-def _migrated_config_text(original: str, args: argparse.Namespace, managed: dict[str, str]) -> str:
+def _ensure_diagnostic_path(text: str, diag_path: str) -> str:
+    import yaml
+    from yaml.nodes import MappingNode, ScalarNode
+    try:
+        data = yaml.safe_load(text) or {}
+    except Exception:
+        return text
+    if not isinstance(data, dict):
+        return text
+    memory = data.get("memory")
+    if not isinstance(memory, dict) or not isinstance(memory.get("localvec"), dict):
+        return text
+    if "diagnostic_path" in memory["localvec"]:
+        return text
+    root = yaml.compose(text, Loader=yaml.SafeLoader)
+    if not isinstance(root, MappingNode):
+        return text
+    mem_node = next((v for k, v in root.value if isinstance(k, ScalarNode) and k.value == "memory"), None)
+    if not isinstance(mem_node, MappingNode):
+        return text
+    lv_node = next((v for k, v in mem_node.value if isinstance(k, ScalarNode) and k.value == "localvec"), None)
+    if not isinstance(lv_node, MappingNode):
+        return text
+    indent = lv_node.value[0][0].start_mark.column if lv_node.value else lv_node.start_mark.column + 2
+    insertion = " " * indent + f"diagnostic_path: {json.dumps(diag_path, ensure_ascii=False)}\n"
+    pos = lv_node.end_mark.index
+    line_start = text.rfind("\n", 0, pos) + 1
+    if not text[line_start:pos].strip():
+        pos = line_start
+    before = text[:pos]
+    if before and not before.endswith("\n"):
+        before += "\n"
+    return before + insertion + text[pos:]
+
+
+def _migrated_config_text(original: str, args: argparse.Namespace, managed: dict[str, str], target_profile: str | None = None) -> str:
     """Compute the exact migration without touching the profile."""
-    profile = getattr(args, "profile", "default")
+    main_profile = getattr(args, "profile", "default")
+    target_name = target_profile or main_profile
     state_parent = Path(managed["liveness_db"]).parent
     cards_root = managed.get("cards_root", str(state_parent / "cards"))
     dev_queue_root = managed.get("dev_queue_root", str(state_parent / "dev-queue"))
+    recall_diag_dir = managed.get("recall_diagnostics_dir", str(state_parent / "recall-diagnostics"))
     raw_mapping: dict[str, str] = {}
     for home_prefix in {str(Path.home()), "/home/caixuf"}:
         raw_mapping.update({
@@ -1078,28 +1116,33 @@ def _migrated_config_text(original: str, args: argparse.Namespace, managed: dict
             f"{home_prefix}/.local/state/agentcore/liveness.db": managed["liveness_db"],
             f"{home_prefix}/.local/state/agentcore/cards": cards_root,
             f"{home_prefix}/.local/state/agentcore/colleague-team/registry.sqlite": managed["colleague_registry"],
-            f"{home_prefix}/.local/state/agentcore/queue/{profile}": str(state_parent / "colleague-queues"),
-            f"{home_prefix}/.hermes/superagent/{profile}/state/analysis-queue": managed["queue_root"],
-            f"{home_prefix}/.hermes/superagent/{profile}/state/dev-queue": dev_queue_root,
-            f"{home_prefix}/.hermes/superagent/{profile}/state/memory-spool": managed["memory_spool"],
-            f"{home_prefix}/.hermes/superagent/{profile}/state/markdown-outbox": managed["markdown_outbox"],
-            f"{home_prefix}/.hermes/superagent/{profile}/state/liveness.db": managed["liveness_db"],
-            f"{home_prefix}/.hermes/superagent/{profile}/state/cards": cards_root,
-            f"{home_prefix}/.hermes/superagent/{profile}/state/colleague-team/registry.sqlite": managed["colleague_registry"],
-            f"{home_prefix}/.hermes/superagent/{profile}/state": str(state_parent),
-            f"{home_prefix}/.hermes/superagent/{profile}/current": managed["engine_root"],
-            f"AGENTCORE_ROOT={home_prefix}/.hermes/superagent/{profile}/current": f"AGENTCORE_ROOT={managed['engine_root']}",
+            f"{home_prefix}/.local/state/agentcore/queue/{target_name}": str(state_parent / "colleague-queues"),
+            f"{home_prefix}/.local/state/agentcore/queue/{main_profile}": str(state_parent / "colleague-queues"),
+            f"{home_prefix}/.local/state/agentcore/recall-diagnostics": recall_diag_dir,
+            f"{home_prefix}/.hermes/superagent/{main_profile}/state/analysis-queue": managed["queue_root"],
+            f"{home_prefix}/.hermes/superagent/{main_profile}/state/dev-queue": dev_queue_root,
+            f"{home_prefix}/.hermes/superagent/{main_profile}/state/memory-spool": managed["memory_spool"],
+            f"{home_prefix}/.hermes/superagent/{main_profile}/state/markdown-outbox": managed["markdown_outbox"],
+            f"{home_prefix}/.hermes/superagent/{main_profile}/state/liveness.db": managed["liveness_db"],
+            f"{home_prefix}/.hermes/superagent/{main_profile}/state/cards": cards_root,
+            f"{home_prefix}/.hermes/superagent/{main_profile}/state/colleague-team/registry.sqlite": managed["colleague_registry"],
+            f"{home_prefix}/.hermes/superagent/{main_profile}/state/recall-diagnostics": recall_diag_dir,
+            f"{home_prefix}/.hermes/superagent/{main_profile}/state": str(state_parent),
+            f"{home_prefix}/.hermes/superagent/{main_profile}/current": managed["engine_root"],
+            f"AGENTCORE_ROOT={home_prefix}/.hermes/superagent/{main_profile}/current": f"AGENTCORE_ROOT={managed['engine_root']}",
         })
     mapping = {old: new for old, new in raw_mapping.items() if old != new}
     updated = _migrate_owned_path_scalars(original, mapping)
+    diag_path = str(Path(recall_diag_dir) / f"{target_name}.json")
+    updated = _ensure_diagnostic_path(updated, diag_path)
     # A checkout can also be a knowledge source or an authorized workspace.
     # Move only explicit plugin engine roots; replacing every checkout-prefixed
     # path would silently redirect unrelated data into an incomplete release.
     candidate_legacy_engines = [
         "/home/caixuf/code/super-agent",
         str(Path.home() / "code" / "super-agent"),
-        str(Path.home() / ".hermes" / "superagent" / profile / "current"),
-        f"/home/caixuf/.hermes/superagent/{profile}/current",
+        str(Path.home() / ".hermes" / "superagent" / main_profile / "current"),
+        f"/home/caixuf/.hermes/superagent/{main_profile}/current",
         *getattr(args, "legacy_engine_root", ()),
     ]
     legacy_engines = tuple(dict.fromkeys(p for p in candidate_legacy_engines if p != managed["engine_root"]))
@@ -1142,6 +1185,9 @@ def _sync_bound_colleague_profiles(profile_home: Path, release: Path, args: argp
         if isinstance(backend, dict) and isinstance(backend.get("members"), list):
             members.extend(m for m in backend["members"] if isinstance(m, dict))
     seen: set[str] = set()
+    state_parent = Path(plan["managed_paths"]["liveness_db"]).parent
+    diag_dir = Path(plan["managed_paths"].get("recall_diagnostics_dir", str(state_parent / "recall-diagnostics")))
+    diag_dir.mkdir(parents=True, exist_ok=True)
     for member in members[:64]:
         name, raw = member.get("profile"), member.get("home")
         if not isinstance(name, str) or name in seen or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name):
@@ -1185,7 +1231,7 @@ def _sync_bound_colleague_profiles(profile_home: Path, release: Path, args: argp
         if member_cfg.is_file():
             try:
                 orig = member_cfg.read_text(encoding="utf-8")
-                migrated = _migrated_config_text(orig, args, plan["managed_paths"])
+                migrated = _migrated_config_text(orig, args, plan["managed_paths"], target_profile=name)
                 if migrated != orig:
                     _write_text_atomic(member_cfg, migrated)
             except Exception:
@@ -1374,7 +1420,9 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         "runtime_configuration": runtime_configuration,
         "worker_configuration": worker_configuration,
     }
-    _write_json_atomic(root / "install-manifest.json", manifest)
+    manifest_path = root / "install-manifest.json"
+    _write_json_atomic(manifest_path, manifest)
+    _prune_old_releases(root, release, manifest_path)
     print(json.dumps({"status": "installed", **manifest}, ensure_ascii=False, indent=2))
     return 0
 
@@ -1769,13 +1817,23 @@ def _recall_diagnostics_observation(profile_home: Path, managed_current: Path | 
                         elif candidates:
                             binding["engine"] = "ambiguous"
                 bindings[name] = binding
-                if not isinstance(command, list) or command.count("--diagnostic-file") != 1:
+                path = None
+                localvec_cfg = data.get("memory", {}).get("localvec")
+                if isinstance(localvec_cfg, dict) and "diagnostic_path" in localvec_cfg:
+                    diag_val = localvec_cfg["diagnostic_path"]
+                    if not isinstance(diag_val, str) or not diag_val:
+                        raise ValueError("invalid diagnostic path")
+                    path = Path(diag_val)
+                    if not path.is_absolute():
+                        raise ValueError("nonabsolute diagnostic")
+                elif isinstance(command, list) and command.count("--diagnostic-file") == 1:
+                    index = command.index("--diagnostic-file")
+                    path = Path(command[index + 1])
+                    if not path.is_absolute():
+                        raise ValueError("nonabsolute diagnostic")
+                if path is None:
                     observations[name] = {"status": "unknown", "reason": "diagnostic_unconfigured"}
                     continue
-                index = command.index("--diagnostic-file")
-                path = Path(command[index + 1])
-                if not path.is_absolute():
-                    raise ValueError("nonabsolute diagnostic")
                 observations[name] = module.inspect(path, now=time.time(), max_age=3600)
             except (OSError, ValueError, TypeError, AttributeError, IndexError, yaml.YAMLError):
                 observations[name] = {"status": "unknown", "reason": "configuration_unavailable"}
@@ -2271,10 +2329,16 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     except (OSError, ValueError) as exc:
         print(json.dumps({"status": "blocked", "reason": "rollback_snapshot_failed", "error": type(exc).__name__}))
         return 1
+    memory_service = f"superagent-memory-{args.profile}.service"
+    user_systemd = Path.home() / ".config/systemd/user"
+    if not (user_systemd / memory_service).is_file():
+        candidates = sorted(user_systemd.glob(f"superagent-memory-{args.profile}-*.service"))
+        if candidates:
+            memory_service = candidates[0].name
     services = {
         "gateway": gateway_service,
         "worker": f"superagent-worker-{args.profile}.service",
-        "memory": f"superagent-memory-{args.profile}.service",
+        "memory": memory_service,
     }
     if set(extra_services) & set(services.values()):
         print(json.dumps({"status": "blocked", "reason": "duplicate_runtime_service"}))

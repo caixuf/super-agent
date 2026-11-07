@@ -109,6 +109,29 @@ def test_tools_recall_entity_cli(tmp_path):
     assert any("3090" in r["statement"] for r in data["results"])
 
 
+def test_tools_recall_entity_diagnostic_file(tmp_path):
+    repo_root = Path(__file__).resolve().parents[1]
+    cli_path = repo_root / "tools" / "recall_entity.py"
+    db_file = tmp_path / "test_entities.db"
+    diag_file = tmp_path / "diag.json"
+    _ = EntityStore(db_path=db_file)
+
+    proc = subprocess.run(
+        [sys.executable, str(cli_path), "proxy", "--limit", "1", "--db", str(db_file),
+         "--diagnostic-file", str(diag_file)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert proc.returncode == 0
+    assert diag_file.is_file()
+    assert (diag_file.stat().st_mode & 0o077) == 0
+    diag_data = json.loads(diag_file.read_text(encoding="utf-8"))
+    assert diag_data["code"] in ("hit", "no_match")
+    assert isinstance(diag_data["count"], int)
+    assert isinstance(diag_data["at"], (int, float))
+
+
 def test_tools_recall_entity_empty_query():
     repo_root = Path(__file__).resolve().parents[1]
     cli_path = repo_root / "tools" / "recall_entity.py"

@@ -166,6 +166,11 @@ def main():
         ("lan-cluster", "lan_cluster"),
     ):
         updated = ensure_toolset(updated, plugin, toolset)
+    memory = data.get("memory")
+    if isinstance(memory, dict) and isinstance(memory.get("localvec"), dict) and "diagnostic_path" not in memory["localvec"]:
+        profile = config.parent.name
+        diag_path = str(config.parent.resolve() / "state" / "recall-diagnostics" / f"{profile}.json")
+        updated = add_missing(updated, ["memory", "localvec", "diagnostic_path"], diag_path)
     if updated == original:
         print("  默认能力配置已就位")
         return

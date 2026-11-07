@@ -23,11 +23,12 @@ if str(REPO_ROOT) not in sys.path:
 from agentcore.memory.entity_store import EntityStore
 
 
-def parse_arguments(argv: list[str]) -> tuple[str, int, Optional[str]]:
+def parse_arguments(argv: list[str]) -> tuple[str, int, Optional[str], Optional[str]]:
     query_parts: list[str] = []
     limit = 5
     db_path: Optional[str] = None
     named_query: Optional[str] = None
+    diagnostic_file: Optional[str] = None
 
     i = 0
     after_double_dash = False
@@ -67,6 +68,15 @@ def parse_arguments(argv: list[str]) -> tuple[str, int, Optional[str]]:
             i += 1
             continue
 
+        if arg in ("--diagnostic-file", "-diagnostic-file") and i + 1 < len(argv):
+            diagnostic_file = argv[i + 1]
+            i += 2
+            continue
+        elif arg.startswith("--diagnostic-file="):
+            diagnostic_file = arg.split("=", 1)[1]
+            i += 1
+            continue
+
         if arg in ("--query", "-query") and i + 1 < len(argv):
             named_query = argv[i + 1]
             i += 2
@@ -81,21 +91,38 @@ def parse_arguments(argv: list[str]) -> tuple[str, int, Optional[str]]:
 
     q = (named_query if named_query is not None else " ".join(query_parts)).strip()
     limit = max(1, min(limit, 20))
-    return q, limit, db_path
+    return q, limit, db_path, diagnostic_file
+
+
+def _write_diagnostic(path_str: str, code: str, count: int) -> None:
+    try:
+        p = Path(path_str)
+        if not p.is_absolute():
+            return
+        p.parent.mkdir(parents=True, exist_ok=True)
+        temp = p.with_suffix(f".tmp.{os.getpid()}")
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"at": time.time(), "code": code, "count": count}, stream)
+        os.replace(temp, p)
+    except Exception:
+        pass
 
 
 def main() -> int:
     raw_args = sys.argv[1:]
     if len(raw_args) == 1 and raw_args[0] in ("-h", "--help"):
-        print("Usage: recall_entity.py [query] [--limit N] [--db PATH]")
+        print("Usage: recall_entity.py [query] [--limit N] [--db PATH] [--diagnostic-file PATH]")
         print("Recall relevant entity rules for prompt prefetch.")
         return 0
 
-    q, limit, db_path = parse_arguments(raw_args)
+    q, limit, db_path, diagnostic_file = parse_arguments(raw_args)
 
     if not q:
         json.dump({"ok": True, "results": [], "empty_reason": "empty_query"}, sys.stdout, ensure_ascii=False)
         sys.stdout.write("\n")
+        if diagnostic_file:
+            _write_diagnostic(diagnostic_file, "no_match", 0)
         return 0
 
     t0 = time.monotonic()
@@ -112,6 +139,8 @@ def main() -> int:
         }
         json.dump(payload, sys.stdout, ensure_ascii=False)
         sys.stdout.write("\n")
+        if diagnostic_file:
+            _write_diagnostic(diagnostic_file, "hit" if results else "no_match", len(results))
         return 0
     except Exception as exc:
         json.dump({
@@ -120,6 +149,8 @@ def main() -> int:
             "results": [],
         }, sys.stdout, ensure_ascii=False)
         sys.stdout.write("\n")
+        if diagnostic_file:
+            _write_diagnostic(diagnostic_file, "backend_query_failed", 0)
         return 0
 
 
