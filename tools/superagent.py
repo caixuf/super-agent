@@ -624,8 +624,22 @@ def _check_runtime_invariants(manifest_path: Path, profile_home: Path, profile: 
 def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     version, identity = _git_identity()
     profile_home = _profile_home(args)
-    hermes_root = args.hermes_root.expanduser().resolve()
     root = _managed_root(args)
+    hermes_root = args.hermes_root.expanduser().resolve()
+    if args.hermes_root == DEFAULT_HERMES:
+        current_hermes = root / "hermes-current"
+        if current_hermes.is_symlink() and current_hermes.is_dir():
+            hermes_root = current_hermes.resolve()
+        else:
+            manifest_path = root / "install-manifest.json"
+            if manifest_path.is_file():
+                try:
+                    prior = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    prior_hr = prior.get("hermes_root")
+                    if prior_hr and Path(prior_hr).is_dir():
+                        hermes_root = Path(prior_hr).resolve()
+                except Exception:
+                    pass
     release = _release_dir(root, version)
     blockers = []
     runtime_manifest = getattr(args, "runtime_manifest", None)

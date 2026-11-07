@@ -776,6 +776,30 @@ def test_plan_refuses_enabled_feishu_card_without_host_implementation(tmp_path):
     assert "feishu_card_implementation_unverified" in plan["blockers"]
 
 
+def test_plan_infers_hermes_root_from_managed_current(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    module = _load_installer()
+    _seed_profile(tmp_path)
+    monkeypatch.setattr(module, "_git_identity", lambda: ("candidate", "candidate"))
+    monkeypatch.setattr(module, "_plugin_names", lambda args: ["example"])
+    monkeypatch.setattr(module, "_external_plugin_sources", lambda args: [])
+    monkeypatch.setattr(module, "_keep_patch_state", lambda root: [])
+    monkeypatch.setattr(module, "_legacy_patch_state", lambda root: [])
+    monkeypatch.setattr(module, "_profile_home", lambda args: tmp_path / ".hermes/profiles/demo")
+    managed_root = tmp_path / ".hermes/superagent/demo"
+    monkeypatch.setattr(module, "_managed_root", lambda args: managed_root)
+
+    staged_hermes = tmp_path / "hermes_staged"
+    (staged_hermes / "plugins/platforms/feishu").mkdir(parents=True)
+    (staged_hermes / "plugins/platforms/feishu/adapter.py").write_text("# adapter\n")
+    managed_root.mkdir(parents=True)
+    (managed_root / "hermes-current").symlink_to(staged_hermes)
+
+    args = SimpleNamespace(hermes_root=module.DEFAULT_HERMES, runtime_manifest=None, profile="demo")
+    plan = module.build_plan(args)
+    assert plan["hermes_root"] == str(staged_hermes.resolve())
+
+
 def test_doctor_reports_configured_card_missing_from_host(tmp_path):
     profile = _seed_profile(tmp_path)
     _run(tmp_path, "install", check=True)
