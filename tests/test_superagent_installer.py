@@ -1669,7 +1669,10 @@ def test_doctor_detects_missing_feishu_pm_extra_when_feishu_enabled(tmp_path):
     install_key = hashlib.sha256(str(hermes_root).encode("utf-8")).hexdigest()[:16]
     facts_path = tmp_path / ".hermes" / "installs" / install_key / "facts.json"
     facts_path.parent.mkdir(parents=True, exist_ok=True)
-    facts_path.write_text(json.dumps({"extras": ["all"]}), encoding="utf-8")
+    facts_path.write_text(
+        json.dumps({"packages": {"venv": {"extras": ["all"]}}, "schema": 1}),
+        encoding="utf-8",
+    )
 
     broken = _run(tmp_path, "doctor")
     assert broken.returncode == 1
@@ -1677,7 +1680,10 @@ def test_doctor_detects_missing_feishu_pm_extra_when_feishu_enabled(tmp_path):
     assert report["status"] == "broken"
     assert report["feishu_dependency_observation"]["status"] == "missing_feishu_extra"
 
-    facts_path.write_text(json.dumps({"extras": ["all", "feishu"]}), encoding="utf-8")
+    facts_path.write_text(
+        json.dumps({"packages": {"venv": {"extras": ["all", "feishu"]}}, "schema": 1}),
+        encoding="utf-8",
+    )
     ready = _run(tmp_path, "doctor", check=True)
     report_ok = json.loads(ready.stdout)
     assert report_ok["status"] == "ready"

@@ -1747,7 +1747,12 @@ def _feishu_dependency_observation(profile_home: Path, hermes_root) -> dict[str,
         if not facts_path.is_file():
             return {"status": "pm_facts_not_present", "install_key": install_key}
         facts = json.loads(facts_path.read_text(encoding="utf-8"))
-        extras = facts.get("extras") if isinstance(facts, dict) else []
+        venv_facts = ((facts.get("packages") or {}).get("venv") or {}) if isinstance(facts, dict) else {}
+        extras = (
+            venv_facts.get("extras")
+            if isinstance(venv_facts, dict) and "extras" in venv_facts
+            else (facts.get("extras") if isinstance(facts, dict) else [])
+        )
         if not isinstance(extras, list):
             extras = []
         return {
