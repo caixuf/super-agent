@@ -1221,9 +1221,10 @@ bash scripts/ops/uninstall-legacy.sh --apply
 ### 17.5 回归
 
 - 新增用例：`tests/test_ops_scripts.py` **18 passed**；
-- 仓内全量：`python3 -m pytest -q` → **2984 passed / 148 skipped / 0 failed**（446.67s）；
-  收集数 3132，比改造前的 3114 正好多 18（新增用例数），
-  一进一出都是 0 失败 —— 受管布局的原行为没有回归。
+- 仓内全量：`python3 -m pytest -q` → **2986 passed / 148 skipped / 0 failed**（447.21s）；
+  其中 2984 是本次改造后的数字，+2 来自之后并进来的上游提交 `349de21`
+  （`installer: stage identity files and provision colleague workspaces and plugins`）；
+  收集数 3132 → 3134，与用例增量一致 —— 受管布局的原行为没有回归。
 
 ### 17.6 更正 §15.2 的一处表述
 
