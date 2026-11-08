@@ -2354,6 +2354,13 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         "worker": f"superagent-worker-{args.profile}.service",
         "memory": memory_service,
     }
+    worker_candidates = sorted(
+        p.name for p in user_systemd.glob(f"superagent-worker-{args.profile}-*.service")
+        if p.is_file()
+    )
+    for idx, wname in enumerate(worker_candidates):
+        if wname not in services.values() and wname not in extra_services:
+            services[f"worker-colleague-{idx}"] = wname
     if set(extra_services) & set(services.values()):
         print(json.dumps({"status": "blocked", "reason": "duplicate_runtime_service"}))
         return 1

@@ -482,6 +482,38 @@ exit 0
     assert any("start hermes-gateway-demo.service" in line for line in lines)
 
 
+def test_update_discovers_and_restarts_colleague_workers(tmp_path):
+    _seed_profile(tmp_path)
+    systemd_user = tmp_path / ".config/systemd/user"
+    systemd_user.mkdir(parents=True, exist_ok=True)
+    colleague_svc = systemd_user / "superagent-worker-demo-dev.service"
+    colleague_svc.write_text("[Unit]\nDescription=Dev Worker\n", encoding="utf-8")
+    calls = tmp_path / "systemctl-calls"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    stub = bindir / "systemctl"
+    stub.write_text(
+        """#!/bin/sh
+printf '%s\n' "$*" >> "$TEST_SYSTEMCTL_CALLS"
+if [ "$2" = is-active ]; then exit 0; fi
+exit 0
+""", encoding="utf-8")
+    stub.chmod(0o755)
+    env = dict(os.environ, HOME=str(tmp_path), TEST_SYSTEMCTL_CALLS=str(calls),
+               PATH=str(bindir) + os.pathsep + os.environ["PATH"])
+    command = [
+        sys.executable, str(TOOL), "--profile", "demo",
+        "--profile-home", str(tmp_path / ".hermes/profiles/demo"),
+        "--root", str(tmp_path / ".hermes/superagent"), "update",
+    ]
+    proc = subprocess.run(command, env=env, text=True, capture_output=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    lines = calls.read_text().splitlines()
+    assert any("stop superagent-worker-demo-dev.service" in line for line in lines)
+    assert any("start superagent-worker-demo-dev.service" in line for line in lines)
+
+
+
 def test_update_writes_capability_defaults_through_the_official_installers(tmp_path):
     """受管布局与官方布局必须同源：能力默认值只由官方配置器写。
 
