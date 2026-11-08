@@ -118,14 +118,28 @@ def _git_identity(root: Path = REPO) -> tuple[str, str]:
     return version, short + ("-dirty" if dirty else "")
 
 
-def _profile_home(args: argparse.Namespace) -> Path:
-    if args.profile_home:
-        return args.profile_home.expanduser().resolve()
-    return (Path.home() / ".hermes" / "profiles" / args.profile).resolve()
-
-
 def _managed_root(args: argparse.Namespace) -> Path:
     return (args.root.expanduser() / args.profile).resolve()
+
+
+def _profile_home(args: argparse.Namespace) -> Path:
+    if getattr(args, "profile_home", None):
+        return args.profile_home.expanduser().resolve()
+    try:
+        root = _managed_root(args)
+        manifest_path = root / "install-manifest.json"
+        if manifest_path.is_file():
+            prior = json.loads(manifest_path.read_text(encoding="utf-8"))
+            prior_ph = prior.get("profile_home")
+            if prior_ph and (Path(prior_ph) / "config.yaml").is_file():
+                return Path(prior_ph).resolve()
+    except Exception:
+        pass
+    if getattr(args, "profile", "") == "default":
+        cand = (Path.home() / ".hermes").resolve()
+        if (cand / "config.yaml").is_file() and not (cand / "profiles" / "default" / "config.yaml").is_file():
+            return cand
+    return (Path.home() / ".hermes" / "profiles" / args.profile).resolve()
 
 
 def _release_dir(root: Path, version: str) -> Path:
