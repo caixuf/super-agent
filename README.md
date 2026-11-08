@@ -14,6 +14,19 @@
 
 ---
 
+## 权威技术规范与操作指南（v2.0 单根架构核心文档）
+
+系统级技术手册、全景架构、生产部署、插件与运维文档：
+
+- [`docs/INDEX.md`](docs/INDEX.md)：**全套技术文档权威导航索引**
+- [`docs/TECH_MANUAL.md`](docs/TECH_MANUAL.md) / [`docs/SUPER_AGENT_TECHNICAL_MANUAL.md`](docs/SUPER_AGENT_TECHNICAL_MANUAL.md)：**Super Agent 技术手册** —— 系统原理、执行边界、并发/恢复语义与故障处置矩阵
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：**v2.0 架构全景深潜** —— 单根拓扑（`~/super_agent/<profile>`）、十二层分层机制、同事制多智能体与 ADR-S1~S6 守卫
+- [`docs/DEPLOY.md`](docs/DEPLOY.md)：**生产部署与生命周期指南** —— 单根受管安装、版本 Release 原子切换、身份暂存与业务叠加层挂载（`SOUL.generic.md`）、`hermes-current` 自动推断
+- [`docs/PLUGINS.md`](docs/PLUGINS.md)：**插件与工具面全景指南** —— 16 款受管插件（13 款通用内建 + 3 款受管外部）与 `localvec` 记忆提供方、两道启用门禁
+- [`docs/OPERATIONS.md`](docs/OPERATIONS.md)：**布局感知运维与对账指南** —— 多布局感知解析（`_layout.sh`）、遗留服务对账纠偏（`uninstall-legacy.sh`）、一键环境重构与 `doctor` 召回观测
+
+---
+
 ## 持久任务、研发同事与执行层
 
 - **持久任务池**：`agentcore.pool` 负责持久任务、依赖、租约与结果 outbox；`agentcore.worker` 通过有界 `AgentScheduler` 调用 stdlib 或真实 `flowcoro_py` 后端。支持取消、超时、输出预算和旧 attempt 隔离。
@@ -50,10 +63,10 @@
 | 运行时 | `runtime/` | `<HERMES_HOME>/agentcore/runtime/` | 常驻服务单元骨架（占位符化，profile 名/服务名非写死）+ `BASELINE.md`（通用能力基线）+ `CONFIG_MAP.md`（段归属与并发语义）+ `autotask/` 定时作业规范 |
 | 技能库 | `skills/` | `<HERMES_HOME>/skills/` | 通用与示例技能库（`illustrated-doc-rendering`, `im-card-markdown`, `research-before-build`, `skill-distillation`），业务技能通过挂钩环境变量注入 |
 | 运维与审计工具 | `tools/` | —— | 部署复验 `redeploy_check.py`、T6 缺口审计 `t6_gap_audit.py`、AI 定时作业编译器 `tools/autotask/`、文档架构浏览器等 |
-| 文档 | `docs/` | —— | `MIGRATION.md`（八层迁移清单 + 资产表）、`PLUGINS.md`（插件/MCP/工具集注册）、`POOL_RUNTIME.md`、`DISPATCH_ANALYSIS.md`、`REDEPLOY.md` |
+| 文档 | `docs/` | —— | 权威导航 [`INDEX.md`](docs/INDEX.md)、技术手册 [`TECH_MANUAL.md`](docs/TECH_MANUAL.md)、架构深潜 [`ARCHITECTURE.md`](docs/ARCHITECTURE.md)、部署生命周期 [`DEPLOY.md`](docs/DEPLOY.md)、插件全景 [`PLUGINS.md`](docs/PLUGINS.md)、运维对账 [`OPERATIONS.md`](docs/OPERATIONS.md)、迁移清单 [`MIGRATION.md`](docs/MIGRATION.md) 等 |
 | 平台适配补丁 | `patches/` | `<HERMES_HOME>/agentcore/patches/` | 消息平台适配：Card 2.4 流式卡片 + 纯文字审批；幂等重放与内容探针校验 |
-| 插件集 | `plugins/` | `<HERMES_HOME>/plugins/<name>` + profile `config.yaml` 的 `plugins.enabled` | `longtask_guard/`（前台长任务自动转后台 + 心跳/账本登记）、`task_status/`（长任务活体快照：state/elapsed/heartbeat age/tail）、`durable_dispatch/`（持久任务提交与状态查询）、`colleague_team/` 与 `colleague_catalog/`（研发团队管理与目录呈现）、`markdown_delivery/`（大文档直发与租户级共享）、`write_guard/`（写保护门禁）等 13 款通用插件 |
-| 安装器 | `install/superagent.sh` + `tools/superagent.py` | —— | 单根受管安装、版本 release、原子切换/回滚、manifest 卸载；`install/install.sh` 保留为兼容入口 |
+| 插件集与记忆 | `plugins/` | `<HERMES_HOME>/plugins/<name>` + profile `config.yaml` 的 `plugins.enabled` | 16 款受管插件（13 款通用内建 + 3 款受管外部）与 `localvec` 记忆提供方：`longtask_guard`、`task_status`、`durable_dispatch`、`colleague_team`、`colleague_catalog`、`markdown_delivery`、`lan_cluster`、`write_guard` 等 |
+| 安装与运维 | `install/superagent.sh` + `tools/superagent.py` + `scripts/ops/` | —— | v2.0 单根受管安装（`~/super_agent/<profile>`）、身份暂存挂载、`hermes-current` 自动推断、多布局感知运维对账（`scripts/ops/_layout.sh`）与原子回滚 |
 | 干净室验证 | `docker/` | —— | 容器里从一个空 HOME 装一遍，20 项断言 |
 | 迁移口径 | `docs/MIGRATION.md` | —— | 「只在盘上」的漏项清单 + 可量化验收 |
 

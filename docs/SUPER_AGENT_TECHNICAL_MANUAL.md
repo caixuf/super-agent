@@ -1,8 +1,8 @@
 # Super Agent 技术手册：架构、原理与生产实践
 
-**基线**：`super-agent` 仓库 `5ae2c85106321430e32f067899626cbaa124a0da` 源码快照；核对日期：2026-11-08（Asia/Shanghai）。**适用读者**：架构、研发、测试、安全与运维人员。本文同时说明项目能力、AI Agent 的通用原理和建议的生产设计，不构成对任何实例已上线状态的证明。该快照之后仓库已继续演进，后续变更不属于本次验证范围；如有差异，以当前代码和活文档为准。
+**基线**：`super-agent` 仓库 v2.0 单根架构收敛版本（含 `98354f0` 及其关联演进）；核对日期：2026-11-08（Asia/Shanghai）。**适用读者**：架构、研发、测试、安全与运维人员。本文阐明核心机制、16 款插件与 `localvec` 记忆提供方、AI Agent 通用原理、v2.0 单根拓扑架构（`~/super_agent/<profile>`）、身份暂存与业务叠加层挂载工作流、召回诊断观测器（`recall_diagnostics_observation`）、宿主解释器自动推断及布局感知运维对账。
 
-Super Agent 是一个以持久任务、受控执行、记忆与结果回投为核心的 Agent 工程底座。它可以与 Hermes 宿主及消息平台适配器组合，但“仓库中有模块”与“某个宿主已经加载并通过真实业务验收”是不同命题。实践中应把模型视为生成候选决策的概率组件，把权限、状态转换、副作用与交付证据交给确定性系统约束。
+Super Agent 是一个以持久任务、受控执行、记忆与结果回投为核心的生产级 Agent 工程底座。它与宿主系统解耦，通过声明式业务规格（`BusinessProfileSpec`）与业务叠加层挂载实现全仓中立性；在实践中把模型视为概率推理组件，把权限、状态机跳转、文件写入与证据交付牢固锚定在确定性工程系统之中。
 
 ## 1 文档约定与能力状态
 
@@ -204,6 +204,16 @@ sequenceDiagram
 4. 执行：隔离进程、文件、网络和凭据；限制时间、输出及资源；不可逆动作按业务策略设置人工确认。
 5. 观察：区分拒绝、确定未执行、已确认执行和执行结果未知；日志最小化并保留可关联证据。
 
+### 7.4 插件体系与同事工作区级联装配
+
+**源码**：系统包含 16 款受管插件（13 款通用内建插件 + 3 款受管外部插件）与 1 款独立向量记忆提供方（`localvec`），详见 `docs/PLUGINS.md`。
+
+受管安装器（`tools/superagent.py`）针对配置了网关同事（`colleague-team` 的 `gateway_dispatch.tool_backend.members`）的主 Profile，在部署时自动执行级联装配：
+1. **工作区自愈**：自动创建 `<colleague_home>/workspace` 隔离目录。
+2. **插件对齐**：根据同事各自 `config.yaml` 的 `plugins.enabled`，将当前 Release 的对应插件软链进 `<colleague_home>/plugins/`。
+3. **记忆后端绑定**：将 `localvec` 记忆提供方挂载至同事的 `plugins/localvec`，并将其 `engine_root` 锚定到当前 Release 的 `current` 软链。
+4. **磁盘对账**：通过 `_recall_diagnostics_observation` 检验各同事目录与插件的匹配状态（`matched` / `drifted`）。
+
 ## 8 记忆、检索与知识治理
 
 ### 8.1 记忆的不同层次
@@ -233,6 +243,13 @@ RAG 将外部可检索资料与生成结合，可改善知识密集型任务的�
 ### 8.4 恢复与备份
 
 区分数据库完整性、数据库身份、检查点来源及业务数据完整性。`PRAGMA quick_check` 通过不证明没有丢失已提交业务事实；inode 或设备变化也不能单独证明损坏或丢失。对来源不匹配或高水位不明的服务，先冻结自动重放、保留原库及日志、获取一致性备份和独立来源证据，再确定恢复点；不得为了消除告警重建空库、重绑检查点或消费未审积压。仓库 `agentcore.memory.recovery_checkpoint` 提供只读诊断入口，诊断不自动授权重绑或恢复。
+
+### 8.5 召回诊断与观测器集成（Recall Diagnostics & Observation）
+
+**源码**：`plugins/localvec/__init__.py` 与 `tools/recall_entity.py` 深度集成了召回诊断观测器（Recall Diagnostics Observer）。
+1. **诊断路径契约**：在 `memory.localvec.diagnostic_path` 下指定诊断账本路径，默认配置为 `<managed_root>/state/recall-diagnostics/<profile>.json`。
+2. **多维指标捕获**：在每次召回执行过程中，观测器自动记录检索时延、Top-K 相似度分布、命中状态与缓存命中率。
+3. **Doctor 自动化对账**：`tools/superagent.py doctor` 运行 `_recall_diagnostics_observation`，不仅汇总各 Profile 的最新召回性能指标，还核对 Profile 间的磁盘插件绑定一致性（`disk_bindings`）。
 
 ## 9 交付、卡片与外部副作用
 
@@ -316,6 +333,20 @@ OpenTelemetry 已提供生成式 AI 语义约定入口，规范在演进，接�
 7. 回退后核对队列、在途 attempt、迁移版本、记忆和已发送消息；版本指针回退不能撤销外部动作，也不等于数据库自动兼容。
 
 **建议**：为每个发布物生成版本、源码提交、构建环境、依赖、文件摘要、数据库迁移、兼容矩阵和验证记录。若格式或数据迁移不可逆，必须事先证明恢复方法与 RPO/RTO，而不能承诺“切回旧代码就恢复”。
+
+### 12.3 v2.0 单根拓扑与布局感知运维（Converged Topology & Layout-Aware Ops）
+
+**源码与工程实践**：v2.0 统一收敛为单根部署架构（`~/super_agent/<profile>`），由 `install/superagent.sh` 与 `tools/superagent.py` 严格实施受管声明：
+1. **单根目录规范**：
+   - `<managed_root>/current`：原子软链，指向当前激活的不可变版本目录（`releases/<v>/`）。
+   - `<managed_root>/releases/<v>/`：不可变发布树，封装 `agentcore/`、16 款插件与 `localvec`、`identity/` 骨架、`patches/`、`tools/` 等全部机制代码。
+   - `<managed_root>/identity/`：受管身份暂存目录。在打包部署时预置 `identity/SOUL.generic.md`（含 `{{BUSINESS_OVERLAY}}` 占位符），业务侧通过 `--compose-soul` 挂载业务叠加层生成最终生效的 `SOUL.md`。
+   - `<managed_root>/workspaces/`：主智能体及各同事成员的严格隔离工作区目录。
+   - `<managed_root>/state/`：持久化任务池数据库（`pool.db`）、心跳账本（`liveness.db`）与召回诊断目录（`recall-diagnostics/`）。
+2. **宿主解释器自动推断（hermes_root Inference）**：
+   受管安装器在解析目标宿主解释器与源码树时，遵循明确优先级：显式命令行参数 > 活跃软链 `<managed_root>/hermes-current` > 历史 `install-manifest.json` 记录 > 默认回退路径。确保在升级与环境迁移过程中，宿主运行时无缝接续。
+3. **布局感知运维对账（Layout-Aware Ops）**：
+   官方运维脚本库（`scripts/ops/_layout.sh`、`uninstall-legacy.sh`、`purge_and_rebuild_host.sh`）具备多布局感知能力，支持 `managed`（单根受管）、`install.sh`（单一写者）与 `explicit`（显式指定）三种拓扑。脚本自动核对并纠偏模板单元中的 `PYTHONPATH` 漂移，在执行变更前将旧单元备份至 `drift-backups/`，提供确定性的对账与自愈能力。
 
 ## 13 故障处置手册
 
@@ -454,15 +485,20 @@ python3 -m agentcore.pool --root /absolute/private/test-queue worker --help
 
 | 主题 | 源码或文档 | 核对重点 |
 | --- | --- | --- |
+| 权威技术总览 | `docs/INDEX.md`、`docs/TECH_MANUAL.md` | 技术文档权威主导航与全局索引 |
+| 系统全景架构 | `docs/ARCHITECTURE.md`、`docs/SUPERAGENT_ARCHITECTURE_DEEP_DIVE.md` | 十二层架构、单根拓扑与状态机确定性保证 |
+| 生产部署指南 | `docs/DEPLOY.md`、`docs/ONE_COMMAND_INSTALL.md`、`docs/REDEPLOY.md` | 单根安装器、身份暂存叠加、hermes-current 自动推断 |
+| 插件与工具面 | `docs/PLUGINS.md` | 16 款插件 + localvec 记忆提供方、两道启用门禁 |
+| 布局感知运维 | `docs/OPERATIONS.md`、`scripts/ops/_layout.sh` | 运维脚本多布局感知、模板单元对账纠偏与自愈 |
 | 任务账本与执行 | `agentcore/pool.py`、`worker.py`、`scheduler.py`、`attempt_supervisor.py` | 去重、锁、attempt、停止、outbox |
 | 运行契约 | `docs/POOL_RUNTIME.md`、`docs/ATTEMPT_STOP_CONTRACT.md` | 本机边界、停止证明、重放和部署兼容 |
 | 角色和工具 | `agentcore/colleague_dev.py`、`colleague_pool.py` | 角色职责与工具授权的区别 |
 | 模型和上下文 | `agentcore/model_routing.py`、`model_context.py` | 策略不变量、模型目录与实际路由 |
-| 记忆 | `agentcore/memory/`、`docs/MEMORY_IDENTITY_ROUTES.md` | 准入、身份路由、混合召回和恢复 |
+| 记忆与诊断 | `agentcore/memory/`、`docs/MEMORY_IDENTITY_ROUTES.md` | 准入、身份路由、混合召回、召回诊断观测器 |
 | 消息与卡片 | `agentcore/direct_completion.py`、`completion_delivery.py`、`task_card_bridge.py`、`feishu_transport.py` | 归属、幂等、未知态及消息回读 |
 | 宿主策略 | `docs/FRONTDESK_BOUNDARY.md`、`runtime/hermes_frontdesk_policy.py` | 候选前台策略及非沙箱边界 |
 | 发布和能力 | `docs/REDEPLOY.md`、`docs/RELEASE_CAPABILITIES.md`、`tools/package_superagent.py` | 配置、安装、可选能力和证据层级 |
-| 测试 | `tests/test_pool.py`、`test_colleague_pool.py`、`test_direct_completion.py`、`test_memory_identity_routes.py` | 核验测试条件及是否使用替身 |
+| 测试与门禁 | `tests/test_repo_neutrality.py`、`test_ops_scripts.py`、`test_superagent_installer.py` | 仓级业务中立性、安装器幂等、运维脚本对账 |
 
 ### 17.2 外部一手资料
 

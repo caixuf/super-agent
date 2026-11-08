@@ -1,10 +1,14 @@
 # 文档索引
 
-先读架构实践指南与核心活文档，其余按需。
+> 完整技术体系全景与文档分类，请查阅权威主索引：[`INDEX.md`](INDEX.md)。
 
-## Super Agent 技术手册
+## 核心技术规范
 
-- [`SUPER_AGENT_TECHNICAL_MANUAL.md`](SUPER_AGENT_TECHNICAL_MANUAL.md)：系统架构、大模型原理、任务与记忆、权限、安全、部署运维及验收。文中明确区分源码快照、隔离验证、真实渠道实测与建议设计；后续实现以当前代码和活文档为准。
+- [`TECH_MANUAL.md`](TECH_MANUAL.md) / [`SUPER_AGENT_TECHNICAL_MANUAL.md`](SUPER_AGENT_TECHNICAL_MANUAL.md)：**Super Agent 技术手册** —— 系统架构、大模型原理、任务与记忆、权限、安全、部署运维及验收规范。
+- [`ARCHITECTURE.md`](ARCHITECTURE.md)：**v2.0 架构全景深潜** —— 单根架构拓扑（`~/super_agent/<profile>`）、十二层分层机制、同事制协作与执行保障。
+- [`DEPLOY.md`](DEPLOY.md)：**生产部署与生命周期指南** —— 单根受管安装、身份暂存与业务叠加层挂载（`SOUL.generic.md`）、`hermes-current` 自动推断与干净室验证。
+- [`PLUGINS.md`](PLUGINS.md)：**插件与工具面全景指南** —— 16 款插件（13 通用内建 + 3 受管外部）与 `localvec` 记忆提供方配置规范。
+- [`OPERATIONS.md`](OPERATIONS.md)：**布局感知运维与对账指南** —— 布局自适应解析（`_layout.sh`）、遗留服务对账纠偏（`uninstall-legacy.sh`）与环境自愈重建。
 
 ## 先进 Agent 架构与工程实践指南（推荐学习入口）
 
