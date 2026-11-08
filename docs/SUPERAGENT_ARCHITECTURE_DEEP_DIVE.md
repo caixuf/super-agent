@@ -1,6 +1,10 @@
 # Super Agent 架构设计与核心技术深度解析 (Architecture Deep Dive)
 
-> **发布版本**: Release `d6e4271`  
+> [!NOTE] **架构演进说明（2026-11-08）**
+> 本文为基线 `d6e4271` 时期的架构深度解析报告，记录了 1-N-M 动态同事池、渐进式交付与原子部署的原始设计演进。
+> 当前系统已全面收敛至 **v2.0 单根架构（Single-Root Architecture）**，最新系统全景架构请参阅 [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)。
+
+> **发布版本**: Release `d6e4271` (Historical Reference)  
 > **核心范式**: 1-N-M 拓扑 · FlowCoro 动态同事池 · 渐进式交付 (Progressive Delivery) · 不可变产物部署  
 > **适用节点**: 本地开发机 (`dev-node-01`) · 生产工控机 (`prod-worker-01`) · 仿真计算中枢 (`sim-server-01`)
 

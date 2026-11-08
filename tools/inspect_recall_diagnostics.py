@@ -46,13 +46,23 @@ def inspect(path: Path, *, now: float, max_age: float) -> dict:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", action="append", required=True, metavar="NAME=ABSOLUTE_PATH")
+    parser.add_argument("--source", action="append", default=[], metavar="NAME=ABSOLUTE_PATH")
+    parser.add_argument("--profile", action="append", default=[], help="Profile name to inspect from managed recall-diagnostics directory")
+    parser.add_argument("--root", type=Path, default=Path(os.environ.get("AGENTCORE_ROOT", Path.home() / "super_agent")), help="Managed root directory (default: ~/super_agent)")
     parser.add_argument("--max-age", type=float, default=3600)
     args = parser.parse_args(argv)
-    if not math.isfinite(args.max_age) or not 1 <= args.max_age <= 604800 or len(args.source) > 64:
-        parser.error("invalid age or source count")
+    if not math.isfinite(args.max_age) or not 1 <= args.max_age <= 604800:
+        parser.error("invalid age")
+    raw_sources = list(args.source)
+    for p in args.profile:
+        if not _NAME.fullmatch(p):
+            parser.error(f"invalid profile name: {p}")
+        diag_path = (args.root / p / "state" / "recall-diagnostics" / f"{p}.json").resolve()
+        raw_sources.append(f"{p}={diag_path}")
+    if not raw_sources or len(raw_sources) > 64:
+        parser.error("at least one --source NAME=ABSOLUTE_PATH or --profile NAME is required (max 64)")
     sources = {}
-    for item in args.source:
+    for item in raw_sources:
         name, sep, raw = item.partition("=")
         if not sep or not _NAME.fullmatch(name) or name in sources or not Path(raw).is_absolute():
             parser.error("each source requires a unique name and an absolute path")

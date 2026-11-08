@@ -403,7 +403,7 @@ OpenTelemetry 已提供生成式 AI 语义约定入口，规范在演进，接�
 
 同一基线在本机运行 `tests/test_pool.py`、`tests/test_colleague_pool.py`、`tests/test_direct_completion.py` 和 `tests/test_memory_identity_routes.py`，结果为 111 通过、2 跳过；两项跳过均因默认环境未加载可选 FlowCoro 绑定。单独加载本机 FlowCoro 绑定运行同事池测试为 36 通过。两组测试有重叠，不能相加为独立测试数量，且均不是生产链路验收。
 
-2026-11-07 的另一工作区快照曾有全仓 `3039 passed, 46 skipped`，但它不是上述 `5ae2c85` 的本次全量回归数字，不能外推；每次升级应在对应提交和环境重新记录。本文中的历史测试只用于解释证据层级，不作为现网健康声明。
+2026-11-07 的另一工作区快照曾有全仓 `3039 passed, 46 skipped`，但它不是上述 `5ae2c85` 的本次全量回归数字，不能外推；每次升级应在对应提交和环境重新记录。在 2026-11-08 v2.0 单根架构收敛基线上，全仓自检入口 `bash verify.sh` 实测回归结果为 `3103 passed, 46 skipped in 570.53s`（46 项跳过均为可选原生 C 绑定或真实外网凭据依赖项，0 失败），仓级中立性门禁 `pytest tests/test_repo_neutrality.py` 17 项全过。本文中的历史测试只用于解释证据层级，不作为现网健康声明。
 
 ## 15 操作接口与数据契约
 

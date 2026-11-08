@@ -1,22 +1,24 @@
 # Super Agent 一键安装与整包升级
 
+> **权威规范索引**：v2.0 单根架构下的完整生产部署生命周期与操作规范，请优先参阅 [`docs/DEPLOY.md`](DEPLOY.md) 与 [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)。
+
 ## 设计目标
 
-Super Agent 的代码、技能、工具集、运行时资产、状态、备份和版本账本全部放在
-一个可删除的根目录：
+Super Agent 的代码、技能、工具集、运行时资产、状态、备份和版本账本统一收敛于受管根目录（默认为 `~/super_agent/<profile>/`）：
 
 ```text
-~/.hermes/superagent/<profile>/
+~/super_agent/<profile>/
   current -> releases/<version>/
+  hermes-current -> /path/to/hermes/runtime
   releases/<version>/
   state/
   config/
-  backups/
+  workspaces/
+  identity/
   install-manifest.json
 ```
 
-Hermes 安装树**不再承载 Super Agent 的业务源码或卡片补丁**。Hermes 侧只保留
-受管插件链接和 `config.yaml` 中的显式注册项；卸载时由 manifest 精确撤回。
+Hermes 安装树**不再承载 Super Agent 的业务源码或卡片补丁**。Hermes 侧只保留受管插件链接和 `config.yaml` 中的显式注册项；卸载时由 manifest 精确撤回。
 
 ## 日常命令
 

@@ -1,7 +1,13 @@
 # 单一写者部署路径（bot1 切官方 install.sh）
 
+> [!NOTE] **架构演进说明（2026-11-08）**
+> 本规格记录 2026-11-07 针对多写者冲突实施的单一写者过渡设计（方案 B）。
+> 系统随后在 2026-11-08 全面收敛演进为 **v2.0 单根受管架构（Single-Root Architecture，`~/super_agent/<profile>`）**，
+> 统一由 `install/superagent.sh` 实施不可变版本 Release 切换、`hermes-current` 解释器动态推断、16 款插件与 `localvec` 记忆提供方挂载、`identity/SOUL.generic.md` 暂存与业务叠加层挂载，以及 `scripts/ops/_layout.sh` 布局感知运维。
+> 最新权威规范请参阅 [`docs/ARCHITECTURE.md`](../../ARCHITECTURE.md)、[`docs/DEPLOY.md`](../../DEPLOY.md)、[`docs/PLUGINS.md`](../../PLUGINS.md) 与 [`docs/OPERATIONS.md`](../../OPERATIONS.md)。
+
 编制日期：2026-11-07（Asia/Shanghai）。
-状态：设计已定（用户选定：方案 B + 宿主树保持受管候选 v0.22.5）。
+状态：历史设计归档（过渡方案 B；当前已被 v2.0 单根架构收敛）。
 
 ## 1. 问题
 

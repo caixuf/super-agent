@@ -25,6 +25,7 @@
 
 | 文档 | 讲什么 |
 | :--- | :--- |
+| [`ONE_COMMAND_INSTALL.md`](ONE_COMMAND_INSTALL.md) | 一键安装与升级指南：受管单根、原子切换与回滚 |
 | [`MIGRATION.md`](MIGRATION.md) | 八层迁移清单 + 资产表：一个仓要立起来缺哪些东西 |
 | [`PLUGINS.md`](PLUGINS.md) | 插件 / MCP / 工具集的注册方式 |
 | [`POOL_RUNTIME.md`](POOL_RUNTIME.md) | 持久任务池：依赖、租约、结果 outbox、调度后端 |

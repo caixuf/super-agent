@@ -23,6 +23,16 @@ python3 tools/t6_gap_audit.py                     # T6 缺口逐条：PASS 还�
 
 ## 2. 装到目标 profile
 
+在 v2.0 单根架构（`~/super_agent/<profile>`）下，推荐使用官方受管入口（详见 [`docs/DEPLOY.md`](DEPLOY.md) 与 [`docs/ONE_COMMAND_INSTALL.md`](ONE_COMMAND_INSTALL.md)）：
+
+```bash
+# 推荐受管入口：先预览，再安装并挂载业务身份
+./install/superagent.sh plan --profile <name>
+./install/superagent.sh install --profile <name> --compose-soul <业务叠加层.md> --apply
+```
+
+底层兼容入口（直接执行底层装配脚本）：
+
 ```bash
 bash install/install.sh --profile <name> --compose-soul <业务叠加层.md> \
   --analysis-root /absolute/approved/project

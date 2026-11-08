@@ -28,3 +28,20 @@ def test_success_is_not_inferred_from_unsafe_or_invalid_data(tmp_path):
     path.chmod(0o600)
     path.write_text(json.dumps({"at": 99, "code": "invented", "count": 0}))
     assert module.inspect(path, now=100, max_age=10)["status"] == "unknown"
+
+
+def test_main_cli_with_source_and_profile(tmp_path, capsys):
+    import time
+    root = tmp_path / "super_agent"
+    diag_dir = root / "p1" / "state" / "recall-diagnostics"
+    diag_dir.mkdir(parents=True)
+    diag_file = diag_dir / "p1.json"
+    diag_file.write_text(json.dumps({"at": time.time() - 10, "code": "hit", "count": 1}))
+    diag_file.chmod(0o600)
+
+    # test --profile with explicit root
+    exit_code = module.main(["--profile", "p1", "--root", str(root)])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "p1" in captured.out
+    assert "healthy" in captured.out

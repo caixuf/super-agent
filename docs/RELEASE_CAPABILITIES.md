@@ -96,19 +96,30 @@
 | O02 | 告警、巡检与修复决策 | `ops_alerts*.py` `proactive_watch.py` `plugins/capability_alert_outbox/` `failure_mender.py` | C | 区分观察、建议、通知与执行；每步有开关；没有自动执行就不宣称会自愈 |
 | O03 | 模型与资源治理 | `model_context.py` `model_routing.py` `ccp_config.py` `process_pressure.py` `tcp_watchdog.py` | A | 记录实际模型及超时 / 并发 / token / 输出预算；路由故障与降级显式 |
 
-## 7. 插件面
+## 7. 插件与工具面（16 款受管插件 + localvec 记忆提供方）
 
-`plugins/` 下 13 个插件均为**可选注册**，装了不等于工具面里看得见：
+受管发布包含 **16 款标准插件**（13 通用内建 + 3 受管外部快照）与 **1 款独立记忆提供方**，详见 [`PLUGINS.md`](PLUGINS.md)。插件均为**可选注册**，装了不等于工具面里看得见（两道启用门禁）：
+
+### 7.1 13 款通用内建插件
 
 | 插件 | 职责 | 插件 | 职责 |
 | :--- | :--- | :--- | :--- |
-| `durable_dispatch` | 持久只读派单 | `task_status` | 回答「还在跑吗」 |
-| `task_progress` | 长任务单条进度 | `longtask_guard` | 派发前转后台 |
-| `localvec` | 每轮自动召回 | `memory_bridge` | 捕获文本与终态判词 |
-| `write_guard` | 落盘纪律钩子 | `markdown_delivery` | Markdown 转在线文档 |
-| `illustrated_delivery` | 图文建议与投递守卫 | `colleague_catalog` | 岗位名册工具 |
-| `colleague_team` | 团队管理（宿主管生命周期） | `capability_alert_outbox` | 能力漂移告警 |
-| `local_model_grounding` | 双本地模型辅助 | | |
+| `durable_dispatch` | 后台持久只读派单与追溯 | `task_status` | 任务活体账本查询工具 |
+| `task_progress` | 长任务单条进度广播 | `longtask_guard` | 前台长任务派发前转后台 |
+| `lan_cluster` | 局域网同构节点探测与互保 | `memory_bridge` | 会话只读召回桥接与终态判词 |
+| `write_guard` | 落盘纪律与路径防穿透 | `markdown_delivery` | Markdown 大文档直发与链接化 |
+| `illustrated_delivery` | 结构化图文建议与投递守卫 | `colleague_catalog` | 8 大研发岗位名册查询工具 |
+| `colleague_team` | 研发团队同事治理与网关派工 | `capability_alert_outbox` | 能力退化与关键异常告警外发 |
+| `local_model_grounding` | 双本地模型快筛与地线校验 | | |
+
+### 7.2 3 款受管外部插件与 1 款独立记忆提供方
+
+| 类型 | 名称 | 职责定位与配置机制 |
+| :--- | :--- | :--- |
+| **受管外部插件** | `advanced-delegation` | 跨智能体上下文受控委派，限制递归深度（Depth ≤ 1） |
+| **受管外部插件** | `langfuse` | 模型调用指标、Token 消耗与链路追踪（Telemetry）采集 |
+| **受管外部插件** | `mcp-serve` | 将宿主工具面转换为标准 MCP 服务协议向外暴露的连接桥 |
+| **核心记忆提供方** | `localvec` | 独立向量化记忆后端（`memory.provider: localvec`），内置召回诊断观测器（`recall_diagnostics_observation`），诊断落位 `<managed_root>/state/recall-diagnostics/<profile>.json` |
 
 ## 8. 安装、部署与复验
 

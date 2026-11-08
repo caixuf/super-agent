@@ -12,6 +12,8 @@ and multi-intent natural language inputs to choose the correct Tool Call / Actio
 from __future__ import annotations
 
 import json
+import time
+import urllib.error
 import urllib.request
 import pytest
 
@@ -33,23 +35,31 @@ SYSTEM_PROMPT = """你是智能驾驶仿真测试团队的小助手（前台接�
 严格以 JSON 输出决策：{"action": "call_tool" | "clarify", "tool_name": "...", "role": "...", "reasoning": "..."}"""
 
 
-def query_llm_intent(user_prompt: str) -> dict:
-    req = urllib.request.Request(
-        LOCAL_LLM_URL,
-        headers={"Content-Type": "application/json"},
-        data=json.dumps({
-            "model": "flash",
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt}
-            ],
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"}
-        }).encode("utf-8")
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-        return json.loads(body["choices"][0]["message"]["content"])
+def query_llm_intent(user_prompt: str, retries: int = 2) -> dict:
+    req_data = json.dumps({
+        "model": "flash",
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"}
+    }).encode("utf-8")
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(
+            LOCAL_LLM_URL,
+            headers={"Content-Type": "application/json"},
+            data=req_data,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+                return json.loads(body["choices"][0]["message"]["content"])
+        except (TimeoutError, urllib.error.URLError, ConnectionError):
+            if attempt < retries:
+                time.sleep(1)
+                continue
+            raise
 
 
 def is_llm_service_available() -> bool:

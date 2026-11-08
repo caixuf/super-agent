@@ -35,8 +35,12 @@
 
 | 文档 | 核心议题 | 权威实现位置 |
 | :--- | :--- | :--- |
+| [`ONE_COMMAND_INSTALL.md`](ONE_COMMAND_INSTALL.md) | 一键安装与整包升级：受管单根目录、原子切换、版本账本与回滚 | `install/superagent.sh`、`tools/superagent.py` |
 | [`MIGRATION.md`](MIGRATION.md) | 八层迁移清单 + 资产表：跨环境整仓拉起标准 | `install/`、`docker/` |
 | [`POOL_RUNTIME.md`](POOL_RUNTIME.md) | 持久任务池：状态迁移、依赖锁、租约、结果 outbox 与调度后端 | `agentcore/pool.py`、`worker.py` |
+| [`COMPLETION_DELIVERY.md`](COMPLETION_DELIVERY.md) | 结果回投与完成态投递：origin 寻址、送达回读与三态语义 | `agentcore/completion_delivery.py`、`direct_completion.py` |
+| [`COLLEAGUE_UNIFICATION_GUIDE.md`](COLLEAGUE_UNIFICATION_GUIDE.md) | 研发同事体系整合：8 大岗位契约、工作区锁与晚期绑定 | `agentcore/colleague_dev.py`、`dev_runner.py` |
+| [`LONG_TASK_INTERACTION_GUIDE.md`](LONG_TASK_INTERACTION_GUIDE.md) | 长任务流式交互与卡片构建：CardKit 2.0、单在途更新与 drain 屏障 | `agentcore/cardkit2_renderer.py`、`card_stream.py` |
 | [`ATTEMPT_STOP_CONTRACT.md`](ATTEMPT_STOP_CONTRACT.md) | 启动许可、Subreaper 进程监管器停止回执与在途任务隔离 | `agentcore/attempt_supervisor.py` |
 | [`DISPATCH_ANALYSIS.md`](DISPATCH_ANALYSIS.md) | 派工协议、执行计划门禁与只读分析追溯事实 | `agentcore/analysis_runner.py` |
 | [`REDEPLOY.md`](REDEPLOY.md) | 重新部署、静态复验与工具注册核对步骤 | `tools/redeploy_check.py` |
@@ -53,14 +57,26 @@
 记录架构重大跃迁的设计初衷与实施闭环：
 
 - **设计规格（Specs）**：
-  - [`superpowers/specs/2026-11-07-single-writer-deployment-design.md`](superpowers/specs/2026-11-07-single-writer-deployment-design.md)：单一写者部署路径与能力默认值收敛设计。
+  - [`superpowers/specs/2026-11-07-single-writer-deployment-design.md`](superpowers/specs/2026-11-07-single-writer-deployment-design.md)：单一写者部署路径与能力默认值收敛设计（过渡历史规格）。
   - [`superpowers/specs/2026-11-08-ops-scripts-layout-aware-design.md`](superpowers/specs/2026-11-08-ops-scripts-layout-aware-design.md)：官方运维脚本布局感知改造与真相源解析架构。
 - **收尾报告（Reports）**：
   - [`superpowers/reports/2026-11-08-v2-convergence-and-docs-polish-report.md`](superpowers/reports/2026-11-08-v2-convergence-and-docs-polish-report.md)：v2.0 单根架构收敛、文档对齐与全仓验证交付报告。
 
 ---
 
-## 5. 历史现场与验证报告（Historical Reports）
+## 5. 专题参考与历史演进文档（Reference & Historical Deep Dive）
+
+| 文档 | 定位与内容说明 |
+| :--- | :--- |
+| [`SUPERAGENT_ARCHITECTURE_DEEP_DIVE.md`](SUPERAGENT_ARCHITECTURE_DEEP_DIVE.md) | 架构深度解析（历史基线 `d6e4271` 深潜参考，最新权威以 [`ARCHITECTURE.md`](ARCHITECTURE.md) 为准） |
+| [`LANDSCAPE.md`](LANDSCAPE.md) | 智能体生态全景对比：Cordis、DSH 与通用智能体基础设施定位分析 |
+| [`UPSTREAM_CATALOG.md`](UPSTREAM_CATALOG.md) | 上游运行时能力目录与依赖映射表 |
+| [`NIGHTLY_SELF_REVIEW.md`](NIGHTLY_SELF_REVIEW.md) | 夜间巡检自愈审查规范与定时作业守卫 |
+| [`LONG_TASK_INTERACTION_HANDOVER.md`](LONG_TASK_INTERACTION_HANDOVER.md) | 长任务流式交互早期交接备忘录 |
+
+---
+
+## 6. 历史现场与验证报告（Historical Reports）
 
 位于 `docs/reports/` 目录下，记录历史排查、断言数据与攻坚过程。
 > **注意**：历史报告包含当时特定的现场测试数据与日志指纹，**仅用于追溯决策依据**；当前系统架构与运行时行为一律以最新代码和上述活文档为准。

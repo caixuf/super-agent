@@ -89,21 +89,33 @@ bash scripts/ops/purge_and_rebuild_host.sh --apply
 用于持续分析长期记忆向量检索的性能与健康水线：
 
 ```bash
+# 方式 1：指定受管 Profile 名称（自动读取 <managed_root>/state/recall-diagnostics/<profile_name>.json）
 python3 tools/inspect_recall_diagnostics.py --profile <profile_name>
+
+# 方式 2：显式指定源名称与绝对路径
+python3 tools/inspect_recall_diagnostics.py --source <profile_name>=/path/to/<profile_name>.json
 ```
 
 读取 `<managed_root>/state/recall-diagnostics/<profile_name>.json`，输出召回时延分位值、未命中样本与异常分布。
 
-### 4.3 部署就绪门禁（`redeploy_check.py`）
+### 4.3 部署就绪与配置检查（`deployment_readiness.py`）
 
 ```bash
-python3 tools/redeploy_check.py --profile-home <profile_home> --profile <profile_name>
+python3 tools/deployment_readiness.py --profile-home <profile_home> --profile <profile_name>
 ```
 
 逐项验证：
 1. 16 款受管插件与 `localvec` 记忆提供方的磁盘落位。
 2. `config.yaml` 中各插件 `settings.enabled` 开关状态。
 3. 关键依赖库与系统工具完整性。
+
+### 4.4 干净 Clone 仓级复验门禁（`redeploy_check.py`）
+
+```bash
+python3 tools/redeploy_check.py --skip-docker
+```
+
+从零克隆验证：单元测试、安装器 dry-run、静态检查及环境完整性门禁。
 
 ---
 
