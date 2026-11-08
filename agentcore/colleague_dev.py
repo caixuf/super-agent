@@ -5,16 +5,47 @@ equipped with coding tools (read, write, edit, bash) operating inside isolated w
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+import fnmatch
 import importlib
 import json
 import os
 from pathlib import Path
 import re
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import uuid
 
-# Standard roster of the Engineering Colleague Team
+OWNS = "owns"
+APPENDS = "appends"
+NEVER = "never"
+ARTIFACTS = "artifacts"
+
+HARD = "hard"
+SOFT = "soft"
+
+
+@dataclass(frozen=True)
+class RolePathOwnership:
+    """Raven-inspired path ownership contract for engineering colleague roles.
+
+    Defines explicit filesystem boundaries for multi-agent collaboration:
+    - owns: full read/write/create/delete authority
+    - appends: append-only authority (deletions/overwrites forbidden)
+    - never: strictly forbidden from touching these paths
+    - artifacts: build, telemetry, or test outputs
+    - enforce_write: 'hard' (raises PermissionError) or 'soft' (logs warning)
+    - enforce_read: 'soft' or 'hard'
+    """
+    role: str
+    owns: Tuple[str, ...] = ()
+    appends: Tuple[str, ...] = ()
+    never: Tuple[str, ...] = ()
+    artifacts: Tuple[str, ...] = ()
+    enforce_write: str = HARD
+    enforce_read: str = SOFT
+
+
 # Standard roster of the Universal Engineering Colleague Team
 # Super Agent core provides these 8 canonical engineering roles out-of-the-box.
 # Business domains can customize, extend, or override duties via register_role_override().
@@ -133,6 +164,66 @@ DEV_ROLES: Dict[str, Dict[str, Any]] = {
     },
 }
 
+#: Raven-inspired canonical path ownership matrix for the engineering colleague team
+DEV_ROLE_OWNERSHIP: Dict[str, Dict[str, Any]] = {
+    "architect": {
+        "owns": ("docs/**", "specs/**", "SPEC.md", "README.md", "architecture/**"),
+        "appends": ("DECISIONS.md", "CHANGELOG.md", "HUMAN_DECISIONS.md", "AGENT_DECISIONS.md"),
+        "never": ("tests/**", "case_set/**", "src/**", "*.py", ".git/**"),
+        "artifacts": ("docs/architecture/**", "specs/**"),
+        "enforce_write": HARD,
+    },
+    "cases": {
+        "owns": ("src/**", "case_set/**", "agentcore/**", "lib/**", "*.py"),
+        "appends": ("FIXLOG.md", "CHANGELOG.md"),
+        "never": ("docs/specs/**", "SPEC.md", ".git/**"),
+        "artifacts": ("case_set/**", "manifest.json", "report.json"),
+        "enforce_write": HARD,
+    },
+    "reviewer": {
+        "owns": ("reviews/**", "reports/**", "RED_TEAM.md", "red_team_review.yaml"),
+        "appends": ("FIXLOG.md", "review_log.txt"),
+        "never": ("src/**", "agentcore/**", "case_set/**", "tests/**", ".git/**"),
+        "artifacts": ("reviews/**", "reports/**"),
+        "enforce_write": HARD,
+    },
+    "test": {
+        "owns": ("tests/**", "test_reports/**", "evals/**"),
+        "appends": ("FIXLOG.md", "test_run.log"),
+        "never": ("src/**", "agentcore/**", "docs/specs/**", ".git/**"),
+        "artifacts": ("test_reports/**", "coverage/**"),
+        "enforce_write": HARD,
+    },
+    "triage": {
+        "owns": ("diagnostics/**", "reproduce/**", "triage/**"),
+        "appends": ("FIXLOG.md", "ROOT_CAUSE.md"),
+        "never": ("docs/specs/**", "SPEC.md", ".git/**"),
+        "artifacts": ("diagnostics/**", "triage/**"),
+        "enforce_write": HARD,
+    },
+    "backend": {
+        "owns": ("backend/**", "api/**", "server/**", "agentcore/**", "runtime/**"),
+        "appends": ("FIXLOG.md", "CHANGELOG.md"),
+        "never": ("frontend/**", "ui/**", ".git/**"),
+        "artifacts": ("backend/**", "runtime/**"),
+        "enforce_write": HARD,
+    },
+    "frontend": {
+        "owns": ("frontend/**", "ui/**", "cards/**", "static/**", "templates/**"),
+        "appends": ("FIXLOG.md", "CHANGELOG.md"),
+        "never": ("backend/**", "agentcore/**", ".git/**"),
+        "artifacts": ("frontend/**", "cards/**"),
+        "enforce_write": HARD,
+    },
+    "ops": {
+        "owns": ("deploy/**", "install/**", "scripts/**", "docker/**", "configs/**"),
+        "appends": ("OPS_JOURNAL.md", "FIXLOG.md"),
+        "never": ("case_set/**", "tests/evals/**", ".git/**"),
+        "artifacts": ("deploy/**", "scripts/**"),
+        "enforce_write": HARD,
+    },
+}
+
 _ROLE_OVERRIDES: Dict[str, Dict[str, Any]] = {}
 
 
@@ -158,6 +249,26 @@ def get_dev_roles() -> Dict[str, Dict[str, Any]]:
     return merged
 
 
+def get_role_ownership(role: str) -> RolePathOwnership:
+    """Retrieve the normalized path ownership contract for a given role."""
+    roles = get_dev_roles()
+    if role not in roles and role not in DEV_ROLE_OWNERSHIP:
+        raise ValueError(f"unknown_role: {role}")
+    raw_own = dict(DEV_ROLE_OWNERSHIP.get(role, {}))
+    custom_own = _ROLE_OVERRIDES.get(role, {}).get("ownership")
+    if custom_own and isinstance(custom_own, dict):
+        raw_own.update(custom_own)
+    return RolePathOwnership(
+        role=role,
+        owns=tuple(raw_own.get("owns", ())),
+        appends=tuple(raw_own.get("appends", ())),
+        never=tuple(raw_own.get("never", ())),
+        artifacts=tuple(raw_own.get("artifacts", ())),
+        enforce_write=str(raw_own.get("enforce_write", HARD)),
+        enforce_read=str(raw_own.get("enforce_read", SOFT)),
+    )
+
+
 def get_role_contract_markdown(role: str) -> str:
     """Generate the standardized markdown role contract for a given colleague."""
     meta = DEV_ROLES.get(role)
@@ -165,6 +276,10 @@ def get_role_contract_markdown(role: str) -> str:
         raise ValueError(f"unknown_role: {role}")
     can_do_lines = "\n".join(f"- {item}" for item in meta["can_do"])
     boundaries_lines = "\n".join(f"- {item}" for item in meta["boundaries"])
+    own = get_role_ownership(role)
+    owns_str = ", ".join(f"`{p}`" for p in own.owns) or "None"
+    appends_str = ", ".join(f"`{p}`" for p in own.appends) or "None"
+    never_str = ", ".join(f"`{p}`" for p in own.never) or "None"
     return f"""# 岗位契约：{meta['display_name']} ({role})
 
 ## 职责描述
@@ -175,7 +290,116 @@ def get_role_contract_markdown(role: str) -> str:
 
 ## 核心纪律与红线约束
 {boundaries_lines}
+
+## 路径所有权矩阵 (Path Ownership Matrix)
+- **拥有读写 (owns)**: {owns_str}
+- **仅限追加 (appends)**: {appends_str}
+- **严禁触碰 (never)**: {never_str}
+- **写入安全级别**: `{own.enforce_write}`
 """
+
+
+def _match_path_pattern(rel_path: str, pattern: str) -> bool:
+    """Match relative path against glob pattern supporting recursive wildcards (**)."""
+    norm_path = rel_path.replace("\\", "/").strip("/")
+    norm_pat = pattern.replace("\\", "/").strip("/")
+
+    if norm_pat.endswith("/**"):
+        base_prefix = norm_pat[:-3]
+        if norm_path == base_prefix or norm_path.startswith(base_prefix + "/"):
+            return True
+    elif "/**/" in norm_pat:
+        parts = norm_pat.split("/**/")
+        if len(parts) == 2:
+            prefix, suffix = parts
+            if norm_path.startswith(prefix + "/") and fnmatch.fnmatch(norm_path, f"{prefix}/*/{suffix}"):
+                return True
+    if fnmatch.fnmatch(norm_path, norm_pat):
+        return True
+    if "/" not in norm_pat and fnmatch.fnmatch(Path(norm_path).name, norm_pat):
+        return True
+    return False
+
+
+def validate_role_path_access(
+    role: str,
+    path: Union[str, Path],
+    action: str = "write",
+    *,
+    root: Optional[Union[str, Path]] = None,
+    ownership: Optional[RolePathOwnership] = None,
+) -> Tuple[bool, str]:
+    """Raven-inspired path access validation for engineering colleague roles.
+
+    Evaluates whether a role is authorized to perform action ('write', 'append', 'read')
+    on the specified path, according to owns / appends / never / artifacts rules.
+    """
+    contract = ownership or get_role_ownership(role)
+    raw_path = Path(path)
+    if root is not None and raw_path.is_absolute():
+        try:
+            rel_path = str(raw_path.relative_to(Path(root).resolve()))
+        except ValueError:
+            rel_path = str(raw_path)
+    else:
+        rel_path = str(raw_path)
+    rel_path = rel_path.replace("\\", "/").lstrip("./")
+
+    # 1. Never rule takes absolute precedence
+    for pattern in contract.never:
+        if _match_path_pattern(rel_path, pattern):
+            return False, f"path_in_never_list: matches '{pattern}'"
+
+    # 2. Append action check
+    if action == "append":
+        for pattern in contract.appends:
+            if _match_path_pattern(rel_path, pattern):
+                return True, f"allowed_by_appends: '{pattern}'"
+        for pattern in contract.owns:
+            if _match_path_pattern(rel_path, pattern):
+                return True, f"allowed_by_owns: '{pattern}'"
+        if contract.enforce_write == HARD:
+            return False, "append_not_permitted_by_ownership"
+        return True, "permitted_by_soft_policy"
+
+    # 3. Write action check (create, modify, delete)
+    if action == "write":
+        for pattern in contract.appends:
+            if _match_path_pattern(rel_path, pattern):
+                return False, f"append_only_path: matches '{pattern}' (deletions/overwrites forbidden)"
+        for pattern in contract.owns:
+            if _match_path_pattern(rel_path, pattern):
+                return True, f"allowed_by_owns: '{pattern}'"
+        for pattern in contract.artifacts:
+            if _match_path_pattern(rel_path, pattern):
+                return True, f"allowed_by_artifacts: '{pattern}'"
+        if contract.enforce_write == HARD:
+            return False, "unlisted_path_write_denied"
+        return True, "permitted_by_soft_policy"
+
+    # 4. Read action check
+    if action == "read":
+        if contract.enforce_read == HARD:
+            for pattern in contract.owns + contract.appends + contract.artifacts:
+                if _match_path_pattern(rel_path, pattern):
+                    return True, "allowed_by_roster"
+            return False, "unlisted_path_read_denied"
+        return True, "read_permitted"
+
+    return False, f"unsupported_action: {action}"
+
+
+def assert_role_path_access(
+    role: str,
+    path: Union[str, Path],
+    action: str = "write",
+    *,
+    root: Optional[Union[str, Path]] = None,
+) -> None:
+    """Enforce role path access, raising PermissionError on violation."""
+    allowed, reason = validate_role_path_access(role, path, action=action, root=root)
+    if not allowed:
+        raise PermissionError(f"role_ownership_violation: role '{role}' cannot {action} '{path}': {reason}")
 
 
 class ColleagueDevOrchestrator:

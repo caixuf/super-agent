@@ -25,6 +25,17 @@ FAILURE_KINDS: Final[tuple[str, ...]] = (
 FAILURE_ACTIONS: Final[tuple[str, ...]] = ("retry", "replan", "stop", "escalate")
 _MAX_REASON_LENGTH: Final[int] = 120
 
+#: Raven-inspired WHY failure classes for recursive self-improvement and causal diagnosis
+WHY_CLASSES: Final[tuple[str, ...]] = (
+    "STOPPED_BEFORE_VERIFY",
+    "PATH_OWNERSHIP_VIOLATION",
+    "SPECIFICATION_MISMATCH",
+    "TIMEOUT_WITHOUT_PROGRESS",
+    "SYNTAX_OR_IMPORT_ERROR",
+    "FLAKY_RESOURCE",
+    "UNCLASSIFIED",
+)
+
 _TRANSIENT_PATTERNS: Final[tuple[str, ...]] = (
     "timeout",
     "timed out",
@@ -105,12 +116,97 @@ def classify_failure(error: BaseException | str) -> tuple[str, str]:
     return "unknown", "unclassified_failure"
 
 
+def diagnose_failure_why(
+    error: BaseException | str,
+    context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Diagnose the root cause 'WHY' of an execution failure, inspired by Raven evolver taxonomy.
+
+    Categorizes failures into canonical root-cause classes:
+    - STOPPED_BEFORE_VERIFY: execution finished without running or passing assertions
+    - PATH_OWNERSHIP_VIOLATION: colleague attempted to write to forbidden/unauthorized files
+    - SPECIFICATION_MISMATCH: verification checks or contract tests failed
+    - TIMEOUT_WITHOUT_PROGRESS: process ran out of budget before producing required outputs
+    - SYNTAX_OR_IMPORT_ERROR: code syntax, module import, or type resolution error
+    - FLAKY_RESOURCE: transient transport, network, or external provider downtime
+    - UNCLASSIFIED: unknown or unmapped failure
+    """
+    msg = str(error).casefold()
+    ctx = context or {}
+
+    # 1. Path ownership violation
+    if "role_ownership_violation" in msg or "path_in_never_list" in msg or "unlisted_path_write_denied" in msg:
+        return {
+            "why": "PATH_OWNERSHIP_VIOLATION",
+            "explanation": "Colleague role attempted to write to a path outside its authorized ownership matrix",
+            "recommended_action": "restrict_to_authorized_worktree_paths",
+            "remediation_code": "R_ENFORCE_PATH_OWNERSHIP",
+        }
+
+    # 2. Stopped before verify / missing verification
+    if ctx.get("verification_run") is False or "stopped_before_verify" in msg or "unverified_completion" in msg:
+        return {
+            "why": "STOPPED_BEFORE_VERIFY",
+            "explanation": "Task terminated or completed without driving required verification gates",
+            "recommended_action": "re_execute_with_mandatory_verification_step",
+            "remediation_code": "R_MANDATORY_VERIFICATION",
+        }
+
+    # 3. Verification checks failed / specification mismatch
+    if (
+        "verification_checks_failed" in msg
+        or "assertionerror" in msg
+        or ctx.get("verification_receipt", {}).get("all_passed") is False
+    ):
+        return {
+            "why": "SPECIFICATION_MISMATCH",
+            "explanation": "Code or artifacts failed verification gate assertions against the specification",
+            "recommended_action": "review_red_team_feedback_and_replan",
+            "remediation_code": "R_REPLAN_SPEC_ALIGNMENT",
+        }
+
+    # 4. Syntax or import error
+    if any(p in msg for p in ("syntaxerror", "syntax error", "importerror", "modulenotfounderror", "nameerror")):
+        return {
+            "why": "SYNTAX_OR_IMPORT_ERROR",
+            "explanation": "Code contains fatal syntax defect or unresolved module import dependency",
+            "recommended_action": "run_linter_and_fix_syntax_in_worktree",
+            "remediation_code": "R_STATIC_SYNTAX_FIX",
+        }
+
+    # 5. Timeout without progress
+    if "timed out" in msg or "timeout" in msg:
+        return {
+            "why": "TIMEOUT_WITHOUT_PROGRESS",
+            "explanation": "Task exceeded allocated time budget without reaching completion state",
+            "recommended_action": "increase_timeout_or_split_task_into_subtasks",
+            "remediation_code": "R_EXTEND_BUDGET_OR_SPLIT",
+        }
+
+    # 6. Flaky resource / transient
+    if any(p in msg for p in _TRANSIENT_PATTERNS):
+        return {
+            "why": "FLAKY_RESOURCE",
+            "explanation": "External provider, transport socket, or system resource temporarily unavailable",
+            "recommended_action": "exponential_backoff_retry",
+            "remediation_code": "R_TRANSIENT_RETRY",
+        }
+
+    return {
+        "why": "UNCLASSIFIED",
+        "explanation": "Unclassified failure requiring manual operator inspection",
+        "recommended_action": "escalate_to_human_or_operator",
+        "remediation_code": "R_ESCALATE_UNKNOWN",
+    }
+
+
 def decide_failure(
     error: BaseException | str,
     *,
     attempt: int = 0,
     max_retries: int = 2,
     source: str = "",
+    context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build an actionable decision without exposing sensitive credentials or unparsed traces."""
     if isinstance(attempt, bool) or attempt < 0:
@@ -133,6 +229,7 @@ def decide_failure(
 
     text = str(error)
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    why_diag = diagnose_failure_why(error, context=context)
 
     return {
         "schema_version": FAILURE_MENDER_SCHEMA_VERSION,
@@ -144,6 +241,7 @@ def decide_failure(
         "retry_allowed": action == "retry",
         "source": _safe_source(source),
         "failure_sha256": digest,
+        "why_diagnosis": why_diag,
         "claim_boundary": (
             "A mender decision is a policy recommendation, not proof that "
             "a retry, replan, or escalation occurred."

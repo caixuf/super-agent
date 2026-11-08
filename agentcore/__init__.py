@@ -11,11 +11,24 @@
 from __future__ import annotations
 
 from .failure_mender import (
+    WHY_CLASSES,
     build_escalation_request,
     classify_failure,
     decide_failure,
+    diagnose_failure_why,
     escalate_timeout,
     validate_failure_decision,
+)
+from .colleague_dev import (
+    RolePathOwnership,
+    assert_role_path_access,
+    get_role_ownership,
+    validate_role_path_access,
+)
+from .skill_forge import (
+    AgentCase,
+    ProceduralSkill,
+    SkillForge,
 )
 from .structured_logging import configure_logging, get_logger, set_log_context
 from .memory import (
@@ -88,5 +101,14 @@ __all__ = [
     "RoleRegistry",
     "ToolRegistry",
     "SlotState",
+    "WHY_CLASSES",
+    "diagnose_failure_why",
+    "RolePathOwnership",
+    "get_role_ownership",
+    "validate_role_path_access",
+    "assert_role_path_access",
+    "AgentCase",
+    "ProceduralSkill",
+    "SkillForge",
     "__version__",
 ]

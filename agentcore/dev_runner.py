@@ -198,7 +198,23 @@ def run_dev_job(
             memory = Path(memory_file).read_text(encoding="utf-8")[:12000]
         except OSError:
             memory = ""
-    prompt = f"{role}\n\n## 共享记忆快照\n{memory}\n\n## 任务\n{goal}\n"
+
+    # Inject procedural skill guidance from SkillForge if available (EverOS Agent Track)
+    skill_guidance = ""
+    try:
+        from agentcore.skill_forge import SkillForge
+        forge = SkillForge()
+        skill_guidance = forge.render_guidance(goal)
+    except Exception:
+        skill_guidance = ""
+
+    prompt_parts = [role]
+    if memory:
+        prompt_parts.append(f"\n## 共享记忆快照\n{memory}")
+    if skill_guidance:
+        prompt_parts.append(f"\n{skill_guidance}")
+    prompt_parts.append(f"\n## 任务\n{goal}\n")
+    prompt = "\n".join(prompt_parts)
 
     agent_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -270,6 +286,23 @@ def run_dev_job(
     }, ensure_ascii=False, indent=2))
 
     artifact_paths = [str(out / name) for name in ("report.json", "report.md", "manifest.json")]
+    if ok:
+        try:
+            from agentcore.skill_forge import AgentCase, SkillForge
+            forge = SkillForge()
+            case = AgentCase(
+                case_id=f"case_{job.get('job', 'dev')}_{job.get('attempt', 0)}",
+                task_intent=goal[:200],
+                approach=(payload.get("final_text") or "")[:500],
+                quality_score=100.0 if not degraded else 85.0,
+                role=str(job["payload"].get("role") or "cases"),
+                verified_files=[str(p) for p in artifact_paths],
+                approved=True,
+            )
+            forge.record_case(case)
+        except Exception:
+            pass
+
     if not ok:
         ret = {
             "ok": False,

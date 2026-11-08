@@ -17,3 +17,4 @@ PROJECT.md
 tools/live_*.py
 tools/batch_live_*.py
 tools/send_live_*.py
+progress.json

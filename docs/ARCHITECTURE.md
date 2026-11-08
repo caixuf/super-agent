@@ -64,13 +64,13 @@ flowchart TB
 | **3. 派发去重** | `agentcore/pool.py:submit` | 基于业务请求键（Request Key）与契约哈希实现严格事务内去重。 |
 | **4. 任务主账** | `agentcore/pool.py` | SQLite WAL 模式，记录任务状态、依赖链、Attempt 代次与租约。 |
 | **5. 有界调度** | `agentcore/worker.py`、`scheduler.py` | 跨进程并发控制，`begin_execution` 代次硬校验，防旧 Worker 迟到覆写。 |
-| **6. 执行隔离** | `agentcore/dev_runner.py`、`attempt_supervisor.py` | Linux Subreaper 递归收割后代进程，`fcntl.flock` 锁定工作区。 |
-| **7. 同事协作** | `agentcore/colleague_dev.py` | 8 大标准研发同事角色契约，独立 Worktree 编码与验收断言。 |
+| **6. 执行隔离** | `agentcore/dev_runner.py`、`attempt_supervisor.py` | Linux Subreaper 递归收割后代进程，`fcntl.flock` 锁定工作区，SkillForge 先例自动注入。 |
+| **7. 同事协作** | `agentcore/colleague_dev.py` | 8 大标准研发同事角色契约，独立 Worktree 编码，Raven 式路径所有权矩阵（`owns`/`appends`/`never`）硬门禁。 |
 | **8. 模型路由** | `agentcore/model_routing.py` | 纯函数三级路由（`pro`/`main`/`flash`），受 ADR-S1 ~ ADR-S6 强约束。 |
-| **9. 长期记忆** | `agentcore/memory/`、`plugins/localvec/` | 代际分桶（`workspace_id`）、向量 + 词法混合召回、突触塑料账本。 |
+| **9. 双轨记忆与技能** | `agentcore/memory/`、`agentcore/skill_forge.py` | EverOS 双轨模型：用户事实/实体/前瞻 + 智能体程序化技能（`SkillForge` Markdown 原生存储、成熟度评分与混合召回）。 |
 | **10. 插件工具面** | `plugins/`（16 款 + localvec） | 标准化工具集暴露，两道启用门禁，自动级联装配同事工作区。 |
 | **11. 证据投递** | `agentcore/completion_delivery.py`、CardKit | 绑定原始 Origin 原路回投，流式更新合并与屏障排空（`drain()`）。 |
-| **12. 运维自愈** | `scripts/ops/_layout.sh`、`tools/superagent.py` | 布局感知对账、遗留配置平滑纠偏、`recall-diagnostics` 持续体检。 |
+| **12. 根因自愈与运维** | `agentcore/failure_mender.py`、`tools/superagent.py` | Raven 结构化 `WHY` 分类学（`STOPPED_BEFORE_VERIFY`、`PATH_OWNERSHIP_VIOLATION` 等）、布局感知对账、`recall-diagnostics` 持续体检。 |
 
 ---
 

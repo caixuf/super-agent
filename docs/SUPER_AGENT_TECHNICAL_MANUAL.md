@@ -184,7 +184,7 @@ sequenceDiagram
 
 ### 7.1 角色不是权限
 
-**源码与隔离验证**：`agentcore/colleague_dev.py` 定义岗位职责和自然语言边界；`ToolRegistry.get_tools_for_role` 当前为角色绑定已注册工具，但不按 `RoleSpec` 的自然语言内容过滤。审查角色与开发角色都可能拿到 `write_file`。自定义工具以提供它们的进程权限运行。内置文件工具解析路径并拒绝一般目录穿越，但检查和文件操作之间存在竞争窗口，不能抵抗有能力并发替换路径的对手，也不是 OS 沙箱。
+**源码与隔离验证**：`agentcore/colleague_dev.py` 定义 8 大岗位职责与 Raven 式路径所有权矩阵（`RolePathOwnership`：`owns`/`appends`/`never`/`artifacts`）；通过 `validate_role_path_access` 与 `assert_role_path_access` 实施确定性路径读写与追加控制（如审查角色只读源码、测试角色严禁改生产代码、架构角色独占规格与架构文档）。同时，`agentcore/skill_forge.py` 引入 EverOS 双轨智能体记忆模型（`AgentCase` 与 `ProceduralSkill`），实现工程案例的 Markdown 规范持久化与程序化技能沉淀。
 
 **建议**：建立机器可验证的身份—资源—动作—条件策略；策略由受信管理员配置，默认拒绝，不能由模型或任务 payload 自行扩大。执行前和资源使用时均校验；插件、内联工具、委派、代码执行和连接器要覆盖同一授权边界。高风险能力使用专用身份、独立工作区、凭据最小化、受控网络出口及资源限制；必要时引入受信容器或更强隔离，进行逃逸与停止验证。
 
