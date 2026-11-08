@@ -331,3 +331,78 @@ def test_card_report_refuses_when_host_card_seam_missing(host, monkeypatch):
         dict(kind='text', text='done', card=True, delivery_uuid='stable-key')))
     assert result['ok'] is False and result['error'] == 'card_adapter_unavailable'
     assert calls == []
+
+
+def test_deliver_finalizes_card_even_when_send_is_deferred(tmp_path):
+    finalized = []
+    class DummyBridge:
+        def finalize(self, task_id, **kwargs):
+            finalized.append((task_id, kwargs))
+            return {'ok': True, 'already_finalized': True}
+
+    class DummyService:
+        profile = 'test-profile'
+        class DummyPool:
+            root = tmp_path / 'queue'
+            def outbox_receipt(self, task_id):
+                return None
+            def status(self, task_id):
+                return {'status': 'completed', 'result': {'summary': 'done'}}
+            def record_card_finalization_state(self, task_id, state, error):
+                pass
+        pool = DummyPool()
+
+    ctx = NS(
+        get_config=lambda k, default=None: True if k == 'direct_delivery_enabled' else (str(ROOT) if k == 'engine_root' else str(tmp_path / 'cards')),
+        plugin_id='durable-dispatch',
+        profile_name='test-profile',
+    )
+    transport = bridge.create_transport(ctx, DummyService())
+    transport.card_bridge = DummyBridge()
+    # Mock super().deliver to return deferred (e.g. host refused or offline)
+    transport.__class__.__bases__[0].deliver = lambda self, addr, msg, idempotency_key: {'deferred': True, 'accepted': False}
+
+    address = dict(profile='test-profile', route='stored-route', channel='feishu', chat='chat')
+    message = dict(task_id='task-123', status='completed', summary='result text')
+    res = transport.deliver(address, message, idempotency_key='task-123')
+    assert res['deferred'] is True
+    # Card was finalized despite text delivery deferral!
+    assert len(finalized) == 1
+    assert finalized[0][0] == 'task-123'
+    assert finalized[0][1]['status'] == 'completed'
+
+
+def test_reconcile_card_falls_back_to_pool_status_when_outbox_missing(tmp_path):
+    finalized = []
+    class DummyBridge:
+        def finalize(self, task_id, **kwargs):
+            finalized.append((task_id, kwargs))
+            return {'ok': True, 'already_finalized': True}
+
+    class DummyService:
+        profile = 'test-profile'
+        class DummyPool:
+            root = tmp_path / 'queue'
+            def outbox_receipt(self, task_id):
+                return None
+            def status(self, task_id):
+                return {'status': 'completed', 'result': {'summary': 'recovered from status'}}
+            def record_card_finalization_state(self, task_id, state, error):
+                pass
+        pool = DummyPool()
+
+    ctx = NS(
+        get_config=lambda k, default=None: True if k == 'direct_delivery_enabled' else (str(ROOT) if k == 'engine_root' else str(tmp_path / 'cards')),
+        plugin_id='durable-dispatch',
+        profile_name='test-profile',
+    )
+    transport = bridge.create_transport(ctx, DummyService())
+    transport.card_bridge = DummyBridge()
+
+    res = transport.reconcile_card('task-456')
+    assert res['terminal'] is True
+    assert len(finalized) == 1
+    assert finalized[0][0] == 'task-456'
+    assert finalized[0][1]['status'] == 'completed'
+    assert 'recovered from status' in finalized[0][1]['summary']
+

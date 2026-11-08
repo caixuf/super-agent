@@ -352,9 +352,19 @@ def create_transport(ctx, service):
             # created the card. Re-read the durable terminal receipt so a fast
             # task cannot leave a newly created card permanently queued.
             from agentcore.completion_delivery import build_message
-            receipt = service.pool.outbox_receipt(task_id)
+            receipt = service.pool.outbox_receipt(task_id) if hasattr(service.pool, 'outbox_receipt') else None
             if receipt is not None:
                 message = self._prepare_message(build_message(receipt).render())
+                return {'terminal': True, 'result': _finalize_card(self.card_bridge, task_id, message)}
+            st = service.pool.status(task_id) if hasattr(service.pool, 'status') else None
+            if isinstance(st, dict) and st.get('status') in ('completed', 'failed', 'cancelled'):
+                result_payload = st.get('result') or {}
+                summary = result_payload.get('summary', '') if isinstance(result_payload, dict) else str(result_payload)
+                message = self._prepare_message({
+                    'task_id': task_id,
+                    'status': st['status'],
+                    'summary': summary,
+                })
                 return {'terminal': True, 'result': _finalize_card(self.card_bridge, task_id, message)}
             return {'terminal': False}
 
@@ -380,6 +390,16 @@ def create_transport(ctx, service):
 
         def deliver(self, address, message, *, idempotency_key):
             message = self._prepare_message(message)
+            # Ensure the bound task card transitions to terminal state (completed/failed/cancelled)
+            # as soon as the task reaches a terminal outcome, even if direct text delivery
+            # is deferred, rejected, or retried.
+            if getattr(self, 'card_bridge', None) and message.get('status') in ('completed', 'failed', 'cancelled'):
+                try:
+                    final = _finalize_card(self.card_bridge, idempotency_key, message)
+                    self._record_card_finalization(idempotency_key, final)
+                except Exception as exc:
+                    logger.warning('card terminal health update failed for %s (%s)',
+                                   idempotency_key, type(exc).__name__)
             result = super().deliver(address, message, idempotency_key=idempotency_key)
             if result and result.get('accepted') and getattr(self, 'card_bridge', None):
                 final = _finalize_card(self.card_bridge, idempotency_key, message)

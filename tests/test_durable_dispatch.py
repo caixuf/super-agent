@@ -948,3 +948,114 @@ def test_cross_session_status_permission(tmp_path):
         assert pool.status(job)['status'] == 'queued'
 
 
+def test_refresh_running_cards_reads_liveness_dict_progress(tmp_path):
+    from types import SimpleNamespace
+    from agentcore.liveness import LivenessLedger
+    service = plugin.DispatchService(str(tmp_path / 'queue'), 'p', [str(tmp_path)], role='dev',
+        route_provider=lambda _: {'route': 'r', 'channel': 'feishu', 'chat': 'c'}, task_cards_enabled=True)
+    job = service.submit('s', {'goal': 'test', 'request_key': 'key'})['task_id']
+
+    # Set up liveness ledger
+    ledger_path = tmp_path / 'liveness.db'
+    ledger = LivenessLedger(ledger_path)
+    ledger.register(job, kind='dispatch', state='queued')
+    ledger.beat(job, phase='Executing tool: terminal', progress=(60, 100))
+    service._liveness_path = ledger_path
+
+    # Claim job and set running
+    claim, fd = service.pool.claim()
+    try:
+        with service.pool.db() as db:
+            db.execute("UPDATE jobs SET status='running', pid=? WHERE id=?", (os.getpid(), job))
+            db.execute("UPDATE card_outbox SET state='sent', progress_state='sent', updated=? WHERE job=?", (0, job))
+
+        updates = []
+        class DummyBridge:
+            def update_progress(self, task_id, **kwargs):
+                updates.append((task_id, kwargs))
+                return {'ok': True}
+
+        transport = SimpleNamespace(card_bridge=DummyBridge())
+        outcomes = service.refresh_running_cards(transport, min_age=0)
+        assert len(outcomes) == 1
+        assert len(updates) == 1
+        assert updates[0][0] == job
+        assert updates[0][1]['phase'] == 'Executing tool: terminal'
+        assert updates[0][1]['progress'] == 0.6
+    finally:
+        os.close(fd)
+
+
+def test_refresh_running_cards_reads_attempt_progress_json(tmp_path):
+    import json
+    from types import SimpleNamespace
+    service = plugin.DispatchService(str(tmp_path / 'queue'), 'p', [str(tmp_path)], role='dev',
+        route_provider=lambda _: {'route': 'r', 'channel': 'feishu', 'chat': 'c'}, task_cards_enabled=True)
+    job = service.submit('s', {'goal': 'test', 'request_key': 'key'})['task_id']
+
+    claim, fd = service.pool.claim()
+    attempt = claim['attempt']
+    try:
+        # Write progress.json in attempt directory
+        attempt_dir = service.pool.root / 'attempts' / attempt
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        prog_file = attempt_dir / 'progress.json'
+        prog_file.write_text(json.dumps({
+            'status': 'running',
+            'phase': '工具执行完成: write_file (第4步)',
+            'progress': 0.45,
+            'step': 4,
+        }), encoding='utf-8')
+
+        with service.pool.db() as db:
+            db.execute("UPDATE jobs SET status='running', pid=? WHERE id=?", (os.getpid(), job))
+            db.execute("UPDATE card_outbox SET state='sent', progress_state='sent', updated=? WHERE job=?", (0, job))
+
+        updates = []
+        class DummyBridge:
+            def update_progress(self, task_id, **kwargs):
+                updates.append((task_id, kwargs))
+                return {'ok': True}
+
+        transport = SimpleNamespace(card_bridge=DummyBridge())
+        outcomes = service.refresh_running_cards(transport, min_age=0)
+        assert len(outcomes) == 1
+        assert len(updates) == 1
+        assert updates[0][0] == job
+        assert updates[0][1]['phase'] == '工具执行完成: write_file (第4步)'
+        assert updates[0][1]['progress'] == 0.45
+    finally:
+        os.close(fd)
+
+
+def test_refresh_running_cards_reconciles_terminal_job(tmp_path):
+    from types import SimpleNamespace
+    service = plugin.DispatchService(str(tmp_path / 'queue'), 'p', [str(tmp_path)], role='dev',
+        route_provider=lambda _: {'route': 'r', 'channel': 'feishu', 'chat': 'c'}, task_cards_enabled=True)
+    job = service.submit('s', {'goal': 'test', 'request_key': 'key'})['task_id']
+
+    reconciled = []
+    class DummyTransport:
+        card_bridge = SimpleNamespace(update_progress=lambda *a, **k: {'ok': True})
+        def reconcile_card(self, task_id):
+            reconciled.append(task_id)
+
+    # Job is completed in pool
+    with service.pool.db() as db:
+        db.execute("UPDATE jobs SET status='completed' WHERE id=?", (job,))
+        # Simulate active_running_card_jobs returning this job
+        db.execute("UPDATE card_outbox SET state='sent', progress_state='sent', updated=? WHERE job=?", (0, job))
+
+    # Monkeypatch active_running_card_jobs to return this job row
+    orig = service.pool.active_running_card_jobs
+    service.pool.active_running_card_jobs = lambda **kw: [{'job': job, 'created': 100}]
+    try:
+        outcomes = service.refresh_running_cards(DummyTransport(), min_age=0)
+        assert len(reconciled) == 1
+        assert reconciled[0] == job
+        assert outcomes[0]['terminal'] is True
+    finally:
+        service.pool.active_running_card_jobs = orig
+
+
+

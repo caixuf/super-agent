@@ -82,6 +82,11 @@ def main():
                 env = dict(os.environ)
                 if config.get("token"):
                     env["AGENTCORE_ATTEMPT_TOKEN"] = config["token"]
+                if config.get("job"):
+                    env["SUPERAGENT_JOB_ID"] = str(config["job"])
+                if config.get("attempt"):
+                    env["SUPERAGENT_ATTEMPT_ID"] = str(config["attempt"])
+                env["SUPERAGENT_ATTEMPT_DIR"] = str(Path.cwd())
                 # The runner inherits neither control/evidence descriptors nor
                 # the lock. The supervisor retains it until its tree is reaped.
                 proc = subprocess.Popen(command, stdin=sys.stdin, stdout=sys.stdout,

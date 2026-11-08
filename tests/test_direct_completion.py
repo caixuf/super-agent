@@ -227,3 +227,30 @@ def test_default_plan_has_no_card_marker(tmp_path):
     transport, message, _ = make_transport(tmp_path, sender)
     assert transport.deliver(ADDRESS, message, idempotency_key='job')['accepted']
     assert 'card' not in calls[0]
+
+
+def test_delivery_plan_retry_normalizes_empty_vs_missing_artifacts(tmp_path):
+    import json
+    calls = []
+    def sender(address, item, **kwargs):
+        calls.append(item)
+        return dict(ok=True, message_id='platform-1')
+    transport, _, _ = make_transport(tmp_path, sender)
+    msg_without_artifacts = dict(task_id='job', status='completed', summary='done')
+    # First delivery with message missing artifacts
+    first = transport.deliver(ADDRESS, msg_without_artifacts, idempotency_key='job')
+    assert first['accepted']
+
+    # Verify plan was saved
+    identity = json.dumps([transport.profile, ADDRESS['route'], 'job'])
+    with transport.db() as db:
+        saved_req = db.execute('SELECT request FROM plans WHERE key=?', (identity,)).fetchone()[0]
+    saved_data = json.loads(saved_req)
+    assert saved_data['message'].get('artifacts') == []
+
+    # Second delivery with explicit empty artifacts: []
+    msg_with_empty_artifacts = dict(task_id='job', status='completed', summary='done', artifacts=[])
+    retry = transport.deliver(ADDRESS, msg_with_empty_artifacts, idempotency_key='job')
+    assert retry['accepted']
+    assert retry == first
+

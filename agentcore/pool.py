@@ -1759,6 +1759,9 @@ class Pool:
                 # Runner failure cleanup may sweep its own attempt token. The
                 # supervisor must survive that sweep to adopt/reap descendants.
                 env.pop(containment.ENV, None)
+                liveness_candidate = self.root.parent / 'liveness.db'
+                if liveness_candidate.exists():
+                    env['SUPERAGENT_LIVENESS_DB'] = str(liveness_candidate)
                 # Slow interpreter startup must not hold the dispatch database
                 # lock. Until registration commits and go is sent, this process
                 # cannot start a runner; Worker EOF closes the no-launch gap.

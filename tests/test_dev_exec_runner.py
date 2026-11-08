@@ -219,6 +219,57 @@ def test_hermes_bin_discovers_single_root_super_agent_release(monkeypatch, tmp_p
     assert module._hermes_bin() == str(managed_bin)
 
 
+def test_progress_monitor_streams_steps_and_writes_progress_json(tmp_path):
+    import time
+    from agentcore.liveness import LivenessLedger
+    module = _module()
+    attempt_dir = tmp_path / "attempts" / "att1"
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    log_file = tmp_path / "agent.log"
+    log_file.write_text("initial logs\n", encoding="utf-8")
+
+    liveness_db = tmp_path / "liveness.db"
+    ledger = LivenessLedger(liveness_db)
+    ledger.register("task-test-pm", kind="dispatch", state="queued")
+
+    monitor = module.ProgressMonitor(
+        job_id="task-test-pm",
+        attempt_dir=attempt_dir,
+        log_file=log_file,
+        liveness_path=liveness_db,
+    )
+    monitor.start()
+    try:
+        # Check initial progress.json
+        prog_file = attempt_dir / "progress.json"
+        assert prog_file.is_file()
+        pdata = json.loads(prog_file.read_text(encoding="utf-8"))
+        assert pdata["status"] == "running"
+        assert pdata["progress"] == 0.05
+
+        # Append simulated tool completion to agent.log
+        with log_file.open("a", encoding="utf-8") as f:
+            f.write("2026-11-08 12:00:00,000 INFO agent.tool_executor: tool read_file completed (0.1s)\n")
+            f.flush()
+
+        # Allow background monitor thread to read
+        time.sleep(3.0)
+
+        # Inspect liveness.db
+        live = ledger.inspect("task-test-pm")
+        assert live["ok"] is True
+        assert "read_file" in live["phase"]
+        assert live["progress"]["percent"] > 5
+    finally:
+        monitor.stop(ok=True)
+
+    # After stop, progress is 1.0 and completed
+    pdata_final = json.loads(prog_file.read_text(encoding="utf-8"))
+    assert pdata_final["status"] == "completed"
+    assert pdata_final["progress"] == 1.0
+
+
+
 
 
 

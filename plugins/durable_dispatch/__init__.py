@@ -565,6 +565,16 @@ class DispatchService:
             if stop_event is not None and stop_event.is_set():
                 break
             job = row['job']
+            job_st = self.pool.status(job) if hasattr(self.pool, 'status') else None
+            if isinstance(job_st, dict) and job_st.get('status') in ('completed', 'failed', 'cancelled'):
+                reconcile = getattr(transport, 'reconcile_card', None)
+                if callable(reconcile):
+                    try:
+                        reconcile(job)
+                        outcomes.append({'task_id': job, 'status': job_st['status'], 'terminal': True})
+                        continue
+                    except Exception as exc:
+                        logging.getLogger(__name__).debug('card terminal reconcile skipped: %s', type(exc).__name__)
             created = float(row.get('created') or now)
             elapsed = round(max(0.0, now - created), 1)
             phase = '执行进程运行中'
@@ -579,6 +589,27 @@ class DispatchService:
                             phase = live['phase'].strip()
                         if isinstance(live.get('progress'), (int, float)) and 0.0 <= float(live['progress']) <= 1.0:
                             progress = float(live['progress'])
+                        elif isinstance(live.get('progress'), dict):
+                            pct = live['progress'].get('percent')
+                            if isinstance(pct, (int, float)) and 0.0 <= pct <= 100.0:
+                                progress = round(float(pct) / 100.0, 3)
+                            elif live['progress'].get('total', 0) > 0:
+                                progress = round(float(live['progress']['done']) / float(live['progress']['total']), 3)
+                except Exception:
+                    pass
+            if phase == '执行进程运行中' or progress == 0.0:
+                try:
+                    if isinstance(job_st, dict) and job_st.get('attempt'):
+                        attempt_dir = getattr(self.pool, 'root', None)
+                        if attempt_dir is not None:
+                            prog_file = attempt_dir / 'attempts' / job_st['attempt'] / 'progress.json'
+                            if prog_file.is_file():
+                                pdata = json.loads(prog_file.read_text(encoding='utf-8'))
+                                if isinstance(pdata, dict):
+                                    if pdata.get('phase') and isinstance(pdata['phase'], str):
+                                        phase = pdata['phase'].strip()
+                                    if isinstance(pdata.get('progress'), (int, float)) and 0.0 <= float(pdata['progress']) <= 1.0:
+                                        progress = float(pdata['progress'])
                 except Exception:
                     pass
             try:

@@ -18,6 +18,24 @@ import stat
 import tempfile
 
 
+def _normalize_request(req_data):
+    """Canonicalize delivery plan request comparison, tolerating missing vs empty artifacts."""
+    if isinstance(req_data, str):
+        try:
+            req_data = json.loads(req_data)
+        except Exception:
+            return req_data
+    if not isinstance(req_data, dict):
+        return req_data
+    normalized = dict(req_data)
+    if 'message' in normalized and isinstance(normalized['message'], dict):
+        msg = dict(normalized['message'])
+        artifacts = msg.get('artifacts')
+        msg['artifacts'] = list(artifacts) if artifacts else []
+        normalized['message'] = msg
+    return normalized
+
+
 class DirectCompletionTransport:
     def __init__(self, root, *, profile, sender, render, attempt_root, attempt_provider, card=False):
         self.root = Path(root).resolve()
@@ -154,13 +172,19 @@ class DirectCompletionTransport:
         files = message.get('artifacts', [])
         if not isinstance(files, list) or len(files) > 8:
             raise ValueError('artifact count budget')
+        norm_message = dict(message)
+        norm_message['artifacts'] = list(norm_message.get('artifacts') or [])
+        request_dict = dict(address=address, message=norm_message)
         identity = json.dumps([self.profile, address['route'], idempotency_key])
-        request = json.dumps(dict(address=address, message=message), sort_keys=True)
+        request = json.dumps(request_dict, sort_keys=True)
         with self.db() as db:
             existing = db.execute('SELECT request,plan FROM plans WHERE key=?', (identity,)).fetchone()
         if existing:
             if existing[0] != request:
-                raise ValueError('delivery plan conflict')
+                if _normalize_request(existing[0]) != _normalize_request(request_dict):
+                    raise ValueError('delivery plan conflict')
+                with self.db() as db:
+                    db.execute('UPDATE plans SET request=? WHERE key=?', (request, identity))
             plan = json.loads(existing[1])
         else:
             attempt = self.attempt_provider(idempotency_key)
@@ -175,7 +199,9 @@ class DirectCompletionTransport:
             with self.db() as db:
                 db.execute('INSERT OR IGNORE INTO plans VALUES(?,?,?)', (identity, request, json.dumps(plan)))
                 saved = db.execute('SELECT request,plan FROM plans WHERE key=?', (identity,)).fetchone()
-                if saved[0] != request or json.loads(saved[1]) != plan:
+                if saved[0] != request and _normalize_request(saved[0]) != _normalize_request(request_dict):
+                    raise ValueError('concurrent delivery plan conflict')
+                if json.loads(saved[1]) != plan:
                     raise ValueError('concurrent delivery plan conflict')
         receipts = []
         for i, item in enumerate(plan):

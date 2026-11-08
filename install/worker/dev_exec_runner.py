@@ -25,6 +25,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
+import time
 
 MAX_INPUT = 131072
 MAX_GOAL = 12000
@@ -116,6 +118,11 @@ def _read_job_envelope(stream) -> tuple[str, dict]:
     goal = payload.get("goal")
     if not isinstance(goal, str) or not goal.strip() or len(goal) > MAX_GOAL:
         raise ValueError("invalid_goal")
+    if isinstance(job, dict):
+        if "job" in job and "_job_id" not in payload:
+            payload["_job_id"] = str(job["job"])
+        if "attempt" in job and "_attempt_id" not in payload:
+            payload["_attempt_id"] = str(job["attempt"])
     return goal.strip(), payload
 
 
@@ -377,6 +384,167 @@ def run_pi(goal: str, *, route: dict | None = None) -> dict:
     return payload
 
 
+class ProgressMonitor:
+    """Live execution progress monitor streaming tool steps and status into liveness.db and progress.json."""
+
+    def __init__(
+        self,
+        job_id: str | None,
+        attempt_dir: Path | None,
+        *,
+        log_file: Path | None = None,
+        liveness_path: Path | None = None,
+    ):
+        self.job_id = job_id
+        self.attempt_dir = attempt_dir
+        self.log_file = log_file
+        self.liveness_path = liveness_path
+        self.ledger = None
+        if self.job_id and self.liveness_path and Path(self.liveness_path).exists():
+            try:
+                engine = _engine_root()
+                if str(engine) not in sys.path:
+                    sys.path.insert(0, str(engine))
+                from agentcore.liveness import LivenessLedger
+                self.ledger = LivenessLedger(self.liveness_path)
+            except Exception:
+                pass
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.step = 0
+        self.last_phase = "执行进程已启动"
+        self.last_progress = 0.05
+        self._log_offset = 0
+        if self.log_file and self.log_file.is_file():
+            try:
+                self._log_offset = self.log_file.stat().st_size
+            except OSError:
+                self._log_offset = 0
+
+    def _record_progress(
+        self,
+        phase: str,
+        progress: float,
+        *,
+        step: int = 0,
+        status: str = "running",
+    ) -> None:
+        now = time.time()
+        if self.attempt_dir and self.attempt_dir.is_dir():
+            try:
+                pdata = {
+                    "status": status,
+                    "phase": phase,
+                    "progress": round(progress, 3),
+                    "step": step,
+                    "updated_at": now,
+                }
+                tmp = self.attempt_dir / "progress.json.tmp"
+                tmp.write_text(json.dumps(pdata, ensure_ascii=False), encoding="utf-8")
+                tmp.replace(self.attempt_dir / "progress.json")
+            except Exception:
+                pass
+
+        if self.ledger and self.job_id:
+            try:
+                done_pct = int(round(progress * 100))
+                self.ledger.beat(self.job_id, phase=phase, progress=(done_pct, 100))
+            except Exception:
+                pass
+
+    def start(self) -> None:
+        self._record_progress(self.last_phase, self.last_progress, step=0)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        tool_done_re = re.compile(r"agent\.tool_executor:\s+tool\s+(\w+)\s+completed")
+        tool_start_re = re.compile(r"agent\.tool_executor:\s+tool\s+(\w+)\s+(?:started|calling)")
+        api_call_re = re.compile(r"agent\.conversation_loop:\s+API call #(\d+)")
+        while not self._stop_event.is_set():
+            if self._stop_event.wait(2.5):
+                break
+            if self.log_file and self.log_file.is_file():
+                try:
+                    size = self.log_file.stat().st_size
+                    if size < self._log_offset:
+                        self._log_offset = 0
+                    if size > self._log_offset:
+                        with self.log_file.open("r", encoding="utf-8", errors="replace") as f:
+                            f.seek(self._log_offset)
+                            chunk = f.read(262144)
+                            self._log_offset = f.tell()
+
+                        done_tools = tool_done_re.findall(chunk)
+                        if done_tools:
+                            self.step += len(done_tools)
+                            last_tool = done_tools[-1]
+                            self.last_phase = f"工具执行完成: {last_tool} (第{self.step}步)"
+                            self.last_progress = min(0.92, 0.05 + 0.87 * (1.0 - (0.93 ** self.step)))
+                        else:
+                            starts = tool_start_re.findall(chunk)
+                            if starts:
+                                self.last_phase = f"正在执行工具: {starts[-1]}..."
+                            else:
+                                api_calls = api_call_re.findall(chunk)
+                                if api_calls:
+                                    self.last_phase = f"大模型交互中 (第{api_calls[-1]}轮)"
+                except Exception:
+                    pass
+
+            self._record_progress(self.last_phase, self.last_progress, step=self.step)
+
+    def stop(self, ok: bool = True) -> None:
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=3)
+        final_phase = "执行完成" if ok else "执行未完成"
+        final_progress = 1.0 if ok else self.last_progress
+        self._record_progress(
+            final_phase,
+            final_progress,
+            step=self.step,
+            status="completed" if ok else "failed",
+        )
+
+
+def _start_progress_monitor(payload: dict | None = None, route: dict | None = None) -> ProgressMonitor:
+    payload = payload or {}
+    job_id = (os.environ.get("SUPERAGENT_JOB_ID")
+              or payload.get("_job_id")
+              or payload.get("job")
+              or payload.get("task_id"))
+    attempt_dir_env = os.environ.get("SUPERAGENT_ATTEMPT_DIR")
+    attempt_dir = Path(attempt_dir_env) if attempt_dir_env else Path.cwd()
+
+    role = str(route.get("role") or "") if route else ""
+    colleague_home = _colleague_profile_home(role)
+    base_home = colleague_home if colleague_home else _profile_home()
+    log_file = base_home / "logs" / "agent.log"
+
+    liveness_db_env = os.environ.get("SUPERAGENT_LIVENESS_DB") or os.environ.get("AGENTCORE_LIVENESS_DB")
+    liveness_path = None
+    if liveness_db_env:
+        liveness_path = Path(liveness_db_env)
+    elif attempt_dir:
+        cand1 = attempt_dir.parent.parent / "liveness.db"
+        if cand1.is_file():
+            liveness_path = cand1
+        else:
+            cand2 = Path.home() / ".local" / "state" / "agentcore" / "liveness.db"
+            if cand2.is_file():
+                liveness_path = cand2
+
+    monitor = ProgressMonitor(
+        job_id=job_id,
+        attempt_dir=attempt_dir,
+        log_file=log_file,
+        liveness_path=liveness_path,
+    )
+    monitor.start()
+    return monitor
+
+
 def _call_engine(fn, goal: str, route: dict | None = None) -> dict:
     import inspect
     try:
@@ -401,70 +569,78 @@ def main() -> int:
     route_degraded = bool(route.get("degraded"))
     route_reason = str(route.get("degradation_reason") or "")
 
-    primary = _call_engine(run_hermes, goal, route=route)
-    if primary.get("ok"):
-        print(json.dumps({
-            "ok": True,
-            "engine": "hermes",
-            "model_tier": model_tier,
-            "degraded": route_degraded,
-            "engine_degraded": False,
-            "degradation_reason": route_reason,
-            "result": primary,
-        }, ensure_ascii=False))
-        return 0
+    monitor = _start_progress_monitor(job_payload, route)
+    try:
+        primary = _call_engine(run_hermes, goal, route=route)
+        if primary.get("ok"):
+            monitor.stop(ok=True)
+            print(json.dumps({
+                "ok": True,
+                "engine": "hermes",
+                "model_tier": model_tier,
+                "degraded": route_degraded,
+                "engine_degraded": False,
+                "degradation_reason": route_reason,
+                "result": primary,
+            }, ensure_ascii=False))
+            return 0
 
-    fallback = _call_engine(run_pi, goal, route=route)
-    primary_err = primary.get("error", "turn_failed")
-    fallback_reason = f"primary_engine_fallback:hermes->{primary_err}"
-    combined_reason = "; ".join(r for r in (route_reason, fallback_reason) if r)
-    if fallback.get("ok"):
+        fallback = _call_engine(run_pi, goal, route=route)
+        primary_err = primary.get("error", "turn_failed")
+        fallback_reason = f"primary_engine_fallback:hermes->{primary_err}"
+        combined_reason = "; ".join(r for r in (route_reason, fallback_reason) if r)
+        if fallback.get("ok"):
+            monitor.stop(ok=True)
+            print(json.dumps({
+                "ok": True,
+                "engine": "pi",
+                "model_tier": model_tier,
+                "degraded": True,
+                "engine_degraded": True,
+                "degradation_reason": combined_reason,
+                "result": fallback,
+                "primary_error": primary_err,
+            }, ensure_ascii=False))
+            return 0
+
+        # If both engines failed, salvage Phase 1 checkpoint from disk if one was persisted
+        salvaged_checkpoint = _find_and_load_checkpoint()
+        if salvaged_checkpoint and salvaged_checkpoint.get("summary"):
+            monitor.stop(ok=True)
+            print(json.dumps({
+                "ok": True,
+                "engine": "checkpoint_salvaged",
+                "model_tier": model_tier,
+                "degraded": True,
+                "engine_degraded": True,
+                "degradation_reason": "phase1_checkpoint_salvaged_after_engine_failure",
+                "result": {
+                    "ok": True,
+                    "summary": salvaged_checkpoint["summary"],
+                    "checkpoint": salvaged_checkpoint,
+                    "phase": "phase1_text",
+                    "checkpoint_delivered": True,
+                    "degraded": True,
+                    "degradation_reason": "phase1_checkpoint_salvaged_after_engine_failure",
+                },
+            }, ensure_ascii=False))
+            return 0
+
+        monitor.stop(ok=False)
         print(json.dumps({
-            "ok": True,
-            "engine": "pi",
+            "ok": False,
+            "engine": "none",
             "model_tier": model_tier,
             "degraded": True,
             "engine_degraded": True,
             "degradation_reason": combined_reason,
             "result": fallback,
             "primary_error": primary_err,
+            "error": "both_engines_failed",
         }, ensure_ascii=False))
         return 0
-
-    # If both engines failed, salvage Phase 1 checkpoint from disk if one was persisted
-    salvaged_checkpoint = _find_and_load_checkpoint()
-    if salvaged_checkpoint and salvaged_checkpoint.get("summary"):
-        print(json.dumps({
-            "ok": True,
-            "engine": "checkpoint_salvaged",
-            "model_tier": model_tier,
-            "degraded": True,
-            "engine_degraded": True,
-            "degradation_reason": "phase1_checkpoint_salvaged_after_engine_failure",
-            "result": {
-                "ok": True,
-                "summary": salvaged_checkpoint["summary"],
-                "checkpoint": salvaged_checkpoint,
-                "phase": "phase1_text",
-                "checkpoint_delivered": True,
-                "degraded": True,
-                "degradation_reason": "phase1_checkpoint_salvaged_after_engine_failure",
-            },
-        }, ensure_ascii=False))
-        return 0
-
-    print(json.dumps({
-        "ok": False,
-        "engine": "none",
-        "model_tier": model_tier,
-        "degraded": True,
-        "engine_degraded": True,
-        "degradation_reason": combined_reason,
-        "result": fallback,
-        "primary_error": primary_err,
-        "error": "both_engines_failed",
-    }, ensure_ascii=False))
-    return 0
+    finally:
+        monitor.stop(ok=False)
 
 
 if __name__ == "__main__":
