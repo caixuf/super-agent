@@ -79,5 +79,15 @@ def apply_task_outcome(task_id: str, passed: bool, failure_text: str = "",
             logger.warning("记忆 %s 强化失败: %s", fid, exc)
             results.append({"fact_id": fid, "error": str(exc)})
 
+    coactivated_edges = 0
+    used_fids = [str(u.get("fact_id") or "") for u in uses if u.get("fact_id")]
+    if len(used_fids) >= 2:
+        try:
+            co_res = synapse.record_coactivation(used_fids, success=bool(passed))
+            coactivated_edges = int(co_res.get("edges_updated") or 0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("赫布共激活记录跳过: %s", exc)
+
     return {"ok": True, "updated": len(results), "results": results,
+            "coactivated_edges": coactivated_edges,
             "task_id": task_id, "passed": passed}

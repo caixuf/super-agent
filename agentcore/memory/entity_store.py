@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -394,6 +395,10 @@ class EntityStore:
     ) -> None:
         now = time.time()
         for ent in entities:
+            ent_name = str(ent.get("name") or "").strip()
+            ent_id = str(ent.get("entity_id") or "").strip()
+            if not ent_id:
+                ent_id = "ent-" + hashlib.sha1(ent_name.encode("utf-8")).hexdigest()[:12]
             aliases_json = json.dumps(ent.get("aliases", []), ensure_ascii=False)
             conn.execute(
                 """
@@ -401,8 +406,8 @@ class EntityStore:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    ent["entity_id"],
-                    ent["name"],
+                    ent_id,
+                    ent_name,
                     aliases_json,
                     ent.get("category") or ent.get("entity_type") or "general",
                     ent.get("summary") or ent.get("description") or "",
@@ -414,6 +419,13 @@ class EntityStore:
         for rule in rules:
             stmt = str(rule.get("statement") or rule.get("action_stmt") or "").strip()
             title = str(rule.get("title") or rule.get("condition_expr") or "").strip()
+            ent_id = str(rule.get("entity_id") or "").strip()
+            if not ent_id:
+                ent_ref = str(rule.get("entity") or title or "general").strip()
+                ent_id = "ent-" + hashlib.sha1(ent_ref.encode("utf-8")).hexdigest()[:12]
+            rule_id = str(rule.get("rule_id") or "").strip()
+            if not rule_id:
+                rule_id = "rule-" + hashlib.sha1(f"{ent_id}:{title}:{stmt}".encode("utf-8")).hexdigest()[:12]
             kw_raw = rule.get("keywords") or []
             kw_str = " ".join(kw_raw) if isinstance(kw_raw, (list, tuple)) else str(kw_raw)
             if not kw_str:
@@ -424,8 +436,8 @@ class EntityStore:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    rule["rule_id"],
-                    rule["entity_id"],
+                    rule_id,
+                    ent_id,
                     title,
                     stmt,
                     rule.get("polarity", "constraint"),
@@ -433,18 +445,18 @@ class EntityStore:
                     now,
                 ),
             )
-            ent_cur = conn.execute("SELECT name, aliases FROM entities WHERE entity_id = ?", (rule["entity_id"],))
+            ent_cur = conn.execute("SELECT name, aliases FROM entities WHERE entity_id = ?", (ent_id,))
             ent_row = ent_cur.fetchone()
             ent_name = ent_row["name"] if ent_row else ""
             ent_aliases = ent_row["aliases"] if ent_row else ""
             try:
-                conn.execute("DELETE FROM entity_rules_fts WHERE rule_id = ?", (rule["rule_id"],))
+                conn.execute("DELETE FROM entity_rules_fts WHERE rule_id = ?", (rule_id,))
                 conn.execute(
                     """
                     INSERT INTO entity_rules_fts (rule_id, entity_name, aliases, title, statement, keywords)
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (rule["rule_id"], ent_name, ent_aliases, title, stmt, kw_str),
+                    (rule_id, ent_name, ent_aliases, title, stmt, kw_str),
                 )
             except Exception:
                 pass
@@ -497,10 +509,13 @@ class EntityStore:
             target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return payload
 
-    def import_seed_pack(self, seed_path: Path | str, *, replace: bool = False) -> Dict[str, Any]:
-        """从外部 JSON 种子包导入实体与规则。replace=True 时先清空既有表。"""
-        source = Path(seed_path).expanduser().resolve(strict=True)
-        payload = json.loads(source.read_text(encoding="utf-8"))
+    def import_seed_pack(self, seed_path: Path | str | Dict[str, Any], *, replace: bool = False) -> Dict[str, Any]:
+        """从外部 JSON 种子包路径或内存字典导入实体与规则。replace=True 时先清空既有表。"""
+        if isinstance(seed_path, dict):
+            payload = seed_path
+        else:
+            source = Path(seed_path).expanduser().resolve(strict=True)
+            payload = json.loads(source.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("invalid entity seed pack")
         entities = payload.get("entities") or []

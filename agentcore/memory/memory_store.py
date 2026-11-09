@@ -43,7 +43,7 @@ import time
 import urllib.request
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from .config import get_config, logger_name
 from .vector_codec import (
@@ -586,8 +586,107 @@ def _confidence_weights(fact_ids: Sequence[Optional[str]]) -> Dict[str, float]:
         elif status == "suspect":
             out[fid] = 0.5
         else:
-            out[fid] = 1.0
+            # 进化三：对活跃记忆叠加 ACT-R 幂律时间衰减与置信度调节
+            if entry.get("use_timestamps") or int(entry.get("reinforce_count") or 0) > 0:
+                try:
+                    conf = float(entry.get("confidence", synapse.DEFAULT_CONFIDENCE))
+                    conf_ratio = conf / synapse.DEFAULT_CONFIDENCE
+                    b_i = synapse.actr_activation(entry)
+                    actr_factor = 0.85 + 0.30 / (1.0 + math.exp(-0.5 * b_i))
+                    out[fid] = round(1.0 * conf_ratio * actr_factor, 4)
+                except Exception:
+                    out[fid] = 1.0
+            else:
+                out[fid] = 1.0
     return out
+
+
+def _parse_fact_timestamp(raw_ts: Any) -> Optional[float]:
+    if isinstance(raw_ts, (int, float)):
+        return float(raw_ts)
+    s = str(raw_ts or "").strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return time.mktime(time.strptime(s[:19], fmt))
+        except ValueError:
+            continue
+    return None
+
+
+def check_fact_freshness(
+    fact: Dict[str, Any],
+    *,
+    workspace_root: Optional[Union[str, Path]] = None,
+) -> Dict[str, Any]:
+    """进化三：源码锚点保鲜期校验（防刻舟求剑）。
+
+    当一条记忆通过 tags['file'] 绑定了源码文件时，比对该文件当前磁盘 mtime
+    与记忆记录时间（tags['file_mtime'] 或 created_at）。若文件在记忆生成后被修改过，
+    自动附加 `stale_file=True` 与 `freshness_warning` 提示。
+    """
+    tags = fact.get("tags") or {}
+    if not isinstance(tags, dict):
+        return fact
+    file_ref = str(tags.get("file") or "").strip()
+    if not file_ref:
+        return fact
+
+    recorded_ts = _parse_fact_timestamp(tags.get("file_mtime")) or _parse_fact_timestamp(fact.get("created_at"))
+    if recorded_ts is None:
+        return fact
+
+    candidates: List[Path] = []
+    p = Path(file_ref)
+    if p.is_absolute():
+        candidates.append(p)
+    else:
+        if workspace_root:
+            candidates.append(Path(workspace_root) / file_ref)
+        candidates.append(Path.cwd() / file_ref)
+
+    for cand in candidates:
+        try:
+            if cand.is_file():
+                current_mtime = cand.stat().st_mtime
+                if current_mtime > recorded_ts + 2.0:
+                    fact = dict(fact)
+                    fact["stale_file"] = True
+                    fact["freshness_warning"] = (
+                        f"[注意：关联文件 {file_ref} 在此记忆记录后已有变更，请先核对当前实时代码]"
+                    )
+                else:
+                    fact = dict(fact)
+                    fact["stale_file"] = False
+                break
+        except OSError:
+            continue
+    return fact
+
+
+def _bookmark_boost(it: Dict[str, Any], query: str) -> float:
+    """第0步：计算 `file:` 与 `error:` 精确书签命中加分。"""
+    q = (query or "").lower()
+    if not q:
+        return 0.0
+    tags = it.get("tags") or {}
+    if not isinstance(tags, dict):
+        return 0.0
+    boost = 0.0
+    file_tag = str(tags.get("file") or "").strip().lower()
+    if file_tag:
+        basename = file_tag.replace("\\", "/").rsplit("/", 1)[-1]
+        if file_tag in q or (basename and len(basename) >= 4 and basename in q):
+            boost += 0.18
+    err_tag = str(tags.get("error") or "").strip().lower()
+    if err_tag and len(err_tag) >= 4 and err_tag in q:
+        boost += 0.18
+    return boost
 
 
 def _knn_rowids(conn: sqlite3.Connection, query: str, *,
@@ -1415,7 +1514,11 @@ def recall_facts(
         floor = float(os.environ.get("MEMORY_RECALL_MIN_SCORE", "") or _recall_floor(want_kinds))
         # 没有分数（向量不可用、退回关键词排序）时不套用门限：那种情况本来就没有
         # 可比的相似度，硬套会把关键词命中的结果也挡掉。
-        results = [it for it in ranked if _passes_floor(it, floor, query)][: max(1, int(limit))]
+        results = [
+            check_fact_freshness(it)
+            for it in ranked
+            if _passes_floor(it, floor, query)
+        ][: max(1, int(limit))]
         if task_id and results:
             try:
                 from . import memory_trace
@@ -2026,6 +2129,8 @@ def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True,
         # subject 命中算 2 分：它是人为给的标签，命中其含义远强于正文里偶然出现。
         subj = (it.get("subject") or "").lower()
         hit = sum(2 if w in subj else (1 if w in low else 0) for w in q)
+        if _bookmark_boost(it, query) > 0:
+            hit += 5
         return (hit, it.get("created_at") or "")
 
     qtext = (query or "").strip()
@@ -2085,11 +2190,14 @@ def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True,
             scored.sort(
                 key=lambda x: (
                     0 if (prefer_ebm and x[1].get("apply_match") == "exact_ebm") else 1,
-                    -(x[0] * weights.get(x[1].get("fact_id"), 1.0)),
+                    -((x[0] + _bookmark_boost(x[1], query)) * weights.get(x[1].get("fact_id"), 1.0)),
                 ))
             for sc, it in scored:
                 it["rank_mode"] = "vector"
-                it["_score"] = round(sc, 4)
+                bm = _bookmark_boost(it, query)
+                it["_score"] = round(sc + bm, 4)
+                if bm > 0:
+                    it["bookmark_pinned"] = True
             return [x[1] for x in scored]
     out = []
     for it in items:

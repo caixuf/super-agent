@@ -16,9 +16,12 @@ from .config import (
 from . import progressive
 from . import monthly_log
 from .hybrid_recall import recall_hybrid, rrf_fuse
+from .memory_consolidate import consolidate_memories
 from .memory_plasticity import apply_task_outcome
+from .memory_surprise import compute_surprise, extract_causal_triplet, should_flash_write
 from .memory_sync import sync_databases
 from .memory_store import (
+    check_fact_freshness,
     drop_fact,
     flush_background,
     list_tags,
@@ -38,12 +41,17 @@ __all__ = [
     "get_config",
     "reset_config",
     "logger_name",
-    # 写入 / 召回 / 混合融合 / 可塑性 / 同步 / 向量回收
+    # 写入 / 召回 / 混合融合 / 可塑性 / 同步 / 向量回收 / 四大进化
     "write_fact",
     "recall_facts",
     "recall_hybrid",
     "rrf_fuse",
     "apply_task_outcome",
+    "compute_surprise",
+    "extract_causal_triplet",
+    "should_flash_write",
+    "consolidate_memories",
+    "check_fact_freshness",
     "sync_databases",
     "prune_dormant_vectors",
     "get_facts_by_ids",

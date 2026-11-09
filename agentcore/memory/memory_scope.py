@@ -29,10 +29,12 @@ from __future__ import annotations
 from typing import Optional, Sequence
 
 SCOPE_PLATFORM = "platform"
+SCOPE_PRINCIPLE = "principle"
 SCOPE_REFERENCE = "reference"
 SCOPE_OPS = "ops"
 
-ALL_SCOPES = (SCOPE_PLATFORM, SCOPE_REFERENCE, SCOPE_OPS)
+ALL_SCOPES = (SCOPE_PLATFORM, SCOPE_PRINCIPLE, SCOPE_REFERENCE, SCOPE_OPS)
+CORE_SCOPES = (SCOPE_PLATFORM, SCOPE_PRINCIPLE, SCOPE_OPS)
 
 #: 默认作用域。没有显式声明的一律按平台自有经验处理 ——
 #: 保守选择：既有数据都是平台经验，新增的必须显式标 reference。

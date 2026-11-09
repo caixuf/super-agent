@@ -79,6 +79,43 @@ def register(ctx):
             return '\n'.join(item.get('text', '') for item in value if isinstance(item, dict))
         return ''
 
+    def _maybe_flash_write(session_id, turn_id, user_msg, reply_msg):
+        if ctx.get_config('flash_write', True) is False:
+            return
+        if module.is_automated_turn(turn_id):
+            return
+        try:
+            if router_enabled:
+                route = router.resolve(session_id) if router is not None else None
+                if route is None:
+                    return
+                data_dir = route.get('data_dir', '')
+                u_id = route.get('user_id', '')
+                a_id = route.get('agent_id', '')
+                prof = route.get('profile', '')
+            else:
+                data_dir = ctx.get_config('data_dir', '')
+                u_id = ctx.get_config('user_id', '')
+                a_id = ctx.get_config('agent_id', '')
+                prof = getattr(ctx, 'profile_name', '')
+            if not data_dir or not Path(data_dir).is_dir():
+                return
+            import sys
+            if str(engine) not in sys.path:
+                sys.path.insert(0, str(engine))
+            from agentcore.memory.memory_surprise import flash_write_explicit_mandate
+            flash_write_explicit_mandate(
+                user_msg,
+                reply_msg,
+                data_dir=str(data_dir),
+                user_id=str(u_id),
+                agent_id=str(a_id),
+                profile=str(prof),
+                entity_db=ctx.get_config('entity_db') or None,
+            )
+        except Exception as exc:
+            log.debug('flash write skipped: %s', type(exc).__name__)
+
     def capture(**kwargs):
         try:
             target, turn = capture_target(kwargs)
@@ -88,10 +125,12 @@ def register(ctx):
                 if user is None:
                     log.warning('memory capture skipped: original input unavailable')
                     return
+            reply = text(kwargs.get('assistant_response'))
             target.capture(session_id=kwargs.get('session_id'),
                           turn_id=turn,
                           user_message=user,
-                          assistant_reply=text(kwargs.get('assistant_response')))
+                          assistant_reply=reply)
+            _maybe_flash_write(kwargs.get('session_id'), turn, user, reply)
         except Exception as exc:
             log.warning('memory capture failed: %s', type(exc).__name__)
 

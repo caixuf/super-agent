@@ -10,6 +10,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from agentcore.memory.config import MemoryConfig, configure
+from agentcore.memory.memory_scope import CORE_SCOPES
 from agentcore.memory.memory_store import recall_facts
 
 
@@ -25,6 +26,10 @@ def main():
     p.add_argument("--embed-dim", type=int, default=1024)
     p.add_argument("--embed-url", default=os.environ.get("SUPERAGENT_MEMORY_EMBED_URL", ""),
                    help="optional embedding endpoint; omit for keyword-only recall")
+    p.add_argument("--include-reference", action="store_true",
+                   help="include external reference book/doc chunks in recall")
+    p.add_argument("--scopes", nargs="*", default=None,
+                   help="explicit scopes filter; defaults to core scopes (platform/principle/ops)")
     args = p.parse_args()
     if args.query_text is not None and args.query is not None:
         p.error("query must be supplied only once")
@@ -52,8 +57,9 @@ def main():
         embed_fn = make_embedder(args.embed_url, dimension=args.embed_dim)
     configure(MemoryConfig(data_dir=root, default_user=args.user, default_agent=args.agent,
                            embed_dim=args.embed_dim, embed_fn=embed_fn))
+    scopes = args.scopes if args.scopes else (None if args.include_reference else list(CORE_SCOPES))
     result = recall_facts(query, user_id=args.user, agent_id=args.agent,
-                          profile=args.profile, limit=args.limit)
+                          profile=args.profile, limit=args.limit, scopes=scopes)
     if not isinstance(result, dict) or result.get("ok") is not True:
         raise RuntimeError("memory recall failed")
     rows = result.get("results")
@@ -61,8 +67,19 @@ def main():
         raise RuntimeError("invalid memory recall result")
     # Return only data the localvec provider needs; do not expose internal paths,
     # source bodies, tags or confidence metadata.
-    clean = [{"fact_id": row.get("fact_id", ""), "statement": row.get("statement", "")}
-             for row in rows if isinstance(row, dict) and isinstance(row.get("statement"), str)]
+    clean = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("statement"), str):
+            continue
+        item = {"fact_id": row.get("fact_id", ""), "statement": row.get("statement", "")}
+        if row.get("freshness_warning"):
+            item["freshness_warning"] = str(row["freshness_warning"])
+        if row.get("bookmark_pinned"):
+            item["bookmark_pinned"] = True
+        tags = row.get("tags") or {}
+        if isinstance(tags, dict) and tags.get("polarity") in ("prohibition", "requirement"):
+            item["polarity"] = tags["polarity"]
+        clean.append(item)
     payload = {"ok": True, "results": clean}
     if not clean:
         payload["empty_reason"] = result.get("empty_reason", "no_match")

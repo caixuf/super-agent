@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""单进程混合召回与 RRF（Reciprocal Rank Fusion）重排器。
+"""单进程混合召回、信噪比分层隔离、赫布 1-Hop 扩散激活与 RRF 重排器。
 
-为什么需要这一层：
-1. 消除双子进程冷启动开销：原先每次联合召回都要 fork 两个独立 Python 进程
-   （recall_entity.py + recall_memory.py），单进程内直接组合 EntityStore 与
-   memory_store，省去 80~150ms 解释器与连接初始化耗时。
-2. 解决分数量纲不可比问题：EntityStore 产出 BM25 / 精确别名命中，memory_store
-   产出 bge-m3 余弦相似度 × 突触权重。两边原始分数量纲不同，简单奇偶交错
-   （zip interleave）会把高置信度的第 2 条事实排在低相关度的第 2 条规则后面。
-   使用 Reciprocal Rank Fusion (RRF):
-       score(d) = sum_{s in sources} weight_s / (rrf_k + rank_s(d))
-   既不依赖原始分数量纲，又能让「实体规则库与事实库同时印证」的条目自动置顶。
+核心能力：
+1. 【第0步：信噪比提纯与精确书签】
+   默认优先从 `CORE_SCOPES = ('platform', 'principle', 'ops')` 召回个人与项目铁律，
+   隔离 7.5 万条 `scope=reference` 电子书噪声；当命中 `file:` 或 `error:` 精确书签时自动置顶。
+2. 【进化二：1-Hop 赫布突触扩散激活（Spreading Activation）】
+   根据首轮命中的种子事实 `fact_id`，沿 `synapse.spreading_activation` 共激活边向外扩散 1 跳，
+   自动捞出历史上共同促成任务成功的伴生经验（问 A 自动联想出 B）。
+3. 【RRF 倒数秩融合】
+   消除 EntityStore 与 memory_store 分数量纲差异，支持禁令极性（`prohibition`）与书签置顶加权。
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from .entity_store import EntityStore
-from . import memory_store
+from .memory_scope import CORE_SCOPES, SCOPE_REFERENCE
+from . import memory_store, synapse
 
 _LOG = logging.getLogger("superagent.agentcore.memory.hybrid_recall")
 
@@ -30,23 +30,28 @@ def rrf_fuse(
     entity_hits: Sequence[Dict[str, Any]],
     memory_hits: Sequence[Dict[str, Any]],
     *,
+    spread_hits: Optional[Sequence[Dict[str, Any]]] = None,
+    reference_hits: Optional[Sequence[Dict[str, Any]]] = None,
+    query: str = "",
     limit: int = 5,
     rrf_k: int = 60,
     entity_weight: float = 1.0,
     memory_weight: float = 1.0,
+    spread_weight: float = 0.85,
+    reference_weight: float = 0.45,
     interleave: bool = False,
 ) -> List[Dict[str, Any]]:
-    """融合实体规则召回与长期事实召回结果。
+    """融合实体规则召回、核心事实召回、1-Hop 突触扩散召回与参考书召回结果。
 
     interleave=True 时保持传统奇偶交错去重顺序（向后兼容旧契约）；
-    默认 interleave=False 时使用 RRF 倒数秩融合并保留禁令极性优先。
+    默认 interleave=False 时使用 RRF 倒数秩融合，并叠加书签置顶与禁令极性优先。
     """
     max_items = max(1, int(limit))
     if interleave:
         rows: List[Dict[str, Any]] = []
         seen: set[str] = set()
         e_list = list(entity_hits)
-        m_list = list(memory_hits)
+        m_list = list(memory_hits) + list(spread_hits or []) + list(reference_hits or [])
         for pair in zip(e_list + [None] * len(m_list), m_list + [None] * len(e_list)):
             for row in pair:
                 if row is None or not isinstance(row, dict):
@@ -63,6 +68,13 @@ def rrf_fuse(
     merged: Dict[str, Dict[str, Any]] = {}
     order_seq = 0
 
+    def _is_bookmarked(raw: Dict[str, Any]) -> bool:
+        if raw.get("bookmark_pinned") is True:
+            return True
+        if query and memory_store._bookmark_boost(raw, query) > 0:
+            return True
+        return False
+
     def _ingest(items: Sequence[Dict[str, Any]], source_name: str, weight: float) -> None:
         nonlocal order_seq
         for rank_idx, raw in enumerate(items, start=1):
@@ -72,11 +84,17 @@ def rrf_fuse(
             if not stmt:
                 continue
             contrib = float(weight) / float(k + rank_idx)
-            if str(raw.get("polarity") or "") == "prohibition":
+            polarity = str(raw.get("polarity") or (raw.get("tags") or {}).get("polarity") or "")
+            if polarity == "prohibition":
                 contrib += 0.002
+            pinned = _is_bookmarked(raw)
+            if pinned:
+                contrib += 0.008
             if stmt not in merged:
                 entry = dict(raw)
                 entry["statement"] = stmt
+                if pinned:
+                    entry["bookmark_pinned"] = True
                 entry["sources"] = [source_name]
                 entry["_rrf_score"] = round(contrib, 6)
                 entry["_first_order"] = order_seq
@@ -84,6 +102,8 @@ def rrf_fuse(
                 merged[stmt] = entry
             else:
                 entry = merged[stmt]
+                if pinned:
+                    entry["bookmark_pinned"] = True
                 if source_name not in entry.get("sources", []):
                     entry.setdefault("sources", []).append(source_name)
                 entry["_rrf_score"] = round(float(entry.get("_rrf_score", 0.0)) + contrib, 6)
@@ -93,12 +113,17 @@ def rrf_fuse(
 
     _ingest(entity_hits, "entity", entity_weight)
     _ingest(memory_hits, "memory", memory_weight)
+    if spread_hits:
+        _ingest(spread_hits, "synapse_spread", spread_weight)
+    if reference_hits:
+        _ingest(reference_hits, "reference", reference_weight)
 
     ranked = sorted(
         merged.values(),
         key=lambda item: (
+            0 if item.get("bookmark_pinned") else 1,
             -float(item.get("_rrf_score") or 0.0),
-            0 if item.get("polarity") == "prohibition" else 1,
+            0 if (item.get("polarity") or (item.get("tags") or {}).get("polarity")) == "prohibition" else 1,
             int(item.get("_first_order") or 0),
         ),
     )
@@ -122,11 +147,14 @@ def recall_hybrid(
     tags: Optional[Dict[str, Any]] = None,
     kinds: Optional[Sequence[str]] = None,
     scopes: Optional[Sequence[str]] = None,
+    exclude_reference: bool = True,
+    include_reference: bool = False,
+    enable_spreading: bool = True,
     task_id: Optional[str] = None,
     fusion: str = "rrf",
     rrf_k: int = 60,
 ) -> Dict[str, Any]:
-    """单进程联合执行 EntityStore + memory_store 召回并做 RRF 融合。"""
+    """单进程联合执行 EntityStore + 核心事实库 + 1-Hop 突触扩散召回并做 RRF 融合。"""
     q = (query or "").strip()
     max_items = max(1, int(limit))
     if not q:
@@ -135,6 +163,7 @@ def recall_hybrid(
             "results": [],
             "entity_count": 0,
             "memory_count": 0,
+            "spread_count": 0,
             "fusion": fusion,
             "empty_reason": "empty_query",
         }
@@ -142,6 +171,10 @@ def recall_hybrid(
     estore = EntityStore(db_path=entity_db)
     entity_hits = estore.recall(q, limit=max_items)
 
+    # 第0步：默认只查核心作用域（platform / principle / ops），隔离 7.5 万条 reference 电子书噪音
+    effective_scopes = list(scopes) if scopes is not None else (
+        list(CORE_SCOPES) if (exclude_reference and not include_reference) else list(CORE_SCOPES)
+    )
     mem_res = memory_store.recall_facts(
         q,
         ebm=ebm,
@@ -151,15 +184,65 @@ def recall_hybrid(
         profile=profile,
         limit=max_items,
         kinds=kinds,
-        scopes=scopes,
+        scopes=effective_scopes,
     )
     if not isinstance(mem_res, dict) or mem_res.get("ok") is not True:
         raise RuntimeError("memory_recall_failed")
     memory_hits = mem_res.get("results") or []
 
+    # 如果显式要求补充 reference 书本（或 caller 指定 scopes 包含 reference）
+    reference_hits: List[Dict[str, Any]] = []
+    if scopes is None and include_reference and len(memory_hits) < max_items:
+        ref_res = memory_store.recall_facts(
+            q,
+            ebm=ebm,
+            tags=tags,
+            user_id=user_id,
+            agent_id=agent_id,
+            profile=profile,
+            limit=max(1, max_items - len(memory_hits)),
+            kinds=kinds,
+            scopes=[SCOPE_REFERENCE],
+        )
+        if isinstance(ref_res, dict) and ref_res.get("ok") is True:
+            reference_hits = ref_res.get("results") or []
+
+    # 进化二：1-Hop 赫布突触扩散激活（问 A 自动联想伴生经验 B）
+    spread_hits: List[Dict[str, Any]] = []
+    if enable_spreading:
+        seed_fids = [
+            str(item.get("fact_id") or "").strip()
+            for item in [*memory_hits, *entity_hits]
+            if str(item.get("fact_id") or "").strip()
+        ]
+        if seed_fids:
+            activated = synapse.spreading_activation(seed_fids, top_k=max(2, max_items))
+            if activated:
+                act_ids = [a["fact_id"] for a in activated]
+                act_by_id = {a["fact_id"]: a for a in activated}
+                loaded = memory_store.get_facts_by_ids(
+                    act_ids,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    profile=profile,
+                )
+                for row in loaded.get("results") or []:
+                    r_tags = row.get("tags") or {}
+                    if exclude_reference and not include_reference and r_tags.get("scope") == SCOPE_REFERENCE:
+                        continue
+                    enriched = memory_store.check_fact_freshness(dict(row))
+                    meta = act_by_id.get(enriched["fact_id"], {})
+                    enriched["rank_mode"] = "synapse_spread"
+                    enriched["spread_score"] = meta.get("spread_score", 0.0)
+                    enriched["activated_by"] = meta.get("activated_by", [])
+                    spread_hits.append(enriched)
+
     fused = rrf_fuse(
         entity_hits,
         memory_hits,
+        spread_hits=spread_hits,
+        reference_hits=reference_hits,
+        query=q,
         limit=max_items,
         rrf_k=rrf_k,
         interleave=(fusion == "interleave"),
@@ -183,6 +266,8 @@ def recall_hybrid(
         "results": fused,
         "entity_count": len(entity_hits),
         "memory_count": len(memory_hits),
+        "spread_count": len(spread_hits),
+        "reference_count": len(reference_hits),
         "fusion": fusion,
     }
     if not fused:

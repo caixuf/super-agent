@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from .config import get_config, logger_name
 
@@ -46,6 +47,9 @@ REINFORCE_STEP = 0.05
 PENALIZE_STEP = 0.15
 MIN_CONFIDENCE = 0.1
 SUSPECT_AFTER = 5
+MAX_USE_TIMESTAMPS = 32
+COACTIVATION_STEP = 0.15
+MAX_COACTIVATION_EDGES = 24
 
 
 def _store_path() -> Path:
@@ -140,6 +144,10 @@ def reinforce(pattern_id: str, success: bool, target: str = "",
         entry["consecutive_failures"] = 0
         if target and target not in entry.get("targets", []):
             entry.setdefault("targets", []).append(target)
+        # 记录 ACT-R 激活时间戳（保留最近 MAX_USE_TIMESTAMPS 次）
+        ts_list = [float(x) for x in (entry.get("use_timestamps") or []) if isinstance(x, (int, float))]
+        ts_list.append(round(time.time(), 3))
+        entry["use_timestamps"] = ts_list[-MAX_USE_TIMESTAMPS:]
         # 成功一次就回 active：连续失败已清零，再用置信度门槛卡住会造成死锁。
         entry["status"] = STATUS_ACTIVE
     else:
@@ -167,6 +175,225 @@ def reinforce(pattern_id: str, success: bool, target: str = "",
         "targets": entry.get("targets", []),
         "action": "reinforced" if success else "penalized",
     }
+
+
+def actr_activation(
+    entry: Dict[str, Any],
+    *,
+    now: Optional[float] = None,
+    decay: float = 0.5,
+) -> float:
+    """计算 ACT-R 幂律基础激活度 B_i = ln(sum_{k} max(1.0, dt_hours)^(-d))。
+
+    未记录过时间戳时返回 0.0（中性基准）。
+    """
+    ts_list = [float(x) for x in (entry.get("use_timestamps") or []) if isinstance(x, (int, float))]
+    if not ts_list:
+        rcount = int(entry.get("reinforce_count") or 0)
+        if rcount <= 0:
+            return 0.0
+        # 兼容历史没有 use_timestamps 的强化条目
+        return round(math.log(max(1.0, float(rcount))), 4)
+    current = float(now if now is not None else time.time())
+    power_sum = 0.0
+    for ts in ts_list:
+        dt_hours = max(0.1, (current - ts) / 3600.0)
+        power_sum += math.pow(dt_hours, -max(0.1, float(decay)))
+    if power_sum <= 0.0:
+        return 0.0
+    return round(math.log(power_sum), 4)
+
+
+def actr_weights_for(
+    fact_ids: Sequence[Optional[str]],
+    *,
+    now: Optional[float] = None,
+    decay: float = 0.5,
+) -> Dict[str, float]:
+    """融合突触状态权重、置信度与 ACT-R 幂律时间衰减的综合排序乘子。
+
+    返回值范围约在 [0.0, 1.35]，默认未记录事实为 1.0。
+    """
+    out: Dict[str, float] = {}
+    try:
+        syn = _load()
+    except Exception:  # noqa: BLE001
+        return out
+    for fid in fact_ids:
+        if not fid:
+            continue
+        entry = syn.get(fid)
+        if not entry:
+            out[fid] = 1.0
+            continue
+        status = str(entry.get("status") or STATUS_ACTIVE)
+        base_w = STATUS_WEIGHT.get(status, 1.0)
+        if base_w <= 0.0:
+            out[fid] = 0.0
+            continue
+        conf = float(entry.get("confidence", DEFAULT_CONFIDENCE))
+        conf_ratio = conf / DEFAULT_CONFIDENCE
+        b_i = actr_activation(entry, now=now, decay=decay)
+        # Sigmoid 映射 B_i 到 [0.82, 1.18] 的平滑调节系数
+        actr_factor = 0.82 + 0.36 / (1.0 + math.exp(-0.5 * b_i))
+        out[fid] = round(base_w * conf_ratio * actr_factor, 4)
+    return out
+
+
+def record_coactivation(
+    fact_ids: Sequence[str],
+    *,
+    success: bool = True,
+    step: float = COACTIVATION_STEP,
+) -> Dict[str, Any]:
+    """进化二：赫布突触学习律（Cells that fire together, wire together）。
+
+    当多条事实在同一次任务中被联合召回并促成任务成功时，增强它们之间的双向共激活边权重 w_AB。
+    """
+    unique_ids = [str(f).strip() for f in dict.fromkeys(fact_ids) if str(f or "").strip()]
+    if len(unique_ids) < 2:
+        return {"ok": True, "edges_updated": 0}
+    synapses = _load()
+    delta = float(step) if success else -0.5 * float(step)
+    updated_pairs = 0
+    now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    for i, fid_a in enumerate(unique_ids):
+        entry_a = synapses.get(fid_a) or {
+            "id": fid_a,
+            "confidence": DEFAULT_CONFIDENCE,
+            "reinforce_count": 0,
+            "penalty_count": 0,
+            "consecutive_failures": 0,
+            "targets": [],
+            "status": STATUS_ACTIVE,
+        }
+        edges_a: Dict[str, float] = dict(entry_a.get("co_edges") or {})
+        for j, fid_b in enumerate(unique_ids):
+            if i == j:
+                continue
+            old_w = float(edges_a.get(fid_b, 0.0))
+            new_w = round(min(1.0, max(0.0, old_w + delta)), 4)
+            if new_w > 0.02:
+                edges_a[fid_b] = new_w
+            else:
+                edges_a.pop(fid_b, None)
+            if i < j:
+                updated_pairs += 1
+        # 限制单节点最大边数，保留权重最高的 MAX_COACTIVATION_EDGES 条边
+        if len(edges_a) > MAX_COACTIVATION_EDGES:
+            top_items = sorted(edges_a.items(), key=lambda kv: -kv[1])[:MAX_COACTIVATION_EDGES]
+            edges_a = dict(top_items)
+        entry_a["co_edges"] = edges_a
+        entry_a["last_updated"] = now_str
+        synapses[fid_a] = entry_a
+
+    _save(synapses)
+    return {"ok": True, "edges_updated": updated_pairs, "nodes": len(unique_ids)}
+
+
+def spreading_activation(
+    seed_fact_ids: Sequence[str],
+    *,
+    top_k: int = 3,
+    min_weight: float = 0.15,
+) -> List[Dict[str, Any]]:
+    """进化二：1-Hop 赫布突触扩散激活（Spreading Activation）。
+
+    给定首轮召回命中的种子事实 ID 列表，沿共激活图谱向外扩散 1 跳，
+    捞出虽未直接命中字面查询、但历史上经常与种子事实共同解决问题的伴生事实。
+    """
+    seeds = [str(f).strip() for f in dict.fromkeys(seed_fact_ids) if str(f or "").strip()]
+    if not seeds or top_k < 1:
+        return []
+    synapses = _load()
+    seed_set = set(seeds)
+    candidate_scores: Dict[str, float] = {}
+    via_map: Dict[str, List[str]] = {}
+
+    for s_id in seeds:
+        s_entry = synapses.get(s_id)
+        if not s_entry or s_entry.get("status") == STATUS_DEPRECATED:
+            continue
+        co_edges = s_entry.get("co_edges") or {}
+        if not isinstance(co_edges, dict):
+            continue
+        for target_id, edge_w in co_edges.items():
+            if not target_id or target_id in seed_set:
+                continue
+            w = float(edge_w or 0.0)
+            if w < min_weight:
+                continue
+            t_entry = synapses.get(target_id) or {}
+            t_status = str(t_entry.get("status") or STATUS_ACTIVE)
+            if t_status == STATUS_DEPRECATED:
+                continue
+            t_conf = float(t_entry.get("confidence", DEFAULT_CONFIDENCE))
+            status_mult = STATUS_WEIGHT.get(t_status, 1.0)
+            contrib = w * (t_conf / DEFAULT_CONFIDENCE) * status_mult
+            candidate_scores[target_id] = round(candidate_scores.get(target_id, 0.0) + contrib, 4)
+            via_map.setdefault(target_id, []).append(s_id)
+
+    ranked = sorted(candidate_scores.items(), key=lambda kv: (-kv[1], kv[0]))[: int(top_k)]
+    return [
+        {
+            "fact_id": fid,
+            "spread_score": score,
+            "activated_by": via_map.get(fid, []),
+        }
+        for fid, score in ranked
+    ]
+
+
+def merge_synapse(old_id: str, new_id: str) -> Dict[str, Any]:
+    """在睡眠巩固归并碎片时，将旧事实的突触强化计数、时间戳与共激活边无损转移给新事实。"""
+    old_k = (old_id or "").strip()
+    new_k = (new_id or "").strip()
+    if not old_k or not new_k or old_k == new_k:
+        return {"ok": False, "merged": False}
+    synapses = _load()
+    old_entry = synapses.pop(old_k, None)
+    if not old_entry:
+        return {"ok": True, "merged": False}
+    new_entry = synapses.get(new_k) or {
+        "id": new_k,
+        "confidence": DEFAULT_CONFIDENCE,
+        "reinforce_count": 0,
+        "penalty_count": 0,
+        "consecutive_failures": 0,
+        "targets": [],
+        "status": STATUS_ACTIVE,
+    }
+    new_entry["confidence"] = round(
+        max(float(new_entry.get("confidence", DEFAULT_CONFIDENCE)),
+            float(old_entry.get("confidence", DEFAULT_CONFIDENCE))),
+        2,
+    )
+    new_entry["reinforce_count"] = int(new_entry.get("reinforce_count", 0)) + int(old_entry.get("reinforce_count", 0))
+    ts_merged = sorted(
+        set(
+            [float(x) for x in (old_entry.get("use_timestamps") or []) if isinstance(x, (int, float))]
+            + [float(x) for x in (new_entry.get("use_timestamps") or []) if isinstance(x, (int, float))]
+        )
+    )
+    if ts_merged:
+        new_entry["use_timestamps"] = ts_merged[-MAX_USE_TIMESTAMPS:]
+
+    edges_new: Dict[str, float] = dict(new_entry.get("co_edges") or {})
+    for target_id, w in (old_entry.get("co_edges") or {}).items():
+        if target_id == new_k:
+            continue
+        edges_new[target_id] = max(float(edges_new.get(target_id, 0.0)), float(w or 0.0))
+        if target_id in synapses and isinstance(synapses[target_id].get("co_edges"), dict):
+            peer_edges = synapses[target_id]["co_edges"]
+            old_peer_w = float(peer_edges.pop(old_k, 0.0))
+            if old_peer_w > 0:
+                peer_edges[new_k] = max(float(peer_edges.get(new_k, 0.0)), old_peer_w)
+    if edges_new:
+        new_entry["co_edges"] = edges_new
+    synapses[new_k] = new_entry
+    _save(synapses)
+    return {"ok": True, "merged": True, "from": old_k, "to": new_k}
 
 
 def drop(pattern_id: str) -> Dict[str, Any]:

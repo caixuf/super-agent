@@ -37,6 +37,7 @@ def main():
     parser.add_argument("--embed-url", default="", help="optional embedding endpoint; omit for keyword-only memory recall")
     parser.add_argument("--fusion", choices=("interleave", "rrf"), default="interleave")
     parser.add_argument("--in-process", action="store_true", help="Run both stores in-process without subprocesses")
+    parser.add_argument("--include-reference", action="store_true", help="Include reference scope book/doc chunks")
     args = parser.parse_args()
     if not 1 <= args.limit <= 20:
         parser.error("invalid limit")
@@ -66,6 +67,8 @@ def main():
             user_id=args.user,
             agent_id=args.agent,
             profile=args.profile,
+            exclude_reference=not args.include_reference,
+            include_reference=args.include_reference,
             fusion=args.fusion,
         )
         rows = [
@@ -76,12 +79,16 @@ def main():
     else:
         entity = run([sys.executable, str(ROOT / "recall_entity.py"), "--query=" + args.query,
                       "--limit", str(args.limit), "--db", args.entity_db])
-        memory = run([sys.executable, str(ROOT / "recall_memory.py"), "--query-text=" + args.query,
-                      "--limit", str(args.limit), "--data-dir", args.data_dir, "--user", args.user,
-                      "--agent", args.agent, "--profile", args.profile, "--embed-url", args.embed_url])
+        mem_cmd = [sys.executable, str(ROOT / "recall_memory.py"), "--query-text=" + args.query,
+                   "--limit", str(args.limit), "--data-dir", args.data_dir, "--user", args.user,
+                   "--agent", args.agent, "--profile", args.profile, "--embed-url", args.embed_url]
+        if args.include_reference:
+            mem_cmd.append("--include-reference")
+        memory = run(mem_cmd)
         rows = rrf_fuse(
             entity,
             memory,
+            query=args.query,
             limit=args.limit,
             interleave=(args.fusion == "interleave"),
         )
