@@ -157,7 +157,15 @@ def main():
             # Bounded reaping deadline check: unkillable or surviving processes must not hang forever
             if state == STATE_STOPPING and stop_deadline is not None:
                 if time.monotonic() >= stop_deadline:
-                    unquiesced_pids = _kill_children()
+                    denied = _kill_children()
+                    remaining = []
+                    try:
+                        cpath = Path(f"/proc/self/task/{os.getpid()}/children")
+                        if cpath.exists():
+                            remaining = [int(p) for p in cpath.read_text().split()]
+                    except Exception:
+                        pass
+                    unquiesced_pids = sorted(list(set(denied + remaining)))
                     quiescent = False
                     break
 
@@ -178,7 +186,14 @@ def main():
         proof.update(quiescent=quiescent, proof_scope="subreaper_tree" if ready else "not_started",
                      supervisor_pid=os.getpid(), supervisor_start=process_start(os.getpid()),
                      child_started=child_started, exit_code=code)
-        if not quiescent and unquiesced_pids:
+        if not quiescent:
+            try:
+                cpath = Path(f"/proc/self/task/{os.getpid()}/children")
+                if cpath.exists():
+                    surviving = [int(p) for p in cpath.read_text().split()]
+                    unquiesced_pids = sorted(list(set(unquiesced_pids + surviving)))
+            except Exception:
+                pass
             proof["unquiesced_pids"] = unquiesced_pids
         state = STATE_EVIDENCE_EMITTED
         blob = json.dumps(proof, sort_keys=True).encode()

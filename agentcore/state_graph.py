@@ -19,6 +19,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import time
@@ -205,7 +206,10 @@ class JsonCheckpointer(BaseCheckpointer):
         self.root_dir.mkdir(parents=True, exist_ok=True)
 
     def _task_dir(self, task_id: str) -> Path:
-        td = self.root_dir / task_id
+        safe_id = re.sub(r"[^\w\-.]", "_", task_id)
+        td = (self.root_dir / safe_id).resolve()
+        if not str(td).startswith(str(self.root_dir)):
+            td = self.root_dir / hashlib.sha256(task_id.encode()).hexdigest()
         td.mkdir(parents=True, exist_ok=True)
         return td
 
@@ -226,7 +230,7 @@ class JsonCheckpointer(BaseCheckpointer):
         return history[-1] if history else None
 
     def list(self, task_id: str) -> List[Checkpoint]:
-        td = self.root_dir / task_id
+        td = self._task_dir(task_id)
         if not td.is_dir():
             return []
         items = []
@@ -528,7 +532,15 @@ class CompiledGraph:
                 if last_ckpt.node in self.conditional_edges:
                     router, path_map = self.conditional_edges[last_ckpt.node]
                     route_val = router(state)
-                    current_node = path_map.get(route_val, route_val) if path_map else route_val
+                    if path_map is not None:
+                        if route_val not in path_map:
+                            raise InvalidGraphError(
+                                f"Conditional edge router from '{last_ckpt.node}' returned '{route_val}', "
+                                f"which is not in path_map: {list(path_map.keys())}"
+                            )
+                        current_node = path_map[route_val]
+                    else:
+                        current_node = route_val
                 elif last_ckpt.node in self.edges:
                     current_node = self.edges[last_ckpt.node]
                 else:
@@ -586,7 +598,15 @@ class CompiledGraph:
             if current_node in self.conditional_edges:
                 router, path_map = self.conditional_edges[current_node]
                 route_val = router(state)
-                next_node = path_map.get(route_val, route_val) if path_map else route_val
+                if path_map is not None:
+                    if route_val not in path_map:
+                        raise InvalidGraphError(
+                            f"Conditional edge router from '{current_node}' returned '{route_val}', "
+                            f"which is not in path_map: {list(path_map.keys())}"
+                        )
+                    next_node = path_map[route_val]
+                else:
+                    next_node = route_val
             elif current_node in self.edges:
                 next_node = self.edges[current_node]
             else:

@@ -74,6 +74,9 @@ def _set_file_limit() -> None:
     try:
         import resource
         limit = int(os.environ.get("DEV_MAX_FILE", "536870912"))
+        _, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+        if hard != resource.RLIM_INFINITY:
+            limit = min(limit, hard)
         resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
     except Exception:
         pass

@@ -323,6 +323,30 @@ def test_terminal_patch_bounded_retry_and_degradation(tmp_path):
     assert len(calls) == 3
 
 
+def test_stale_sending_terminal_patch_recovers_after_timeout(tmp_path):
+    calls = []
+    def sender(**kwargs):
+        calls.append(kwargs)
+        return {'ok': True, 'message_id': 'message'}
+
+    root = tmp_path / 'cards'
+    bridge = TaskCardBridge(root, profile='test', sender=sender)
+    bridge.bind_task('task', {'route': 'route'}, 'goal', 'dev', 'name', 'message')
+
+    # Simulate a crashed process that left patch_state='sending' with an old updated_at
+    with bridge.db() as conn:
+        conn.execute("UPDATE task_cards SET patch_state='sending', updated_at=? WHERE task_id='task'",
+                     (time.time() - 35.0,))
+
+    # Finalize sees the send is stale (> 30s) and proceeds to send instead of deadlocking
+    res = bridge.finalize('task', status='completed', summary='done')
+    assert res['ok'] is True
+    assert res['patch_result'] == {'ok': True, 'message_id': 'message'}
+    assert bridge.get_card('task')['patch_state'] == 'idle'
+    assert bridge.get_card('task')['finalized'] == 1
+    assert len(calls) == 1
+
+
 def test_terminal_without_message_can_be_delivered_after_binding(tmp_path):
     calls = []
     bridge = TaskCardBridge(tmp_path / 'cards', profile='test',

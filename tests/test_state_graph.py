@@ -288,3 +288,35 @@ def test_worktree_harvest_gate(tmp_path: Path):
     final = graph_with_cb.invoke({"worktree": str(wt_dir), "worktree_base": "master"})
     assert final.get("worktree_harvested") is True
     assert str(wt_dir) in harvested
+
+
+def test_json_checkpointer_path_traversal_sanitization(tmp_path: Path):
+    """Verify that JsonCheckpointer prevents path traversal attacks in task_id."""
+    checkpointer = JsonCheckpointer(tmp_path / "ckpts")
+    malicious_task_id = "../../etc/passwd"
+    ckpt = Checkpoint(task_id=malicious_task_id, step=1, node="safe_node", state={"k": "v"})
+    checkpointer.put(ckpt)
+
+    # Checkpoint must be stored safely inside root_dir, not outside
+    retrieved = checkpointer.get(malicious_task_id)
+    assert retrieved is not None
+    assert retrieved.step == 1
+    assert retrieved.node == "safe_node"
+    # Ensure no file was created outside root_dir
+    assert not (tmp_path / "etc").exists()
+
+
+def test_conditional_edge_invalid_route_key_raises_invalid_graph_error():
+    """Verify that if router returns an unmapped key, InvalidGraphError is raised."""
+    from agentcore.state_graph import InvalidGraphError
+    builder = StateGraph()
+    builder.add_node("step1", lambda s: {"val": 1})
+    builder.add_node("target_a", lambda s: {"out": "a"})
+    builder.set_entry_point("step1")
+    builder.add_conditional_edges("step1", lambda s: "unmapped_route", {"good": "target_a"})
+    builder.add_edge("target_a", END)
+
+    graph = builder.compile()
+    with pytest.raises(InvalidGraphError) as exc_info:
+        graph.invoke({})
+    assert "not in path_map" in str(exc_info.value)

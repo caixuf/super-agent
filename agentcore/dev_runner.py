@@ -254,7 +254,10 @@ def run_dev_job(
         payload = raw_result if isinstance(raw_result, dict) else raw_result.to_dict()
 
         ok = bool(payload.get("ok"))
-        if ok and _detect_tool_stagnation(payload.get("tool_calls") or []):
+        tool_calls = payload.get("tool_calls")
+        if not tool_calls and isinstance(payload.get("result"), dict):
+            tool_calls = payload["result"].get("tool_calls")
+        if ok and _detect_tool_stagnation(tool_calls or []):
             ok = False
             payload["error"] = "tool_loop_stagnation_detected"
         if ok and verification_checks:

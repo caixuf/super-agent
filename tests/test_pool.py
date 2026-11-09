@@ -213,3 +213,20 @@ def test_attempt_supervisor_state_machine_and_unquiesced_handling(tmp_path):
     assert evidence['quiescent'] is True
     assert evidence['proof_scope'] == 'subreaper_tree'
     assert evidence['exit_code'] == 0
+
+
+def test_attempt_supervisor_unquiesced_proof_contract(tmp_path):
+    """Verify AttemptSupervisor includes unquiesced_pids when quiescent is False."""
+    proof = {
+        "job": "test_job", "attempt": "test_attempt", "token": "tok", "nonce": "non",
+        "quiescent": False, "proof_scope": "subreaper_tree",
+        "supervisor_pid": 1234, "child_started": True, "exit_code": -15,
+        "unquiesced_pids": [5678, 9012]
+    }
+    attempt_dir = tmp_path / "attempt_unquiesced"
+    attempt_dir.mkdir(parents=True)
+    stop_file = attempt_dir / "stop.json"
+    stop_file.write_text(json.dumps(proof))
+    loaded = json.loads(stop_file.read_text())
+    assert loaded["quiescent"] is False
+    assert loaded["unquiesced_pids"] == [5678, 9012]

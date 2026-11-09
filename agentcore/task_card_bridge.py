@@ -226,9 +226,11 @@ class TaskCardBridge:
                                      "WHERE task_id=? AND profile=? AND patch_state='sending'",
                                      (state, now, task_id, self.profile))
             else:
-                conn.execute("UPDATE task_cards SET patch_state=?, progress_patch_state=? WHERE task_id=? AND profile=? "
+                conn.execute("UPDATE task_cards SET progress_patch_state=?, "
+                             "patch_state=CASE WHEN finalized=1 THEN patch_state ELSE ? END, "
+                             "updated_at=? WHERE task_id=? AND profile=? "
                              "AND (progress_patch_state='sending' OR patch_state='sending')",
-                             (state, state, task_id, self.profile))
+                             (state, state, now, task_id, self.profile))
         if confirmed:
             with self._throttle_lock:
                 self._last_patched[task_id] = time.monotonic()
@@ -534,11 +536,16 @@ class TaskCardBridge:
         with self.db() as conn:
             conn.execute('BEGIN IMMEDIATE')
             row = conn.execute(
-                "SELECT role, display_name, goal, message_id, route, chat_id, channel, finalized, patch_state, thread_id, status, summary, artifacts_json, elapsed, error_text, terminal_retries FROM task_cards WHERE task_id=? AND profile=?",
+                "SELECT role, display_name, goal, message_id, route, chat_id, channel, "
+                "finalized, patch_state, thread_id, status, summary, artifacts_json, "
+                "elapsed, error_text, terminal_retries, updated_at "
+                "FROM task_cards WHERE task_id=? AND profile=?",
                 (task_id, self.profile)
             ).fetchone()
             if not row:
                 return {"ok": False, "error": "task_not_found"}
+            updated_at = float(row[16] or 0.0)
+            is_stale_sending = (row[8] == 'sending' and (now - updated_at) > 30.0)
             is_terminal_already = row[10] in ('completed', 'failed', 'cancelled')
             if is_terminal_already:
                 same = (row[10] == status and (row[11] or '') == (summary or '')
@@ -550,7 +557,7 @@ class TaskCardBridge:
                     return {'ok': True, 'finalized': True, 'already_finalized': True}
                 if row[7] and row[8] == 'degraded':
                     return {'ok': True, 'finalized': True, 'degraded': True}
-                if row[8] == 'sending':
+                if row[8] == 'sending' and not is_stale_sending:
                     return {'ok': True, 'finalized': bool(row[7]),
                             'patch_result': {'ok': False, 'error': 'previous_patch_unknown'}}
             card_payload = self.build_card_payload(
@@ -558,7 +565,7 @@ class TaskCardBridge:
                 summary=summary, artifacts=artifacts, error_msg=error_msg)
 
             will_patch = bool(row[3] and self.sender and callable(self.sender))
-            blocked = will_patch and row[8] == 'sending'
+            blocked = will_patch and row[8] == 'sending' and not is_stale_sending
             if will_patch and not blocked:
                 conn.execute("""
                     UPDATE task_cards
