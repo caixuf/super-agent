@@ -25,7 +25,7 @@ from agentcore import colleague_containment as containment
 logger = logging.getLogger(__name__)
 
 
-ORIGIN_FIELDS = ('profile', 'session', 'route', 'channel', 'chat', 'thread', 'turn')
+ORIGIN_FIELDS = ('profile', 'session', 'route', 'channel', 'chat', 'thread', 'turn', 'scheduled')
 # The dispatcher is only guaranteed to hold these two; the rest are recorded when
 # the host supplies them, never inferred from an ambient session.
 ORIGIN_REQUIRED = ('profile', 'session')
@@ -58,6 +58,11 @@ def normalize_origin(origin):
         if name not in origin:
             continue
         value = origin[name]
+        if name == 'scheduled':
+            if type(value) is not bool:
+                raise ValueError('origin scheduled must be boolean')
+            normalized[name] = value
+            continue
         if not isinstance(value, str) or not value.strip() or len(value) > 512:
             raise ValueError('origin %s must be a nonempty string of at most 512 characters' % name)
         normalized[name] = value

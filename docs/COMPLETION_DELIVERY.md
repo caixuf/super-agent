@@ -115,3 +115,53 @@ pool.attach_origin(
 | 反复重投、聊天里重复出现 | 传输器确实投了但 ACK 失败（at-least-once 兼容路径） | 改用直投传输器（真实平台回执 + fence） |
 | 每次 `drain` 都 `delivered:0` | 头部是无主回执（按设计跳过） | §1 找到 `deliverable:false` 的条目 |
 | 升级后"同事像没干活" | 工具面里没有 `durable_submit`（插件整块加载失败） | 先修插件加载（见 `docs/PLUGINS.md`），再看 §1 |
+
+## 6. 脚本定时派单（scheduled_routes）
+
+### 为什么 Cron Agent Turn 会被拒绝
+定时触发的宿主 Agent 回合（如 `hermes cron`）没有绑定的交互会话上下文（缺少 `HERMES_SESSION_KEY` 等地址环境变量）。在 `plugins/durable_dispatch` 中，门禁会明确拒绝无地址会话的派发请求（`addressable submitting conversation required before dispatch`）。该门禁必须保留，防止任务完成后回执丢失或被投递到任意活跃会话中。
+
+### 注册定时路由（scheduled_routes）
+管理员可以在前台 profile 的 `config.yaml` 中通过 `scheduled_routes` 显式预注册定时路由：
+
+```yaml
+plugins:
+  entries:
+    durable-dispatch:
+      settings:
+        enabled: true
+        deliver_completions: true
+        scheduled_routes:
+          daily_triage:
+            route: "frontdesk:channel:session_1"
+            channel: "feishu"
+            chat: "chat_001"
+            thread: "thread_001"  # 可选
+```
+
+- 约束：最多注册 16 个路由；路由名称必须匹配 `[a-z][a-z0-9_-]{0,31}`；`scheduled_routes` 属于顶层插件设置，不允许配置在 `colleagues.<role>` 下。
+- 只有启用 `deliver_completions: true` 时定时任务的回执才可被投递，未启用时拒绝派发。
+
+### 命令行工具使用（CLI）
+通过独立的管理员脚本入口 `tools/scheduled_submit.py` 将任务压入目标角色的本地队列：
+
+```bash
+python3 tools/scheduled_submit.py \
+  --profile-home <profile_home_dir> \
+  --role dev \
+  --route daily_triage \
+  --goal-file /path/to/goal.txt \
+  --idempotency-key <unique_key> \
+  [--expect-new]
+```
+
+- 退出码语义：
+  - `0`：成功入队或已去重存在；输出 `{"ok":true,"task_id":"...","status":"...","deduplicated":true|false}`。
+  - `2`：参数、配置或前置校验错误（如文件超限、配置非法、`deliver_completions` 未开启、`--expect-new` 检测到重复任务）。
+  - `3`：权限拒绝（未注册的路由名称或未配置的 colleague 角色）。
+
+### 幂等与去重语义（Dedupe）
+基于 `idempotency-key` 与合成会话标识（`scheduled:<route_name>`）的 SHA256 计算去重键。重复提交相同的 key 会返回已有任务 ID（`deduplicated: true`），不会在队列中生成重复任务。
+
+### 推荐实践
+推荐采用 `cron --no-agent` 脚本模式：由确定性脚本完成前置拉取与检查，对需要异步处理的条目调用 `tools/scheduled_submit.py` 逐条派单；坚决不要通过 `ssh` + `hermes -z` 绕过队列派单（无生命周期管控、无法取消、失去幂等与卡片投递保障）。

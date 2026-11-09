@@ -266,13 +266,137 @@ def _public_result(raw):
     return result, truncated
 
 
+_SCHEDULED_ROUTE_NAME_PATTERN = re.compile(r'^[a-z][a-z0-9_-]{0,31}$')
+_SCHEDULED_ROUTE_FIELDS = ('route', 'channel', 'chat')
+
+
+def validate_scheduled_routes(routes):
+    """Validate administrator scheduled routes mapping.
+
+    Bounded mapping (<= 16) of name -> {route, channel, chat, thread?}.
+    Names match [a-z][a-z0-9_-]{0,31}.
+    Fields route, channel, chat must be non-empty strings <= 512 chars.
+    Field thread is optional; if present, non-empty string <= 512 chars.
+    """
+    if routes is None:
+        return {}
+    if not isinstance(routes, dict) or len(routes) > 16:
+        raise ValueError('scheduled_routes must be a bounded administrator mapping')
+    normalized = {}
+    for name, target in routes.items():
+        if not isinstance(name, str) or not _SCHEDULED_ROUTE_NAME_PATTERN.fullmatch(name):
+            raise ValueError('invalid scheduled route name: ' + repr(name))
+        if not isinstance(target, dict):
+            raise ValueError('invalid scheduled route definition for ' + repr(name))
+        if set(target) - {'route', 'channel', 'chat', 'thread'}:
+            raise ValueError('unexpected fields in scheduled route: ' + repr(name))
+        item = {}
+        for field in _SCHEDULED_ROUTE_FIELDS:
+            value = target.get(field)
+            if not isinstance(value, str) or not value.strip() or len(value) > 512:
+                raise ValueError('invalid scheduled route field %s for %s' % (field, name))
+            item[field] = value.strip()
+        if 'thread' in target:
+            thread_value = target.get('thread')
+            if not isinstance(thread_value, str) or not thread_value.strip() or len(thread_value) > 512:
+                raise ValueError('invalid scheduled route field thread for ' + name)
+            item['thread'] = thread_value.strip()
+        normalized[name] = item
+    return normalized
+
+
+def _get_setting(provider, key, default=None):
+    if hasattr(provider, 'get_config'):
+        return provider.get_config(key, default)
+    if isinstance(provider, dict):
+        return provider.get(key, default)
+    return getattr(provider, key, default)
+
+
+def build_dispatch_services(provider, profile_name, *, pool_type=None, delivery=None,
+                            route_provider=None):
+    """Construct administrator DispatchService mapping from provider settings."""
+    engine_root = _get_setting(provider, 'engine_root')
+    if pool_type is None or delivery is None:
+        p_type, deliv = _engine(engine_root)
+        if pool_type is None:
+            pool_type = p_type
+        if delivery is None:
+            delivery = deliv
+    require_route = _get_setting(provider, 'require_delivery_route',
+                                 _get_setting(provider, 'deliver_completions', False))
+    liveness_path = _get_setting(provider, 'liveness_db') or None
+    cross_session = _get_setting(provider, 'cross_session_status',
+                                 _get_setting(provider, 'allow_cross_session_status', False))
+    task_cards = _get_setting(provider, 'task_lifecycle_cards_enabled', False)
+    if type(task_cards) is not bool:
+        raise ValueError('task_lifecycle_cards_enabled must be boolean')
+    if task_cards and (_get_setting(provider, 'deliver_completions', False) is not True
+                       or _get_setting(provider, 'direct_delivery_enabled', False) is not True
+                       or not _get_setting(provider, 'delivery_transport_file', '')):
+        raise ValueError('task cards require direct completion delivery')
+    scheduled_routes = validate_scheduled_routes(_get_setting(provider, 'scheduled_routes', {}))
+    service = DispatchService(_get_setting(provider, 'queue_root'), profile_name,
+                              _get_setting(provider, 'allowed_roots'),
+                              denied_globs=_get_setting(provider, 'denied_globs', []),
+                              pool_type=pool_type, delivery=delivery,
+                              route_provider=route_provider,
+                              require_delivery_route=require_route,
+                              role='analysis', display_name='主 Bot 汇总', display_label='汇总',
+                              liveness_path=liveness_path, engine_root=engine_root,
+                              cross_session_status=cross_session, task_cards_enabled=task_cards,
+                              scheduled_routes=scheduled_routes)
+    services = {'analysis': service}
+    colleagues = _get_setting(provider, 'colleagues', {})
+    if not isinstance(colleagues, dict) or len(colleagues) > 24:
+        raise ValueError('colleagues must be a bounded administrator mapping')
+    seen_roots = {service.pool.root.resolve()}
+    allowed_colleague_keys = {
+        'queue_root', 'allowed_roots', 'denied_globs',
+        'display_name', 'display_label', 'duty', 'target_host', 'model_tier',
+    }
+    for role, settings in colleagues.items():
+        if (not isinstance(role, str) or not re.fullmatch(r'[a-z][a-z0-9_]{0,31}', role)
+                or role == 'analysis' or not isinstance(settings, dict)
+                or set(settings) - allowed_colleague_keys):
+            raise ValueError('invalid administrator colleague configuration')
+        candidate = DispatchService(settings.get('queue_root'), profile_name, settings.get('allowed_roots'),
+                                    denied_globs=settings.get('denied_globs', []), pool_type=pool_type,
+                                    delivery=delivery, route_provider=route_provider,
+                                    require_delivery_route=require_route, role=role,
+                                    display_name=settings.get('display_name', role),
+                                    display_label=settings.get('display_label', role),
+                                    duty=settings.get('duty'),
+                                    target_host=settings.get('target_host'),
+                                    model_tier=settings.get('model_tier'),
+                                    liveness_path=liveness_path,
+                                    engine_root=engine_root,
+                                    cross_session_status=cross_session, task_cards_enabled=task_cards,
+                                    scheduled_routes=scheduled_routes)
+        if candidate.pool.root.resolve() in seen_roots:
+            raise ValueError('colleague queues must be distinct')
+        seen_roots.add(candidate.pool.root.resolve())
+        services[role] = candidate
+    return services
+
+
+def build_dispatch_service(provider, profile_name, role, *, pool_type=None, delivery=None,
+                           route_provider=None):
+    services = build_dispatch_services(provider, profile_name, pool_type=pool_type,
+                                       delivery=delivery, route_provider=route_provider)
+    if not isinstance(role, str) or role not in services:
+        raise PermissionError('colleague role not configured: ' + repr(role))
+    return services[role]
+
+
 class DispatchService:
     def __init__(self, root, profile, allowed_roots, *, max_sources=8, max_lines=400,
                  denied_globs=None, pool_type=None, delivery=None, route_provider=None,
                  require_delivery_route=False, role='analysis', display_name=None,
                  display_label=None, duty=None, target_host=None, model_tier=None,
                  liveness_ledger=None, liveness_path=None, engine_root=None,
-                 cross_session_status=False, task_cards_enabled=False):
+                 cross_session_status=False, task_cards_enabled=False,
+                 scheduled_routes=None):
         if not isinstance(profile, str) or not profile:
             raise ValueError('profile identity required')
         if not isinstance(root, str) or not Path(root).is_absolute():
@@ -334,6 +458,10 @@ class DispatchService:
         if type(task_cards_enabled) is not bool:
             raise ValueError('task_cards_enabled must be boolean')
         self.task_cards_enabled = task_cards_enabled
+        if scheduled_routes is not None:
+            self.scheduled_routes = validate_scheduled_routes(scheduled_routes)
+        else:
+            self.scheduled_routes = {}
 
     def _resolve_liveness(self):
         if self._liveness_ledger is not None:
@@ -400,13 +528,11 @@ class DispatchService:
             normalized.append(item)
         return normalized
 
-    def submit(self, session_id, args):
+    def _submit_internal(self, session_id, goal, key, *, sources=None, origin,
+                         max_goal_len=4000, is_scheduled=False):
         owner = self._owner(session_id)
-        if not isinstance(args, dict) or set(args) - {'goal', 'sources', 'request_key'}:
-            raise ValueError('unexpected dispatch arguments')
-        goal, key = args.get('goal'), args.get('request_key')
-        if not isinstance(goal, str) or not goal.strip() or len(goal) > 4000:
-            raise ValueError('goal must contain 1 to 4000 characters')
+        if not isinstance(goal, str) or not goal.strip() or len(goal) > max_goal_len:
+            raise ValueError('goal must contain 1 to %d characters' % max_goal_len)
         if not isinstance(key, str) or not key.strip() or len(key) > 128:
             raise ValueError('request_key must contain 1 to 128 characters')
         # Only the read-only evidence role analyses source files. Execution roles
@@ -415,17 +541,17 @@ class DispatchService:
         # a frontdesk that attaches a path outside the analysis roots would
         # otherwise lose the whole task ("source outside administrator roots").
         if self.role == 'analysis':
-            sources = self._sources(args.get('sources'))
+            normalized_sources = self._sources(sources)
         else:
             # When an administrator configures narrow allowed_roots for a role,
             # still enforce that boundary; when full-capability root ("/") is
             # configured, accept and ignore any stray sources (including
             # directories, not-yet-created files, or config files).
-            if args.get('sources') and self.roots != (Path('/'),):
-                self._sources(args['sources'])
-            sources = []
-        ignored_sources = len(args.get('sources') or []) if self.role != 'analysis' else 0
-        payload = {'goal': goal, 'sources': sources,
+            if sources and self.roots != (Path('/'),):
+                self._sources(sources)
+            normalized_sources = []
+        ignored_sources = len(sources or []) if self.role != 'analysis' else 0
+        payload = {'goal': goal, 'sources': normalized_sources,
                    '_dispatch_owner': owner, '_colleague_role': self.role,
                    '_colleague_name': self.display_name,
                    '_colleague_label': self.display_label}
@@ -435,12 +561,17 @@ class DispatchService:
         # ``_dispatch_owner`` is an ownership *proof* (one-way), never an address:
         # persist profile + session + route alongside it so a completion can be routed
         # back to the conversation that submitted the work, after reconnects and restarts.
-        origin = self._origin(session_id)
         if self.require_delivery_route and not origin.get('route'):
             raise PermissionError('addressable submitting conversation required before dispatch')
         card_requested = (self.task_cards_enabled and origin.get('channel') == 'feishu'
                           and bool(origin.get('route')) and bool(origin.get('chat')))
         options = {'request_card': True} if card_requested else {}
+        is_dedup = False
+        if hasattr(self.pool, 'job_by_dedupe'):
+            try:
+                is_dedup = bool(self.pool.job_by_dedupe(dedupe))
+            except Exception:
+                is_dedup = False
         job = self.pool.submit(dedupe, payload, replay_safe=True, max_tries=2, origin=origin, **options)
         ledger = self._resolve_liveness()
         if ledger is not None:
@@ -449,13 +580,48 @@ class DispatchService:
                                 label=self.display_label, state="queued")
             except Exception:
                 pass
-        result = {'ok': True, 'task_id': job, 'status': self.pool.status(job)['status'],
-                  'next_action': 'Return the task ID to the user and finish this turn. Do not poll.'}
+        status_info = self.pool.status(job)
+        if is_scheduled:
+            result = {'ok': True, 'task_id': job, 'status': status_info['status'],
+                      'deduplicated': is_dedup}
+        else:
+            result = {'ok': True, 'task_id': job, 'status': status_info['status'],
+                      'next_action': 'Return the task ID to the user and finish this turn. Do not poll.'}
         if ignored_sources:
             result['sources_ignored'] = ignored_sources
         if card_requested:
             result['card_requested'] = True
         return result
+
+    def submit(self, session_id, args):
+        if not isinstance(args, dict) or set(args) - {'goal', 'sources', 'request_key'}:
+            raise ValueError('unexpected dispatch arguments')
+        goal, key = args.get('goal'), args.get('request_key')
+        origin = self._origin(session_id)
+        return self._submit_internal(session_id, goal, key, sources=args.get('sources'),
+                                      origin=origin, max_goal_len=4000, is_scheduled=False)
+
+    def submit_scheduled(self, goal, *, route_name, routes=None, idempotency_key, sources=None):
+        if routes is not None:
+            available = validate_scheduled_routes(routes)
+        else:
+            available = self.scheduled_routes
+        if not isinstance(route_name, str) or route_name not in available:
+            raise PermissionError('scheduled route not registered')
+        target = available[route_name]
+        session_id = 'scheduled:' + route_name
+        origin = {
+            'profile': self.profile,
+            'session': session_id,
+            'route': target['route'],
+            'channel': target['channel'],
+            'chat': target['chat'],
+            'scheduled': True,
+        }
+        if 'thread' in target:
+            origin['thread'] = target['thread']
+        return self._submit_internal(session_id, goal, idempotency_key, sources=sources,
+                                      origin=origin, max_goal_len=65536, is_scheduled=True)
 
     def drain_cards(self, transport, *, limit=20, not_before=None, stop_event=None):
         """Process bounded durable create intents without holding a queue DB lock during I/O."""
@@ -1133,52 +1299,7 @@ def register(ctx):
     # A backend runner is an executor, not a frontdesk: do not inject the
     # dispatch rules or it will submit the same work again instead of doing it.
     backend_runner = _backend_execution_session()
-    pool_type, delivery = _engine(ctx.get_config('engine_root'))
-    require_route = ctx.get_config('require_delivery_route',ctx.get_config('deliver_completions',False))
-    liveness_path = ctx.get_config('liveness_db') or None
-    cross_session = ctx.get_config('cross_session_status', ctx.get_config('allow_cross_session_status', False))
-    task_cards = ctx.get_config('task_lifecycle_cards_enabled', False)
-    if type(task_cards) is not bool:
-        raise ValueError('task_lifecycle_cards_enabled must be boolean')
-    if task_cards and (ctx.get_config('deliver_completions', False) is not True
-                       or ctx.get_config('direct_delivery_enabled', False) is not True
-                       or not ctx.get_config('delivery_transport_file', '')):
-        raise ValueError('task cards require direct completion delivery')
-    service = DispatchService(ctx.get_config('queue_root'), ctx.profile_name,
-                              ctx.get_config('allowed_roots'),
-                              denied_globs=ctx.get_config('denied_globs', []),
-                              pool_type=pool_type, delivery=delivery,require_delivery_route=require_route,
-                              role='analysis', display_name='主 Bot 汇总', display_label='汇总',
-                              liveness_path=liveness_path, engine_root=ctx.get_config('engine_root'),
-                              cross_session_status=cross_session, task_cards_enabled=task_cards)
-    services = {'analysis':service}
-    colleagues = ctx.get_config('colleagues',{})
-    if not isinstance(colleagues,dict) or len(colleagues)>24:
-        raise ValueError('colleagues must be a bounded administrator mapping')
-    seen_roots = {service.pool.root.resolve()}
-    allowed_colleague_keys = {
-        'queue_root', 'allowed_roots', 'denied_globs',
-        'display_name', 'display_label', 'duty', 'target_host', 'model_tier',
-    }
-    for role,settings in colleagues.items():
-        if (not isinstance(role,str) or not re.fullmatch('[a-z][a-z0-9_]{0,31}',role)
-                or role=='analysis' or not isinstance(settings,dict)
-                or set(settings)-allowed_colleague_keys):
-            raise ValueError('invalid administrator colleague configuration')
-        candidate = DispatchService(settings.get('queue_root'),ctx.profile_name,settings.get('allowed_roots'),
-            denied_globs=settings.get('denied_globs',[]),pool_type=pool_type,delivery=delivery,
-            require_delivery_route=require_route, role=role,
-            display_name=settings.get('display_name', role),
-            display_label=settings.get('display_label', role),
-            duty=settings.get('duty'),
-            target_host=settings.get('target_host'),
-            model_tier=settings.get('model_tier'),
-            liveness_path=liveness_path,
-            engine_root=ctx.get_config('engine_root'),
-            cross_session_status=cross_session, task_cards_enabled=task_cards)
-        if candidate.pool.root.resolve() in seen_roots:
-            raise ValueError('colleague queues must be distinct')
-        seen_roots.add(candidate.pool.root.resolve()); services[role]=candidate
+    services = build_dispatch_services(ctx, ctx.profile_name)
     if not backend_runner:
         ctx.register_system_prompt_section(
             'durable-dispatch-routing',
@@ -1193,7 +1314,7 @@ def register(ctx):
             or not Path(roster_path).is_absolute()):
         roster_path = None
     router = DispatchRouter(services, roster_path=roster_path)
-    max_source_lines = service.max_lines
+    max_source_lines = services['analysis'].max_lines
     names = ', '.join('%s=%s' % (role, svc.display_name) for role, svc in services.items())
     default_role = 'dev' if 'dev' in services else 'analysis'
     role_schema = {'type':'string','enum':list(services),
