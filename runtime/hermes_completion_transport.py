@@ -284,9 +284,9 @@ def _render(message):
     name = message.get('colleague_name')
     label = message.get('colleague_label')
     if role == 'analysis':
-        prefix = '**主 Bot 汇总**\n'
+        prefix = '**【分析汇总】**\n'
     elif isinstance(role, str) and role and isinstance(name, str) and name:
-        prefix = '**%s · %s**（由主 Bot 转交）\n' % (
+        prefix = '**%s · %s**（结果同步）\n' % (
             name, label if isinstance(label, str) and label else role)
     else:
         prefix = ''
@@ -294,7 +294,9 @@ def _render(message):
         message['status'], message['status'])
     summary = message.get('summary', '')
     sanitized_summary, _ = sanitize_and_extract_artifacts(summary)
-    return prefix + '[后台任务 ' + message['task_id'] + '] ' + status + '\n' + sanitized_summary
+    task_id = message.get('task_id', '')
+    header = '[后台任务 ' + task_id + '] ' + status
+    return prefix + header + '\n\n' + sanitized_summary
 
 
 def create_transport(ctx, service):

@@ -53,8 +53,10 @@ delegate_task(tasks=[{
 | `triager.md` | 归因诊断师 | `verdict` / `evidence` / `first_divergence` / `is_degraded` |
 | `closure.md` | 交付与演化员 | `evolved` / `skipped` / `tool_gaps` / `recall_verified` |
 
-## 回执纪律
+## 回执纪律与说人话要求
 
+- **说人话与清晰度**：所有 worker 产出与主智能体对外汇报必须使用直白易懂的自然工程语言，禁止堆砌“赋能/抓手/心智负担/物理轰炸/承兑”等八股套话；屏蔽内部无意义长 UUID 与底层私有表名。
+- **严禁动辄派工**：普通问答、架构咨询、日常交流必须由主智能体当面直接解答，绝不转派工；仅当真正需要跨阶段执行长任务（如用例落盘、环境修复、全量跑测等）时才派发 worker。
 - `is_degraded: true` → 没上真环境，不能当真实结果报。
 - `scope_confidence: low`、`verdict: undetermined`、`recall_verified: false` 都是
   worker 在诚实地说"没查全"，指挥官必须照实转述缺口，不能包装成确定结论。

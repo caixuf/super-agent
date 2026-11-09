@@ -230,7 +230,7 @@ python3 tools/superagent.py --root <managed-root> --profile <profile> \
 
 ### 契约与测试
 
-- `docs/FRONTDESK_DISPATCH_PLAN.md` P1 的「初始一个执行槽位」改为槽位可配置、一个前台回合可提交多个后台任务。
+- `docs/handoff/FRONTDESK_DISPATCH_PLAN.md` P1 的「初始一个执行槽位」改为槽位可配置、一个前台回合可提交多个后台任务。
 - `tests/test_worker_setup.py` 新增 8 例：配置生效 / 默认 1 / 6 类非法值拒绝。
 - 门禁与受影响测试：**144 passed，退出码 0**（含中立门禁、派单、回合释放、边界、worker 配置）。
 - 现场部署：受管 release `b8d270e-dirty` 候选包（含未提交改动，非正式发布物），doctor `ready`、三项 release 校验 true。

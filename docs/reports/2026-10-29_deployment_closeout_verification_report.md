@@ -1,6 +1,6 @@
 # 2026-10-29 · Super Agent 升级收尾与部署验证报告
 
-根据 `docs/DEPLOYMENT_CLOSEOUT_PLAN.md` 收尾计划，本日完成 Super Agent 升级阶段的完整基线核验、门禁回归、差异梳理与收尾交付。本文记录实际执行证据与部署清单。
+根据 `docs/handoff/DEPLOYMENT_CLOSEOUT_PLAN.md` 收尾计划，本日完成 Super Agent 升级阶段的完整基线核验、门禁回归、差异梳理与收尾交付。本文记录实际执行证据与部署清单。
 
 ---
 

@@ -156,4 +156,4 @@ python3 -m pytest tests/test_frontdesk_boundary.py tests/test_frontdesk_turn_rel
 候选宿主的强制回合交接已有隔离实现，双身份路由、Worker 执行/交付、
 宿主重启和实际 IM 插话纵向验收仍待完成，不能据此称为 P1 完成。
 可信研发 containment、停止证明、长期记忆身份/质量、真实 IM 灰度与回退
-仍按 `FRONTDESK_DISPATCH_PLAN.md` 和 `RELEASE_READINESS.md` 单独过门。
+仍按 `docs/handoff/FRONTDESK_DISPATCH_PLAN.md` 和 `RELEASE_READINESS.md` 单独过门。

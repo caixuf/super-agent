@@ -1073,7 +1073,7 @@ def start_backfill(ctx, service):
 
 
 def _render_routing_prompt(services) -> str:
-    base = """Capability routing for durable dispatch. Use durable_submit for every task.
+    base = """Capability routing for durable dispatch. Submit work with durable_submit when background execution is needed. Do not reflexively dispatch to a subagent for questions, chatting, advice, or architectural discussions; answer those directly in clear human language.
 Pick the role by what the work needs, not by keywords.
 - role=dev executes work: inspecting a repository, running git/read commands, checking versions or configuration, running a test. It needs only goal; omit sources entirely. Never attach sources to a dev task.
 - role=analysis performs read-only evidence analysis of files inside the administrator roots. It requires sources with absolute paths inside those roots. If a task is about inspecting or running something rather than analysing a supplied file, it is a dev task.
@@ -1084,7 +1084,7 @@ Pick the role by what the work needs, not by keywords.
     NEVER call durable_submit! You MUST call durable_status with that task_id. Report the live status (queued, running, completed, failed) and details (phase, progress, verdict, summary) directly to the user.
     If running or queued, reassure the user the worker is actively executing. NEVER claim a role has no worker or that the task disappeared.
   * Only call durable_submit when the user is explicitly requesting a NEW piece of work, test, or investigation to be performed.
-- Conceptual and architectural questions: Answer directly with deep expertise; never dispatch background jobs unless execution, code changes, or testing is requested.
+- Conceptual, architectural, and advice discussions: Answer directly with deep expertise as a helpful senior engineer colleague; NEVER dispatch background jobs to a subagent unless execution, code changes, or testing is explicitly requested.
 - Investigating recent changes, git history, logs or any repository state is ALWAYS dev work. analysis is only for evidence about a file the user explicitly supplied; never pick analysis for an investigation.
 If the user asks to look at changes, check logs, run a command or inspect the repo, submit role=dev with no sources. Do not claim you cannot see the repository: dev exists for exactly that. Submit one task, return its ID and role, then finish the turn without waiting or polling. NEVER submit work through terminal/execute_code or a raw pool CLI. Use durable_status/cancel with the returned role and task ID. An IM frontdesk only interacts, dispatches and reports; it must not execute or delegate work itself. Unsupported work must be reported as unavailable, never silently rerouted. Never provide an owner, queue path, shell command, runner, or model adapter."""
     domain_lines = []
@@ -1100,7 +1100,7 @@ If the user asks to look at changes, check logs, run a command or inspect the re
     if not domain_lines:
         return base
     extra = '\nConfigured domain experts (omit sources when dispatching to an execution expert):\n' + '\n'.join(domain_lines)
-    if len(base) + len(extra) <= 3100:
+    if len(base) + len(extra) <= 3500:
         return base + extra
     return base
 

@@ -221,7 +221,7 @@ Super Agent 确立了不可动摇的**生产部署铁律**：
 - **效果**：无论底座版本迭代多么剧烈，业务资产与配置永远处于物理隔离的只读白名单保护中，**业务能力一分不少，配置参数零被覆盖**。
 
 ### 6.4 自动化仓库中立性门禁 (Repo Neutrality Gate)
-在核心测试集 [`tests/test_repo_neutrality.py`](file:///home/caixuf/code/super-agent/tests/test_repo_neutrality.py) 中：
+在核心测试集 [`tests/test_repo_neutrality.py`](../tests/test_repo_neutrality.py) 中：
 - 严格禁止在平台通用代码中出现任何特定业务字面量（如 `<business-domain>`、特定车型编号）或特定主机名指纹（如 `prod-worker-01`、`sim-server-01`、内网 IP）；
 - 所有示例一律使用占位符（如 `<business-domain>`、`<remote-host>`）；
 - 确保 Super Agent 作为通用智能体平台，具备 100% 的可移植性与纯粹中立性。
@@ -230,7 +230,7 @@ Super Agent 确立了不可动摇的**生产部署铁律**：
 
 ## 7. 集中结构化可观测性 (Centralized Structured Observability)
 
-在 [`agentcore/structured_logging.py`](file:///home/caixuf/code/super-agent/agentcore/structured_logging.py) 中建立了集中式日志规范：
+在 [`agentcore/structured_logging.py`](../agentcore/structured_logging.py) 中建立了集中式日志规范：
 1. **自动滚动与容量上限**：支持 50MB × 5 自动文件轮转，杜绝单日志文件撑爆工控机磁盘；
 2. **上下文自动注入 (ContextFilter)**：每一行日志均自动携带 `task_id`、`session_id`、`slot_id` 与当前角色 `role`，支持分布式全链路追踪；
 3. **拒绝静默吞错 (No Silent Suppression)**：全面治理裸 `except Exception:`，所有的降级和容错均显式记录堆栈信息，让系统运转全程透明可审计。

@@ -22,6 +22,7 @@ docker run --rm super-agent-check
 | 文件 | 作用 |
 | :--- | :--- |
 | `Dockerfile` | `python:3.12-slim` + pytest；只装本仓，不装任何业务内容 |
+| `Dockerfile.cleanroom` | 极简干净室测试镜像（供 `scripts/ops/docker_cleanroom_test.sh` 挂载验证） |
 | `clean_room_check.sh` | 容器内 7 步 20 项断言（表见仓根 `README.md`） |
 | `engine_smoke.py` | 引擎端到端最小闭环；同时是「宿主该怎么注入业务约定」的可运行范例 |
 | `verify.sh` | 主机侧：干净检出 → 建镜像 → 跑自检 → 透传退出码 |

@@ -190,3 +190,35 @@ Super Agent 生产部署统一收敛至 `<managed_root>/<profile>`（默认 `~/s
 ### 7.4 前台双通道交付与概念咨询直答
 - **前台解释文字 + 派单回执双通道并存**：前台大模型在同一轮次中输出专业分析文字并调用 `durable_submit` 时，网关层完整保留引导说明文本并与任务承兑回执拼接交付，拒绝截断覆盖。
 - **纯概念与架构意图直答（类别六）**：对于架构概念、设计哲学与方法论咨询，前台作为资深技术参谋直接在首轮深度专业作答，严禁无脑向后台反射性派发重型分析单。
+
+---
+
+## 8. 工程目录职责边界与核心包拓扑（Directory Boundaries & Package Map）
+
+### 8.1 仓库四大运行面目录边界契约
+
+为保持跨宿主部署、日常运维与验证测试的职责边界严格正交，仓库运行面划分为四大核心目录：
+
+| 目录 | 定位 | 核心文件与职责 | 目标场景与读者 |
+| :--- | :--- | :--- | :--- |
+| `install/` | **引导器与外层 Shell 包装器**<br/>(Bootstrap & Shell Wrappers) | `superagent.sh`（一键安装交互入口）、`install.sh`（底层幂等安装器）、`bootstrap_dependencies.py`（依赖预取器）、`templates/`（systemd 模板与 `SOUL.generic.md`）。 | 新机器/新环境从零初始化、无人值守拉起通用智能体底座。 |
+| `tools/` | **操作员 CLI 与开发者工具**<br/>(Operator CLIs & Tools) | `superagent.py`（统一受管生命周期 CLI：支持 `plan` / `install` / `update` / `rollback` / `doctor` / `pack`）、`redeploy_check.py`、`recall_diagnostics_observation.py` 等。 | 工程师日常开发交互、发布打包与故障排查。 |
+| `checks/` | **就地环境验收探针与轻量冒烟**<br/>(Verification Probes & Smoke Tests) | `prefer_d7_smoke.py`、`feature_check.sh`、`deployment_layered_audit.py`、`model_context_check.sh`、`systemd_containment_probe.py`、`verify_memory_source.py`。 | 部署后验收验证、CI 自动化门禁、无副作用现场只读探针。 |
+| `scripts/ops/` | **宿主生命周期与集群运维脚本**<br/>(Host Lifecycle Shell Scripts) | `_layout.sh`（多拓扑感知推断器）、`deploy_production.sh`（自动化构建与分发流水线）、`backup_and_rollback.py`（物理备份与回滚引擎）、`uninstall-legacy.sh`（遗留服务平滑清理）、`purge_and_rebuild_host.sh`。 | SRE 集群运维编排、多机器批量交付与灾备重建。 |
+
+### 8.2 `agentcore/` 七大逻辑领域架构与向后兼容契约
+
+`agentcore/` 包承担全系统核心执行引擎，为保证现有 280+ 自动化测试集、第三方插件系统与外部脚本的 100% 向后兼容性，所有模块在 Python 导入层面统一维持顶层扁平入口（`from agentcore.<module> import ...`），在架构逻辑上收敛为七大领域：
+
+1. **同事制与多智能体组织学 (Colleagues & Multi-Agent Orchestration)**：`colleague_*`, `dev_runner.py`
+2. **卡片交互与流式前端 (Cards & Stream Interaction)**：`card_*`, `cardkit2_renderer.py`, `task_card*.py`, `stalled_card_bridge.py`
+3. **交付、事实回投与安全证据 (Delivery, Receipts & Traceability)**：`completion_*`, `delivery_*`, `direct_completion.py`, `markdown_delivery.py`
+4. **持久任务池与进程监督 (Execution Engine & Supervision)**：`pool.py`, `worker.py`, `scheduler.py`, `attempt_supervisor.py`, `analysis_runner.py`, `barge_in_control.py`
+5. **长期记忆与可塑性治理 (Long-Term Memory Subsystem)**：`memory/`（子包）, `memory_*`, `colleague_memory_cli.py`
+6. **状态图引擎与系统韧性 (State Graph, Liveness & SRE Observability)**：`state_graph.py`, `liveness*.py`, `structured_logging.py`, `ops_alerts*.py`
+7. **配置、治理与模型拓扑 (Governance, Profiles & Routing)**：`model_routing.py`, `model_context.py`, `profile_spec.py`, `baseline_config.py`, `safety_envelope.py`
+
+详细的 103 个模块归属与职责映射表请参阅：
+- [`agentcore/PACKAGE_MAP.md`](../agentcore/PACKAGE_MAP.md) —— 模块职责完整映射表
+- [`agentcore/README.md`](../agentcore/README.md) —— 核心引擎开发与使用规范
+

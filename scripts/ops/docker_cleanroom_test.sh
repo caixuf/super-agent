@@ -5,7 +5,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TAG="super-agent-cleanroom:$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
 
 echo "=== Building Docker Clean Room Image [$TAG] ==="
-docker build -t "$TAG" -f "$REPO_ROOT/Dockerfile.cleanroom" "$REPO_ROOT"
+docker build -t "$TAG" -f "$REPO_ROOT/docker/Dockerfile.cleanroom" "$REPO_ROOT"
 
 echo "=== Running Clean Room Verification Container ==="
 docker run --rm \

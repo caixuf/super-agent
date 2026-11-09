@@ -1,5 +1,18 @@
 # super-agent —— 通用智能体本体
 
+## 📚 官方用户与架构 Wiki (User & Architecture Wiki)
+
+欢迎查阅全新上线的 **[Super Agent 用户与架构 Wiki](docs/wiki/Home.md)**，为初学者与系统架构师提供结构化、模块化、带导航图谱的沉浸式查阅体验：
+
+- [🏠 **Wiki 首页与全局导览** (Home.md)](docs/wiki/Home.md) — 架构全景、核心概念与章节知识图谱
+- [🚀 **01. 5分钟快速上手与单根部署** (01-Quickstart-and-Install.md)](docs/wiki/01-Quickstart-and-Install.md) — 单根受管拓扑（`~/super_agent/<profile>`）、`superagent.sh` 一键安装、升级与秒级回滚
+- [🧩 **02. 业务知识挂载指南** (02-Business-Overlay-Guide.md)](docs/wiki/02-Business-Overlay-Guide.md) — 中性底座与业务叠加解耦、`SOUL.generic.md`、MCP 挂载、外部 Skills 与 9 角色团队装配
+- [🤖 **03. 前后台协同与 StateGraph** (03-Multi-Agent-and-StateGraph.md)](docs/wiki/03-Multi-Agent-and-StateGraph.md) — 前后台权责边界、8 大官方研发角色（`DEV_ROLES`）、Raven 路径所有权矩阵与 LangGraph 状态图
+- [📨 **04. 交互卡片与交付机制** (04-Feishu-Cards-and-Delivery.md)](docs/wiki/04-Feishu-Cards-and-Delivery.md) — CardKit 2.0 状态机、单在途合并去抖、`drain()` 屏障、实时动态进度流与 Chromium 图文交付
+- [🛠️ **05. 运维排障与 FAQ** (05-Operations-and-Troubleshooting.md)](docs/wiki/05-Operations-and-Troubleshooting.md) — 布局感知运维、`doctor` 体检、脱敏长期记忆召回诊断与常见故障处置矩阵
+
+---
+
 ## 先进 Agent 架构与工程实践指南（核心技术导读）
 
 若希望系统学习本项目沉淀的**生产级常驻智能体（Always-on Production Agent）**核心架构、设计哲学与工程实现，请从 [`docs/guide/README.md`](docs/guide/README.md) 开始阅读：
@@ -19,7 +32,7 @@
 系统级技术手册、全景架构、生产部署、插件与运维文档：
 
 - [`docs/INDEX.md`](docs/INDEX.md)：**全套技术文档权威导航索引**
-- [`docs/TECH_MANUAL.md`](docs/TECH_MANUAL.md) / [`docs/SUPER_AGENT_TECHNICAL_MANUAL.md`](docs/SUPER_AGENT_TECHNICAL_MANUAL.md)：**Super Agent 技术手册** —— 系统原理、执行边界、并发/恢复语义与故障处置矩阵
+- [`docs/TECH_MANUAL.md`](docs/TECH_MANUAL.md)：**Super Agent 技术手册** —— 系统原理、执行边界、并发/恢复语义与故障处置矩阵
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：**v2.0 架构全景深潜** —— 单根拓扑（`~/super_agent/<profile>`）、十二层分层机制、同事制多智能体与 ADR-S1~S6 守卫
 - [`docs/DEPLOY.md`](docs/DEPLOY.md)：**生产部署与生命周期指南** —— 单根受管安装、版本 Release 原子切换、身份暂存与业务叠加层挂载（`SOUL.generic.md`）、`hermes-current` 自动推断
 - [`docs/PLUGINS.md`](docs/PLUGINS.md)：**插件与工具面全景指南** —— 16 款受管插件（13 款通用内建 + 3 款受管外部）与 `localvec` 记忆提供方、两道启用门禁
@@ -377,7 +390,9 @@ super-agent/
 │   ├── SOUL.generic.md        # 通用纪律骨架（占位符化）
 │   ├── COLLEAGUE_MODEL.md     # 同事制角色分层与边界模型
 │   └── agents/                # 派工角色叶子契约 (reader/author/runner/triage/closure 等)
-├── agentcore/                 # 核心引擎包
+├── agentcore/                 # 核心引擎包（详见 agentcore/PACKAGE_MAP.md）
+│   ├── PACKAGE_MAP.md         # 7 大领域拓扑与 103 模块职责映射
+│   ├── README.md              # 核心引擎规范与使用守则
 │   ├── memory/                # 长期记忆引擎（存储/双路召回/vec0/冲突判定/突触账本）
 │   ├── pool.py                # 持久任务队列、POSIX 任务锁与隔离
 │   ├── worker.py              # 有界任务 Worker 与执行器适配
@@ -385,12 +400,10 @@ super-agent/
 │   ├── colleague_dev.py       # 8 大官方研发同事角色契约与编排器
 │   ├── dev_runner.py          # 具备编码/测试工具的独立 Git Worktree 隔离运行器与文件锁
 │   ├── analysis_runner.py     # 只读分析运行器（输出引用可追溯证据）
-│   ├── colleague_catalog.py   # 规范化同事名录与描述提取
-│   ├── colleague_conversation.py # 同事会话生命周期与路由
-│   ├── colleague_evidence.py  # 研发证据链校验 (dev_traceability_v1)
-│   ├── markdown_delivery.py   # 大文档递送与共享权限
-│   └── card_emit.py           # 卡片流式状态发射与存储
-├── plugins/                   # 通用插件集
+│   ├── cardkit2_renderer.py   # 原生 CardKit 2.0 状态机渲染引擎
+│   ├── completion_delivery.py # 完成回执投递调度器与 Origin 原路回投
+│   └── state_graph.py         # 确定性状态图引擎（Reducers / Checkpoints / Stagnation Guard）
+├── plugins/                   # 通用插件集（16 款受管插件 + localvec 记忆提供方）
 │   ├── colleague_team/        # 研发同事团队管理（招聘/授权/停用）
 │   ├── colleague_catalog/     # 同事名录与岗位描述查询
 │   ├── durable_dispatch/      # 持久任务提交、状态查询与取消
@@ -400,25 +413,27 @@ super-agent/
 │   ├── capability_alert_outbox/ # 能力异常与漂移告警发件箱
 │   └── illustrated_delivery/  # 图文排版与渲染交付
 ├── skills/                    # 通用技能库
-│   ├── illustrated-doc-rendering/ # 图文排版与渲染
-│   ├── im-card-markdown/      # 消息卡片 Markdown 转换
-│   ├── research-before-build/ # 建前预研规范
-│   └── skill-distillation/    # 技能提炼与抽取
-├── tools/                     # 运维、测试与审计工具
-│   ├── redeploy_check.py      # 一键重建复验
-│   ├── t6_gap_audit.py        # T6 迁移缺口逐条审计
-│   ├── install_skills.py      # 技能安装器
-│   └── autotask/              # 定时 AI 作业规范编译器 (taskfile.py/cron.py)
-├── toolsets/                  # 外部工具适配面
-│   └── pi_executor/           # 外部代码隔离执行器适配
+├── install/                   # 引导器与外层 Shell 包装器 (superagent.sh, install.sh, templates/)
+├── tools/                     # 操作员 CLI 与开发者工具集 (superagent.py, redeploy_check.py)
+├── checks/                    # 就地环境验收探针与轻量冒烟 (prefer_d7_smoke.py, feature_check.sh, deployment_layered_audit.py)
+├── scripts/ops/               # 宿主生命周期与集群运维脚本 (_layout.sh, deploy_production.sh, backup_and_rollback.py)
+├── toolsets/                  # 外部工具适配面 (pi_executor)
 ├── runtime/                   # 运行时服务单元骨架与基线
 │   ├── agentcore-worker@.service # Worker 服务模板
 │   ├── BASELINE.md            # 能力基线与通用键地板值
 │   ├── CONFIG_MAP.md          # 配置段归属与并行语义
 │   └── autotask/jobs/         # 生产定时巡检作业模板
 ├── patches/                   # 宿主平台适配补丁（Card 2.4 / 流式卡片等）
-├── install/                   # 安装器与插件启用脚本 (install.sh, enable_plugins.py)
-├── docker/                    # 干净室部署验证 (verify.sh, Dockerfile)
-├── docs/                      # 架构、迁移与规范文档
+├── docker/                    # 干净室部署验证 (verify.sh, Dockerfile, Dockerfile.cleanroom)
+├── docs/                      # 架构、迁移与规范文档 (INDEX.md, TECH_MANUAL.md, ARCHITECTURE.md)
 └── tests/                     # 仓级门禁、单测与集成测试
 ```
+
+### 运行面工程目录职责边界契约
+
+| 目录 | 职责定义 | 代表文件与作用 |
+| :--- | :--- | :--- |
+| `install/` | **引导器与外层 Shell 包装器 (Bootstrap & Shell Wrappers)** | `superagent.sh`（一键安装入口）、`install.sh`（底层幂等安装器）、`bootstrap_dependencies.py`（依赖预取器）、`templates/`（systemd 模板与 `SOUL.generic.md`）。专职新机器从零拉起底座。 |
+| `tools/` | **操作员 CLI 与开发者工具集 (Operator CLIs & Tools)** | `superagent.py`（统一生命周期工具：plan/install/update/rollback/doctor/pack）、`redeploy_check.py` 等。专职运维日常交互与发版管理。 |
+| `checks/` | **就地环境验收探针与轻量冒烟 (Verification Probes & Smoke Tests)** | `prefer_d7_smoke.py`、`feature_check.sh`、`deployment_layered_audit.py`、`model_context_check.sh`、`systemd_containment_probe.py`。专职就地环境验收与只读体检。 |
+| `scripts/ops/` | **宿主生命周期与集群运维脚本 (Host Lifecycle Shell Scripts)** | `_layout.sh`（多拓扑感知推断器）、`deploy_production.sh`（发布构建与分发）、`backup_and_rollback.py`（物理备份与回滚）、`uninstall-legacy.sh`（遗留服务清理）。专职集群 SRE 运维。 |

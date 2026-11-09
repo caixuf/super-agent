@@ -137,16 +137,20 @@ def release_after_submission(
         lead = explanatory_text.strip() if isinstance(explanatory_text, str) and explanatory_text.strip() else ""
         rej_body = UNCONFIRMED + ("\n\n拒绝原因：" + reason if reason else "")
         return f"{lead}\n\n{rej_body}" if lead else rej_body
-    lines = ["已持久记录后台任务：", ""]
+    lines = ["任务已提交后台处理（已持久记录后台任务）：", ""]
     for task_id, (state, role) in accepted.items():
-        lines.append(f"- `{task_id}`：{_STATES[state]}" + (f"（`{role}`）" if role else ""))
-    lines.extend(["", "前台回合已结束，可继续发消息；后台结果可按任务 ID 查询。"
-                  "接单回执不等于验收或交付完成。"])
+        role_label = f"（负责同事：`{role}`）" if role else ""
+        lines.append(f"- `{task_id}`：{_STATES[state]}{role_label}")
+    lines.extend([
+        "",
+        "前台已就绪，您可以继续沟通其他问题。后台执行完毕后会自动同步结果（也可随时凭任务 ID 查询进度）。",
+        "（提示：接单回执不等于验收或交付完成，以最终执行产物为准）"
+    ])
     if uncertain:
         lines.append(f"另有 {uncertain} 笔提交结果未确认；保留原请求键核对，不要换键重复提交。")
     receipt_body = "\n".join(lines)
     if explanatory_text and isinstance(explanatory_text, str) and explanatory_text.strip():
         clean_lead = explanatory_text.strip()
-        if not clean_lead.startswith("已持久记录后台任务"):
+        if not (clean_lead.startswith("任务已提交后台处理") or clean_lead.startswith("已持久记录后台任务")):
             return f"{clean_lead}\n\n{receipt_body}"
     return receipt_body

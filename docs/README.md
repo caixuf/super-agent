@@ -1,10 +1,19 @@
 # 文档索引
 
-> 完整技术体系全景与文档分类，请查阅权威主索引：[`INDEX.md`](INDEX.md)。
+> 完整技术体系全景与文档分类，请查阅权威主索引：[`INDEX.md`](INDEX.md)。新用户建议直接访问：[**官方用户与架构 Wiki**](wiki/Home.md)。
+
+## 官方用户与架构 Wiki
+
+- [`wiki/Home.md`](wiki/Home.md)：**Wiki 首页与全局导览** —— 架构全景、核心概念与章节索引
+- [`wiki/01-Quickstart-and-Install.md`](wiki/01-Quickstart-and-Install.md)：**第 1 篇：5 分钟上手与单根部署**
+- [`wiki/02-Business-Overlay-Guide.md`](wiki/02-Business-Overlay-Guide.md)：**第 2 篇：业务知识挂载指南**
+- [`wiki/03-Multi-Agent-and-StateGraph.md`](wiki/03-Multi-Agent-and-StateGraph.md) ：**第 3 篇：前后台协同与 StateGraph**
+- [`wiki/04-Feishu-Cards-and-Delivery.md`](wiki/04-Feishu-Cards-and-Delivery.md)：**第 4 篇：企业协作卡片与交付机制**
+- [`wiki/05-Operations-and-Troubleshooting.md`](wiki/05-Operations-and-Troubleshooting.md)：**第 5 篇：运维排障与 FAQ**
 
 ## 核心技术规范
 
-- [`TECH_MANUAL.md`](TECH_MANUAL.md) / [`SUPER_AGENT_TECHNICAL_MANUAL.md`](SUPER_AGENT_TECHNICAL_MANUAL.md)：**Super Agent 技术手册** —— 系统架构、大模型原理、任务与记忆、权限、安全、部署运维及验收规范。
+- [`TECH_MANUAL.md`](TECH_MANUAL.md)：**Super Agent 技术手册** —— 系统架构、大模型原理、任务与记忆、权限、安全、部署运维及验收规范。
 - [`ARCHITECTURE.md`](ARCHITECTURE.md)：**v2.0 架构全景深潜** —— 单根架构拓扑（`~/super_agent/<profile>`）、十二层分层机制、同事制协作与执行保障。
 - [`DEPLOY.md`](DEPLOY.md)：**生产部署与生命周期指南** —— 单根受管安装、身份暂存与业务叠加层挂载（`SOUL.generic.md`）、`hermes-current` 自动推断与干净室验证。
 - [`PLUGINS.md`](PLUGINS.md)：**插件与工具面全景指南** —— 16 款插件（13 通用内建 + 3 受管外部）与 `localvec` 记忆提供方配置规范。
@@ -41,7 +50,9 @@
 
 ## 实施规划（不是当前能力说明）
 
-- [`FRONTDESK_DISPATCH_PLAN.md`](FRONTDESK_DISPATCH_PLAN.md)：2026-11-02 的收敛计划。
+- [`TRUSTED_AUTONOMOUS_EXECUTION_PLAN.md`](TRUSTED_AUTONOMOUS_EXECUTION_PLAN.md)：可信自主执行实施计划（2026-11-09，待执行）。
+  定义 M0—M5 工作项、退出条件、首批最小交付与证据规则；不授权生产变更，不代表能力已验收。
+- [`FRONTDESK_DISPATCH_PLAN.md`](handoff/FRONTDESK_DISPATCH_PLAN.md)：2026-11-02 的收敛计划。
   IM 前台只交互、派单与汇报，后台执行；按调度闭环、同事配置、记忆治理与
   真实渠道灰度分阶段验收。权限子项已开始隔离实现，整体尚未完成，
   不代表生产已完成迁移。

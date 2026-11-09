@@ -828,10 +828,18 @@ def test_frontdesk_release_hook_is_idempotent_and_migrates_v1(tmp_path):
     spec = importlib.util.spec_from_file_location("fd_patch_migration", PATCH)
     patch = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(patch)
-    assert patch._ROUND_RELEASE_V2 in after
-    target.write_text(after.replace(patch._ROUND_RELEASE_V2, patch._ROUND_RELEASE_V1, 1), encoding="utf-8")
+    assert patch._ROUND_RELEASE in after
+    target.write_text(after.replace(patch._ROUND_RELEASE, patch._ROUND_RELEASE_V1, 1), encoding="utf-8")
     _apply(staged)
     migrated = target.read_text(encoding="utf-8")
     assert "finalize_after_release(agent)" in migrated
     assert migrated.count("SUPERAGENT_FRONTDESK_TURN_RELEASE") == 1, "migration must not insert a second hook"
+    assert patch._ROUND_RELEASE in migrated
+
+    target.write_text(after.replace(patch._ROUND_RELEASE, patch._ROUND_RELEASE_V2, 1), encoding="utf-8")
+    _apply(staged)
+    migrated_v2 = target.read_text(encoding="utf-8")
+    assert "finalize_after_release(agent)" in migrated_v2
+    assert migrated_v2.count("SUPERAGENT_FRONTDESK_TURN_RELEASE") == 1, "migration from v2 must not duplicate"
+    assert patch._ROUND_RELEASE in migrated_v2
 

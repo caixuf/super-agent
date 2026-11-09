@@ -28,7 +28,7 @@
 
 1. **`README.md`**：更新插件统计为 16 款插件 + `localvec` 记忆提供方，建立清晰的技术文档导航入口。
 2. **`docs/INDEX.md`**：新建权威文档总导航索引，划分核心规范、实践指南、活文档、专项规格与历史报告五大板块。
-3. **`docs/TECH_MANUAL.md` / `docs/SUPER_AGENT_TECHNICAL_MANUAL.md`**：全面同步至 v2.0 架构基线，补齐 16 款插件与同事工作区级联装配、召回诊断观测器集成（`recall_diagnostics_observation`）、单根受管拓扑与布局感知运维章节。
+3. **`docs/TECH_MANUAL.md`**：全面同步至 v2.0 架构基线，补齐 16 款插件与同事工作区级联装配、召回诊断观测器集成（`recall_diagnostics_observation`）、单根受管拓扑与布局感知运维章节。
 4. **`docs/ARCHITECTURE.md`**：系统性梳理十二层分层拓扑、单根受管结构图、8 大研发同事契约与 Worktree 锁机制、模型路由守护神 ADR-S1~S6。
 5. **`docs/DEPLOY.md`**：规范化单根受管生命周期操作命令（plan/install/update/rollback/doctor/uninstall）、身份暂存挂载工作流与干净室验证门禁。
 6. **`docs/PLUGINS.md`**：详尽枚举 16 款插件与 `localvec` 记忆提供方清单，明确 `settings.enabled` 总开关机制与同事 Profile 自动级联装配。

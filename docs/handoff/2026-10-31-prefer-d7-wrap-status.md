@@ -33,7 +33,7 @@ SHAs re-confirmed from `git log origin/main` at branch time (2026-10-31 Asia/Sha
 | E4 | Scheduling | D2+D4+D6 | PASS | pause/cancel windows + stalled/lost + `reconcile_watchdog` / attempt fence · SQLite only · cite `test_prefer_d4_stalled_feishu.py` · `test_prefer_d6_watchdog_fencing.py` |
 | E5 | Memory / packs | #2+#3 | PASS | evidence modules present · cite `test_memory_progressive.py` · `test_memory_monthly_log.py` · `test_colleague_pack.py` · `test_prefer_d7_wrap_smoke_cites_prior_unit_modules` |
 | E6 | Ops / CI | verify | PASS | `bash verify.sh` green on land tip |
-| E7 | Demo / WRAP | smoke+doc | PASS | `tests/test_prefer_d7_wrap_smoke.py` · `scripts/prefer_d7_smoke.py` · this file |
+| E7 | Demo / WRAP | smoke+doc | PASS | `tests/test_prefer_d7_wrap_smoke.py` · `checks/prefer_d7_smoke.py` · this file |
 
 ## PARK
 
@@ -48,7 +48,7 @@ Prefer-B1 PARK only — **no weld in D7**.
 | Path | Role |
 |---|---|
 | `tests/test_prefer_d7_wrap_smoke.py` | Scripted wrap path D7-1..D7-6 + PARK Temporal guard |
-| `scripts/prefer_d7_smoke.py` | Thin runner → pytest smoke module |
+| `checks/prefer_d7_smoke.py` | Thin runner → pytest smoke module |
 | `docs/handoff/2026-10-31-prefer-d7-wrap-status.md` | This WRAP STATUS |
 | `tests/test_card_24_elements.py` | Thin env skip when host Hermes adapter helper slice NameError (pre-existing tip red; not Prefer knife) |
 
