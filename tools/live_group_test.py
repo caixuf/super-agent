@@ -159,9 +159,10 @@ def test_3_reviewer_rule_audit():
 def test_4_illustrated_delivery():
     print("--> [Test 4] 验证无头浏览器出图与图文交付 (chrome-headless-shell)...")
     import subprocess
-    cmd = ["python3", "tools/arch_doc.py", "docs/PLUGINS.md", "--png-only"]
-    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    out_png = Path("docs/PLUGINS.png")
+    repo_root = Path(__file__).resolve().parent.parent
+    cmd = [sys.executable, str(repo_root / "tools" / "arch_doc.py"), str(repo_root / "docs" / "PLUGINS.md"), "--png-only"]
+    res = subprocess.run(cmd, cwd=str(repo_root), capture_output=True, text=True, check=True)
+    out_png = repo_root / "docs" / "PLUGINS.png"
     assert out_png.exists() and out_png.stat().st_size > 100000
     size_kb = round(out_png.stat().st_size / 1024, 1)
     return {
