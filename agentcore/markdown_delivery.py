@@ -169,31 +169,141 @@ def poll(ticket, *, authorization, wait_seconds=DEFAULT_POLL_SECONDS):
         time.sleep(min(2.0, max(0.2, deadline - time.monotonic())))
 
 
-def share_with_org(document_id, *, authorization, allow_fallback: bool = False):
-    """Make a bot-created document readable by colleagues in the same organisation.
+def grant_member_permission(document_id, *, authorization, member_id: str,
+                           member_type: str = "", perm: str = "full_access"):
+    """Grant collaborator permissions on a document to a user or chat.
 
-    Documents created with tenant credentials belong to the app, so without this step even
-    the person who asked cannot open the link. Best-effort: callers surface a failure instead
-    of handing out a link that does not open. When allow_fallback is True, tenant policy
-    rejections are returned as warning strings instead of raising RuntimeError.
+    member_type: 'openchat', 'openid', 'unionid', 'userid' (inferred if omitted).
+    perm: 'full_access' or 'edit'.
     """
-    body = {"external_access_entity": "closed", "security_entity": "anyone_can_view",
-            "comment_entity": "anyone_can_view", "share_entity": "same_tenant",
-            "manage_collaborator_entity": "collaborator_can_view",
-            "link_share_entity": "tenant_readable", "copy_entity": "anyone_can_view"}
-    data = _call("PATCH", "/drive/v2/permissions/" + document_id + "/public",
-                 authorization=authorization, body=body, params={"type": "docx"})
-    entity = ((data.get("permission_public") or {}).get("link_share_entity"))
-    if entity != "tenant_readable":
-        msg = "document share rejected (link_share_entity=%s)" % (entity,)
+    mid = (member_id or "").strip()
+    if not mid:
+        return False, "empty member_id"
+    if not member_type:
+        if mid.startswith("oc_"):
+            member_type = "openchat"
+            perm = perm if perm in ("view", "edit") else "edit"
+        elif mid.startswith("ou_"):
+            member_type = "openid"
+        elif mid.startswith("on_"):
+            member_type = "unionid"
+        else:
+            member_type = "userid"
+
+    body = {"member_type": member_type, "member_id": mid, "perm": perm}
+    try:
+        res = _call("POST", "/drive/v1/permissions/" + document_id + "/members",
+                    authorization=authorization, body=body,
+                    params={"type": "docx", "need_notification": "false"})
+        if res.get("member", {}).get("perm") or res.get("perm") or res.get("code") == 0:
+            return True, None
+    except Exception as exc:
+        if perm == "full_access":
+            try:
+                body["perm"] = "edit"
+                res = _call("POST", "/drive/v1/permissions/" + document_id + "/members",
+                            authorization=authorization, body=body,
+                            params={"type": "docx", "need_notification": "false"})
+                if res.get("member", {}).get("perm") or res.get("perm") or res.get("code") == 0:
+                    return True, None
+            except Exception as retry_exc:
+                return False, str(retry_exc)
+        return False, str(exc)
+    return True, None
+
+
+def share_with_org(document_id, *, authorization, allow_fallback: bool = False,
+                   chat_id: str = "", user_id: str = "", user_id_alt: str = "",
+                   members: list | tuple | None = None):
+    """Make a bot-created document accessible and editable by colleagues in the same organisation.
+
+    1. Set public link sharing to 'tenant_editable' (falling back to 'tenant_readable'
+       if editable link sharing is restricted by tenant policy).
+    2. Grant collaborator permissions ('full_access' / 'edit') to the requesting user
+       and/or chat group.
+    3. Verify permissions before returning.
+    """
+    body_editable = {
+        "external_access_entity": "open", "security_entity": "anyone_can_view",
+        "comment_entity": "anyone_can_view", "share_entity": "anyone",
+        "manage_collaborator_entity": "collaborator_can_view",
+        "link_share_entity": "tenant_editable", "copy_entity": "anyone_can_view"
+    }
+    body_readable = {
+        "external_access_entity": "closed", "security_entity": "anyone_can_view",
+        "comment_entity": "anyone_can_view", "share_entity": "same_tenant",
+        "manage_collaborator_entity": "collaborator_can_view",
+        "link_share_entity": "tenant_readable", "copy_entity": "anyone_can_view"
+    }
+
+    public_ok = False
+    public_warning = None
+
+    try:
+        data = _call("PATCH", "/drive/v2/permissions/" + document_id + "/public",
+                     authorization=authorization, body=body_editable, params={"type": "docx"})
+        entity = ((data.get("permission_public") or {}).get("link_share_entity"))
+        if entity in ("tenant_editable", "tenant_readable"):
+            public_ok = True
+        else:
+            data = _call("PATCH", "/drive/v2/permissions/" + document_id + "/public",
+                         authorization=authorization, body=body_readable, params={"type": "docx"})
+            entity = ((data.get("permission_public") or {}).get("link_share_entity"))
+            if entity in ("tenant_editable", "tenant_readable"):
+                public_ok = True
+            else:
+                public_warning = "document share rejected (link_share_entity=%s)" % (entity,)
+    except Exception as exc:
+        try:
+            data = _call("PATCH", "/drive/v2/permissions/" + document_id + "/public",
+                         authorization=authorization, body=body_readable, params={"type": "docx"})
+            entity = ((data.get("permission_public") or {}).get("link_share_entity"))
+            if entity in ("tenant_editable", "tenant_readable"):
+                public_ok = True
+            else:
+                public_warning = "document share rejected (link_share_entity=%s)" % (entity,)
+        except Exception as fallback_exc:
+            public_warning = "document share failed: %s" % (fallback_exc,)
+
+    candidate_items = []
+    if members:
+        for m in members:
+            if isinstance(m, dict) and m.get("member_id"):
+                candidate_items.append(m)
+            elif isinstance(m, str) and m.strip():
+                candidate_items.append({"member_id": m.strip()})
+    for val in (user_id, user_id_alt, chat_id):
+        if isinstance(val, str) and val.strip():
+            sid = val.strip()
+            if not any(c.get("member_id") == sid for c in candidate_items):
+                candidate_items.append({"member_id": sid})
+
+    member_ok = False
+    for cand in candidate_items:
+        ok, _ = grant_member_permission(
+            document_id, authorization=authorization,
+            member_id=cand["member_id"],
+            member_type=cand.get("member_type", ""),
+            perm=cand.get("perm", "full_access")
+        )
+        if ok:
+            member_ok = True
+
+    if not public_ok and not member_ok:
+        msg = public_warning or "document share rejected (link_share_entity=closed)"
         if not allow_fallback:
             raise RuntimeError(msg)
         return msg
+
+    if not public_ok and allow_fallback:
+        return public_warning
     return None
 
 
 def deliver_markdown(source, *, authorization, title="", parent_token="",
-                     wait_seconds=DEFAULT_POLL_SECONDS, allow_unshared_fallback: bool = False):
+                     wait_seconds=DEFAULT_POLL_SECONDS, allow_unshared_fallback: bool = False,
+                     chat_id: str = "", user_id: str = "", user_id_alt: str = "",
+                     members: list | tuple | None = None):
     """Import ``source``; returns ``{"state": "delivered", "url", "document_id", ...}``."""
     source = Path(source)
     file_token, extension = upload_material(source, authorization=authorization)
@@ -201,19 +311,28 @@ def deliver_markdown(source, *, authorization, title="", parent_token="",
                          parent_token=parent_token, authorization=authorization)
     outcome = poll(ticket, authorization=authorization, wait_seconds=wait_seconds)
     # A link nobody can open is worse than no link: share first, then report delivered.
-    warning = share_with_org(outcome["document_id"], authorization=authorization, allow_fallback=allow_unshared_fallback)
+    warning = share_with_org(outcome["document_id"], authorization=authorization,
+                             allow_fallback=allow_unshared_fallback,
+                             chat_id=chat_id, user_id=user_id, user_id_alt=user_id_alt,
+                             members=members)
     if warning:
         outcome.setdefault("warnings", []).append(warning)
     outcome.update(state="delivered", ticket=ticket, source=str(source))
     return outcome
 
 
-def resolve_import(ticket, *, authorization, wait_seconds=DEFAULT_POLL_SECONDS, allow_unshared_fallback: bool = False):
+def resolve_import(ticket, *, authorization, wait_seconds=DEFAULT_POLL_SECONDS,
+                   allow_unshared_fallback: bool = False,
+                   chat_id: str = "", user_id: str = "", user_id_alt: str = "",
+                   members: list | tuple | None = None):
     """Finish an import started earlier; the caller owns removing the source file."""
     outcome = poll(ticket, authorization=authorization, wait_seconds=wait_seconds)
     # A pending import resolved on the next turn must be shared exactly like a direct one:
     # the app owns the document, so without this the link is closed to the requester.
-    warning = share_with_org(outcome["document_id"], authorization=authorization, allow_fallback=allow_unshared_fallback)
+    warning = share_with_org(outcome["document_id"], authorization=authorization,
+                             allow_fallback=allow_unshared_fallback,
+                             chat_id=chat_id, user_id=user_id, user_id_alt=user_id_alt,
+                             members=members)
     if warning:
         outcome.setdefault("warnings", []).append(warning)
     outcome.update(state="delivered", ticket=ticket)

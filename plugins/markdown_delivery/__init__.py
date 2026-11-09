@@ -30,9 +30,11 @@ import urllib.error
 import urllib.request
 
 _TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-#: Only a request that asks for a document pays for the extra guidance line.
+#: Only an explicit request that asks for a document or formal report pays for the extra guidance line.
 _DOCUMENT_REQUEST = re.compile(
-    r"文档|报告|写成|整理成|汇总成|归档|纪要|复盘|docx|markdown|\.md", re.I)
+    r"(?:生成|导出|输出|做成|写成|整理成|汇总成|沉淀成).{0,10}(?:文档|在线文档|云文档|docx|markdown|\.md|长篇报告)|(?:写一份|输出一份|生成一份).{0,10}(?:文档|报告)",
+    re.I
+)
 
 
 def _engine(ctx):
@@ -141,6 +143,24 @@ class _TenantToken:
         return "Bearer " + self._value
 
 
+def _caller_context():
+    """Extract caller identity (chat_id, user_id) from session context or environment."""
+    route = {}
+    try:
+        from gateway.session_context import get_session_env
+    except Exception:
+        get_session_env = lambda k, d="": os.getenv(k, d)
+    for key, var in (("chat_id", "HERMES_SESSION_CHAT_ID"),
+                     ("user_id", "HERMES_SESSION_USER_ID"),
+                     ("user_id_alt", "HERMES_SESSION_USER_ID_ALT")):
+        val = get_session_env(var, "")
+        if not val:
+            val = os.getenv(var, "")
+        if isinstance(val, str) and val.strip():
+            route[key] = val.strip()
+    return route
+
+
 def _reply(ok, state, message, **extra):
     return json.dumps({"ok": ok, "format": "docx", "state": state, "message": message, **extra},
                       ensure_ascii=False)
@@ -160,11 +180,16 @@ def _handler(deliver, resolve, ctx, token):
             return _reply(False, "error", "path must be a file inside " + root)
         source = Path(os.path.realpath(path))
         title = kwargs.get("title")
+        caller = _caller_context()
+        chat_id = kwargs.get("chat_id") or caller.get("chat_id") or ""
+        user_id = kwargs.get("user_id") or caller.get("user_id") or ""
+        user_id_alt = kwargs.get("user_id_alt") or caller.get("user_id_alt") or ""
         try:
             authorization = token.authorization()
             outcome = deliver(source, authorization=authorization,
                               title=(title if isinstance(title, str) else "") or source.stem,
-                              parent_token=ctx.get_config("folder_token", "") or "")
+                              parent_token=ctx.get_config("folder_token", "") or "",
+                              chat_id=chat_id, user_id=user_id, user_id_alt=user_id_alt)
         except Exception as exc:  # never raise into the model loop
             ticket = getattr(exc, "ticket", "")
             return _reply(False, "pending" if ticket else "error",
@@ -181,9 +206,14 @@ def _handler(deliver, resolve, ctx, token):
         if not isinstance(ticket, str) or not ticket.strip():
             return _reply(False, "error", "ticket is required")
         source = kwargs.get("path")
+        caller = _caller_context()
+        chat_id = kwargs.get("chat_id") or caller.get("chat_id") or ""
+        user_id = kwargs.get("user_id") or caller.get("user_id") or ""
+        user_id_alt = kwargs.get("user_id_alt") or caller.get("user_id_alt") or ""
         try:
             authorization = token.authorization()
-            outcome = resolve(ticket.strip(), authorization=authorization)
+            outcome = resolve(ticket.strip(), authorization=authorization,
+                              chat_id=chat_id, user_id=user_id, user_id_alt=user_id_alt)
         except Exception as exc:
             pending = bool(getattr(exc, "ticket", ""))
             return _reply(False, "pending" if pending else "error",
@@ -205,13 +235,15 @@ def _guide(*, user_message="", **kwargs):
     if not isinstance(user_message, str) or not _DOCUMENT_REQUEST.search(user_message):
         return None
     return {"context": (
-        "Markdown delivery rule: a finished hand-written .md report must reach the user as an online "
-        "document, not as a raw attachment. Write the .md into the return-file directory, then call "
-        "md_deliver with that path and put its returned document link in the answer. Do not emit a "
-        "##FILE: marker for Markdown and do not paste the whole report again: a document renders "
-        "headings, tables and lists; a .md attachment shows source. If md_deliver reports state "
-        "pending, say the document is still converting, keep the .md in place, give the ticket, and "
-        "finish it next turn with md_resolve(path=..., ticket=...).")}
+        "Markdown delivery rule: Routine questions, status checks, short/medium explanations, and normal "
+        "task summaries MUST be answered directly in chat. Do NOT create an online document unless the user "
+        "explicitly requested one or the content is a heavy structured deep-dive report (>1500 words / multi-table audit). "
+        "When an online document is generated, write the .md into the return-file directory, then call md_deliver "
+        "with that path and put its returned document link in the answer. Do not emit a ##FILE: marker for Markdown. "
+        "The delivery engine automatically sets tenant-editable link permissions and collaborator permissions. "
+        "Even when delivering an online document, you MUST include the core executive summary and main conclusions "
+        "directly in the chat reply. If md_deliver reports state pending, say the document is still converting, "
+        "keep the .md in place, give the ticket, and finish it next turn with md_resolve(path=..., ticket=...).")}
 
 
 def register(ctx):
@@ -222,6 +254,8 @@ def register(ctx):
     tools = (
         ("md_deliver",
          "Import a Markdown report from the outbox as an online document; returns its link. "
+         "Use ONLY for heavy, structured deep-dive reports (>1500 words / multi-table audit) or when the user "
+         "explicitly requests an online document. Routine answers and summaries must stay directly in chat. "
          "Use this instead of a ##FILE: marker for Markdown reports.",
          {"path": {"type": "string", "description": "Absolute path of a .md file inside the transfer outbox."},
           "title": {"type": "string", "description": "Document title; defaults to the file name."}},

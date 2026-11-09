@@ -309,3 +309,120 @@ def test_resolve_also_shares_the_document_before_reporting_delivered(monkeypatch
 
     assert outcome["state"] == "delivered"
     assert calls == [("PATCH", "/drive/v2/permissions/doc_11/public")]
+
+
+def test_share_sets_tenant_editable_and_grants_member_permissions(monkeypatch, source):
+    """Verified: public permission sets tenant_editable and members receive full_access/edit."""
+    calls = []
+    monkeypatch.setattr(md, "upload_material", lambda path, **kw: ("file_tok", "md"))
+    monkeypatch.setattr(md, "create_task", lambda token, **kw: "ticket_perm")
+    monkeypatch.setattr(md, "poll", lambda ticket, **kw: {"document_id": "doc_perm",
+                                                          "url": "https://x/docx/doc_perm"})
+
+    def fake_call(method, path, **kw):
+        calls.append((method, path, kw.get("body")))
+        if "/public" in path:
+            return {"permission_public": {"link_share_entity": kw.get("body", {}).get("link_share_entity")}}
+        if "/members" in path:
+            return {"member": {"perm": kw.get("body", {}).get("perm")}, "code": 0}
+        return {}
+
+    monkeypatch.setattr(md, "_call", fake_call)
+
+    outcome = md.deliver_markdown(
+        source, authorization=AUTH,
+        chat_id="oc_group123", user_id="ou_user456"
+    )
+
+    assert outcome["state"] == "delivered"
+    # Step 1: public PATCH with tenant_editable
+    assert any(c[0] == "PATCH" and "/public" in c[1] and c[2].get("link_share_entity") == "tenant_editable" for c in calls)
+    # Step 2: members POST for openid user with full_access
+    assert any(c[0] == "POST" and "/members" in c[1] and c[2].get("member_type") == "openid"
+               and c[2].get("member_id") == "ou_user456" and c[2].get("perm") == "full_access" for c in calls)
+    # Step 3: members POST for openchat with edit
+    assert any(c[0] == "POST" and "/members" in c[1] and c[2].get("member_type") == "openchat"
+               and c[2].get("member_id") == "oc_group123" and c[2].get("perm") == "edit" for c in calls)
+
+
+def test_share_falls_back_to_tenant_readable_when_editable_restricted(monkeypatch):
+    """When tenant policy restricts tenant_editable, fallback to tenant_readable succeeds."""
+    patch_calls = []
+
+    def fake_call(method, path, **kw):
+        if "/public" in path:
+            body = kw.get("body", {})
+            entity = body.get("link_share_entity")
+            patch_calls.append(entity)
+            if entity == "tenant_editable":
+                # Simulated tenant policy restriction
+                return {"permission_public": {"link_share_entity": "closed"}}
+            if entity == "tenant_readable":
+                return {"permission_public": {"link_share_entity": "tenant_readable"}}
+        return {}
+
+    monkeypatch.setattr(md, "_call", fake_call)
+
+    warning = md.share_with_org("doc_fallback", authorization=AUTH)
+    assert warning is None
+    assert patch_calls == ["tenant_editable", "tenant_readable"]
+
+
+def test_member_permission_retry_with_edit_on_full_access_failure(monkeypatch):
+    """If full_access fails, the engine retries with edit."""
+    member_calls = []
+
+    def fake_call(method, path, **kw):
+        if "/members" in path:
+            perm = kw.get("body", {}).get("perm")
+            member_calls.append(perm)
+            if perm == "full_access":
+                raise RuntimeError("full_access not permitted")
+            return {"member": {"perm": "edit"}, "code": 0}
+        return {}
+
+    monkeypatch.setattr(md, "_call", fake_call)
+
+    ok, err = md.grant_member_permission("doc_retry", authorization=AUTH, member_id="user_abc", perm="full_access")
+    assert ok is True
+    assert err is None
+    assert member_calls == ["full_access", "edit"]
+
+
+def test_plugin_deliver_automatically_passes_session_caller_identity(tmp_path, monkeypatch):
+    """md_deliver reads HERMES_SESSION_CHAT_ID and USER_ID from context and passes to engine."""
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "oc_caller_chat")
+    monkeypatch.setenv("HERMES_SESSION_USER_ID", "ou_caller_user")
+
+    delivered_args = {}
+
+    def fake_deliver(source, **kwargs):
+        delivered_args.update(kwargs)
+        return {"state": "delivered", "url": "https://x/docx/session_doc", "document_id": "session_doc"}
+
+    ctx = _ctx(tmp_path)
+    handlers = plugin._handler(fake_deliver, {}, ctx, _Token())
+    source = tmp_path / "session_report.md"
+    source.write_text("# Test", encoding="utf-8")
+
+    out = json.loads(handlers["md_deliver"](path=str(source)))
+
+    assert out["ok"] is True
+    assert delivered_args.get("chat_id") == "oc_caller_chat"
+    assert delivered_args.get("user_id") == "ou_caller_user"
+
+
+def test_routine_inquiries_do_not_trigger_document_guidance():
+    """Routine status queries, explanations, and summaries must answer directly without doc guidance."""
+    assert plugin._guide(user_message="查一下现在的状态") is None
+    assert plugin._guide(user_message="汇报一下当前进展") is None
+    assert plugin._guide(user_message="进度如何，有几个挂了") is None
+    assert plugin._guide(user_message="请解释一下这个报错的原因") is None
+
+    # Only explicit requests for a document or report trigger guidance
+    guided = plugin._guide(user_message="把结论整理成文档给我")
+    assert guided is not None
+    assert "md_deliver" in guided["context"]
+    assert "##FILE:" in guided["context"]
+    assert "Routine questions" in guided["context"]
+
