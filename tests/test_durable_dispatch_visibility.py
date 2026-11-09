@@ -90,7 +90,7 @@ p=importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
 manifest=PluginManifest(name='durable-dispatch',version='0.1.0',description='test',author='test',path=Path(sys.argv[5]).parent)
 manager=PluginManager(scope_key=str(home)); ctx=PluginContext(manifest,manager)
 p.register(ctx)
-assert set(manager._system_prompt_sections)=={'durable-dispatch-routing'}
+assert set(manager._system_prompt_sections)=={'durable-dispatch-routing','durable-dispatch-briefing'}
 raw=get_tool_definitions(enabled_toolsets=['durable_dispatch'],quiet_mode=True,skip_tool_search_assembly=True)
 names={item['function']['name'] for item in raw}
 assert names=={'durable_submit','durable_status','durable_cancel','durable_roster'}, sorted(names)

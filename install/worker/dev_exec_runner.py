@@ -35,6 +35,22 @@ MAX_STDERR = 1500
 _SSH_HOST_RE = re.compile(r"^[A-Za-z0-9._@-]{1,128}\Z")
 
 
+def _compose_goal(goal: str, payload: dict | None) -> str:
+    """Attach the requester's own words so a lossy frontdesk brief cannot hide the task."""
+    payload = payload or {}
+    user_request = payload.get("_user_request")
+    conversation = payload.get("_conversation")
+    sections = [goal]
+    if isinstance(user_request, str) and user_request.strip() and user_request.strip() != goal.strip():
+        sections.append("[用户原话（以此为准；与上面的任务描述冲突时按用户原话执行）]\n" + user_request.strip()[:4000])
+    if isinstance(conversation, str) and conversation.strip():
+        sections.append("[此前对话摘录（用于理解“这个/上面/继续”等指代）]\n" + conversation.strip()[:4000])
+    if len(sections) == 1:
+        return goal
+    composed = "\n\n".join(sections)
+    return composed[:MAX_GOAL]
+
+
 def _decorate_goal(goal: str) -> str:
     duty = (os.environ.get("DEV_EXPERT_DUTY") or "").strip()
     target_host = (os.environ.get("DEV_TARGET_HOST") or "").strip()
@@ -681,6 +697,7 @@ def main() -> int:
         return 1
 
     route = _resolve_job_model_route(job_payload)
+    goal = _compose_goal(goal, job_payload)
     model_tier = str(route.get("selected_model") or "flash")
     route_degraded = bool(route.get("degraded"))
     route_reason = str(route.get("degradation_reason") or "")

@@ -45,6 +45,88 @@ _MAX_DELIVERY_HEALTH_FAULT_GRACE = 3600.0
 _DELIVERY_HEALTH_RECOVERY_GRACE = 10.0
 _DELIVERY_WARNING_INTERVAL = 60.0
 
+#: Requester context captured from the submitting turn. A frontdesk paraphrase is
+#: lossy: backend colleagues repeatedly received goals that dropped the user's
+#: actual wording, referenced IDs/paths and earlier turns, so the task could not be
+#: completed. The original request travels with the job alongside the brief.
+_REQUEST_CONTEXT_TTL = 1800.0
+_REQUEST_CONTEXT_MAX_SESSIONS = 256
+_USER_REQUEST_MAX = 4000
+_CONVERSATION_MAX = 4000
+_CONVERSATION_TURNS = 8
+_request_context_lock = threading.Lock()
+_request_context = {}
+
+
+def _message_text(message):
+    """Plain text of a chat message; tool calls, images and tool results are skipped."""
+    if isinstance(message, str):
+        return message
+    if not isinstance(message, dict):
+        return ''
+    content = message.get('content')
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and part.get('type') in ('text', 'input_text'):
+                text = part.get('text')
+                if isinstance(text, str):
+                    parts.append(text)
+            elif isinstance(part, str):
+                parts.append(part)
+        return '\n'.join(parts)
+    return ''
+
+
+def _conversation_excerpt(history, current):
+    """Recent user/assistant text turns before the current message, newest kept."""
+    lines = []
+    messages = [m for m in (history or []) if isinstance(m, dict)
+                and m.get('role') in ('user', 'assistant')]
+    if (messages and messages[-1].get('role') == 'user'
+            and _message_text(messages[-1]).strip() == (current or '').strip()):
+        messages = messages[:-1]
+    for message in messages:
+        text = _message_text(message).strip()
+        if not text:
+            continue
+        label = '用户' if message['role'] == 'user' else '前台'
+        lines.append('%s: %s' % (label, text[:1200]))
+    lines = lines[-_CONVERSATION_TURNS:]
+    excerpt = '\n'.join(lines)
+    if len(excerpt) > _CONVERSATION_MAX:
+        excerpt = '…' + excerpt[-(_CONVERSATION_MAX - 1):]
+    return excerpt
+
+
+def remember_request_context(session_id, user_message, conversation_history=None, *, now=None):
+    if not isinstance(session_id, str) or not session_id:
+        return
+    text = _message_text(user_message).strip()
+    if not text:
+        return
+    now = time.time() if now is None else now
+    entry = {'user_request': text[:_USER_REQUEST_MAX],
+             'conversation': _conversation_excerpt(conversation_history, text),
+             'at': now}
+    with _request_context_lock:
+        _request_context[session_id] = entry
+        if len(_request_context) > _REQUEST_CONTEXT_MAX_SESSIONS:
+            for key, _ in sorted(_request_context.items(), key=lambda kv: kv[1]['at'])[
+                    :len(_request_context) - _REQUEST_CONTEXT_MAX_SESSIONS]:
+                _request_context.pop(key, None)
+
+
+def recall_request_context(session_id, *, now=None):
+    now = time.time() if now is None else now
+    with _request_context_lock:
+        entry = _request_context.get(session_id)
+        if entry is None or now - entry['at'] > _REQUEST_CONTEXT_TTL:
+            return None
+        return dict(entry)
+
 
 class _BacklogWarningLimiter:
     """Rate-limit noisy observations without affecting delivery or health events."""
@@ -557,6 +639,12 @@ class DispatchService:
                    '_colleague_label': self.display_label}
         if self.configured_model_tier is not None:
             payload['_model_tier'] = self.model_tier
+        if not is_scheduled:
+            requester = recall_request_context(session_id)
+            if requester:
+                payload['_user_request'] = requester['user_request']
+                if requester.get('conversation'):
+                    payload['_conversation'] = requester['conversation']
         dedupe = owner + ':' + hashlib.sha256(key.encode()).hexdigest()
         # ``_dispatch_owner`` is an ownership *proof* (one-way), never an address:
         # persist profile + session + route alongside it so a completion can be routed
@@ -1248,8 +1336,17 @@ def start_backfill(ctx, service):
     return thread
 
 
-def _render_routing_prompt(services) -> str:
-    base = """Capability routing for durable dispatch. Submit work with durable_submit when background execution is needed. Do not reflexively dispatch to a subagent for questions, chatting, advice, or architectural discussions; answer those directly in clear human language.
+_SECTION_BUDGET = 4000  # host maximum per system prompt section
+_BRIEF_RULES = """
+Writing the goal (the colleague cannot see this chat; the user's latest message and recent turns are attached automatically, but your goal is the work order):
+- Make it self-contained: what to do, on what (copy every repository, branch, path, case/story/task ID, link, version and number from the conversation verbatim, never paraphrase them), what to hand back, and how to tell it is done.
+- Resolve references like "这个/上面那个/刚才的/继续" into the concrete object before submitting.
+- If something essential is missing and cannot be found from the conversation (e.g. which case, which version, which environment), ask the user one short question instead of submitting a task that cannot be completed. Do not ask for details a colleague can look up itself.
+- Do not narrow, soften or reinterpret the user's request; keep their constraints and acceptance criteria."""
+
+
+def _render_routing_base() -> str:
+    return """Capability routing for durable dispatch. Submit work with durable_submit when background execution is needed. Do not reflexively dispatch to a subagent for questions, chatting, advice, or architectural discussions; answer those directly in clear human language.
 Pick the role by what the work needs, not by keywords.
 - role=dev executes work: inspecting a repository, running git/read commands, checking versions or configuration, running a test. It needs only goal; omit sources entirely. Never attach sources to a dev task.
 - role=analysis performs read-only evidence analysis of files inside the administrator roots. It requires sources with absolute paths inside those roots. If a task is about inspecting or running something rather than analysing a supplied file, it is a dev task.
@@ -1260,9 +1357,12 @@ Pick the role by what the work needs, not by keywords.
     NEVER call durable_submit! You MUST call durable_status with that task_id. Report the live status (queued, running, completed, failed) and details (phase, progress, verdict, summary) directly to the user.
     If running or queued, reassure the user the worker is actively executing. NEVER claim a role has no worker or that the task disappeared.
   * Only call durable_submit when the user is explicitly requesting a NEW piece of work, test, or investigation to be performed.
-- Conceptual, architectural, and advice discussions: Answer directly with deep expertise as a helpful senior engineer colleague; NEVER dispatch background jobs to a subagent unless execution, code changes, or testing is explicitly requested.
+- Conceptual, architectural, workflow, and colleague-role discussions (e.g. "你现在的agent架构是怎样的", "有用到langgraph么", "有哪些专家角色"): Answer directly in the current turn with deep expertise on Super Agent's 5-layer architecture (1. Thin Frontdesk + CardKit 2.0; 2. Durable SQLite Queue + Colleague Pool; 3. LangGraph StateGraph + AttemptSupervisor bwrap/subreaper sandbox + Hermes/Pi dual engines; 4. Hippocampus Memory 4 Evolutions + Neural Bridge; 5. Progressive Delivery + Outbound Sanitizer) and use durable_roster for colleague roles; NEVER call durable_submit to inspect systemd/host processes for architecture or role questions.
 - Investigating recent changes, git history, logs or any repository state is ALWAYS dev work. analysis is only for evidence about a file the user explicitly supplied; never pick analysis for an investigation.
 If the user asks to look at changes, check logs, run a command or inspect the repo, submit role=dev with no sources. Do not claim you cannot see the repository: dev exists for exactly that. Submit one task, return its ID and role, then finish the turn without waiting or polling. NEVER submit work through terminal/execute_code or a raw pool CLI. Use durable_status/cancel with the returned role and task ID. An IM frontdesk only interacts, dispatches and reports; it must not execute or delegate work itself. Unsupported work must be reported as unavailable, never silently rerouted. Never provide an owner, queue path, shell command, runner, or model adapter."""
+
+
+def _render_briefing_prompt(services) -> str:
     domain_lines = []
     for role, svc in sorted(services.items()):
         if role in ('analysis', 'dev'):
@@ -1271,14 +1371,20 @@ If the user asks to look at changes, check logs, run a command or inspect the re
         host = getattr(svc, 'target_host', None)
         if duty or host:
             host_tag = (' [target=%s]' % host) if host else ''
-            desc = (': ' + duty) if duty else ''
+            desc = (': ' + duty[:120]) if duty else ''
             domain_lines.append('- role=%s (%s)%s%s' % (role, svc.display_name, host_tag, desc))
-    if not domain_lines:
-        return base
-    extra = '\nConfigured domain experts (omit sources when dispatching to an execution expert):\n' + '\n'.join(domain_lines)
-    if len(base) + len(extra) <= 3500:
-        return base + extra
-    return base
+    text = _BRIEF_RULES.lstrip('\n')
+    if domain_lines:
+        extra = ('\nConfigured domain experts (omit sources when dispatching to an execution expert):\n'
+                 + '\n'.join(domain_lines))
+        if len(text) + len(extra) <= _SECTION_BUDGET - 50:
+            text += extra
+    return text
+
+
+def _render_routing_prompt(services) -> str:
+    """Both frontdesk sections; kept for callers that want the full rule set."""
+    return _render_routing_base() + '\n' + _render_briefing_prompt(services)
 
 
 def format_boost_status(services=None, ctx=None) -> str:
@@ -1313,12 +1419,30 @@ def register(ctx):
     if not backend_runner:
         ctx.register_system_prompt_section(
             'durable-dispatch-routing',
-            _render_routing_prompt(services),
+            _render_routing_base(),
             # The host DROPS a section over its budget (it does not truncate), so the
             # budget must exceed the literal text below or the frontdesk never sees
             # the routing rules. tests/test_durable_dispatch.py pins this.
-            position='after_memory', max_chars=3600,
+            position='after_memory', max_chars=_SECTION_BUDGET,
         )
+        # Brief-writing rules and the expert roster live in their own section: in
+        # one section the roster overflowed the host cap and was silently dropped.
+        ctx.register_system_prompt_section(
+            'durable-dispatch-briefing',
+            _render_briefing_prompt(services),
+            position='after_memory', max_chars=_SECTION_BUDGET,
+        )
+        register_hook = getattr(ctx, 'register_hook', None)
+        if callable(register_hook):
+            def _capture_request(session_id='', user_message=None,
+                                 conversation_history=None, **_):
+                try:
+                    remember_request_context(session_id, user_message, conversation_history)
+                except Exception:
+                    logging.getLogger(__name__).debug('request context capture failed',
+                                                      exc_info=True)
+                return None
+            register_hook('pre_llm_call', _capture_request)
     roster_path = ctx.get_config('roster_registry_path')
     if (not isinstance(roster_path, str) or not roster_path
             or not Path(roster_path).is_absolute()):

@@ -55,7 +55,7 @@ def test_register_opt_in_and_bounded_submission(tmp_path):
     assert not (tmp_path / 'off').exists()
     context, args = make_context(tmp_path)
     assert set(context.tools) == {'durable_submit', 'durable_status', 'durable_cancel', 'durable_roster'}
-    assert set(context.prompt_sections) == {'durable-dispatch-routing'}
+    assert set(context.prompt_sections) == {'durable-dispatch-routing', 'durable-dispatch-briefing'}
     routing = context.prompt_sections['durable-dispatch-routing']['content']
     assert 'durable_submit' in routing and 'finish the turn' in routing
     assert 'not by keywords' in routing
@@ -586,7 +586,7 @@ p.register(ctx)
 assert sys.path==before
 assert manager._plugin_tool_names=={'durable_submit','durable_status','durable_cancel','durable_roster'}
 assert {registry.get_entry(name,scope=manager.scope_key).toolset for name in manager._plugin_tool_names}=={'durable_dispatch'}
-assert set(manager._system_prompt_sections)=={'durable-dispatch-routing'}
+assert set(manager._system_prompt_sections)=={'durable-dispatch-routing','durable-dispatch-briefing'}
 args={'goal':'Read the evidence','sources':[{'path':str(source)}],'request_key':'event'}
 assert not json.loads(registry.dispatch('durable_submit',args,scope=manager.scope_key))['ok']
 answer=json.loads(registry.dispatch('durable_submit',args,scope=manager.scope_key,session_id='trusted'))
@@ -890,7 +890,7 @@ def test_domain_colleagues_expose_duty_and_target_host_in_prompt_and_roster(tmp_
     }
     context = Context(settings)
     plugin.register(context)
-    section = context.prompt_sections['durable-dispatch-routing']
+    section = context.prompt_sections['durable-dispatch-briefing']
     assert 'role=bench (台架测试专家) [target=bench-node-01]' in section['content']
     assert len(section['content']) <= section['max_chars']
     roster = call(context, 'roster', {}, session_id='trusted-session')
