@@ -20,7 +20,9 @@ def _finalize_card(bridge, task_id, message):
         try:
             card = bridge.get_card(task_id)
             if isinstance(card, dict):
-                if card.get('finalized'):
+                if card.get('elapsed') is not None and float(card.get('elapsed') or 0.0) > 0:
+                    elapsed = float(card['elapsed'])
+                elif card.get('finalized'):
                     elapsed = float(card.get('elapsed') or 0.0)
                 elif card.get('created_at'):
                     elapsed = round(max(0.0, time.time() - float(card['created_at'])), 1)
@@ -247,7 +249,7 @@ class HostSender:
             coroutine.close()
             return dict(ok=False, not_sent=True, error='gateway_unavailable')
         try:
-            return future.result(timeout=10)
+            return future.result(timeout=30)
         except Exception as exc:
             return dict(ok=False, error='card_patch_outcome_unknown', error_type=type(exc).__name__)
 
@@ -384,12 +386,14 @@ def create_transport(ctx, service):
                 if card is not None and not card.get('message_id'):
                     return
             unsent = isinstance(patch, dict) and patch.get('not_sent') is True
-            state = 'pending' if unsent else 'unknown'
-            error = 'card_patch_not_sent' if unsent else 'card_patch_unknown'
+            degraded = isinstance(final, dict) and final.get('degraded') is True
+            state = 'degraded' if degraded else ('pending' if unsent else 'unknown')
+            error = 'card_patch_degraded' if degraded else ('card_patch_not_sent' if unsent else 'card_patch_unknown')
             service.pool.record_card_finalization_state(task_id, state, error)
 
         def deliver(self, address, message, *, idempotency_key):
             message = self._prepare_message(message)
+            final = None
             # Ensure the bound task card transitions to terminal state (completed/failed/cancelled)
             # as soon as the task reaches a terminal outcome, even if direct text delivery
             # is deferred, rejected, or retried.
@@ -401,7 +405,7 @@ def create_transport(ctx, service):
                     logger.warning('card terminal health update failed for %s (%s)',
                                    idempotency_key, type(exc).__name__)
             result = super().deliver(address, message, idempotency_key=idempotency_key)
-            if result and result.get('accepted') and getattr(self, 'card_bridge', None):
+            if result and result.get('accepted') and getattr(self, 'card_bridge', None) and final is None:
                 final = _finalize_card(self.card_bridge, idempotency_key, message)
                 try:
                     self._record_card_finalization(idempotency_key, final)

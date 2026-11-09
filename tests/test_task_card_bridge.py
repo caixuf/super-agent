@@ -260,10 +260,14 @@ def test_unknown_patch_is_fenced_across_restart_and_terminal_update(tmp_path):
     assert result['patch_result'] == {'ok': False, 'error': 'patch_outcome_unknown', 'error_type': 'TimeoutError'}
     assert first.get_card('task')['patch_state'] == 'unknown'
     restarted = TaskCardBridge(root, profile='test', sender=unknown, min_update_interval=0)
+    # Architectural fix: a progress timeout must NEVER block terminal finalization!
+    # Finalize attempts the terminal patch instead of being deadlocked by progress heartbeat.
     terminal = restarted.finalize('task', summary='done')
-    assert terminal['patch_result']['error'] == 'previous_patch_unknown'
+    assert terminal['patch_result']['error'] == 'patch_outcome_unknown'
     assert restarted.get_card('task')['status'] == 'completed'
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert restarted.get_card('task')['finalized'] == 0
+    assert restarted.get_card('task')['terminal_retries'] == 1
 
 
 def test_definitely_unsent_terminal_can_retry_once_with_same_payload(tmp_path):
@@ -283,6 +287,40 @@ def test_definitely_unsent_terminal_can_retry_once_with_same_payload(tmp_path):
     assert retried['patch_result']['ok'] and restarted.get_card('task')['patch_state'] == 'idle'
     assert restarted.finalize('task', status='failed', summary='failed', error_msg='details')['already_finalized']
     assert len(calls) == 2
+
+
+def test_terminal_patch_bounded_retry_and_degradation(tmp_path):
+    calls = []
+    def failing_sender(**kwargs):
+        calls.append(kwargs)
+        return {'ok': False, 'error': 'timeout'}
+
+    root = tmp_path / 'cards'
+    bridge = TaskCardBridge(root, profile='test', sender=failing_sender)
+    bridge.bind_task('task', {'route': 'route'}, 'goal', 'dev', 'name', 'message')
+
+    # Attempt 1
+    r1 = bridge.finalize('task', status='completed', summary='done')
+    assert r1['ok'] is True and r1['finalized'] is False
+    assert bridge.get_card('task')['terminal_retries'] == 1
+    assert bridge.get_card('task')['patch_state'] == 'unknown'
+
+    # Attempt 2
+    r2 = bridge.finalize('task', status='completed', summary='done')
+    assert r2['ok'] is True and r2['finalized'] is False
+    assert bridge.get_card('task')['terminal_retries'] == 2
+
+    # Attempt 3: hits max retries -> marks degraded terminal state
+    r3 = bridge.finalize('task', status='completed', summary='done')
+    assert r3['ok'] is True and r3.get('degraded') is True
+    assert bridge.get_card('task')['terminal_retries'] == 3
+    assert bridge.get_card('task')['patch_state'] == 'degraded'
+    assert bridge.get_card('task')['finalized'] == 1
+
+    # Subsequent call recognizes degraded terminal state without re-sending
+    r4 = bridge.finalize('task', status='completed', summary='done')
+    assert r4['ok'] is True and r4.get('degraded') is True
+    assert len(calls) == 3
 
 
 def test_terminal_without_message_can_be_delivered_after_binding(tmp_path):

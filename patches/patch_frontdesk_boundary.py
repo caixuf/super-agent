@@ -108,11 +108,21 @@ _ROUND_RELEASE_V2 = _ROUND_RELEASE_V1.replace(
     '            finalize_after_release(agent)\n'
     '        except Exception:\n'
     '            pass\n', 1)
-_ROUND_RELEASE = _ROUND_RELEASE_V2
-# Hosts already carrying the V1 handoff block must be migrated in place; the
+_ROUND_RELEASE_V3 = _ROUND_RELEASE_V2.replace(
+    '            _frontdesk_reply = release_after_submission(\n'
+    '                _frontdesk_submit_ids, messages[_frontdesk_result_start:])\n',
+    '            _frontdesk_lead = getattr(assistant_message, "content", None) or ""\n'
+    '            _frontdesk_reply = release_after_submission(\n'
+    '                _frontdesk_submit_ids, messages[_frontdesk_result_start:],\n'
+    '                explanatory_text=_frontdesk_lead)\n', 1)
+_ROUND_RELEASE = _ROUND_RELEASE_V3
+# Hosts already carrying the V1 or V2 handoff block must be migrated in place; the
 # generic EDITS anchor would otherwise insert a second copy of the hook.
 MIGRATIONS = {
-    Path("agent/turn_tool_round.py"): ((_ROUND_RELEASE_V1, _ROUND_RELEASE_V2),),
+    Path("agent/turn_tool_round.py"): (
+        (_ROUND_RELEASE_V1, _ROUND_RELEASE_V3),
+        (_ROUND_RELEASE_V2, _ROUND_RELEASE_V3),
+    ),
 }
 _ROUND_COMPLETED = 'or str(_turn_exit_reason).startswith("text_response(")'
 _REVIEW_GATE = _tool_gate("        ", '"memory"') + (

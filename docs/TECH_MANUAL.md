@@ -511,7 +511,40 @@ python3 -m agentcore.pool --root /absolute/private/test-queue worker --help
 - [OpenTelemetry 生成式 AI 语义约定入口](https://opentelemetry.io/docs/specs/semconv/gen-ai/)：追踪与指标约定，应固定实际使用版本。
 - [SQLite WAL](https://www.sqlite.org/wal.html)：WAL 一致性、并发与文件系统限制。
 
-## 18 维护规则
+## 18 状态图引擎与架构级状态机规范
+
+### 18.1 确定性状态图引擎（`agentcore.state_graph`）
+针对多智能体长程研发中黑盒 ReAct 循环容易陷入的停滞打转缺陷，`agentcore.state_graph` 吸收 LangGraph 核心架构优势，提供零外部依赖、强类型纯 Python 状态图执行器：
+1. **类型化状态规约（Typed Reducers）**：通过 Reducer 机制（覆盖/列表追加/自增计数）保证多节点状态合并的纯函数确定性。
+2. **确定性门禁路由（Conditional Edges）**：支持 `add_conditional_edges(source, router, path_map)`，在 `research -> implement -> verify -> [harvest / retry]` 流水线中严格按测试门禁执行跳变与有界回退。
+3. **分层持久化检查点（Checkpointers）**：
+   - `SqliteCheckpointer`：WAL 模式多版本快照存储，支持长任务断点续跑与外部崩溃恢复。
+   - `JsonCheckpointer`：轻量级单文件持久化快照。
+   - `MemoryCheckpointer`：无副作用内存快照测试替身。
+4. **工具循环停滞守卫（Stagnation Guard）**：
+   跟踪相邻状态指纹与内容摘要。连续 `stagnation_limit`（默认 5）步零增量时抛出 `StagnationDetectedError`，根除“无脑执行数百次搜索而不产出代码”的死循环。
+5. **工作区分支收获保护（Worktree Harvest Gate）**：
+   在图执行到达 `END` 终态时，若工作区内有未合并/未提取的已验证 Git Commit，强制校验并拦截，杜绝研发成果孤立沉没。
+
+### 18.2 任务卡片桥接状态机（`TaskCardBridge`）
+1. **过程心跳与终态回执解耦**：
+   - `progress_patch_state`：跟踪运行中心跳卡片补丁，偶发网络抖动（`unknown`）绝不污染主账。
+   - `patch_state`：专职管理终态卡片补丁（`idle`/`sending`/`unsent`/`degraded`）。
+2. **终态非阻塞与有界退避降级**：
+   - 终态卡片补丁超时或失败时保持 `finalized=0` 并允许重试。
+   - 重试超限（3 次）后自动转入 `degraded` 终态，并由直接文本投递兜底通知用户。
+
+### 18.3 进程收敛监管状态机（`AttemptSupervisor`）
+1. **收敛超时与跨权限子进程管理**：
+   - 监管状态机严格按 `RUNNING -> STOPPING -> EVIDENCE_EMITTED` 演进。
+   - 停止信号下达后启动 5 秒有界收敛 Deadline；捕获不同 UID/`sudo` 子进程的 `PermissionError` 并记录 `unquiesced_pids`。
+   - 超时未退出时确定性写入带有 `quiescent=False` 的 `stop.json` 与 `evidence_fd`，驱动任务池状态机安全流转至终态，永不挂死主循环。
+2. **文件体积配额**：
+   - 默认 `--max-file`（`RLIMIT_FSIZE`）由 64MB 升级至 512MB，防范构建与日志写满引发的 `SIGXFSZ`。
+
+---
+
+## 19 维护规则
 
 每次修改任务状态机、权限、模型路由、记忆身份、投递、数据格式或部署方式时，同时更新对应章节、源码基线与验收证据。保留历史实测的日期和范围；不要把新版本的规划、旧版本的结果或隔离环境的通过写成当前生产能力。版本发布由实现负责人、测试负责人和运维负责人共同核对，安全相关边界由安全负责人复核。
 

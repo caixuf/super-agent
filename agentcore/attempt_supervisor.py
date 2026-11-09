@@ -16,6 +16,7 @@ import signal
 import socket
 import subprocess
 import sys
+import time
 
 
 def process_start(pid):
@@ -38,25 +39,52 @@ def _enable_subreaper():
         raise RuntimeError("subreaper_not_enabled")
 
 
-def _kill_children():
+def _kill_children() -> list[int]:
     # This supervisor is single-threaded. Children cannot reuse their PIDs until
     # we reap them, so signalling our own still-unreaped children is PID safe.
-    for name in Path(f"/proc/self/task/{os.getpid()}/children").read_text().split():
+    # Returns list of PIDs that could not be killed (e.g. PermissionError on sudo children).
+    unquiesced = []
+    try:
+        children_path = Path(f"/proc/self/task/{os.getpid()}/children")
+        if not children_path.exists():
+            return unquiesced
+        pids = children_path.read_text().split()
+    except (OSError, ProcessLookupError):
+        return unquiesced
+    for name in pids:
         try:
-            os.kill(int(name), signal.SIGKILL)
+            pid = int(name)
+            os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            # Different UID / sudo child cannot be SIGKILLed directly; track it
+            unquiesced.append(int(name))
+        except OSError:
+            pass
+    return unquiesced
+
+
+# Deterministic lifecycle states for attempt supervisor
+STATE_RUNNING = "RUNNING"
+STATE_STOPPING = "STOPPING"
+STATE_EVIDENCE_EMITTED = "EVIDENCE_EMITTED"
+REAPING_DEADLINE_SECONDS = 5.0
 
 
 def main():
     control = socket.socket(fileno=int(sys.argv[1]))
     evidence_fd, lock_fd = int(sys.argv[2]), int(sys.argv[3])
     config = json.loads(control.recv(1 << 20))
-    stopped = False
+    state = STATE_RUNNING
+    stop_deadline = None
+    unquiesced_pids = []
 
     def request_stop(*_):
-        nonlocal stopped
-        stopped = True
+        nonlocal state, stop_deadline
+        if state == STATE_RUNNING:
+            state = STATE_STOPPING
+            stop_deadline = time.monotonic() + REAPING_DEADLINE_SECONDS
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
@@ -69,13 +97,14 @@ def main():
         if not isinstance(limit, int) or limit <= 0:
             raise ValueError("invalid_file_limit")
     except Exception:
-        stopped = True
+        state = STATE_STOPPING
+        stop_deadline = time.monotonic() + REAPING_DEADLINE_SECONDS
 
     try:
         # Do not publish a signalable PID before our handlers are installed.
         control.sendall(b"ready")
         authorized = control.recv(16) == b"go"
-        if authorized and not stopped:
+        if authorized and state == STATE_RUNNING:
             try:
                 command = [sys.executable, str(Path(__file__).with_name("exec_runner.py")),
                            str(limit)] + config["command"]
@@ -94,10 +123,14 @@ def main():
                                         env=env)
                 child_started = True
             except Exception:
-                stopped = True
+                state = STATE_STOPPING
+                stop_deadline = time.monotonic() + REAPING_DEADLINE_SECONDS
         else:
-            stopped = True
+            state = STATE_STOPPING
+            stop_deadline = time.monotonic() + REAPING_DEADLINE_SECONDS
             code = -signal.SIGTERM
+
+        quiescent = True
         while True:
             no_children = False
             while True:
@@ -113,22 +146,41 @@ def main():
                 if proc is not None and pid == proc.pid:
                     code = os.waitstatus_to_exitcode(status)
                     proc.returncode = code
-                    stopped = True
+                    if state == STATE_RUNNING:
+                        state = STATE_STOPPING
+                        stop_deadline = time.monotonic() + REAPING_DEADLINE_SECONDS
+
             if no_children:
+                quiescent = True
                 break
+
+            # Bounded reaping deadline check: unkillable or surviving processes must not hang forever
+            if state == STATE_STOPPING and stop_deadline is not None:
+                if time.monotonic() >= stop_deadline:
+                    unquiesced_pids = _kill_children()
+                    quiescent = False
+                    break
+
             readable, _, _ = select.select([control], [], [], .02)
             if readable:
                 # Any control message or EOF is a stop request. A dead Worker
                 # cannot leave an executing child orphaned behind a stale lease.
                 control.recv(1024)
-                stopped = True
-            if stopped:
-                _kill_children()
-        # ECHILD after subreaping is the proof, not main-PID exit or token emptiness.
+                if state == STATE_RUNNING:
+                    state = STATE_STOPPING
+                    stop_deadline = time.monotonic() + REAPING_DEADLINE_SECONDS
+
+            if state == STATE_STOPPING:
+                unquiesced_pids = _kill_children()
+
+        # Emit evidence payload deterministically (ECHILD proof or bounded unquiesced report)
         proof = {name: config[name] for name in ("job", "attempt", "token", "nonce")}
-        proof.update(quiescent=True, proof_scope="subreaper_tree" if ready else "not_started",
+        proof.update(quiescent=quiescent, proof_scope="subreaper_tree" if ready else "not_started",
                      supervisor_pid=os.getpid(), supervisor_start=process_start(os.getpid()),
                      child_started=child_started, exit_code=code)
+        if not quiescent and unquiesced_pids:
+            proof["unquiesced_pids"] = unquiesced_pids
+        state = STATE_EVIDENCE_EMITTED
         blob = json.dumps(proof, sort_keys=True).encode()
         written = 0
         while written < len(blob):

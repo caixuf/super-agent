@@ -88,6 +88,7 @@ def finalize_after_release(agent: Any) -> bool:
 def release_after_submission(
     submit_call_ids: list[str], tool_results: list[dict[str, Any]],
     *, home: Path | str | None = None,
+    explanatory_text: str | None = None,
 ) -> str | None:
     """Return a foreground acknowledgement or None for an ordinary tool round.
 
@@ -133,9 +134,9 @@ def release_after_submission(
         accepted[receipt["task_id"]] = (receipt["status"], role)
     if not accepted:
         reason = _rejection_reason(tool_results)
-        if not reason:
-            return UNCONFIRMED
-        return UNCONFIRMED + "\n\n拒绝原因：" + reason
+        lead = explanatory_text.strip() if isinstance(explanatory_text, str) and explanatory_text.strip() else ""
+        rej_body = UNCONFIRMED + ("\n\n拒绝原因：" + reason if reason else "")
+        return f"{lead}\n\n{rej_body}" if lead else rej_body
     lines = ["已持久记录后台任务：", ""]
     for task_id, (state, role) in accepted.items():
         lines.append(f"- `{task_id}`：{_STATES[state]}" + (f"（`{role}`）" if role else ""))
@@ -143,4 +144,9 @@ def release_after_submission(
                   "接单回执不等于验收或交付完成。"])
     if uncertain:
         lines.append(f"另有 {uncertain} 笔提交结果未确认；保留原请求键核对，不要换键重复提交。")
-    return "\n".join(lines)
+    receipt_body = "\n".join(lines)
+    if explanatory_text and isinstance(explanatory_text, str) and explanatory_text.strip():
+        clean_lead = explanatory_text.strip()
+        if not clean_lead.startswith("已持久记录后台任务"):
+            return f"{clean_lead}\n\n{receipt_body}"
+    return receipt_body

@@ -1715,7 +1715,7 @@ class Pool:
             )
         return {'state': 'delivered', 'receipt_id': receipt_id}
 
-    def run_once(self, command, timeout=300, lease=60, max_output=1048576, max_file=67108864):
+    def run_once(self, command, timeout=300, lease=60, max_output=1048576, max_file=536870912):
         if timeout <= 0 or lease <= 0 or max_output <= 0 or max_file <= 0:
             raise ValueError('budgets must be positive')
         claimed = self.claim(lease)
@@ -1723,7 +1723,7 @@ class Pool:
             return False
         return self.run_claimed(claimed, command, timeout, lease, max_output, max_file)
 
-    def run_claimed(self, claimed, command, timeout=300, lease=60, max_output=1048576, max_file=67108864):
+    def run_claimed(self, claimed, command, timeout=300, lease=60, max_output=1048576, max_file=536870912):
         """Execute a claim owned by this process; caller transfers lock ownership here."""
         row, fd = claimed
         job, attempt = row['id'], row['attempt']
@@ -1912,7 +1912,7 @@ def main():
     worker.add_argument('--workers', type=int, default=1)
     worker.add_argument('--backend', choices=['stdlib', 'flowcoro'], default='stdlib')
     worker.add_argument('--max-output', type=int, default=1048576)
-    worker.add_argument('--max-file', type=int, default=67108864)
+    worker.add_argument('--max-file', type=int, default=536870912)
     worker.add_argument('--poll-interval', type=float, default=0.05,
                         help='Queue polling and reaping interval in seconds (default: 0.05s)')
     args = parser.parse_args()

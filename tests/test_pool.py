@@ -198,3 +198,18 @@ def test_legacy_database_gains_origin_column_and_unowned_rows(tmp_path):
     assert pool.origin(legacy) is None
     assert pool.submit('owned-after-upgrade', {'goal': 'x'},
                        origin={'profile': 'p', 'session': 's'}) != legacy
+
+
+def test_attempt_supervisor_state_machine_and_unquiesced_handling(tmp_path):
+    """Verify AttemptSupervisor transitions RUNNING -> STOPPING -> EVIDENCE_EMITTED."""
+    p = Pool(tmp_path)
+    # Run a command that terminates cleanly and emits proof
+    task = p.submit('supervisor_test', {})
+    assert p.run_once([sys.executable, '-c', 'import json; print(json.dumps({"ok":True,"summary":"done"}))'])
+    st = p.status(task)
+    assert st['status'] == 'completed'
+    attempt_dir = tmp_path / 'attempts' / st['attempt']
+    evidence = json.loads((attempt_dir / 'stop.json').read_text())
+    assert evidence['quiescent'] is True
+    assert evidence['proof_scope'] == 'subreaper_tree'
+    assert evidence['exit_code'] == 0

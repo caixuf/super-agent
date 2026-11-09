@@ -152,6 +152,10 @@ class TaskCardBridge:
                 conn.execute("UPDATE task_cards SET patch_state=CASE "
                              "WHEN message_id IS NOT NULL AND message_id<>'' THEN 'unknown' "
                              "WHEN finalized=1 THEN 'unsent' ELSE 'idle' END")
+            if 'progress_patch_state' not in columns:
+                conn.execute("ALTER TABLE task_cards ADD COLUMN progress_patch_state TEXT NOT NULL DEFAULT 'idle'")
+            if 'terminal_retries' not in columns:
+                conn.execute("ALTER TABLE task_cards ADD COLUMN terminal_retries INTEGER NOT NULL DEFAULT 0")
             if 'thread_id' not in columns:
                 conn.execute("ALTER TABLE task_cards ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''")
             if 'error_text' not in columns:
@@ -177,7 +181,7 @@ class TaskCardBridge:
         finally:
             conn.close()
 
-    def _send_patch(self, task_id: str, address: dict, message_id: str, payload: dict) -> dict:
+    def _send_patch(self, task_id: str, address: dict, message_id: str, payload: dict, *, is_terminal: bool = False) -> dict:
         """Complete a write-ahead patch; uncertain results remain fenced across restarts."""
         try:
             result = self.sender(address=address, message_id=message_id, card_payload=payload)
@@ -199,9 +203,32 @@ class TaskCardBridge:
         if result.get('ok') is True and not confirmed:
             result = {'ok': False, 'error': 'patch_receipt_mismatch'}
         state = 'idle' if confirmed else ('unsent' if definitely_unsent else 'unknown')
+        now = time.time()
         with self.db() as conn:
-            conn.execute("UPDATE task_cards SET patch_state=? WHERE task_id=? AND profile=? AND patch_state='sending'",
-                         (state, task_id, self.profile))
+            if is_terminal:
+                if confirmed:
+                    conn.execute("UPDATE task_cards SET finalized=1, patch_state='idle', terminal_retries=0, updated_at=? "
+                                 "WHERE task_id=? AND profile=? AND patch_state='sending'",
+                                 (now, task_id, self.profile))
+                else:
+                    # Increment terminal retry count
+                    conn.execute("UPDATE task_cards SET terminal_retries=terminal_retries+1, updated_at=? "
+                                 "WHERE task_id=? AND profile=? AND patch_state='sending'",
+                                 (now, task_id, self.profile))
+                    retries = conn.execute("SELECT terminal_retries FROM task_cards WHERE task_id=? AND profile=?",
+                                           (task_id, self.profile)).fetchone()[0]
+                    if retries >= 3:
+                        conn.execute("UPDATE task_cards SET finalized=1, patch_state='degraded', updated_at=? "
+                                     "WHERE task_id=? AND profile=? AND patch_state='sending'",
+                                     (now, task_id, self.profile))
+                    else:
+                        conn.execute("UPDATE task_cards SET finalized=0, patch_state=?, updated_at=? "
+                                     "WHERE task_id=? AND profile=? AND patch_state='sending'",
+                                     (state, now, task_id, self.profile))
+            else:
+                conn.execute("UPDATE task_cards SET patch_state=?, progress_patch_state=? WHERE task_id=? AND profile=? "
+                             "AND (progress_patch_state='sending' OR patch_state='sending')",
+                             (state, state, task_id, self.profile))
         if confirmed:
             with self._throttle_lock:
                 self._last_patched[task_id] = time.monotonic()
@@ -447,7 +474,7 @@ class TaskCardBridge:
         with self.db() as conn:
             conn.execute('BEGIN IMMEDIATE')
             row = conn.execute(
-                "SELECT role, display_name, goal, message_id, route, chat_id, channel, finalized, patch_state, thread_id FROM task_cards WHERE task_id=? AND profile=?",
+                "SELECT role, display_name, goal, message_id, route, chat_id, channel, finalized, patch_state, thread_id, progress_patch_state FROM task_cards WHERE task_id=? AND profile=?",
                 (task_id, self.profile)
             ).fetchone()
             if not row:
@@ -467,12 +494,12 @@ class TaskCardBridge:
                 WHERE task_id=? AND profile=?
             """, (status, phase, progress, elapsed, now, task_id, self.profile))
             will_patch = bool(row[3] and self.sender and callable(self.sender))
-            blocked = will_patch and row[8] not in ('idle', 'unsent')
+            blocked = will_patch and (row[8] not in ('idle', 'unsent') or row[10] not in ('idle', 'unsent'))
             if will_patch and not blocked:
-                conn.execute("UPDATE task_cards SET patch_state='sending' WHERE task_id=? AND profile=?",
+                conn.execute("UPDATE task_cards SET patch_state='sending', progress_patch_state='sending' WHERE task_id=? AND profile=?",
                              (task_id, self.profile))
 
-        role, display_name, goal, message_id, route, chat_id, channel, _, _, thread_id = row
+        role, display_name, goal, message_id, route, chat_id, channel, _, _, thread_id, _ = row
         patch_result = None
         if blocked:
             patch_result = {'ok': False, 'error': 'previous_patch_unknown'}
@@ -480,7 +507,7 @@ class TaskCardBridge:
             address = {"route": route, "chat": chat_id, "channel": channel, "profile": self.profile}
             if thread_id:
                 address['thread'] = thread_id
-            patch_result = self._send_patch(task_id, address, message_id, card_payload)
+            patch_result = self._send_patch(task_id, address, message_id, card_payload, is_terminal=False)
 
         return {"ok": True, "task_id": task_id, "card_payload": card_payload, "patch_result": patch_result}
 
@@ -507,42 +534,45 @@ class TaskCardBridge:
         with self.db() as conn:
             conn.execute('BEGIN IMMEDIATE')
             row = conn.execute(
-                "SELECT role, display_name, goal, message_id, route, chat_id, channel, finalized, patch_state, thread_id, status, summary, artifacts_json, elapsed, error_text FROM task_cards WHERE task_id=? AND profile=?",
+                "SELECT role, display_name, goal, message_id, route, chat_id, channel, finalized, patch_state, thread_id, status, summary, artifacts_json, elapsed, error_text, terminal_retries FROM task_cards WHERE task_id=? AND profile=?",
                 (task_id, self.profile)
             ).fetchone()
             if not row:
                 return {"ok": False, "error": "task_not_found"}
-            if row[7]:
+            is_terminal_already = row[10] in ('completed', 'failed', 'cancelled')
+            if is_terminal_already:
                 same = (row[10] == status and (row[11] or '') == (summary or '')
                         and json.loads(row[12] or '[]') == (artifacts or [])
-                        and row[13] == elapsed and (row[14] or '') == (error_msg or ''))
+                        and (row[14] or '') == (error_msg or ''))
                 if not same:
                     return {'ok': False, 'error': 'already_finalized'}
-                if row[8] != 'unsent':
-                    if row[8] != 'idle':
-                        return {'ok': True, 'finalized': True,
-                                'patch_result': {'ok': False, 'error': 'previous_patch_unknown'}}
+                if row[7] and row[8] == 'idle':
                     return {'ok': True, 'finalized': True, 'already_finalized': True}
+                if row[7] and row[8] == 'degraded':
+                    return {'ok': True, 'finalized': True, 'degraded': True}
+                if row[8] == 'sending':
+                    return {'ok': True, 'finalized': bool(row[7]),
+                            'patch_result': {'ok': False, 'error': 'previous_patch_unknown'}}
             card_payload = self.build_card_payload(
                 task_id, row[1], row[2], status, elapsed=elapsed,
                 summary=summary, artifacts=artifacts, error_msg=error_msg)
 
-            conn.execute("""
-                UPDATE task_cards
-                SET status=?, summary=?, error_text=?, artifacts_json=?, elapsed=?, updated_at=?, finalized=1
-                WHERE task_id=? AND profile=?
-            """, (status, summary, error_msg, json.dumps(artifacts or []), elapsed, now, task_id, self.profile))
             will_patch = bool(row[3] and self.sender and callable(self.sender))
-            blocked = will_patch and row[8] not in ('idle', 'unsent')
+            blocked = will_patch and row[8] == 'sending'
             if will_patch and not blocked:
-                conn.execute("UPDATE task_cards SET patch_state='sending' WHERE task_id=? AND profile=?",
-                             (task_id, self.profile))
+                conn.execute("""
+                    UPDATE task_cards
+                    SET status=?, summary=?, error_text=?, artifacts_json=?, elapsed=?, updated_at=?, patch_state='sending'
+                    WHERE task_id=? AND profile=?
+                """, (status, summary, error_msg, json.dumps(artifacts or []), elapsed, now, task_id, self.profile))
+            elif not will_patch:
+                conn.execute("""
+                    UPDATE task_cards
+                    SET status=?, summary=?, error_text=?, artifacts_json=?, elapsed=?, updated_at=?, finalized=1, patch_state='unsent'
+                    WHERE task_id=? AND profile=?
+                """, (status, summary, error_msg, json.dumps(artifacts or []), elapsed, now, task_id, self.profile))
 
-            elif not will_patch and row[8] in ('idle', 'unsent'):
-                conn.execute("UPDATE task_cards SET patch_state='unsent' WHERE task_id=? AND profile=?",
-                             (task_id, self.profile))
-
-        role, display_name, goal, message_id, route, chat_id, channel, _, _, thread_id = row[:10]
+        role, display_name, goal, message_id, route, chat_id, channel, _, patch_state, thread_id = row[:10]
         patch_result = None
         if blocked:
             patch_result = {'ok': False, 'error': 'previous_patch_unknown'}
@@ -550,11 +580,21 @@ class TaskCardBridge:
             address = {"route": route, "chat": chat_id, "channel": channel, "profile": self.profile}
             if thread_id:
                 address['thread'] = thread_id
-            patch_result = self._send_patch(task_id, address, message_id, card_payload)
+            patch_result = self._send_patch(task_id, address, message_id, card_payload, is_terminal=True)
 
         with self._throttle_lock:
             self._last_patched.pop(task_id, None)
-        return {"ok": True, "task_id": task_id, "finalized": True, "card_payload": card_payload, "patch_result": patch_result}
+
+        with self.db() as conn:
+            final_row = conn.execute("SELECT finalized, patch_state, terminal_retries FROM task_cards WHERE task_id=? AND profile=?",
+                                     (task_id, self.profile)).fetchone()
+            is_finalized = bool(final_row[0]) if final_row else False
+            is_degraded = (final_row[1] == 'degraded') if final_row else False
+
+        res = {"ok": True, "task_id": task_id, "finalized": is_finalized, "card_payload": card_payload, "patch_result": patch_result}
+        if is_degraded:
+            res["degraded"] = True
+        return res
 
     def get_card(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Query stored card status and metadata."""
@@ -572,9 +612,11 @@ class TaskCardBridge:
             raise ValueError('stale_before must be finite')
         with self.db() as conn:
             conn.execute('BEGIN')
-            unknown = conn.execute("SELECT COUNT(*) FROM task_cards WHERE profile=? AND finalized=1 "
+            unknown = conn.execute("SELECT COUNT(*) FROM task_cards WHERE profile=? "
+                                   "AND (status IN ('completed', 'failed', 'cancelled') OR finalized=1) "
                                    "AND patch_state='unknown'", (self.profile,)).fetchone()[0]
-            stale = conn.execute("SELECT COUNT(*) FROM task_cards WHERE profile=? AND finalized=1 "
+            stale = conn.execute("SELECT COUNT(*) FROM task_cards WHERE profile=? "
+                                 "AND (status IN ('completed', 'failed', 'cancelled') OR finalized=1) "
                                  "AND patch_state='sending' AND updated_at<?",
                                  (self.profile, stale_before)).fetchone()[0]
         return {'unknown': unknown, 'stale_sending': stale}

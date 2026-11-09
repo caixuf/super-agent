@@ -159,3 +159,34 @@ Super Agent 生产部署统一收敛至 `<managed_root>/<profile>`（默认 `~/s
    `显式参数` > `managed_root/hermes-current` > `install-manifest.json` > `默认回退`。
 2. **多布局感知运维（Layout-Aware Ops）**：
    `scripts/ops/_layout.sh` 统一判定当前实例拓扑，使 `uninstall-legacy.sh` 与 `purge_and_rebuild_host.sh` 既能治理单根受管环境，也能纠偏单一写者环境中的 systemd 单元与 `PYTHONPATH` 漂移，所有历史修改前置备份至 `drift-backups/`。
+
+---
+
+## 7. 架构级状态机重塑与 LangGraph 思想吸收
+
+### 7.1 LangGraph 核心架构价值评估与纯 Python 引擎（`agentcore.state_graph`）
+在复杂长任务与多智能体研发中，传统的黑盒命令式循环（Imperative Tool Loop）极易发生**工具停滞死循环**（如无指引地连续触发数百次文件检索却不进入实现与验证）。LangGraph 的核心优势在于将智能体协作重塑为显式、有状态、可回退的图机：
+1. **显式 StateGraph 与强类型 Reducers**：
+   任务状态由类型化字典承载，节点更新经由显式 Reducer 进行纯函数合并，彻底消除隐式局部变量污染。
+2. **确定性条件边（Gate-Driven Routing）**：
+   支持 `add_conditional_edges`，严格执行 `research -> implement -> verify -> [harvest / retry]` 状态跃迁；仅当验证门禁失败且重试次数未耗尽时方可触发回退，杜绝无限制盲目打转。
+3. **节点边界持久化快照（Durable Checkpointing）**：
+   提供 `SqliteCheckpointer`（WAL 模式）、`JsonCheckpointer` 与 `MemoryCheckpointer`。在长耗时任务或外部进程中断后，能精确在最近一次验证通过的节点断点续跑，无需从头重算。
+4. **停滞检测守卫（Tool-Loop Stagnation Guard）**：
+   计算相邻节点间的状态指纹（State Fingerprint）。当检测到任务在连续 `N` 步内未产生任何实质性状态增量（Zero Delta）时，主动抛出 `StagnationDetectedError`，强制熔断并触发人工干预或降级路由。
+5. **工作区收获门禁（Mandatory Worktree Harvest Gate）**：
+   智能体在独立 Git Worktree 完成验证并生成 Commit 后，图终态严格执行 `worktree_harvest` 校验，未合并或未提取的临时分支会触发 `WorktreeStrandedError`，杜绝已验证的代码资产静默遗失。
+
+### 7.2 任务卡片桥接状态机（`TaskCardBridge`）彻底解耦
+此前 `TaskCardBridge` 将**瞬态运行心跳（Running Heartbeat）**与**终态交付回执（Terminal Patch）**混在单一状态字段中，导致中间心跳超时（`unknown`）会永久阻塞终态卡片变绿（`finalized=1` 锁死）。
+- **正交化状态解耦**：将 `progress_patch_state`（过程心跳状态）与 `patch_state`（终态卡片状态）物理分拆。中间心跳的任何网络抖动或超时绝不拦截终态回执。
+- **真终态确认与有界重试**：只有在终端补丁明确成功送达平台时才落盘 `finalized=1, patch_state='idle'`；若遭遇超时，保留在重试队列中（最多 3 次指数退避重试），超限后降级至 `patch_state='degraded'` 并通过私聊/群聊直投文字底线兜底，杜绝卡片永久挂死。
+
+### 7.3 进程收敛状态机（`AttemptSupervisor`）与文件配额
+- **确定性收敛状态机**：`AttemptSupervisor` 规范为 `RUNNING -> STOPPING（5秒有界收敛 Deadline）-> EVIDENCE_EMITTED`。
+- **跨权限子进程防崩溃**：子进程衍生 `sudo` 或不同 UID 进程时，捕获 `PermissionError`/`ProcessLookupError`，记录 `unquiesced_pids`；当 5 秒超期时，确定性退出并输出带有 `quiescent=False` 的 `stop.json` / `evidence_fd`，驱动任务池状态机安全流转至终态。
+- **配额扩展**：默认 `--max-file`（`RLIMIT_FSIZE`）由 64MB 升级至 512MB，彻底消除大型环境部署与大产物输出时的 `SIGXFSZ` 崩溃。
+
+### 7.4 前台双通道交付与概念咨询直答
+- **前台解释文字 + 派单回执双通道并存**：前台大模型在同一轮次中输出专业分析文字并调用 `durable_submit` 时，网关层完整保留引导说明文本并与任务承兑回执拼接交付，拒绝截断覆盖。
+- **纯概念与架构意图直答（类别六）**：对于架构概念、设计哲学与方法论咨询，前台作为资深技术参谋直接在首轮深度专业作答，严禁无脑向后台反射性派发重型分析单。

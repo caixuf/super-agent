@@ -46,7 +46,7 @@ class WorkerSpec:
     target_host: Optional[str] = None
     concurrency: int = 1
     timeout: int = 600
-    max_file: int = 67108864
+    max_file: int = 536870912
     max_turns: int = 1000
     run_budget: int = 3600
     env: Dict[str, str] = field(default_factory=dict)
@@ -436,7 +436,7 @@ def load_profile_spec(data: Dict[str, Any], base_dir: Optional[Path] = None) -> 
                     target_host=w.get("target_host"),
                     concurrency=int(w.get("concurrency", 1)),
                     timeout=int(w.get("timeout", 600)),
-                    max_file=int(w.get("max_file", 67108864)),
+                    max_file=int(w.get("max_file", 536870912)),
                     max_turns=int(w.get("max_turns", 40)),
                     run_budget=int(w.get("run_budget", 480)),
                     env=dict(w.get("env") or {}),

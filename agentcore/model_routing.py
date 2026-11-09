@@ -27,6 +27,7 @@ PRO_ALLOWED_ROLES: Final[frozenset[str]] = frozenset({
     "deep_diagnosis",
     "reviewer",
     "triage",
+    "maintainer",
 })
 
 # Roles strictly forbidden from accessing 'pro' tier (forced to flash to prevent overdraft).
