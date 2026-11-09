@@ -1222,7 +1222,7 @@ class AttemptBoundSandboxAdapter:
         if self.network_policy == "allowed":
             cmd.append("--share-net")
 
-        for sys_root in ("/usr", "/bin", "/sbin", "/lib", "/lib64"):
+        for sys_root in ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt"):
             if Path(sys_root).exists():
                 cmd.extend(["--ro-bind", sys_root, sys_root])
         for etc_item in ("/etc/ld.so.cache", "/etc/alternatives", "/etc/localtime"):
@@ -1239,6 +1239,22 @@ class AttemptBoundSandboxAdapter:
             "--size", str(eff_budgets.max_disk_bytes),
             "--tmpfs", "/tmp/scratch",
         ])
+
+        bound_py_roots: set[str] = set()
+        for raw_py in (Path(sys.base_prefix), Path(sys.prefix), Path(sys.executable).parent.parent):
+            for candidate_py in (raw_py, raw_py.resolve(strict=False)):
+                c_str = str(candidate_py)
+                if not c_str or c_str == "/" or c_str in bound_py_roots or not candidate_py.exists():
+                    continue
+                if any(
+                    candidate_py == Path(sr) or candidate_py.is_relative_to(Path(sr))
+                    for sr in ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt")
+                ):
+                    continue
+                forbidden_py, _ = is_forbidden_host_path(candidate_py)
+                if not forbidden_py:
+                    cmd.extend(["--ro-bind", c_str, c_str])
+                    bound_py_roots.add(c_str)
 
         for ro_path in self.extra_ro_paths:
             if ro_path.exists():
@@ -1271,6 +1287,8 @@ class AttemptBoundSandboxAdapter:
                     if not ok_app:
                         cmd.extend(["--ro-bind", str(candidate), str(candidate)])
 
+        py_bin_dir = str(Path(sys.executable).parent)
+        sandbox_path = f"{py_bin_dir}:/usr/bin:/bin" if py_bin_dir not in ("/usr/bin", "/bin") else "/usr/bin:/bin"
         cmd.extend([
             "--remount-ro", "/run",
             "--remount-ro", "/var",
@@ -1280,13 +1298,16 @@ class AttemptBoundSandboxAdapter:
             "--chdir", str(wdir),
             "--setenv", "HOME", "/tmp/scratch",
             "--setenv", "TMPDIR", "/tmp/scratch",
-            "--setenv", "PATH", "/usr/bin:/bin",
+            "--setenv", "PATH", sandbox_path,
             "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
             "--setenv", ENV, self.token,
             "--setenv", "SUPERAGENT_JOB_ID", self.job,
             "--setenv", "SUPERAGENT_ATTEMPT_ID", self.attempt,
             "--setenv", "SUPERAGENT_INSTANCE_ID", self.instance_id,
         ])
+        host_ld_lib = os.environ.get("LD_LIBRARY_PATH", "").strip()
+        if host_ld_lib:
+            cmd.extend(["--setenv", "LD_LIBRARY_PATH", host_ld_lib])
 
         if self.extra_ro_paths:
             py_paths = ":".join(str(p) for p in self.extra_ro_paths)
@@ -1308,7 +1329,8 @@ class AttemptBoundSandboxAdapter:
             f"resource.setrlimit(resource.RLIMIT_NPROC, ({eff_budgets.max_procs}, {eff_budgets.max_procs}))\n"
             "os.execvp(sys.argv[1], sys.argv[1:])\n"
         )
-        cmd.extend(["--", "/usr/bin/python3", "-c", rlimit_bootstrap, *[str(a) for a in argv]])
+        bootstrap_py = sys.executable if Path(sys.executable).exists() else "/usr/bin/python3"
+        cmd.extend(["--", bootstrap_py, "-c", rlimit_bootstrap, *[str(a) for a in argv]])
         return cmd
 
     def active_sandbox_pids(self) -> list[int]:
