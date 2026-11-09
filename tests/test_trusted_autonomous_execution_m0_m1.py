@@ -1519,3 +1519,193 @@ def make():
     assert stop_data["quiescent"] is True
 
 
+def test_m1_large_file_rollback_on_disk_budget_and_append_verification(tmp_path: Path, monkeypatch):
+    """Verify >256 KiB pre-existing files and deleted files are rolled back on disk budget breach and append works on >256 KiB files."""
+    env_paths = _init_isolated_test_env_and_repo(tmp_path, monkeypatch)
+    repo_dir = env_paths["repo_dir"]
+    token = containment.new_token()
+
+    large_py = repo_dir / "large_module.py"
+    original_large_bytes = b"# header\n" + (b"x = 1\n" * 60000)  # ~360 KiB (> 256 KiB)
+    large_py.write_bytes(original_large_bytes)
+
+    fixlog_md = repo_dir / "FIXLOG.md"
+    original_fixlog_bytes = b"# Fix Log\n" + (b"- entry\n" * 40000)  # ~320 KiB (> 256 KiB)
+    fixlog_md.write_bytes(original_fixlog_bytes)
+
+    adapter = containment.AttemptBoundSandboxAdapter.create_host_bound(
+        attempt_dir=tmp_path / "attempt_large_rollback",
+        job="job-large-1",
+        attempt="att-large-1",
+        nonce="nonce-large-1",
+        token=token,
+        workdir=repo_dir,
+        role="cases",
+    )
+
+    # 1. Overwriting >256 KiB file + deleting calc.py while breaching max_disk_bytes rolls back both files!
+    res_disk = adapter.execute_in_sandbox(
+        [
+            sys.executable,
+            "-c",
+            "import pathlib\n"
+            "pathlib.Path('large_module.py').write_bytes(b'Y' * 450000)\n"
+            "pathlib.Path('calc.py').unlink()\n"
+            "pathlib.Path('extra_bloat.py').write_bytes(b'Z' * 50000)\n",
+        ],
+        target_paths=["large_module.py", "calc.py", "extra_bloat.py"],
+        budgets={"max_file_bytes": 2 * 1024 * 1024, "max_disk_bytes": 32768},
+    )
+    assert res_disk["ok"] is False
+    assert res_disk["budget_exceeded"] == "disk"
+    assert res_disk["exit_code"] == 125
+    assert large_py.read_bytes() == original_large_bytes
+    assert (repo_dir / "calc.py").is_file()
+    assert not (repo_dir / "extra_bloat.py").exists()
+
+    # 2. Appending to >256 KiB append-only file (FIXLOG.md) succeeds
+    res_append_ok = adapter.execute_in_sandbox(
+        [
+            sys.executable,
+            "-c",
+            "with open('FIXLOG.md', 'ab') as f:\n    f.write(b'- new appended fix\\n')\n",
+        ],
+        target_paths=["FIXLOG.md"],
+        action="append",
+    )
+    assert res_append_ok["ok"] is True
+    assert res_append_ok["policy_violation"] is False
+    updated_fixlog = fixlog_md.read_bytes()
+    assert updated_fixlog == original_fixlog_bytes + b"- new appended fix\n"
+
+    # 3. Overwriting prefix of >256 KiB append-only file (FIXLOG.md) is caught and rolled back
+    res_append_corrupt = adapter.execute_in_sandbox(
+        [
+            sys.executable,
+            "-c",
+            "import pathlib; pathlib.Path('FIXLOG.md').write_bytes(b'TAMPERED' + b'!' * 350000)\n",
+        ],
+        target_paths=["FIXLOG.md"],
+        action="append",
+    )
+    assert res_append_corrupt["ok"] is False
+    assert res_append_corrupt["policy_violation"] is True
+    assert res_append_corrupt["exit_code"] == 126
+    assert fixlog_md.read_bytes() == updated_fixlog
+
+
+def test_m1_post_exec_symlink_planting_escape_rejected_and_cleaned(tmp_path: Path, monkeypatch):
+    """Verify that planting symlinks inside workdir pointing to host secrets, outside workdir, or forbidden role paths is blocked and cleaned."""
+    env_paths = _init_isolated_test_env_and_repo(tmp_path, monkeypatch)
+    repo_dir = env_paths["repo_dir"]
+    outside_secret = tmp_path / "outside_secret.txt"
+    outside_secret.write_text("SECRET_OUTSIDE", encoding="utf-8")
+
+    token = containment.new_token()
+    adapter = containment.AttemptBoundSandboxAdapter.create_host_bound(
+        attempt_dir=tmp_path / "attempt_symlink_escape",
+        job="job-sym-1",
+        attempt="att-sym-1",
+        nonce="nonce-sym-1",
+        token=token,
+        workdir=repo_dir,
+        role="cases",
+    )
+
+    # 1. Planting a symlink pointing outside workdir
+    res_outside = adapter.execute_in_sandbox(
+        [
+            sys.executable,
+            "-c",
+            f"import os; os.symlink({str(outside_secret)!r}, 'planted_outside.py')",
+        ],
+        target_paths=["planted_outside.py"],
+    )
+    assert res_outside["ok"] is False
+    assert res_outside["policy_violation"] is True
+    assert res_outside["exit_code"] == 126
+    assert "post_exec_symlink_escape_outside_workdir" in res_outside["policy_violation_reason"]
+    assert not (repo_dir / "planted_outside.py").exists() and not (repo_dir / "planted_outside.py").is_symlink()
+
+    # 2. Replacing an existing tracked file (calc.py) with a symlink to ~/.ssh/id_rsa restores calc.py
+    orig_calc = (repo_dir / "calc.py").read_text(encoding="utf-8")
+    res_ssh = adapter.execute_in_sandbox(
+        [
+            sys.executable,
+            "-c",
+            "import os, pathlib; pathlib.Path('calc.py').unlink(); os.symlink('/root/.ssh/id_rsa', 'calc.py')",
+        ],
+        target_paths=["calc.py"],
+    )
+    assert res_ssh["ok"] is False
+    assert res_ssh["policy_violation"] is True
+    assert res_ssh["exit_code"] == 126
+    assert not (repo_dir / "calc.py").is_symlink()
+    assert (repo_dir / "calc.py").read_text(encoding="utf-8") == orig_calc
+
+    # 3. Planting a symlink inside workdir pointing to a role-forbidden file (SPEC.md)
+    res_spec = adapter.execute_in_sandbox(
+        [
+            sys.executable,
+            "-c",
+            "import os; os.symlink('SPEC.md', 'planted_spec.py')",
+        ],
+        target_paths=["planted_spec.py"],
+    )
+    assert res_spec["ok"] is False
+    assert res_spec["policy_violation"] is True
+    assert res_spec["exit_code"] == 126
+    assert "post_exec_symlink_target_role_denied" in res_spec["policy_violation_reason"]
+    assert not (repo_dir / "planted_spec.py").exists() and not (repo_dir / "planted_spec.py").is_symlink()
+
+
+def test_m1_concurrent_cancel_racing_with_sandbox_startup(tmp_path: Path, monkeypatch):
+    """Rapid concurrent cancel() racing against execute_in_sandbox startup must cleanly stop and reap with no JSONDecodeError or survivors."""
+    env_paths = _init_isolated_test_env_and_repo(tmp_path, monkeypatch)
+    repo_dir = env_paths["repo_dir"]
+
+    for idx in range(3):
+        token = containment.new_token()
+        adapter = containment.AttemptBoundSandboxAdapter.create_host_bound(
+            attempt_dir=tmp_path / f"attempt_race_{idx}",
+            job=f"job-race-{idx}",
+            attempt=f"att-race-{idx}",
+            nonce=f"nonce-race-{idx}",
+            token=token,
+            workdir=repo_dir,
+            role="cases",
+        )
+        barrier = threading.Barrier(2)
+        exec_outcomes: list[Any] = []
+
+        def _worker():
+            barrier.wait()
+            try:
+                r = adapter.execute_in_sandbox(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    budgets={"timeout_s": 30.0},
+                )
+                exec_outcomes.append(r)
+            except PermissionError as exc:
+                exec_outcomes.append({"cancelled_pre_exec": True, "error": str(exc)})
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        barrier.wait()
+        # Race cancel against subreaper startup window
+        time.sleep(0.002 * (idx + 1))
+        cancel_res = adapter.cancel(
+            expected_job=f"job-race-{idx}",
+            expected_attempt=f"att-race-{idx}",
+            expected_nonce=f"nonce-race-{idx}",
+            expected_token=token,
+        )
+        t.join(timeout=5.0)
+        assert cancel_res["ok"] is True, f"Race iteration {idx} cancel failed: {cancel_res}"
+        assert cancel_res["status"] == "stopped"
+        assert cancel_res["quiescent"] is True
+        assert cancel_res["new_actions_blocked"] is True
+        assert containment.tagged(token) == []
+
+
+

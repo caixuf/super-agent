@@ -29,6 +29,7 @@ import threading
 import time
 from typing import Any, Mapping, Optional, Sequence
 import uuid
+import zlib
 
 ENV = "AGENTCORE_ATTEMPT_TOKEN"
 _TOKEN = re.compile(r"[0-9a-f]{32}\Z")
@@ -666,8 +667,11 @@ def verify_attempt_binding_record(
     }
 
 
+_MAX_SNAPSHOT_INLINE_BYTES = 16 * 1024 * 1024
+
+
 def _snapshot_workdir(workdir: Path) -> dict[str, dict[str, Any]]:
-    """Capture sha256, size, and raw bytes (for small files) of all regular files in workdir."""
+    """Capture sha256, size, symlink state, and compressed bytes of files and symlinks in workdir."""
     snap: dict[str, dict[str, Any]] = {}
     if not workdir.is_dir():
         return snap
@@ -678,18 +682,105 @@ def _snapshot_workdir(workdir: Path) -> dict[str, dict[str, Any]]:
             continue
         if rel == ".git" or rel.startswith(".git/"):
             continue
-        if p.is_symlink() or not p.is_file():
+        if p.is_symlink():
+            try:
+                link_target = os.readlink(p)
+            except OSError:
+                continue
+            target_bytes = link_target.encode("utf-8", errors="surrogateescape")
+            snap[rel] = {
+                "is_symlink": True,
+                "link_target": link_target,
+                "sha256": "symlink:" + hashlib.sha256(target_bytes).hexdigest(),
+                "size": len(target_bytes),
+                "compressed": None,
+            }
+            continue
+        if not p.is_file():
             continue
         try:
-            raw = p.read_bytes()
+            st = p.stat()
+            if st.st_size <= _MAX_SNAPSHOT_INLINE_BYTES:
+                raw = p.read_bytes()
+                digest = hashlib.sha256(raw).hexdigest()
+                comp = zlib.compress(raw, level=1)
+                size = len(raw)
+            else:
+                h = hashlib.sha256()
+                size = 0
+                with p.open("rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        h.update(chunk)
+                        size += len(chunk)
+                digest = h.hexdigest()
+                comp = None
         except OSError:
             continue
         snap[rel] = {
-            "sha256": hashlib.sha256(raw).hexdigest(),
-            "size": len(raw),
-            "content": raw if len(raw) <= 262144 else None,
+            "is_symlink": False,
+            "link_target": None,
+            "sha256": digest,
+            "size": size,
+            "compressed": comp,
         }
     return snap
+
+
+def _file_prefix_sha256(path: Path, prefix_len: int) -> Optional[str]:
+    """Compute sha256 of the first prefix_len bytes of path without loading all of it into memory."""
+    if prefix_len < 0 or path.is_symlink() or not path.is_file():
+        return None
+    h = hashlib.sha256()
+    remaining = prefix_len
+    try:
+        with path.open("rb") as f:
+            while remaining > 0:
+                chunk = f.read(min(65536, remaining))
+                if not chunk:
+                    return None
+                h.update(chunk)
+                remaining -= len(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+def _unlink_entry(path: Path) -> None:
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _restore_snapshot_entry(workdir: Path, rel: str, entry: Mapping[str, Any]) -> None:
+    """Restore a single file or symlink in workdir from its pre-execution snapshot entry."""
+    dest = workdir / rel
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _unlink_entry(dest)
+        if entry.get("is_symlink"):
+            link_target = entry.get("link_target")
+            if isinstance(link_target, str):
+                os.symlink(link_target, dest)
+            return
+        comp = entry.get("compressed")
+        if comp is not None:
+            dest.write_bytes(zlib.decompress(comp))
+            return
+        if (workdir / ".git").exists():
+            subprocess.run(
+                ["git", "checkout", "--", rel],
+                cwd=workdir,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+    except OSError:
+        pass
 
 
 class AttemptBoundSandboxAdapter:
@@ -786,6 +877,7 @@ class AttemptBoundSandboxAdapter:
         self._lock = threading.RLock()
         self._cancelled = False
         self._stopped = False
+        self._active_executions = 0
         self._active_control: Optional[socket.socket] = None
         self._active_subreaper_pid: Optional[int] = None
         self._active_bwrap_pid: Optional[int] = None
@@ -1171,8 +1263,13 @@ class AttemptBoundSandboxAdapter:
             if rel == ".git" or rel.startswith(".git/"):
                 continue
             ok_write, why = validate_role_path_access(self.role, rel, action="write", root=wdir, ownership=ownership)
-            if not ok_write and why.startswith("path_in_never_list"):
-                cmd.extend(["--ro-bind", str(candidate), str(candidate)])
+            if not ok_write:
+                if why.startswith("path_in_never_list"):
+                    cmd.extend(["--ro-bind", str(candidate), str(candidate)])
+                elif candidate.is_file():
+                    ok_app, _ = validate_role_path_access(self.role, rel, action="append", root=wdir, ownership=ownership)
+                    if not ok_app:
+                        cmd.extend(["--ro-bind", str(candidate), str(candidate)])
 
         cmd.extend([
             "--remount-ro", "/run",
@@ -1282,7 +1379,7 @@ class AttemptBoundSandboxAdapter:
             with self._lock:
                 if self._cancelled or self._stopped:
                     raise PermissionError("attempt_cancelled_or_stopped")
-                self._active_control = ctrl_parent
+                self._active_executions += 1
 
             subreaper_cmd = [
                 sys.executable,
@@ -1308,16 +1405,22 @@ class AttemptBoundSandboxAdapter:
             os.close(res_w)
             res_w = None
 
-            with self._lock:
-                self._active_subreaper_pid = proc.pid
-                self._observed_sandbox_pids.add(proc.pid)
-
             cfg_blob = json.dumps({
                 "bwrap_argv": bwrap_argv,
                 "timeout_s": eff_timeout,
                 "max_output_bytes": eff_budgets.max_output_bytes,
             }).encode("utf-8") + b"\n"
             ctrl_parent.sendall(cfg_blob)
+
+            with self._lock:
+                self._active_control = ctrl_parent
+                self._active_subreaper_pid = proc.pid
+                self._observed_sandbox_pids.add(proc.pid)
+                if self._cancelled:
+                    try:
+                        ctrl_parent.sendall(b"stop\n")
+                    except OSError:
+                        pass
 
             ctrl_parent.settimeout(5.0)
             try:
@@ -1362,21 +1465,23 @@ class AttemptBoundSandboxAdapter:
                 "unquiesced_pids": [],
             }
         finally:
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    pass
             with self._lock:
                 self._active_control = None
                 self._active_subreaper_pid = None
                 self._active_bwrap_pid = None
+                if self._active_executions > 0:
+                    self._active_executions -= 1
             if ctrl_child is not None:
                 ctrl_child.close()
             if res_w is not None:
                 os.close(res_w)
             os.close(res_r)
             ctrl_parent.close()
-            if proc is not None and proc.poll() is None:
-                try:
-                    proc.wait(timeout=5.0)
-                except subprocess.TimeoutExpired:
-                    pass
 
         for opid in sub_out.get("observed_pids", []):
             if isinstance(opid, int) and opid > 0:
@@ -1397,57 +1502,86 @@ class AttemptBoundSandboxAdapter:
             budget_exceeded = "disk"
             for rel, meta in post_snap.items():
                 if rel not in pre_snap:
-                    try:
-                        (target_workdir / rel).unlink()
-                    except OSError:
-                        pass
-                elif pre_snap[rel]["content"] is not None:
-                    try:
-                        (target_workdir / rel).write_bytes(pre_snap[rel]["content"])
-                    except OSError:
-                        pass
+                    _unlink_entry(target_workdir / rel)
+                elif meta["sha256"] != pre_snap[rel]["sha256"]:
+                    _restore_snapshot_entry(target_workdir, rel, pre_snap[rel])
+            for rel in set(pre_snap) - set(post_snap):
+                _restore_snapshot_entry(target_workdir, rel, pre_snap[rel])
 
         policy_violation = False
         policy_violation_reason = ""
         from agentcore.colleague_dev import validate_role_path_access
+
+        def _check_symlink_target_safe(rel_path: str, link_target_str: str) -> tuple[bool, str]:
+            link_file = target_workdir / rel_path
+            raw_t = Path(link_target_str).expanduser()
+            forb_raw, f_why_raw = is_forbidden_host_path(raw_t)
+            if forb_raw:
+                return False, f"post_exec_symlink_forbidden_host_path:{rel_path}:{f_why_raw}"
+            cand = (link_file.parent / raw_t) if not raw_t.is_absolute() else raw_t
+            resolved_t = cand.resolve(strict=False)
+            forb_res, f_why_res = is_forbidden_host_path(resolved_t)
+            if forb_res:
+                return False, f"post_exec_symlink_forbidden_host_path:{rel_path}:{f_why_res}"
+            if not (resolved_t == target_workdir or resolved_t.is_relative_to(target_workdir)):
+                return False, f"post_exec_symlink_escape_outside_workdir:{rel_path}->{link_target_str}"
+            if resolved_t != target_workdir:
+                t_rel = resolved_t.relative_to(target_workdir).as_posix()
+                if t_rel == ".git" or t_rel.startswith(".git/"):
+                    return False, f"post_exec_symlink_to_git_denied:{rel_path}"
+                ok_tw, why_tw = validate_role_path_access(self.role, t_rel, action="write", root=target_workdir)
+                if not ok_tw:
+                    return False, f"post_exec_symlink_target_role_denied:{rel_path}->{t_rel}:{why_tw}"
+            return True, "ok"
+
         for rel, meta in post_snap.items():
             if rel not in pre_snap:
                 ok_w, reason_w = validate_role_path_access(self.role, rel, action="write", root=target_workdir)
                 if not ok_w:
                     policy_violation = True
                     policy_violation_reason = f"post_exec_create_denied:{rel}:{reason_w}"
-                    try:
-                        (target_workdir / rel).unlink()
-                    except OSError:
-                        pass
+                    _unlink_entry(target_workdir / rel)
+                    continue
+                if meta.get("is_symlink"):
+                    ok_sym, sym_reason = _check_symlink_target_safe(rel, str(meta.get("link_target") or ""))
+                    if not ok_sym:
+                        policy_violation = True
+                        policy_violation_reason = sym_reason
+                        _unlink_entry(target_workdir / rel)
             elif meta["sha256"] != pre_snap[rel]["sha256"]:
-                ok_w, reason_w = validate_role_path_access(self.role, rel, action="write", root=target_workdir)
-                if not ok_w:
-                    ok_app, _ = validate_role_path_access(self.role, rel, action="append", root=target_workdir)
-                    old_bytes = pre_snap[rel]["content"]
-                    new_bytes = meta["content"]
-                    if ok_app and old_bytes is not None and new_bytes is not None and new_bytes.startswith(old_bytes):
+                if meta.get("is_symlink"):
+                    ok_w, reason_w = validate_role_path_access(self.role, rel, action="write", root=target_workdir)
+                    if not ok_w:
+                        policy_violation = True
+                        policy_violation_reason = f"post_exec_modify_denied:{rel}:{reason_w}"
+                        _restore_snapshot_entry(target_workdir, rel, pre_snap[rel])
                         continue
-                    policy_violation = True
-                    policy_violation_reason = f"post_exec_modify_denied:{rel}:{reason_w}"
-                    if old_bytes is not None:
-                        try:
-                            (target_workdir / rel).write_bytes(old_bytes)
-                        except OSError:
-                            pass
+                    ok_sym, sym_reason = _check_symlink_target_safe(rel, str(meta.get("link_target") or ""))
+                    if not ok_sym:
+                        policy_violation = True
+                        policy_violation_reason = sym_reason
+                        _restore_snapshot_entry(target_workdir, rel, pre_snap[rel])
+                        continue
+                else:
+                    ok_w, reason_w = validate_role_path_access(self.role, rel, action="write", root=target_workdir)
+                    if not ok_w:
+                        ok_app, _ = validate_role_path_access(self.role, rel, action="append", root=target_workdir)
+                        old_size = int(pre_snap[rel]["size"])
+                        if (ok_app
+                                and not pre_snap[rel].get("is_symlink")
+                                and int(meta["size"]) >= old_size
+                                and _file_prefix_sha256(target_workdir / rel, old_size) == pre_snap[rel]["sha256"]):
+                            continue
+                        policy_violation = True
+                        policy_violation_reason = f"post_exec_modify_denied:{rel}:{reason_w}"
+                        _restore_snapshot_entry(target_workdir, rel, pre_snap[rel])
 
         for rel in set(pre_snap) - set(post_snap):
             ok_del, reason_del = validate_role_path_access(self.role, rel, action="write", root=target_workdir)
             if not ok_del:
                 policy_violation = True
                 policy_violation_reason = f"post_exec_delete_denied:{rel}:{reason_del}"
-                if pre_snap[rel]["content"] is not None:
-                    try:
-                        restored = target_workdir / rel
-                        restored.parent.mkdir(parents=True, exist_ok=True)
-                        restored.write_bytes(pre_snap[rel]["content"])
-                    except OSError:
-                        pass
+                _restore_snapshot_entry(target_workdir, rel, pre_snap[rel])
 
         if policy_violation:
             self.audit_log.append({
@@ -1552,7 +1686,7 @@ class AttemptBoundSandboxAdapter:
             ctrl = self._active_control
             active_spid = self._active_subreaper_pid
 
-        # Step 1: Send stop signal to any active sandbox execution immediately
+        # Step 1: Send stop signal to any active sandbox execution immediately and wait until all executions quiesce
         if ctrl is not None:
             try:
                 ctrl.sendall(b"stop\n")
@@ -1562,8 +1696,14 @@ class AttemptBoundSandboxAdapter:
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             with self._lock:
-                if self._active_subreaper_pid is None:
+                cur_ctrl = self._active_control
+                if self._active_executions == 0 and self._active_subreaper_pid is None:
                     break
+            if cur_ctrl is not None:
+                try:
+                    cur_ctrl.sendall(b"stop\n")
+                except OSError:
+                    pass
             time.sleep(0.02)
 
         # Step 2: Validate binding identity and supervisor state (do not forge stop proof on mismatch/missing)
@@ -1683,9 +1823,17 @@ class AttemptBoundSandboxAdapter:
     def trusted_containment_evidence(self) -> Optional[dict[str, Any]]:
         """Return the subreaper quiescence proof for the completed sandbox execution."""
         with self._lock:
-            if self._active_subreaper_pid is not None:
+            if self._active_executions > 0 or self._active_subreaper_pid is not None:
                 return None
-            return dict(self._last_stop_proof) if self._last_stop_proof is not None else None
+            if self._last_stop_proof is None:
+                return None
+            observed = sorted(self._observed_sandbox_pids)
+            proof = dict(self._last_stop_proof)
+        survivors = [pid for pid in observed if process_start(pid) is not None]
+        if survivors:
+            proof["quiescent"] = False
+            proof["unquiesced_pids"] = survivors
+        return proof
 
 
 def _sandbox_subreaper_main(ctrl_fd: int, res_fd: int) -> int:
@@ -1710,90 +1858,113 @@ def _sandbox_subreaper_main(ctrl_fd: int, res_fd: int) -> int:
         while b"\n" not in raw_cfg and len(raw_cfg) < 65536:
             chunk = ctrl.recv(4096)
             if not chunk:
+                cancelled = True
                 break
             raw_cfg.extend(chunk)
-        cfg = json.loads(raw_cfg.decode("utf-8").splitlines()[0])
+        lines = [ln.strip() for ln in raw_cfg.decode("utf-8", errors="replace").splitlines() if ln.strip()]
+        cfg_line = None
+        for ln in lines:
+            if ln.startswith("{"):
+                cfg_line = ln
+            elif ln == "stop":
+                cancelled = True
+        if cfg_line is None:
+            cancelled = True
+            cfg = {"bwrap_argv": [], "timeout_s": 1.0, "max_output_bytes": 4096}
+        else:
+            cfg = json.loads(cfg_line)
         bwrap_argv = cfg["bwrap_argv"]
         timeout_s = float(cfg["timeout_s"])
         max_output_bytes = int(cfg["max_output_bytes"])
 
-        bwrap_env = {"PATH": "/usr/bin:/bin"}
-        if os.environ.get(ENV):
-            bwrap_env[ENV] = os.environ[ENV]
-        bwrap_proc = subprocess.Popen(
-            bwrap_argv,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-            close_fds=True,
-            env=bwrap_env,
-        )
-        observed_pids.add(bwrap_proc.pid)
-        try:
-            ctrl.sendall((json.dumps({
-                "event": "started",
-                "bwrap_pid": bwrap_proc.pid,
-                "subreaper_pid": os.getpid(),
-            }) + "\n").encode("utf-8"))
-        except OSError:
-            pass
+        if not cancelled and bwrap_argv:
+            bwrap_env = {"PATH": "/usr/bin:/bin"}
+            if os.environ.get(ENV):
+                bwrap_env[ENV] = os.environ[ENV]
+            bwrap_proc = subprocess.Popen(
+                bwrap_argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+                close_fds=True,
+                env=bwrap_env,
+            )
+            observed_pids.add(bwrap_proc.pid)
+            try:
+                ctrl.sendall((json.dumps({
+                    "event": "started",
+                    "bwrap_pid": bwrap_proc.pid,
+                    "subreaper_pid": os.getpid(),
+                }) + "\n").encode("utf-8"))
+            except OSError:
+                pass
 
-        deadline = time.monotonic() + timeout_s
-        with selectors.DefaultSelector() as sel:
-            for name, stream in (("stdout", bwrap_proc.stdout), ("stderr", bwrap_proc.stderr)):
-                os.set_blocking(stream.fileno(), False)
-                sel.register(stream, selectors.EVENT_READ, name)
-            ctrl.setblocking(False)
-            sel.register(ctrl, selectors.EVENT_READ, "ctrl")
+            deadline = time.monotonic() + timeout_s
+            with selectors.DefaultSelector() as sel:
+                for name, stream in (("stdout", bwrap_proc.stdout), ("stderr", bwrap_proc.stderr)):
+                    os.set_blocking(stream.fileno(), False)
+                    sel.register(stream, selectors.EVENT_READ, name)
+                ctrl.setblocking(False)
+                sel.register(ctrl, selectors.EVENT_READ, "ctrl")
 
-            while True:
-                observed_pids.update(_descendant_pids(os.getpid()))
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    timed_out = True
-                    break
-                stream_keys = [k for k in sel.get_map().values() if k.data in ("stdout", "stderr")]
-                if not stream_keys and bwrap_proc.poll() is not None:
-                    break
-                events = sel.select(min(0.02, remaining))
-                stop_now = False
-                for key, _ in events:
-                    if key.data == "ctrl":
-                        try:
-                            msg = ctrl.recv(1024)
-                        except BlockingIOError:
-                            continue
-                        except OSError:
-                            msg = b""
-                        # Any message ('stop') or EOF (parent worker crash) triggers immediate stop!
-                        cancelled = True
-                        stop_now = True
+                while True:
+                    observed_pids.update(_descendant_pids(os.getpid()))
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        timed_out = True
                         break
-                    else:
-                        try:
-                            chunk = os.read(key.fd, 65536)
-                        except BlockingIOError:
-                            continue
-                        if not chunk:
-                            sel.unregister(key.fileobj)
-                            key.fileobj.close()
-                            continue
-                        target = buffers[key.data]
-                        room = max_output_bytes - len(target)
-                        target.extend(chunk[:room])
-                        if len(chunk) > room:
-                            output_limited = True
+                    stream_keys = [k for k in sel.get_map().values() if k.data in ("stdout", "stderr")]
+                    if not stream_keys and bwrap_proc.poll() is not None:
+                        break
+                    events = sel.select(min(0.02, remaining))
+                    stop_now = False
+                    for key, _ in events:
+                        if key.data == "ctrl":
+                            try:
+                                msg = ctrl.recv(1024)
+                            except BlockingIOError:
+                                continue
+                            except OSError:
+                                msg = b""
+                            # Any message ('stop') or EOF (parent worker crash) triggers immediate stop!
+                            cancelled = True
                             stop_now = True
                             break
-                if stop_now:
-                    break
+                        else:
+                            try:
+                                chunk = os.read(key.fd, 65536)
+                            except BlockingIOError:
+                                continue
+                            if not chunk:
+                                sel.unregister(key.fileobj)
+                                key.fileobj.close()
+                                continue
+                            target = buffers[key.data]
+                            room = max_output_bytes - len(target)
+                            target.extend(chunk[:room])
+                            if len(chunk) > room:
+                                output_limited = True
+                                stop_now = True
+                                break
+                    if stop_now:
+                        break
 
-        if not timed_out and not output_limited and not cancelled:
+            if not timed_out and not output_limited and not cancelled:
+                try:
+                    bwrap_proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+        else:
             try:
-                bwrap_proc.wait(timeout=max(0.0, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                timed_out = True
+                ctrl.sendall((json.dumps({
+                    "event": "cancelled_before_spawn",
+                    "bwrap_pid": None,
+                    "subreaper_pid": os.getpid(),
+                }) + "\n").encode("utf-8"))
+            except OSError:
+                pass
+            exit_code = -signal.SIGTERM
 
         # Reap all children and adopted grandchildren deterministically until ECHILD
         reap_deadline = time.monotonic() + 5.0

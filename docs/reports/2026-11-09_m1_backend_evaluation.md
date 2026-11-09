@@ -3,7 +3,7 @@
 - 评估日期：2026-11-09（Asia/Shanghai）
 - 依据规范：[`TRUSTED_AUTONOMOUS_EXECUTION_PLAN.md`](../TRUSTED_AUTONOMOUS_EXECUTION_PLAN.md) 第 3 节 M1 与第 4 节
 - 宿主环境：Linux 5.15+ x86_64, Ubuntu 24.04 LTS, Python 3.12.3
-- 状态：**已完成评估、选型落地与实测验收（`AttemptBoundSandboxAdapter` 已在 `agentcore/colleague_containment.py`、`agentcore/attempt_supervisor.py`、`agentcore/colleague_worker.py` 与 `agentcore/dev_runner.py` 落地并通过 27 项 M0/M1 专项回归验证）。**
+- 状态：**已完成评估、选型落地与实测验收（`AttemptBoundSandboxAdapter` 已在 `agentcore/colleague_containment.py`、`agentcore/attempt_supervisor.py`、`agentcore/colleague_worker.py` 与 `agentcore/dev_runner.py` 落地并通过 30 项 M0/M1 专项回归验证）。**
 
 ---
 

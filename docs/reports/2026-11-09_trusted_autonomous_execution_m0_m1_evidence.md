@@ -12,7 +12,7 @@
 | :--- | :--- |
 | **负责人和范围** | **实施负责人**：Antigravity Autonomous Coding Worker<br>**评审/验收责任人**：Super-Agent Coordinator / Lead Security Reviewer<br>**允许动作**：在独立测试 profile (`trusted_exec_test_profile`) 与独立 Git 测试仓库中完成 M0、M1 与 §4 第一批交付切片及正反例回归。<br>**禁止动作**：严禁生产切换 (`superagent.py update/install`)、严禁重启生产服务、严禁向生产队列/生产记忆写入或外发消息、严禁触碰外部并发会话持有的 `agentcore/memory/*` 等未提交文件。 |
 | **输入身份** | **源码基线**：本地 `main`，父提交 `6006129`（含已提交 M0 改动 `20b6259`、`6006129`）。<br>**宿主环境**：Linux 5.15+ x86_64, Ubuntu 24.04 LTS, Python 3.12.3, `bubblewrap` (`/usr/bin/bwrap` v0.9.0)。<br>**冻结配置与隔离审计**：本工作流仅修改并暂存 `agentcore/attempt_supervisor.py`、`agentcore/colleague_containment.py`、`agentcore/colleague_worker.py`、`agentcore/dev_runner.py`、`tests/test_trusted_autonomous_execution_m0_m1.py` 及对应计划/报告文档；工作区中外部并发会话的 `agentcore/memory/*`、`plugins/localvec/*`、`plugins/memory_bridge/*`、`tools/recall_*`、`tests/test_memory_four_evolutions_and_bridge.py` 已核对并严格隔离，不纳入本次提交。 |
-| **场景与结果** | **专项回归命令**：`pytest -v tests/test_trusted_autonomous_execution_m0_m1.py` → **`27 passed in 5.24s`**。<br>**全量关联与中性门禁命令**：`pytest -v tests/test_trusted_autonomous_execution_m0_m1.py tests/test_colleague_worker.py tests/test_colleague_containment.py tests/test_colleague_containment_trusted.py tests/test_colleague_dispatch.py tests/test_dev_runner.py tests/test_dev_exec_runner.py tests/test_colleague_dev_universal.py tests/test_cancel_request_truth.py tests/test_pool.py tests/test_repo_neutrality.py tests/test_business_neutrality.py` → **`238 passed, 1 skipped in 29.92s`**。<br>**跳过原因**：`tests/test_colleague_dispatch.py:82` 因当前 Python 环境未安装可选 C++ 扩展模块 `flowcoro_py` 而跳过 1 项，非关键门禁跳过。 |
+| **场景与结果** | **专项回归命令**：`pytest -v tests/test_trusted_autonomous_execution_m0_m1.py` → **`30 passed`**。<br>**全量关联与中性门禁命令**：`pytest -v tests/test_trusted_autonomous_execution_m0_m1.py tests/test_colleague_worker.py tests/test_colleague_containment.py tests/test_colleague_containment_trusted.py tests/test_colleague_dispatch.py tests/test_dev_runner.py tests/test_dev_exec_runner.py tests/test_colleague_dev_universal.py tests/test_cancel_request_truth.py tests/test_pool.py tests/test_repo_neutrality.py tests/test_business_neutrality.py` → **`241 passed, 1 skipped`**。<br>**跳过原因**：`tests/test_colleague_dispatch.py:82` 因当前 Python 环境未安装可选 C++ 扩展模块 `flowcoro_py` 而跳过 1 项，非关键门禁跳过。 |
 | **执行证据** | 1. **宿主前置绑定 (`binding.json`)**：`attempt_supervisor.py` 与 `AttemptBoundSandboxAdapter.create_host_bound` 在 attempt 专属目录以 `0o600`、`O_CREAT \| O_EXCL \| O_NOFOLLOW` 写入 `binding.json`，绑定 `job`、`attempt`、`token`、`nonce`、`instance_id`、`generation`、`boot_id`、`supervisor_pid` 与 `supervisor_start`。<br>2. **双路径沙箱执行**：`dev_runner.py` 中模型工具执行与 `verification_gate` 验收检查均通过 `AttemptBoundSandboxAdapter` (`bwrap` + `PR_SET_CHILD_SUBREAPER`) 执行，产物 `report.json` 与 `manifest.json` 记录 `containment_binding`、`containment_audit_log` 与 `containment_evidence`。<br>3. **停止回执 (`stop.json`)**：证明普通子进程、`setsid`/`double-fork` 脱离会话子进程、超时进程及 Worker `SIGKILL` 崩溃后的全部后代进程均被收割（`quiescent: true`, `unquiesced_pids: []`）。 |
 | **交付证据** | 第一批交付范围限于本地隔离测试 profile 与独立 Git 测试仓库中的补丁、产物 (`report.json`, `report.md`, `manifest.json`) 与队列回执核对；**不涉及真实外部前台通道投递**（真实通道投递属于 M4 范围，当前标记为未验收）。 |
 | **结论和回退** | **结论**：M0、M1 及 §4 第一批交付范围全部通过实测验证；M2–M5 保持未完成/未验收。<br>**限制与阻断项**：真实模型端到端闭环（M2）、完整故障矩阵（M3）、真实前台会话投递（M4）与灰度晋升（M5）尚未实施。<br>**回退步骤**：若需回退本次 M1 变更，可执行 `git revert <commit_sha>` 恢复至 `6006129`，门禁将自动退回无适配器 100% 拒绝状态。 |
@@ -21,13 +21,13 @@
 
 ## 2. 真实已证明项与验证记录（Raw Counts & Commands）
 
-### 2.1 M0 / M1 / §4 专项回归测试（27 项全通过）
+### 2.1 M0 / M1 / §4 专项回归测试（30 项全通过）
 
 ```bash
 pytest -v tests/test_trusted_autonomous_execution_m0_m1.py
 ```
 
-- **原始结果**：`27 passed in 5.24s`
+- **原始结果**：`30 passed`
 - **覆盖的具体正反例清单**：
   1. `test_m0_bridge_failure_does_not_silently_generate_synthetic_success` (PASS): 真实模式桥接不可用时抛出 `colleague_bridge_unavailable`，拒绝静默生成假成功。
   2. `test_m0_demo_mode_explicitly_labeled_as_synthetic` (PASS): 显式 `demo_mode=True` 输出、`manifest.json` 与 `report.json` 明确带有 `synthetic: true` 与 claim boundary。
@@ -56,6 +56,9 @@ pytest -v tests/test_trusted_autonomous_execution_m0_m1.py
   25. `test_m1_cancel_blocks_new_actions_and_reaps_setsid_descendants` (PASS): 两阶段 `cancel()` 先阻断后续执行请求，再终止并收割普通及 `setsid` double-fork 脱离会话子进程（宿主 `os.kill(pid, 0)` 确证 `ProcessLookupError`）；身份不符时保留 `status="unknown"`, `quiescent=False`。
   26. `test_m1_worker_sigkill_crash_reaps_sandbox_and_setsid_descendants` (PASS): 对真实 Worker 进程发送 `SIGKILL` (`kill -9`) 后，沙箱 subreaper 立即检测控制套接字 `EOF` 并连根收割 `bwrap` 与 `setsid` 脱离会话孙进程，确认无任何残留进程。
   27. `test_m1_end_to_end_dev_runner_and_pool_with_attempt_bound_sandbox_adapter` (PASS): 验证 `run_dev_job`（模型工具修改 + `verification_gate` 独立测试均在 `AttemptBoundSandboxAdapter` 内运行）及 `ColleagueDispatch` -> `Pool.run_claimed` -> `attempt_supervisor` -> `colleague_worker` (`AttemptBoundSandboxAdapter.from_environment`) 全链路通过，且 `binding.json` 与 `stop.json` 的 `instance_id`、`generation` 一致。
+  28. `test_m1_large_file_rollback_on_disk_budget_and_append_verification` (PASS): 验证 >256 KiB 已存在文件与被删文件在 `max_disk_bytes` 超限时逐字节完整回滚，且对 >256 KiB `append` 权限文件（如 `FIXLOG.md`）追加放行、篡改前缀精准拦截并回滚。
+  29. `test_m1_post_exec_symlink_planting_escape_rejected_and_cleaned` (PASS): 验证沙箱内植入指向工作树外、宿主敏感凭据（`~/.ssh/id_rsa`）或岗位禁写文件（`SPEC.md`）的符号链接被执行后审计拦截（`exit_code=126`, `policy_violation=True`）并自动清除/还原。
+  30. `test_m1_concurrent_cancel_racing_with_sandbox_startup` (PASS): 验证多线程高频并发 `adapter.cancel()` 与 `execute_in_sandbox()` 启动时刻竞争时无控制流解析异常，确定性收割并阻断后续动作（`quiescent=True`, `status="stopped"`）。
 
 ---
 
