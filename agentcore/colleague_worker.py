@@ -10,6 +10,7 @@ import argparse
 import importlib
 import json
 import os
+from pathlib import Path
 import sys
 
 from agentcore import colleague_containment as containment
@@ -51,14 +52,20 @@ def _attempt_token():
 def _trusted_containment_available(runner):
     """Check if verified attempt containment is available from runner or supervisor."""
     # A plain boolean alone is not proof (as verified by test_worker_succeeds_when_trusted_containment_is_provided).
-    # Only a verifiable evidence callback or supervisor proof file unlocks the gate.
+    # Only a verifiable evidence callback or valid supervisor proof unlocks the gate.
     if hasattr(runner, "has_trusted_containment_proof") and callable(runner.has_trusted_containment_proof):
         return bool(runner.has_trusted_containment_proof())
     if hasattr(runner, "trusted_containment_evidence") and callable(runner.trusted_containment_evidence):
-        return bool(runner.trusted_containment_evidence())
+        proof = runner.trusted_containment_evidence()
+        if isinstance(proof, dict):
+            return containment.verify_subreaper_containment(proof).get("ok", False)
     proof_path = os.environ.get("AGENTCORE_SUPERVISOR_PROOF_PATH")
     if proof_path and Path(proof_path).is_file():
-        return True
+        try:
+            proof = json.loads(Path(proof_path).read_text(encoding="utf-8"))
+            return containment.verify_subreaper_containment(proof).get("ok", False)
+        except Exception:
+            return False
     return False
 
 

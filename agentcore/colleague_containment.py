@@ -208,13 +208,16 @@ def verify_docker_containment(container: str, *, attempt_token: str | None = Non
 def verify_subreaper_containment(proof: dict, *,
                                  expected_token: str | None = None,
                                  expected_job: str | None = None,
-                                 expected_attempt: str | None = None) -> dict:
+                                 expected_attempt: str | None = None,
+                                 expected_nonce: str | None = None,
+                                 expected_supervisor_pid: int | None = None) -> dict:
     """Verify quiescence proof emitted by attempt_supervisor or trusted subreaper.
 
     Validates that:
     1. The proof dictionary is valid and scoped to subreaper_tree.
     2. Quiescence is proven (all child processes reaped, unquiesced_pids is empty).
-    3. Job, attempt, and token match expected values if specified.
+    3. Job, attempt, nonce, supervisor_pid, exit_code are valid and bound.
+    4. Match expected values if specified.
     """
     if not isinstance(proof, dict):
         return {"ok": False, "reason": "invalid_proof_format", "quiescent": False}
@@ -233,24 +236,48 @@ def verify_subreaper_containment(proof: dict, *,
     except ValueError:
         return {"ok": False, "reason": "invalid_proof_token", "quiescent": False}
 
+    job = proof.get("job")
+    if not isinstance(job, str) or not job.strip():
+        return {"ok": False, "reason": "missing_or_invalid_proof_job", "quiescent": False}
+
+    attempt = proof.get("attempt")
+    if not isinstance(attempt, str) or not attempt.strip():
+        return {"ok": False, "reason": "missing_or_invalid_proof_attempt", "quiescent": False}
+
+    nonce = proof.get("nonce")
+    if not isinstance(nonce, str) or not nonce.strip():
+        return {"ok": False, "reason": "missing_or_invalid_proof_nonce", "quiescent": False}
+
+    spid = proof.get("supervisor_pid")
+    if type(spid) is not int or spid <= 0:
+        return {"ok": False, "reason": "invalid_supervisor_pid", "quiescent": False}
+
+    exit_code = proof.get("exit_code")
+    if type(exit_code) is not int:
+        return {"ok": False, "reason": "invalid_proof_exit_code", "quiescent": False}
+
     if expected_token and token != expected_token:
         return {"ok": False, "reason": "proof_token_mismatch", "quiescent": False}
-    if expected_job and proof.get("job") != expected_job:
+    if expected_job and job != expected_job:
         return {"ok": False, "reason": "proof_job_mismatch", "quiescent": False}
-    if expected_attempt and proof.get("attempt") != expected_attempt:
+    if expected_attempt and attempt != expected_attempt:
         return {"ok": False, "reason": "proof_attempt_mismatch", "quiescent": False}
+    if expected_nonce and nonce != expected_nonce:
+        return {"ok": False, "reason": "proof_nonce_mismatch", "quiescent": False}
+    if expected_supervisor_pid is not None and spid != expected_supervisor_pid:
+        return {"ok": False, "reason": "proof_supervisor_pid_mismatch", "quiescent": False}
 
     evidence = {
         "ok": True,
         "token": token,
-        "job": proof.get("job"),
-        "attempt": proof.get("attempt"),
-        "nonce": proof.get("nonce"),
-        "supervisor_pid": proof.get("supervisor_pid"),
+        "job": job,
+        "attempt": attempt,
+        "nonce": nonce,
+        "supervisor_pid": spid,
         "quiescent": True,
         "proof_scope": "subreaper_tree",
         "observed_at": time.time(),
-        "exit_code": proof.get("exit_code"),
+        "exit_code": exit_code,
     }
     eid = evidence_id(evidence)
     if eid is None:
@@ -309,8 +336,16 @@ def evidence_id(evidence) -> str | None:
     elif scope == "subreaper_tree":
         if evidence.get("unquiesced_pids") or evidence.get("survivors"):
             return None
-        payload = json.dumps([token, evidence.get("job"), evidence.get("attempt"),
-                              evidence.get("nonce"), evidence.get("supervisor_pid")],
+        job = evidence.get("job")
+        attempt = evidence.get("attempt")
+        nonce = evidence.get("nonce")
+        spid = evidence.get("supervisor_pid")
+        if (not isinstance(job, str) or not job.strip()
+                or not isinstance(attempt, str) or not attempt.strip()
+                or not isinstance(nonce, str) or not nonce.strip()
+                or type(spid) is not int or spid <= 0):
+            return None
+        payload = json.dumps([token, job, attempt, nonce, spid],
                              separators=(",", ":"))
         return hashlib.sha256(payload.encode()).hexdigest()[:32]
     return None

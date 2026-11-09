@@ -280,7 +280,19 @@ def run_dev_job(
             except WorktreeStrandedError as exc:
                 payload["worktree_harvest_warning"] = str(exc)
     out = (output_dir or Path.cwd()).resolve()
+    try:
+        out.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError:
+        pass
     artifact_paths = [str(out / name) for name in ("report.json", "report.md", "manifest.json")]
+
+    execution_completed = bool(payload.get("ok")) and payload.get("error") != "tool_loop_stagnation_detected"
+    verification_passed = bool(verification_receipt and verification_receipt.get("all_passed"))
+    artifacts_valid = bool(out.is_dir())
+    if not artifacts_valid and ok:
+        ok = False
+        if not payload.get("error_message") and not payload.get("error"):
+            payload["error"] = "artifacts_destination_invalid"
 
     failure_decision = None
     err = payload.get("error_message") or payload.get("error")
@@ -294,9 +306,9 @@ def run_dev_job(
 
     report = {
         "ok": ok,
-        "execution_completed": True,
-        "verification_passed": bool(verification_receipt and verification_receipt.get("all_passed")),
-        "artifacts_valid": bool(out.is_dir()),
+        "execution_completed": execution_completed,
+        "verification_passed": verification_passed,
+        "artifacts_valid": artifacts_valid,
         "role": job["payload"].get("role"),
         "job": job.get("job"),
         "attempt": job.get("attempt"),
@@ -347,6 +359,9 @@ def run_dev_job(
     if not ok:
         ret = {
             "ok": False,
+            "execution_completed": execution_completed,
+            "verification_passed": verification_passed,
+            "artifacts_valid": artifacts_valid,
             "error": err or "execution_failed",
             "degraded": degraded,
             "degradation_reason": degradation_reason,
@@ -360,6 +375,9 @@ def run_dev_job(
 
     ret = {
         "ok": True,
+        "execution_completed": execution_completed,
+        "verification_passed": verification_passed,
+        "artifacts_valid": artifacts_valid,
         "degraded": degraded,
         "degradation_reason": degradation_reason,
         "result": {

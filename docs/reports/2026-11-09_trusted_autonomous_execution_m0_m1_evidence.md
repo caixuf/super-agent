@@ -42,13 +42,18 @@
 | **SC-08** | M1/Sec4 正向 | 在独立测试 Profile 与独立测试仓库中，Attempt Supervisor 监管下完成代码修改并通关验证 | 修复 `calc.py` 漏洞，`test_calc.py` 退出码 0，生成 `stop.json` | 修改成功，测试通过，静默停止证明完备 | **PASS** |
 | **SC-09** | M1/Sec4 停止 | Attempt 终止/超时时，`attempt_supervisor` 递归清理所有脱离会话的孤儿后代进程 | 杀死 `setsid` 孤儿进程，`waitpid` 达到 ECHILD，`quiescent: true` | 后代 PID 彻底销毁，证据写入 `stop.json` | **PASS** |
 | **SC-10** | M1/Sec4 故障反例 | 伪造 Token、复用 Job、篡改 Attempt、残留未清理 PID 或单纯布尔值断言 | `verify_subreaper_containment` 逐项拒绝并标明根因 | 精确拦截：`proof_token_mismatch`, `proof_job_mismatch`, `unquiesced_descendants_remain` | **PASS** |
+| **SC-11** | M0 故障反例 | 显式 `demo_mode` 下的合成执行严禁向 Git 分支创建假提交，且必须保留 Worktree | 不向 Git 分支提交，`worktree_preserved: true` | 正确阻止提交，完整保留工作树 | **PASS** |
+| **SC-12** | M0 边界 | 环境变量 `AGENTCORE_DEMO_MODE=0/false/no` 等假值严禁被误判为启用 Demo 模式 | 桥接缺失时保持关闭并报错 `colleague_bridge_unavailable` | 准确识别假值，严密阻断静默合成模式 | **PASS** |
+| **SC-13** | M0 故障反例 | Runner 执行失败时，收口报告与回执中 `execution_completed` 必须为 False | 报告与回执明确标记 `execution_completed: false` 与 `ok: false` | 准确标记，未将失败标记为执行完成 | **PASS** |
+| **SC-14** | M1/Sec4 故障反例 | 缺失 `job`/`attempt`/`nonce`/`supervisor_pid`/`exit_code` 的不完整证明核验 | `verify_subreaper_containment` 严格拒绝，`evidence_id` 返回 None | 严格拦截缺字段证明，消除未绑定证据隐患 | **PASS** |
+| **SC-15** | M1/Sec4 故障反例 | 环境变量 `AGENTCORE_SUPERVISOR_PROOF_PATH` 指向伪造或无效文件时尝试穿透门禁 | `_trusted_containment_available` 验证证明内容并拒绝 | 准确拦截伪造文件，未绕过前置门禁 | **PASS** |
 
 ---
 
 ## 4. 执行证据
 
-- **测试套件**：`tests/test_trusted_autonomous_execution_m0_m1.py`（10 项专项验证，10 passed）。
-- **定向关联回归**：`340 passed, 2 skipped in 62.91s`（覆盖全部受改动模块依赖、新测试 `test_trusted_autonomous_execution_m0_m1.py` 以及 `test_repo_neutrality.py` 等 16 个关联测试文件；按编排规范全库全量回归在各 Agent 交付后由调度编排器统一执行）。
+- **测试套件**：`tests/test_trusted_autonomous_execution_m0_m1.py`（15 项专项验证，15 passed in 2.53s）。
+- **定向关联回归**：`242 passed, 2 skipped in 24.88s`（覆盖全部受改动模块依赖、新测试 `test_trusted_autonomous_execution_m0_m1.py` 以及 `test_repo_neutrality.py` 等关联测试文件；按编排规范全库全量回归在各 Agent 交付后由调度编排器统一执行）。
 - **静默停止证据摘要**：
   ```json
   {

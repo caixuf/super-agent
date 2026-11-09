@@ -440,3 +440,143 @@ def test_section4_tampered_or_invalid_proof_rejected():
     res_bool = containment.sweep_and_verify(valid_token, runner_contained=True)
     assert res_bool.get("quiescent") is False
     assert containment.evidence_id(res_bool) is None
+
+
+def test_m0_execute_in_worktree_does_not_commit_on_synthetic_demo_mode(tmp_path: Path, monkeypatch):
+    """Synthetic execution in demo_mode must not commit to the git branch and must preserve worktree."""
+    repo = tmp_path / "repo_demo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    (repo / "README.md").write_text("# Initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial commit"], cwd=repo, check=True, capture_output=True)
+
+    orchestrator = ColleagueDevOrchestrator()
+    def fail_bridge():
+        raise RuntimeError("simulated_bridge_missing")
+    monkeypatch.setattr(orchestrator, "_ensure_bridge", fail_bridge)
+
+    res = orchestrator.execute_in_worktree(
+        repo_path=repo,
+        task_id="task-demo-commit-1",
+        requirement_text="Fix brake failure demo",
+        demo_mode=True,
+    )
+    assert res["ok"] is True
+    assert res.get("synthetic") is True
+    assert res.get("worktree_preserved") is True
+
+    # Branch must not have an autonomous colleague commit
+    log = subprocess.run(["git", "log", "-1", "dev-colleague/task-demo-commit-1", "--pretty=%s"],
+                         cwd=repo, capture_output=True, text=True)
+    assert log.returncode != 0 or "autonomous colleague pipeline" not in log.stdout
+
+
+def test_m0_demo_mode_env_var_falsy_values_disable_demo_mode(tmp_path: Path, monkeypatch):
+    """Setting AGENTCORE_DEMO_MODE=0 or false must NOT enable demo mode."""
+    orchestrator = ColleagueDevOrchestrator()
+    def fail_bridge():
+        raise RuntimeError("simulated_bridge_missing")
+    monkeypatch.setattr(orchestrator, "_ensure_bridge", fail_bridge)
+
+    for val in ("0", "false", "False", "no"):
+        monkeypatch.setenv("AGENTCORE_DEMO_MODE", val)
+        res = orchestrator.execute_autonomous_case_dev(
+            requirement_text="ACC Cruise activation",
+            workdir=tmp_path / f"work_{val}",
+            demo_mode=False,
+        )
+        assert res["ok"] is False
+        assert "colleague_bridge_unavailable" in res["error"]
+
+
+def test_m0_dev_runner_report_execution_failed_marks_execution_completed_false(tmp_path: Path):
+    """When runner fails, execution_completed must be False in receipt and report."""
+    workdir = tmp_path / "worktree_fail"
+    workdir.mkdir()
+    out_dir = tmp_path / "out_fail"
+    out_dir.mkdir()
+    policy = {"allowed_roots": [str(workdir)]}
+    job = {
+        "job": "job-fail-report",
+        "attempt": "att-1",
+        "payload": {"role": "cases", "goal": "Failing run"},
+    }
+    res = run_dev_job(
+        job=job,
+        policy=policy,
+        role="# Role",
+        workdir=workdir,
+        agent_dir=tmp_path / "agent",
+        output_dir=out_dir,
+        runner_callable=lambda p, k: {"ok": False, "error": "fatal_execution_error"},
+    )
+    assert res["ok"] is False
+    assert res["execution_completed"] is False
+    report = json.loads((out_dir / "report.json").read_text(encoding="utf-8"))
+    assert report["execution_completed"] is False
+    assert report["ok"] is False
+
+
+def test_section4_verify_subreaper_containment_rejects_missing_identity_fields():
+    """Proofs missing job, attempt, nonce, supervisor_pid, or exit_code must be rejected."""
+    valid_token = containment.new_token()
+    base_proof = {
+        "job": "job-sec4",
+        "attempt": "att-sec4",
+        "token": valid_token,
+        "nonce": "nonce-12345",
+        "quiescent": True,
+        "proof_scope": "subreaper_tree",
+        "supervisor_pid": 12345,
+        "exit_code": 0,
+    }
+
+    # Missing / empty job
+    res_no_job = containment.verify_subreaper_containment(dict(base_proof, job=""))
+    assert res_no_job["ok"] is False
+    assert res_no_job["reason"] == "missing_or_invalid_proof_job"
+
+    # Missing / empty attempt
+    res_no_att = containment.verify_subreaper_containment(dict(base_proof, attempt=None))
+    assert res_no_att["ok"] is False
+    assert res_no_att["reason"] == "missing_or_invalid_proof_attempt"
+
+    # Missing / empty nonce
+    res_no_nonce = containment.verify_subreaper_containment(dict(base_proof, nonce=""))
+    assert res_no_nonce["ok"] is False
+    assert res_no_nonce["reason"] == "missing_or_invalid_proof_nonce"
+
+    # Invalid supervisor_pid
+    res_bad_pid = containment.verify_subreaper_containment(dict(base_proof, supervisor_pid="not_int"))
+    assert res_bad_pid["ok"] is False
+    assert res_bad_pid["reason"] == "invalid_supervisor_pid"
+
+    res_zero_pid = containment.verify_subreaper_containment(dict(base_proof, supervisor_pid=0))
+    assert res_zero_pid["ok"] is False
+    assert res_zero_pid["reason"] == "invalid_supervisor_pid"
+
+    # Invalid exit_code
+    res_bad_code = containment.verify_subreaper_containment(dict(base_proof, exit_code=None))
+    assert res_bad_code["ok"] is False
+    assert res_bad_code["reason"] == "invalid_proof_exit_code"
+
+    # Evidence ID returns None if fields are missing
+    bad_evidence = dict(base_proof, supervisor_pid=0)
+    assert containment.evidence_id(bad_evidence) is None
+
+
+def test_colleague_worker_refuses_fake_supervisor_proof_file(tmp_path: Path, monkeypatch):
+    """An arbitrary or unverified file in AGENTCORE_SUPERVISOR_PROOF_PATH must be refused."""
+    fake_proof_file = tmp_path / "fake_proof.json"
+    fake_proof_file.write_text('{"token": "not-valid", "quiescent": false}', encoding="utf-8")
+    monkeypatch.setenv("AGENTCORE_SUPERVISOR_PROOF_PATH", str(fake_proof_file))
+
+    class DummyRunner:
+        attempt_containment = "runner_and_descendants"
+    runner = DummyRunner()
+
+    from agentcore.colleague_worker import _trusted_containment_available
+    assert _trusted_containment_available(runner) is False

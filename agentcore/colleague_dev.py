@@ -483,7 +483,8 @@ class ColleagueDevOrchestrator:
             return res
         except Exception as exc:
             # Standalone self-healing fallback ONLY when demo_mode is explicitly enabled
-            if not demo_mode and not os.environ.get("AGENTCORE_DEMO_MODE"):
+            is_demo = bool(demo_mode) or os.environ.get("AGENTCORE_DEMO_MODE") in ("1", "true", "True")
+            if not is_demo:
                 return {
                     "ok": False,
                     "approved": False,
@@ -583,7 +584,7 @@ class ColleagueDevOrchestrator:
 
         graph = builder.compile(
             stagnation_limit=3,
-            worktree_harvest_check=bool(work_path and (work_path / ".git").exists()),
+            worktree_harvest_check=False,
         )
         initial_state = {
             "task_id": task_id,
@@ -651,7 +652,7 @@ class ColleagueDevOrchestrator:
                     demo_mode=demo_mode,
                 )
                 manifest_file = worktree_dir / "manifest.json"
-                if result.get("ok") and manifest_file.is_file():
+                if result.get("ok") and not result.get("synthetic") and manifest_file.is_file():
                     subprocess.run(["git", "add", "."], cwd=str(worktree_dir), check=True, capture_output=True)
                     subprocess.run(["git", "commit", "-m", f"chore(dev): autonomous colleague pipeline {task_id}"],
                                    cwd=str(worktree_dir), check=True, capture_output=True)
