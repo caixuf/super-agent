@@ -2169,7 +2169,8 @@ def _deploy_version_observation(manifest: dict[str, Any], current: Path, profile
             pid = obs.get("main_pid")
             if isinstance(pid, int) and pid > 0:
                 p_start = _process_start_time(pid)
-                if p_start is not None and p_start < installed_at:
+                # /proc/stat btime and ps lstart have 1-second integer resolution
+                if p_start is not None and p_start < float(installed_at) - 2.0:
                     svc = obs.get("service")
                     if svc and svc not in stale_processes:
                         stale_processes.append(svc)
@@ -2731,7 +2732,8 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
                     pid = int(fields.get("MainPID", "0"))
                     if pid > 0:
                         p_start = _process_start_time(pid)
-                        if p_start is not None and p_start < installed_at:
+                        # Allow 2s tolerance for /proc/stat integer btime truncation
+                        if p_start is not None and p_start < float(installed_at) - 2.0:
                             raise RuntimeError("service_not_restarted_on_new_release")
         if was_active["worker"] and getattr(args, "legacy_engine_root", None):
             observed = _worker_runtime_observation(args.profile, root / "current")
