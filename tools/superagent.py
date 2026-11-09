@@ -1569,11 +1569,14 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     manifest_path = root / "install-manifest.json"
     _write_json_atomic(manifest_path, manifest)
     _prune_old_releases(root, release, manifest_path, keep=getattr(args, "keep", 3))
+    try:
+        manifest["release_history"] = json.loads(manifest_path.read_text(encoding="utf-8")).get("release_history", manifest["release_history"])
+    except Exception:
+        pass
     out = {"status": "installed", **manifest}
     if guard_warnings:
         out["warnings"] = guard_warnings
     print(json.dumps(out, ensure_ascii=False, indent=2))
-    return 0
     return 0
 
 
@@ -1756,6 +1759,13 @@ def _process_start_time(pid: int) -> float | None:
                         break
             if btime > 0 and clk_tck > 0:
                 return float(btime + (starttime_ticks / clk_tck))
+    except Exception:
+        pass
+    try:
+        proc = _run(["ps", "-p", str(pid), "-o", "lstart="], env=dict(os.environ, LC_ALL="C"))
+        if proc.returncode == 0 and proc.stdout.strip():
+            raw_date = proc.stdout.strip()
+            return float(dt.datetime.strptime(raw_date, "%a %b %d %H:%M:%S %Y").timestamp())
     except Exception:
         pass
     try:
@@ -2120,16 +2130,18 @@ def _deploy_version_observation(manifest: dict[str, Any], current: Path, profile
         identity = manifest.get("identity", "")
         if identity and isinstance(identity, str):
             cand = identity.removesuffix("-dirty")
-            res = _run(["git", "rev-parse", "--verify", f"{cand}^{{commit}}"], cwd=REPO)
-            installed_commit = res.stdout.strip() if res.returncode == 0 else cand
+            source_repo_val = manifest.get("source_repo")
+            repo_to_check = Path(source_repo_val) if source_repo_val and Path(source_repo_val).is_dir() else REPO
+            res = _run(["git", "rev-parse", "--verify", f"{cand}^{{commit}}"], cwd=repo_to_check)
+            installed_commit = res.stdout.strip() if res.returncode == 0 else "unknown"
         else:
             installed_commit = "unknown"
 
-    installed_dirty_val = manifest.get("source_dirty")
-    if installed_dirty_val is not None:
-        installed_dirty = bool(installed_dirty_val)
-    elif manifest.get("identity"):
-        installed_dirty = "-dirty" in str(manifest.get("identity", ""))
+    installed_dirty_val = manifest.get("identity")
+    if installed_dirty_val:
+        installed_dirty = "-dirty" in str(installed_dirty_val)
+    elif manifest.get("source_dirty") is not None:
+        installed_dirty = bool(manifest.get("source_dirty"))
     else:
         installed_dirty = "unknown"
 
@@ -2179,6 +2191,7 @@ def _deploy_version_observation(manifest: dict[str, Any], current: Path, profile
         reasons.append("stale_processes")
 
     return {
+        "status": "drift" if reasons else "ready",
         "installed_commit": installed_commit,
         "installed_dirty": installed_dirty,
         "source_repo": source_repo,
@@ -2811,13 +2824,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         cmd = commands.add_parser(name)
         cmd.add_argument("--keep-data", action="store_true")
         if name in ("install", "update"):
-            cmd.add_argument("--allow-dirty", action="store_true",
+            cmd.add_argument("--allow-dirty", action="store_true", default=argparse.SUPPRESS,
                              help="Allow installation from a dirty git working tree")
-            cmd.add_argument("--adopt-source", action="store_true",
+            cmd.add_argument("--adopt-source", action="store_true", default=argparse.SUPPRESS,
                              help="Adopt a new source repository path when mismatched")
-            cmd.add_argument("--allow-downgrade", action="store_true",
+            cmd.add_argument("--allow-downgrade", action="store_true", default=argparse.SUPPRESS,
                              help="Allow installing a commit that is not a descendant of the prior commit")
-            cmd.add_argument("--expect-commit", type=str, default=None,
+            cmd.add_argument("--expect-commit", type=str, default=argparse.SUPPRESS,
                              help="Require source_commit to resolve to this commit")
         if name == "prune-releases":
             cmd.add_argument("--keep", type=int, default=3,

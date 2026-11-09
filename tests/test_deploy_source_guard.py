@@ -421,3 +421,109 @@ exit 0
     assert data_update["status"] in ("rolled-back", "rollback-incomplete")
     assert "service_not_restarted_on_new_release" in data_update["error"]
 
+
+def test_rollback_after_two_consecutive_installs(tmp_path):
+    repo = _make_git_repo(tmp_path / "repo")
+    c1 = _make_commit(repo, "version 1")
+    profile, hermes, managed_root = _seed_test_env(tmp_path)
+
+    # First install
+    res1 = _run_tool(repo, profile, hermes, managed_root, "install")
+    assert res1.returncode == 0
+    manifest1 = json.loads((managed_root / "demo/install-manifest.json").read_text(encoding="utf-8"))
+    assert manifest1["release_history"] == []
+    rel1 = Path(manifest1["release"]).resolve()
+
+    # Second install
+    c2 = _make_commit(repo, "version 2")
+    res2 = _run_tool(repo, profile, hermes, managed_root, "install")
+    assert res2.returncode == 0
+    manifest2 = json.loads((managed_root / "demo/install-manifest.json").read_text(encoding="utf-8"))
+    assert manifest2["release_history"] == [str(rel1)]
+    assert (managed_root / "demo/current").resolve() != rel1
+
+    # Rollback succeeds after two consecutive installs
+    res_rb = _run_tool(repo, profile, hermes, managed_root, "rollback")
+    assert res_rb.returncode == 0
+    rb_data = json.loads(res_rb.stdout)
+    assert rb_data["status"] == "rolled-back"
+    assert (managed_root / "demo/current").resolve() == rel1
+
+
+def test_doctor_detects_stale_processes(tmp_path):
+    repo = _make_git_repo(tmp_path / "repo")
+    c1 = _make_commit(repo, "version 1")
+    profile, hermes, managed_root = _seed_test_env(tmp_path)
+
+    res_install = _run_tool(repo, profile, hermes, managed_root, "install")
+    assert res_install.returncode == 0
+
+    # Mock systemctl so MainPID=1 (boot time < installed_at)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    stub = bindir / "systemctl"
+    stub.write_text(
+        """#!/bin/sh
+case "$*" in
+    *"property=MainPID"*)
+        printf 'ActiveState=active\\nMainPID=1\\n'
+        exit 0
+        ;;
+esac
+exit 0
+""", encoding="utf-8")
+    stub.chmod(0o755)
+
+    env_override = {
+        "PATH": str(bindir) + os.pathsep + os.environ["PATH"],
+    }
+    res_doc = _run_tool(repo, profile, hermes, managed_root, "doctor", env_override=env_override)
+    assert res_doc.returncode == 1
+    doc = json.loads(res_doc.stdout)
+    assert doc["status"] == "drift"
+    obs = doc["deploy_version_observation"]
+    assert "stale_processes" in obs["reasons"]
+    assert any("hermes-gateway" in s or "superagent-worker" in s for s in obs["stale_processes"])
+
+
+def test_doctor_legacy_unresolvable_reports_unknown(tmp_path):
+    repo = _make_git_repo(tmp_path / "repo")
+    c1 = _make_commit(repo, "version 1")
+    profile, hermes, managed_root = _seed_test_env(tmp_path)
+
+    res_install = _run_tool(repo, profile, hermes, managed_root, "install")
+    assert res_install.returncode == 0
+
+    manifest_path = managed_root / "demo" / "install-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("source_commit", None)
+    manifest["identity"] = "nonexistent-tag-dirty"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    res_doc = _run_tool(repo, profile, hermes, managed_root, "doctor")
+    assert res_doc.returncode == 1
+    doc = json.loads(res_doc.stdout)
+    assert doc["status"] == "drift"
+    obs = doc["deploy_version_observation"]
+    assert obs["installed_commit"] == "unknown"
+    assert obs["installed_dirty"] is True
+    assert "installed_dirty" in obs["reasons"]
+
+
+def test_process_start_time_ps_lstart_fallback(monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("superagent", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # Force /proc stat checks to fail so it falls back to ps -o lstart=
+    original_is_file = Path.is_file
+    monkeypatch.setattr(Path, "is_file", lambda self: False if "/proc" in str(self) else original_is_file(self))
+
+    t = mod._process_start_time(os.getpid())
+    assert t is not None
+    assert t > 0
+    assert abs(t - time.time()) < 300
+
+
+
