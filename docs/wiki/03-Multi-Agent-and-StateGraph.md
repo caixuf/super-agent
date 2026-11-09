@@ -14,23 +14,26 @@
 Super Agent 提出了**“同事制多智能体（Colleague Multi-Agent Team）”**组织学模型：
 
 ```mermaid
-graph LR
+graph TD
     classDef front fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#137333;
     classDef pool fill:#FCE8E6,stroke:#EA4335,stroke-width:2px,color:#C5221F;
     classDef dev fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#1A73E8;
     classDef guard fill:#FEF7E0,stroke:#FBBC04,stroke-width:2px,color:#B06000;
 
-    User["用户 / 协同平台消息"] --> Frontdesk["前台接待员 (Frontdesk)"]:::front
-    Frontdesk -->|鉴权分诊 & 快速回执| User
+    User["用户 / 协同平台消息"] <--> Frontdesk["前台接待员 (Frontdesk Receptionist)"]:::front
     Frontdesk -->|持久投递| Queue["SQLite 持久任务池 (Durable Pool)"]:::pool
 
-    Queue --> Worker1["架构师 (architect)"]:::dev
-    Queue --> Worker2["研发专家 (cases)"]:::dev
-    Queue --> Worker3["红队质检 (reviewer)"]:::dev
-    Queue --> Worker4["仿真测试 (test)"]:::dev
+    subgraph Workers ["8 大研发专家同事 (Background Workers)"]
+        direction LR
+        Worker1["架构师 (architect)"]:::dev
+        Worker2["研发专家 (cases)"]:::dev
+        Worker3["红队质检 (reviewer)"]:::dev
+        Worker4["仿真测试 (test)"]:::dev
+    end
 
-    Worker1 & Worker2 & Worker3 & Worker4 --> Raven["Raven 路径所有权矩阵 (RolePathOwnership)"]:::guard
-    Raven --> CodeRepo["代码版本库 (Git Worktree 隔离)"]
+    Queue --> Workers
+    Workers --> Raven["Raven 路径所有权矩阵 (RolePathOwnership)"]:::guard
+    Raven --> CodeRepo["代码版本库 (Git Worktree 独立隔离)"]
 ```
 
 ### 1.1 前台接待员（Frontdesk Receptionist）
@@ -164,16 +167,16 @@ stateDiagram-v2
 - **智能体经验轨迹 (Agent Track)**：专职记录任务处置案例（`AgentCase`）与提炼高质量可复用程序化技能（`ProceduralSkill`）。
 
 ```mermaid
-graph LR
+graph TD
     classDef step fill:#E8F0FE,stroke:#4285F4,stroke-width:1px;
     classDef skill fill:#E6F4EA,stroke:#34A853,stroke-width:2px;
 
     Task["长任务执行完成"] --> Case["记录 AgentCase (意图/方案/证据/验收分)"]:::step
     Case --> Evaluate["成熟度评估 (质量评分 >= 0.85)"]:::step
     Evaluate --> Distill["技能蒸馏器 (Skill Distillation)"]:::step
-    Distill --> MarkdownSkill["生成 Markdown 技能 (SKILL.md)"]:::skill
+    Distill --> MarkdownSkill["生成 Markdown 技能文件 (SKILL.md)"]:::skill
     MarkdownSkill --> Recall["混合意图召回 (Hybrid Intent Recall)"]:::step
-    Recall --> NextTask["为后续类似任务动态注入最佳实践 Prompt"]
+    Recall --> NextTask["后续同类任务动态注入最佳实践 Prompt"]
 ```
 
 ### 技能成熟度管理 (`maturity_score`)
@@ -185,3 +188,5 @@ graph LR
 ---
 
 > ➡️ **下一步**：了解如何将长任务进度与高质量图表交付给用户，请阅读 [04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md)。
+>
+> 🧭 [⬅️ 上一篇：02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [🏠 返回 Wiki 首页 (Home)](Home.md) │ [➡️ 下一篇：04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md)

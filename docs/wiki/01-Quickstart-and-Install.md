@@ -206,3 +206,5 @@ python3 tools/superagent.py uninstall --profile dev --apply
 ---
 
 > ➡️ **下一步**：单根环境就绪后，请阅读 [02. 业务知识挂载指南](02-Business-Overlay-Guide.md) 了解如何零污染接入业务 MCP、Skills 与领域专家角色。
+>
+> 🧭 [🏠 返回 Wiki 首页 (Home)](Home.md) │ [➡️ 下一篇：02. 业务知识挂载指南](02-Business-Overlay-Guide.md)

@@ -119,3 +119,5 @@ graph LR
 ---
 
 > ➡️ **下一步**：掌握系统的日常监控、诊断工具与应急故障处置，请阅读 [05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)。
+>
+> 🧭 [⬅️ 上一篇：03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [🏠 返回 Wiki 首页 (Home)](Home.md) │ [➡️ 下一篇：05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)

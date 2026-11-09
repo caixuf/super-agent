@@ -1,6 +1,6 @@
 # Super Agent 用户与架构 Wiki (User & Architecture Wiki)
 
-> 📚 **导航导航 / Wiki Navigation**
+> 📚 **知识库导览 / Wiki Navigation**
 > [🏠 Wiki 首页 (Home)](Home.md) │ [🚀 01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [🧩 02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [🤖 03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [📨 04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [🛠️ 05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
 
 ---
@@ -25,59 +25,53 @@ Super Agent 采用**中立引擎（Neutral Engine）**与**业务叠加层（Bus
 Super Agent 采用清晰的分层架构设计，各层间严格遵循单向依赖与状态栅栏约束：
 
 ```mermaid
-graph TD
+flowchart TD
     classDef client fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#1A73E8;
     classDef front fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#137333;
-    classDef stgraph fill:#FEF7E0,stroke:#FBBC04,stroke-width:2px,color:#B06000;
     classDef pool fill:#FCE8E6,stroke:#EA4335,stroke-width:2px,color:#C5221F;
+    classDef stgraph fill:#FEF7E0,stroke:#FBBC04,stroke-width:2px,color:#B06000;
     classDef storage fill:#F3E8FD,stroke:#A142F4,stroke-width:2px,color:#7627BB;
 
     Client["企业协同终端 / IM 客户端 / CLI 交互"]:::client
-    
-    subgraph LayerFront ["一、前台交互与网关层 (Frontdesk Gateway)"]
-        Gateway["前台接待员 (Frontdesk Receptionist)"]:::front
-        BoundaryGate["可信边界防御 (Frontdesk Boundary Gate)"]:::front
-        CardEngine["CardKit 2.0 流式交互卡片引擎"]:::front
+
+    subgraph L1 ["一、前台交互与网关层 (Frontdesk Gateway)"]
+        direction LR
+        Gateway["前台接待员 (Frontdesk)"]:::front
+        Boundary["可信边界防御 (Boundary Gate)"]:::front
+        CardEngine["CardKit 2.0 流式卡片引擎"]:::front
+        Gateway --> Boundary --> CardEngine
     end
 
-    subgraph LayerGraph ["二、多智能体协同与状态机层 (Multi-Agent StateGraph)"]
-        StateGraphEngine["StateGraph 状态图引擎 (SQLite WAL 检查点)"]:::stgraph
-        RavenGuard["Raven 路径所有权矩阵 (RolePathOwnership)"]:::stgraph
-        Colleagues["8 大官方研发专家角色 (DEV_ROLES)"]:::stgraph
-        SkillForgeEngine["SkillForge 程序化技能锻造与案例记忆"]:::stgraph
+    subgraph L2 ["二、任务执行与持久运行时 (Durable Runtime)"]
+        direction LR
+        DPool["SQLite 持久任务池 (Durable Pool)"]:::pool
+        Supervisor["Subreaper 进程监管与租约隔离"]:::pool
+        DevRunner["Git Worktree + 三级模型路由"]:::pool
+        DPool --> Supervisor --> DevRunner
     end
 
-    subgraph LayerRuntime ["三、持久任务与执行运行时 (Durable Runtime)"]
-        DurablePool["持久任务池 (SQLite Durable Pool & Outbox)"]:::pool
-        AttemptSupervisor["Linux Subreaper 进程监管与租约隔离"]:::pool
-        DevRunner["独立 Git Worktree + fcntl.flock 排他运行器"]:::pool
-        ModelRouter["确定性三级模型路由与 ADR-S1~S6 护栏"]:::pool
+    subgraph L3 ["三、多智能体协同与状态机层 (Multi-Agent StateGraph)"]
+        direction LR
+        SG["StateGraph 状态图引擎 (WAL 检查点)"]:::stgraph
+        Roles["8 大官方研发专家角色 (DEV_ROLES)"]:::stgraph
+        Raven["Raven 路径所有权矩阵 (RolePathOwnership)"]:::stgraph
+        SG --> Roles --> Raven
     end
 
-    subgraph LayerRoot ["四、单根受管与存储治理层 (Single-Root ~/super_agent)"]
-        SingleRoot["单根目录拓扑 (releases / current / state / config)"]:::storage
-        MemoryEngine["双路召回记忆引擎 (LocalVec + FactTags + 分桶)"]:::storage
-        DeliveryPipeline["图文渲染与云文档交付管道 (arch_doc / Markdown)"]:::storage
-        OpsSuite["运维自愈套件 (superagent.py / doctor / prune-releases)"]:::storage
+    subgraph L4 ["四、单根受管与存储治理层 (Single-Root ~/super_agent)"]
+        direction LR
+        SRoot["单根目录拓扑 (releases/state/config)"]:::storage
+        Memory["双路召回记忆引擎 (LocalVec + FactTags)"]:::storage
+        Delivery["图文与云文档交付管道 (arch_doc)"]:::storage
+        SRoot --> Memory --> Delivery
     end
 
     Client <--> Gateway
-    Gateway --> BoundaryGate
-    BoundaryGate --> CardEngine
-    BoundaryGate --> DurablePool
-    DurablePool --> AttemptSupervisor
-    AttemptSupervisor --> StateGraphEngine
-    StateGraphEngine --> Colleagues
-    Colleagues --> RavenGuard
-    Colleagues --> DevRunner
-    Colleagues --> SkillForgeEngine
-    DevRunner --> ModelRouter
-    AttemptSupervisor --> DeliveryPipeline
-    DeliveryPipeline --> CardEngine
-    CardEngine --> Client
-    StateGraphEngine -.-> MemoryEngine
-    AttemptSupervisor -.-> SingleRoot
-    OpsSuite -.-> SingleRoot
+    CardEngine <--> Client
+    Boundary -->|持久投递| DPool
+    DevRunner -->|驱动工作流| SG
+    Raven -->|写入产物| Delivery
+    Delivery -.->|卡片流式刷新| CardEngine
 ```
 
 ---
@@ -125,3 +119,5 @@ graph TD
 ---
 
 > 💡 **小贴士**：开始使用请继续阅读：[01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md)
+>
+> ➡️ [下一篇：01. 5分钟快速上手与单根部署 (01-Quickstart-and-Install.md)](01-Quickstart-and-Install.md)

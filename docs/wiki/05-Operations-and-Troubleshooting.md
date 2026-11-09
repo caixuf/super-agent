@@ -210,4 +210,5 @@ python3 tools/superagent.py rollback --profile <profile>
 ---
 
 > 💡 **至此已通读 Super Agent User Wiki 全部章节！**
-> 返回 [🏠 Wiki 首页 (Home)](Home.md) 查看全局知识索引。
+>
+> 🧭 [⬅️ 上一篇：04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [🏠 返回 Wiki 首页 (Home)](Home.md)
