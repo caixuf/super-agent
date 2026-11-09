@@ -22,6 +22,7 @@ from __future__ import annotations
 import enum
 import hashlib
 import inspect
+import json
 import logging
 import math
 import os
@@ -276,6 +277,11 @@ def evaluate_verification_checks(
     workdir: Path | str,
     *,
     executor: Callable[[Sequence[str], float, Path], dict[str, Any]] | None = None,
+    task_id: Optional[str] = None,
+    attempt: Optional[Union[int, str]] = None,
+    policy_digest: Optional[str] = None,
+    code_snapshot_digest: Optional[str] = None,
+    bind_worktree_snapshot: bool = False,
 ) -> dict[str, Any]:
     """Evaluate a sequence of verification checks against workdir with fail-closed semantics."""
     target_dir = Path(workdir).resolve()
@@ -379,7 +385,11 @@ def evaluate_verification_checks(
     serialized = ":".join(f"{r['check_id']}={r['status']}" for r in results)
     receipt_id = f"vrec-{hashlib.sha256(serialized.encode('utf-8')).hexdigest()[:12]}"
 
-    return {
+    effective_code_digest = code_snapshot_digest
+    if effective_code_digest is None and (bind_worktree_snapshot or task_id is not None):
+        effective_code_digest = compute_worktree_digest(target_dir)
+
+    receipt: dict[str, Any] = {
         "schema_version": VERIFICATION_RECEIPT_SCHEMA,
         "receipt_id": receipt_id,
         "workdir": str(target_dir),
@@ -393,6 +403,49 @@ def evaluate_verification_checks(
             "It is not proof that the whole system is bug-free."
         ),
     }
+    if task_id is not None:
+        receipt["task_id"] = str(task_id)
+    if attempt is not None:
+        receipt["attempt"] = attempt
+    if policy_digest is not None:
+        receipt["policy_digest"] = str(policy_digest)
+    if effective_code_digest is not None:
+        receipt["code_snapshot_digest"] = str(effective_code_digest)
+
+    return receipt
+
+
+def compute_worktree_digest(workdir: Path | str) -> str:
+    """Compute a deterministic SHA-256 digest of the files in worktree."""
+    p = Path(workdir).resolve()
+    if not p.is_dir():
+        raise ValueError(f"workdir does not exist or is not a directory: {workdir}")
+    h = hashlib.sha256()
+    files = []
+    for root, dirs, filenames in os.walk(p):
+        dirs[:] = sorted([d for d in dirs if d not in {".git", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}])
+        for f in sorted(filenames):
+            if f.endswith((".pyc", ".tmp", ".lock")):
+                continue
+            fpath = Path(root) / f
+            try:
+                rel = fpath.relative_to(p).as_posix()
+                content = fpath.read_bytes()
+                files.append((rel, hashlib.sha256(content).hexdigest()))
+            except (OSError, ValueError):
+                continue
+    for rel, fhash in sorted(files):
+        h.update(f"{rel}:{fhash}\n".encode("utf-8"))
+    return h.hexdigest()
+
+
+def compute_policy_digest(policy: Union[Mapping[str, Any], str, bytes]) -> str:
+    """Compute deterministic SHA-256 digest of a verification or execution policy."""
+    if isinstance(policy, (str, bytes)):
+        raw = policy.encode("utf-8") if isinstance(policy, str) else policy
+    else:
+        raw = json.dumps(policy, sort_keys=True, ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def validate_verification_receipt(receipt: Mapping[str, Any] | object) -> list[str]:
@@ -412,6 +465,55 @@ def validate_verification_receipt(receipt: Mapping[str, Any] | object) -> list[s
     if "not" not in str(receipt.get("claim_boundary", "")).casefold():
         errors.append("claim_boundary must state a limitation")
     return errors
+
+
+def validate_bound_verification_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    expected_task_id: str,
+    expected_attempt: Union[int, str],
+    expected_code_snapshot_digest: Optional[str] = None,
+    expected_policy_digest: Optional[str] = None,
+    current_workdir: Optional[Path | str] = None,
+) -> Tuple[bool, List[str]]:
+    """Validate that a verification receipt is structurally sound and strictly bound to task/attempt/digests."""
+    errors: List[str] = validate_verification_receipt(receipt)
+    if receipt.get("verdict") != "approved":
+        errors.append(f"receipt_verdict_not_approved: {receipt.get('verdict')}")
+    if not receipt.get("all_passed"):
+        errors.append("receipt_not_all_passed")
+
+    receipt_task = str(receipt.get("task_id", "") or "")
+    if not receipt_task or receipt_task != expected_task_id:
+        errors.append(f"cross_task_receipt_reuse_rejected: receipt bound to '{receipt_task}' != expected '{expected_task_id}'")
+
+    receipt_attempt = str(receipt.get("attempt", "") or "")
+    if not receipt_attempt or receipt_attempt != str(expected_attempt):
+        errors.append(f"stale_attempt_receipt_rejected: receipt bound to attempt '{receipt_attempt}' != expected '{expected_attempt}'")
+
+    if expected_policy_digest is not None:
+        actual_pol = str(receipt.get("policy_digest", "") or "")
+        if actual_pol != expected_policy_digest:
+            errors.append(f"stale_policy_digest_mismatch: receipt policy '{actual_pol}' != expected '{expected_policy_digest}'")
+
+    if expected_code_snapshot_digest is not None:
+        actual_code = str(receipt.get("code_snapshot_digest", "") or "")
+        if actual_code != expected_code_snapshot_digest:
+            errors.append(f"stale_code_snapshot_digest_mismatch: receipt code '{actual_code}' != expected '{expected_code_snapshot_digest}'")
+
+    if current_workdir is not None:
+        workdir_path = Path(current_workdir).resolve()
+        if not workdir_path.is_dir():
+            errors.append(f"current_workdir_not_a_directory: {current_workdir}")
+        else:
+            cur_digest = compute_worktree_digest(workdir_path)
+            receipt_code = str(receipt.get("code_snapshot_digest", "") or "")
+            if not receipt_code:
+                errors.append("missing_code_snapshot_digest_for_workdir: receipt lacks code_snapshot_digest to verify current worktree")
+            elif receipt_code != cur_digest:
+                errors.append(f"stale_receipt_code_modified_after_verification: worktree modified after verification (receipt={receipt_code}, current={cur_digest})")
+
+    return (len(errors) == 0, errors)
 
 
 # =========================================================================
