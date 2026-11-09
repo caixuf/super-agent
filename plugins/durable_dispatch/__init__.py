@@ -296,7 +296,7 @@ def validate_scheduled_routes(routes):
             if not isinstance(value, str) or not value.strip() or len(value) > 512:
                 raise ValueError('invalid scheduled route field %s for %s' % (field, name))
             item[field] = value.strip()
-        if 'thread' in target:
+        if target.get('thread') is not None:
             thread_value = target.get('thread')
             if not isinstance(thread_value, str) or not thread_value.strip() or len(thread_value) > 512:
                 raise ValueError('invalid scheduled route field thread for ' + name)
@@ -567,12 +567,20 @@ class DispatchService:
                           and bool(origin.get('route')) and bool(origin.get('chat')))
         options = {'request_card': True} if card_requested else {}
         is_dedup = False
-        if hasattr(self.pool, 'job_by_dedupe'):
-            try:
-                is_dedup = bool(self.pool.job_by_dedupe(dedupe))
-            except Exception:
-                is_dedup = False
-        job = self.pool.submit(dedupe, payload, replay_safe=True, max_tries=2, origin=origin, **options)
+        try:
+            submit_res = self.pool.submit(dedupe, payload, replay_safe=True, max_tries=2,
+                                         origin=origin, return_meta=True, **options)
+            if isinstance(submit_res, tuple):
+                job, is_dedup = submit_res
+            else:
+                job = submit_res
+        except TypeError:
+            if hasattr(self.pool, 'job_by_dedupe'):
+                try:
+                    is_dedup = bool(self.pool.job_by_dedupe(dedupe))
+                except Exception:
+                    is_dedup = False
+            job = self.pool.submit(dedupe, payload, replay_safe=True, max_tries=2, origin=origin, **options)
         ledger = self._resolve_liveness()
         if ledger is not None:
             try:
@@ -581,11 +589,12 @@ class DispatchService:
             except Exception:
                 pass
         status_info = self.pool.status(job)
+        status_val = status_info['status'] if isinstance(status_info, dict) and 'status' in status_info else 'queued'
         if is_scheduled:
-            result = {'ok': True, 'task_id': job, 'status': status_info['status'],
+            result = {'ok': True, 'task_id': job, 'status': status_val,
                       'deduplicated': is_dedup}
         else:
-            result = {'ok': True, 'task_id': job, 'status': status_info['status'],
+            result = {'ok': True, 'task_id': job, 'status': status_val,
                       'next_action': 'Return the task ID to the user and finish this turn. Do not poll.'}
         if ignored_sources:
             result['sources_ignored'] = ignored_sources

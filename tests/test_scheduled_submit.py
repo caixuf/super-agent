@@ -388,3 +388,65 @@ def test_validate_scheduled_routes_unit():
     # Invalid thread
     with pytest.raises(ValueError, match="invalid scheduled route field thread"):
         validate_scheduled_routes({"ok_name": {"route": "r", "channel": "c", "chat": "ch", "thread": "   "}})
+
+    # Thread None / null handled gracefully
+    res_null = validate_scheduled_routes({"ok_name": {"route": "r", "channel": "c", "chat": "ch", "thread": None}})
+    assert "thread" not in res_null["ok_name"]
+
+
+def test_concurrent_submit_same_idempotency_key(tmp_path):
+    import concurrent.futures
+    env = _make_fixture(tmp_path)
+    services = build_dispatch_services(env["settings"], "frontdesk")
+    dev_service = services["dev"]
+
+    results = []
+    def _submit(idx):
+        return dev_service.submit_scheduled(
+            "Execute concurrent verification\n",
+            route_name="daily_triage",
+            idempotency_key="shared-race-key-001",
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        futures = [ex.submit(_submit, i) for i in range(10)]
+        for f in concurrent.futures.as_completed(futures):
+            results.append(f.result())
+
+    task_ids = {r["task_id"] for r in results}
+    assert len(task_ids) == 1, f"expected 1 task_id, got: {task_ids}"
+
+    new_count = sum(1 for r in results if not r["deduplicated"])
+    dedup_count = sum(1 for r in results if r["deduplicated"])
+    assert new_count == 1, f"expected exactly 1 new submission, got {new_count}"
+    assert dedup_count == 9, f"expected exactly 9 deduped submissions, got {dedup_count}"
+
+    pool = Pool(str(env["dev_queue"]))
+    with pool.db() as db:
+        count = db.execute("SELECT count(*) FROM jobs").fetchone()[0]
+    assert count == 1
+
+
+def test_concurrent_cli_processes_expect_new(tmp_path):
+    import concurrent.futures
+    env = _make_fixture(tmp_path)
+
+    def _call():
+        return _run_cli(
+            "--profile-home", str(env["profile_home"]),
+            "--role", "dev",
+            "--route", "daily_triage",
+            "--goal-file", str(env["goal_file"]),
+            "--idempotency-key", "race-expect-new-key",
+            "--expect-new",
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        f1 = ex.submit(_call)
+        f2 = ex.submit(_call)
+        res1 = f1.result()
+        res2 = f2.result()
+
+    returncodes = sorted([res1.returncode, res2.returncode])
+    assert returncodes == [0, 2], f"expected [0, 2], got: {returncodes}"
+

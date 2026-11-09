@@ -78,6 +78,8 @@ def main(argv=None):
 
     dd_entry = entries.get("durable-dispatch")
     if not isinstance(dd_entry, dict):
+        dd_entry = entries.get("durable_dispatch")
+    if not isinstance(dd_entry, dict):
         sys.stderr.write("durable-dispatch plugin not configured in config.yaml\n")
         sys.exit(2)
 

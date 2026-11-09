@@ -182,7 +182,7 @@ class Pool:
                 db.close()
 
     def submit(self, key, payload, dependencies=(), replay_safe=False, max_tries=2, origin=None,
-               request_card=False):
+               request_card=False, return_meta=False):
         """Enqueue work. ``origin`` is the addressable ownership to persist with it.
 
         A completion can only be routed back to the conversation that submitted the
@@ -211,6 +211,8 @@ class Pool:
                         or existing['replay_safe'] != bool(replay_safe) or existing['max_tries'] != max_tries
                         or existing['origin'] != origin or old_card != request_card):
                     raise ValueError('dedupe key reused with different task')
+                if return_meta:
+                    return existing['id'], True
                 return existing['id']
             for dependency in dependencies:
                 if not db.execute('SELECT 1 FROM jobs WHERE id=?', (dependency,)).fetchone():
@@ -222,6 +224,8 @@ class Pool:
             if request_card:
                 db.execute('INSERT INTO card_outbox(job,updated) VALUES(?,?)', (job, time.time()))
             db.executemany('INSERT INTO deps VALUES(?,?)', [(job, d) for d in set(dependencies)])
+            if return_meta:
+                return job, False
             return job
 
     def origin(self, job):
