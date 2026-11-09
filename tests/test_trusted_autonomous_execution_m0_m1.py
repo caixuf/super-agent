@@ -12,8 +12,11 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import signal
+import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -568,6 +571,213 @@ def test_section4_verify_subreaper_containment_rejects_missing_identity_fields()
     assert containment.evidence_id(bad_evidence) is None
 
 
+def test_m1_gate_refuses_self_declared_bool_runner(tmp_path: Path):
+    """A self-declared boolean runner must be refused by the pre-execution gate."""
+    from agentcore.colleague_worker import _trusted_containment_available
+
+    class BoolRunner:
+        attempt_containment = "runner_and_descendants"
+        trusted_containment = True
+        def has_trusted_containment_proof(self):
+            return True
+
+    runner = BoolRunner()
+    token = containment.new_token()
+    assert _trusted_containment_available(
+        runner,
+        expected_job="job-1",
+        expected_attempt="att-1",
+        expected_nonce="nonce-1",
+        expected_token=token,
+    ) is False
+
+
+def test_m1_gate_refuses_when_no_backend_adapter():
+    """Gate returns False when no execution backend adapter exists (fail-closed baseline)."""
+    from agentcore.colleague_worker import _trusted_containment_available
+
+    class PlainRunner:
+        attempt_containment = "runner_and_descendants"
+
+    runner = PlainRunner()
+    assert _trusted_containment_available(runner) is False
+    assert _trusted_containment_available(
+        runner,
+        expected_job="job-1",
+        expected_attempt="att-1",
+        expected_nonce="nonce-1",
+        expected_token=containment.new_token(),
+    ) is False
+
+
+def test_m1_gate_refuses_well_formed_stop_proof_alone(tmp_path: Path, monkeypatch):
+    """A stop/quiescence proof shows an attempt stopped; it must NEVER open the pre-execution gate."""
+    valid_token = containment.new_token()
+    well_formed_stop_proof = {
+        "job": "job-stop-1",
+        "attempt": "att-stop-1",
+        "token": valid_token,
+        "nonce": "nonce-stop-1",
+        "quiescent": True,
+        "proof_scope": "subreaper_tree",
+        "supervisor_pid": os.getpid(),
+        "exit_code": 0,
+        "child_started": True,
+        "unquiesced_pids": [],
+    }
+    # Verify that the proof itself is valid as a stop proof
+    ver = containment.verify_subreaper_containment(
+        well_formed_stop_proof,
+        expected_token=valid_token,
+        expected_job="job-stop-1",
+        expected_attempt="att-stop-1",
+        expected_nonce="nonce-stop-1",
+    )
+    assert ver["ok"] is True
+    assert ver["quiescent"] is True
+
+    # 1. Stop proof presented via runner callback must not open the gate
+    class StopProofRunner:
+        attempt_containment = "runner_and_descendants"
+        def trusted_containment_evidence(self):
+            return well_formed_stop_proof
+
+    from agentcore.colleague_worker import _trusted_containment_available
+    runner = StopProofRunner()
+    assert _trusted_containment_available(
+        runner,
+        expected_job="job-stop-1",
+        expected_attempt="att-stop-1",
+        expected_nonce="nonce-stop-1",
+        expected_token=valid_token,
+    ) is False
+
+    # 2. Well-formed stop proof file in environment must not open the gate
+    proof_file = tmp_path / "stop.json"
+    proof_file.write_text(json.dumps(well_formed_stop_proof), encoding="utf-8")
+    monkeypatch.setenv("AGENTCORE_SUPERVISOR_PROOF_PATH", str(proof_file))
+
+    class PlainRunner:
+        attempt_containment = "runner_and_descendants"
+
+    assert _trusted_containment_available(
+        PlainRunner(),
+        expected_job="job-stop-1",
+        expected_attempt="att-stop-1",
+        expected_nonce="nonce-stop-1",
+        expected_token=valid_token,
+    ) is False
+
+
+def test_m1_proof_from_different_attempt_job_or_nonce_is_refused(tmp_path: Path):
+    """Proofs from different jobs, attempts, or nonces must be strictly rejected."""
+    token = containment.new_token()
+    proof = {
+        "job": "job-alpha",
+        "attempt": "att-alpha",
+        "token": token,
+        "nonce": "nonce-alpha",
+        "quiescent": True,
+        "proof_scope": "subreaper_tree",
+        "supervisor_pid": 54321,
+        "exit_code": 0,
+    }
+
+    # 1. verify_subreaper_containment rejects mismatches
+    assert containment.verify_subreaper_containment(proof, expected_job="job-beta")["ok"] is False
+    assert containment.verify_subreaper_containment(proof, expected_job="job-beta")["reason"] == "proof_job_mismatch"
+
+    assert containment.verify_subreaper_containment(proof, expected_attempt="att-beta")["ok"] is False
+    assert containment.verify_subreaper_containment(proof, expected_attempt="att-beta")["reason"] == "proof_attempt_mismatch"
+
+    assert containment.verify_subreaper_containment(proof, expected_nonce="nonce-beta")["ok"] is False
+    assert containment.verify_subreaper_containment(proof, expected_nonce="nonce-beta")["reason"] == "proof_nonce_mismatch"
+
+    # 2. sweep_and_verify rejects if expected identities are missing or mismatched
+    sweep_missing = containment.sweep_and_verify(token, supervisor_proof=proof)
+    assert sweep_missing["ok"] is False
+    assert sweep_missing["reason"] == "missing_expected_identities"
+
+    sweep_mismatch = containment.sweep_and_verify(
+        token,
+        supervisor_proof=proof,
+        expected_job="job-beta",
+        expected_attempt="att-alpha",
+        expected_nonce="nonce-alpha",
+    )
+    assert sweep_mismatch["ok"] is False
+    assert sweep_mismatch["reason"] == "proof_job_mismatch"
+
+    # 3. Bare FakeAdapter without pre-execution bwrap_subreaper proof is rejected
+    class FakeAdapter:
+        def verify_attempt_binding(self, *, expected_job, expected_attempt, expected_nonce, expected_token):
+            return {"ok": True}
+
+    class FakeAdapterRunner:
+        attempt_containment = "runner_and_descendants"
+        execution_backend_adapter = FakeAdapter()
+
+    from agentcore.colleague_worker import _trusted_containment_available
+    assert _trusted_containment_available(
+        FakeAdapterRunner(),
+        expected_job="job-real",
+        expected_attempt="att-real",
+        expected_nonce="nonce-real",
+        expected_token=token,
+    ) is False
+
+    # 4. Real AttemptBoundSandboxAdapter passes only when all 4 identities match
+    real_adapter = containment.AttemptBoundSandboxAdapter.create_host_bound(
+        attempt_dir=tmp_path / "attempt_real",
+        job="job-real",
+        attempt="att-real",
+        nonce="nonce-real",
+        token=token,
+        workdir=tmp_path,
+    )
+
+    class RealAdapterRunner:
+        attempt_containment = "runner_and_descendants"
+        execution_backend_adapter = real_adapter
+
+    assert _trusted_containment_available(
+        RealAdapterRunner(),
+        expected_job="job-real",
+        expected_attempt="att-real",
+        expected_nonce="nonce-real",
+        expected_token=token,
+    ) is True
+
+    assert _trusted_containment_available(
+        RealAdapterRunner(),
+        expected_job="job-other",
+        expected_attempt="att-real",
+        expected_nonce="nonce-real",
+        expected_token=token,
+    ) is False
+    assert _trusted_containment_available(
+        RealAdapterRunner(),
+        expected_job="job-real",
+        expected_attempt="att-other",
+        expected_nonce="nonce-real",
+        expected_token=token,
+    ) is False
+    assert _trusted_containment_available(
+        RealAdapterRunner(),
+        expected_job="job-real",
+        expected_attempt="att-real",
+        expected_nonce="nonce-other",
+        expected_token=token,
+    ) is False
+    assert _trusted_containment_available(
+        RealAdapterRunner(),
+        expected_job="job-real",
+        expected_attempt="att-real",
+        expected_nonce="nonce-real",
+        expected_token=containment.new_token(),
+    ) is False
+
+
 def test_colleague_worker_refuses_fake_supervisor_proof_file(tmp_path: Path, monkeypatch):
     """An arbitrary or unverified file in AGENTCORE_SUPERVISOR_PROOF_PATH must be refused."""
     fake_proof_file = tmp_path / "fake_proof.json"
@@ -580,3 +790,732 @@ def test_colleague_worker_refuses_fake_supervisor_proof_file(tmp_path: Path, mon
 
     from agentcore.colleague_worker import _trusted_containment_available
     assert _trusted_containment_available(runner) is False
+
+
+# ==============================================================================
+# M1 & Section 4 — AttemptBoundSandboxAdapter (bwrap + subreaper) Verification
+# ==============================================================================
+
+
+def _init_isolated_test_env_and_repo(tmp_path: Path, monkeypatch) -> dict[str, Path]:
+    """Create an isolated test profile and isolated Git test repository (Section 4 Step 2)."""
+    profile_root = tmp_path / "isolated_profile"
+    hermes_home = profile_root / "hermes_home"
+    pool_dir = profile_root / "pool"
+    memory_dir = profile_root / "memory"
+    repo_dir = tmp_path / "isolated_repo"
+
+    for d in (hermes_home, pool_dir, memory_dir, repo_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("SUPERAGENT_PROFILE", "trusted_exec_test_profile")
+    monkeypatch.setenv("SUPERAGENT_MEMORY_DIR", str(memory_dir))
+
+    (repo_dir / "SPEC.md").write_text("# Immutable Spec\nadd(a, b) must return a + b.\n", encoding="utf-8")
+    (repo_dir / "STATUS.md").write_text("# Status Log\n", encoding="utf-8")
+    (repo_dir / "calc.py").write_text(
+        "def add(a: int, b: int) -> int:\n    return a - b\n",
+        encoding="utf-8",
+    )
+    (repo_dir / "test_calc.py").write_text(
+        "import unittest\nfrom calc import add\n\n"
+        "class TestCalc(unittest.TestCase):\n"
+        "    def test_add(self):\n"
+        "        self.assertEqual(add(2, 3), 5)\n\n"
+        "if __name__ == '__main__':\n"
+        "    unittest.main()\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Isolated Test"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "Initial buggy commit"], cwd=repo_dir, check=True, capture_output=True)
+
+    return {
+        "profile_root": profile_root,
+        "hermes_home": hermes_home,
+        "pool_dir": pool_dir,
+        "memory_dir": memory_dir,
+        "repo_dir": repo_dir,
+    }
+
+
+def test_m1_host_minted_binding_rejects_tampering_symlinks_and_dead_supervisor(tmp_path: Path):
+    """Host-created binding.json enforces instance_id, generation, boot_id, file mode, and live supervisor."""
+    token = containment.new_token()
+    attempt_dir = tmp_path / "attempt_bind_1"
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+
+    adapter = containment.AttemptBoundSandboxAdapter.create_host_bound(
+        attempt_dir=attempt_dir,
+        job="job-bind-1",
+        attempt="att-bind-1",
+        nonce="nonce-bind-1",
+        token=token,
+        workdir=workdir,
+        generation=2,
+    )
+
+    check = adapter.verify_attempt_binding(
+        expected_job="job-bind-1",
+        expected_attempt="att-bind-1",
+        expected_nonce="nonce-bind-1",
+        expected_token=token,
+    )
+    assert check["ok"] is True
+    assert check["proof_type"] == "attempt_pre_execution_binding"
+    assert check["backend"] == "bwrap_subreaper"
+    assert check["generation"] == 2
+    assert len(check["instance_id"]) == 32
+
+    # World-writable binding file must be rejected
+    binding_file = attempt_dir / "binding.json"
+    os.chmod(binding_file, 0o666)
+    bad_mode = adapter.verify_attempt_binding(
+        expected_job="job-bind-1",
+        expected_attempt="att-bind-1",
+        expected_nonce="nonce-bind-1",
+        expected_token=token,
+    )
+    assert bad_mode["ok"] is False
+    assert "binding_file_invalid" in bad_mode["reason"]
+    os.chmod(binding_file, 0o600)
+
+    # Symlinked binding file must be rejected
+    symlink_path = tmp_path / "symlink_binding.json"
+    symlink_path.symlink_to(binding_file)
+    with pytest.raises(OSError):
+        containment.AttemptBoundSandboxAdapter.from_binding_file(
+            symlink_path,
+            workdir=workdir,
+        )
+
+    # Binding referencing a supervisor PID that later exits must be rejected
+    short_proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.3)"])
+    dead_dir = tmp_path / "attempt_dead_sup"
+    dead_adapter = containment.AttemptBoundSandboxAdapter.create_host_bound(
+        attempt_dir=dead_dir,
+        job="job-dead",
+        attempt="att-dead",
+        nonce="nonce-dead",
+        token=token,
+        workdir=workdir,
+        supervisor_pid=short_proc.pid,
+    )
+    short_proc.wait(timeout=5)
+    dead_check = dead_adapter.verify_attempt_binding(
+        expected_job="job-dead",
+        expected_attempt="att-dead",
+        expected_nonce="nonce-dead",
+        expected_token=token,
+    )
+    assert dead_check["ok"] is False
+    assert dead_check["reason"] == "supervisor_not_alive_or_reused"
+
+
+def test_m1_payload_self_declared_binding_fields_rejected(tmp_path: Path, monkeypatch):
+    """Task payloads attempting to self-declare binding or containment fields must be rejected before execution."""
+    env_paths = _init_isolated_test_env_and_repo(tmp_path, monkeypatch)
+    repo_dir = env_paths["repo_dir"]
+    token = containment.new_token()
+    adapter = containment.AttemptBoundSandboxAdapter.create_host_bound(
+        attempt_dir=tmp_path / "attempt_forged_payload",
+        job="job-forged-1",
+        attempt="att-forged-1",
+        nonce="nonce-forged-1",
+        token=token,
+        workdir=repo_dir,
+    )
+
+    forged_job = {
+        "job": "job-forged-1",
+        "attempt": "att-forged-1",
+        "payload": {
+            "role": "cases",
+            "goal": "Fix add",
+            "trusted_containment": True,
+            "instance_id": "a" * 32,
+        },
+    }
+
+    called = False
+
+    def _runner(_prompt, _opts):
+        nonlocal called
+        called = True
+        return {"ok": True}
+
+    with pytest.raises(PermissionError, match="payload_binding_self_declaration_forbidden"):
+        run_dev_job(
+            job=forged_job,
+            policy={"allowed_roots": [str(repo_dir)]},
+            role="# Dev",
+            workdir=repo_dir,
+            agent_dir=tmp_path / "agent",
+            output_dir=tmp_path / "out",
+            runner_callable=_runner,
+            execution_backend_adapter=adapter,
+        )
+    assert called is False
+
+
+def test_m1_gateway_delegated_and_host_owned_runners_refused_even_with_real_adapter(tmp_path: Path):
+    """gateway_delegated and host_owned runners must be refused even if attached to a real adapter."""
+    token = containment.new_token()
+    adapter = containment.AttemptBoundSandboxAdapter.create_host_bound(
+        attempt_dir=tmp_path / "attempt_gw",
+        job="job-gw",
+        attempt="att-gw",
+        nonce="nonce-gw",
+        token=token,
+        workdir=tmp_path,
+    )
+
+    from agentcore.colleague_worker import _require_attempt_containment, _trusted_containment_available
+
+    for bad_kind in ("gateway_delegated", "host_owned", None, "custom_unknown"):
+        class BadRunner:
+            attempt_containment = bad_kind
+            execution_backend_adapter = adapter
+
+        assert _trusted_containment_available(
+            BadRunner(),
+            expected_job="job-gw",
+            expected_attempt="att-gw",
+            expected_nonce="nonce-gw",
+            expected_token=token,
+        ) is False
+        with pytest.raises(RuntimeError, match="colleague_turn_containment_unprovable"):
+            _require_attempt_containment(BadRunner())
+
+
+def test_m1_pre_execution_and_kernel_bwrap_enforcement_of_paths_credentials_network_and_tools(
+    tmp_path: Path, monkeypatch
+):
+    """Verify pre-execution authorization AND kernel-level bwrap enforcement of role paths, credentials, network, and tool whitelist."""
+    env_paths = _init_isolated_test_env_and_repo(tmp_path, monkeypatch)
+    repo_dir = env_paths["repo_dir"]
+    hermes_home = env_paths["hermes_home"]
+
+    # Create a sensitive credential file in simulated HERMES_HOME and host tmp
+    secret_file = hermes_home / "secret_token.txt"
+    secret_file.write_text("TOP_SECRET_CREDENTIAL", encoding="utf-8")
+    outside_file = tmp_path / "outside_host_secret.txt"
+    outside_file.write_text("HOST_OUTSIDE_SECRET", encoding="utf-8")
+
+    token = containment.new_token()
+    adapter = containment.AttemptBoundSandboxAdapter.create_host_bound(
+        attempt_dir=tmp_path / "attempt_isolation",
+        job="job-iso-1",
+        attempt="att-iso-1",
+        nonce="nonce-iso-1",
+        token=token,
+        workdir=repo_dir,
+        role="cases",
+        allowed_tools=["python_exec", "pytest_verify"],
+        network_policy="isolated",
+    )
+
+    # 1. Tool outside whitelist is rejected pre-execution
+    with pytest.raises(PermissionError, match="unauthorized_tool_denied:unauthorized_curl"):
+        adapter.execute_in_sandbox(
+            [sys.executable, "-c", "print('hi')"],
+            tool="unauthorized_curl",
+        )
+
+    # 2. Network access request is rejected pre-execution
+    with pytest.raises(PermissionError, match="unauthorized_network_access_denied"):
+        adapter.execute_in_sandbox(
+            [sys.executable, "-c", "print('hi')"],
+            tool="python_exec",
+            network_access=True,
+        )
+
+    # 3. Forbidden host credential/socket paths and outside paths are rejected pre-execution
+    for bad_path in ("~/.ssh/id_rsa", "~/.config/secrets", "~/.hermes/auth.json", "/var/run/docker.sock", str(outside_file)):
+        with pytest.raises(PermissionError, match="forbidden_host_access|path_outside_authorized_workdir"):
+            adapter.execute_in_sandbox(
+                [sys.executable, "-c", "print('hi')"],
+                tool="python_exec",
+                target_paths=[bad_path],
+            )
+
+    # 4. Role path access (validate_role_path_access) rejects 'cases' role modifying SPEC.md, .git/config, or STATUS.md pre-execution
+    for forbidden_rel in ("SPEC.md", ".git/config", "STATUS.md"):
+        with pytest.raises(PermissionError, match="role_ownership_violation"):
+            adapter.execute_in_sandbox(
+                [sys.executable, "-c", "print('hi')"],
+                tool="python_exec",
+                target_paths=[forbidden_rel],
+                action="write",
+            )
+
+    # 5. Inside bwrap sandbox: kernel mount namespace blocks writing to SPEC.md and .git/config (EROFS),
+    # hides outside_file and hermes_home secrets, and --unshare-all blocks connecting to host loopback TCP sockets!
+    host_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    host_sock.bind(("127.0.0.1", 0))
+    host_sock.listen(1)
+    host_port = host_sock.getsockname()[1]
+    try:
+        probe_code = f"""
+import errno, json, os, pathlib, socket
+results = {{}}
+# Check outside file visibility
+results["outside_visible"] = pathlib.Path({str(outside_file)!r}).exists()
+results["hermes_secret_visible"] = pathlib.Path({str(secret_file)!r}).exists()
+# Check writing to SPEC.md (mounted ro-bind by bwrap)
+try:
+    pathlib.Path("SPEC.md").write_text("hacked", encoding="utf-8")
+    results["spec_write"] = "allowed"
+except OSError as exc:
+    results["spec_write"] = exc.errno
+# Check writing to .git/config (mounted ro-bind by bwrap)
+try:
+    pathlib.Path(".git/config").write_text("hacked", encoding="utf-8")
+    results["git_write"] = "allowed"
+except OSError as exc:
+    results["git_write"] = exc.errno
+# Check connecting to host loopback TCP port (isolated netns)
+try:
+    s = socket.create_connection(("127.0.0.1", {host_port}), timeout=1.0)
+    s.close()
+    results["net_connect"] = "allowed"
+except OSError:
+    results["net_connect"] = "blocked"
+print(json.dumps(results))
+"""
+        res_probe = adapter.execute_in_sandbox(
+            [sys.executable, "-c", probe_code],
+            tool="python_exec",
+            target_paths=["calc.py"],
+            action="read",
+        )
+    finally:
+        host_sock.close()
+
+    assert res_probe["ok"] is True, f"Probe failed: {res_probe}"
+    probe_data = json.loads(res_probe["stdout"].strip())
+    assert probe_data["outside_visible"] is False
+    assert probe_data["hermes_secret_visible"] is False
+    assert probe_data["spec_write"] == 30  # errno.EROFS (Read-only file system)
+    assert probe_data["git_write"] == 30   # errno.EROFS
+    assert probe_data["net_connect"] == "blocked"
+
+
+def test_m1_resource_budgets_enforced_and_invalid_policy_fails_closed(tmp_path: Path, monkeypatch):
+    """Verify timeout_s, max_procs, max_memory_bytes, max_output_bytes, max_file_bytes, max_disk_bytes, and invalid budget fail-closed."""
+    env_paths = _init_isolated_test_env_and_repo(tmp_path, monkeypatch)
+    repo_dir = env_paths["repo_dir"]
+    token = containment.new_token()
+
+    # 1. Invalid budget policy fails closed
+    with pytest.raises(ValueError, match="invalid_resource_budget"):
+        containment.normalize_resource_budgets({"timeout_s": 0})
+    with pytest.raises(ValueError, match="invalid_resource_budget"):
+        containment.normalize_resource_budgets({"max_procs": -5})
+
+    adapter = containment.AttemptBoundSandboxAdapter.create_host_bound(
+        attempt_dir=tmp_path / "attempt_budgets",
+        job="job-budget-1",
+        attempt="att-budget-1",
+        nonce="nonce-budget-1",
+        token=token,
+        workdir=repo_dir,
+        role="cases",
+    )
+
+    # 2. timeout_s enforcement
+    res_timeout = adapter.execute_in_sandbox(
+        [sys.executable, "-c", "import time; time.sleep(10)"],
+        budgets={"timeout_s": 0.4},
+    )
+    assert res_timeout["ok"] is False
+    assert res_timeout["timed_out"] is True
+    assert res_timeout["budget_exceeded"] == "timeout"
+    assert res_timeout["quiescent"] is True
+
+    # 3. max_output_bytes enforcement
+    res_out = adapter.execute_in_sandbox(
+        [sys.executable, "-c", "import sys; sys.stdout.write('X' * 50000); sys.stdout.flush()"],
+        budgets={"max_output_bytes": 4096},
+    )
+    assert res_out["ok"] is False
+    assert res_out["output_limited"] is True
+    assert res_out["budget_exceeded"] == "output"
+    assert len(res_out["stdout"].encode("utf-8")) <= 4096
+
+    # 4. max_memory_bytes enforcement (RLIMIT_AS)
+    res_mem = adapter.execute_in_sandbox(
+        [sys.executable, "-c", "x = bytearray(256 * 1024 * 1024)"],
+        budgets={"max_memory_bytes": 96 * 1024 * 1024},
+    )
+    assert res_mem["ok"] is False
+    assert res_mem["exit_code"] != 0
+
+    # 5. max_procs enforcement (RLIMIT_NPROC scoped to bwrap user namespace)
+    res_procs = adapter.execute_in_sandbox(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, sys\n"
+            "procs = [subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)']) for _ in range(12)]",
+        ],
+        budgets={"max_procs": 4, "timeout_s": 5.0},
+    )
+    assert res_procs["ok"] is False
+    assert res_procs["exit_code"] != 0
+    assert res_procs["quiescent"] is True
+
+    # 6. max_file_bytes / max_disk_bytes enforcement + automatic rollback of workdir changes
+    res_disk = adapter.execute_in_sandbox(
+        [
+            sys.executable,
+            "-c",
+            "import pathlib; pathlib.Path('calc.py').write_bytes(b'#' * 200000)",
+        ],
+        target_paths=["calc.py"],
+        budgets={"max_file_bytes": 1024 * 1024, "max_disk_bytes": 65536},
+    )
+    assert res_disk["ok"] is False
+    assert res_disk["budget_exceeded"] == "disk"
+    assert res_disk["exit_code"] == 125
+    # Verify calc.py was rolled back to its original content
+    assert "return a - b" in (repo_dir / "calc.py").read_text(encoding="utf-8")
+
+
+def test_m1_cancel_blocks_new_actions_and_reaps_setsid_descendants(tmp_path: Path, monkeypatch):
+    """Two-phase cancel blocks new actions first, then kills and reaps normal and setsid detached children."""
+    env_paths = _init_isolated_test_env_and_repo(tmp_path, monkeypatch)
+    repo_dir = env_paths["repo_dir"]
+    token = containment.new_token()
+    attempt_dir = tmp_path / "attempt_cancel"
+    adapter = containment.AttemptBoundSandboxAdapter.create_host_bound(
+        attempt_dir=attempt_dir,
+        job="job-cancel-1",
+        attempt="att-cancel-1",
+        nonce="nonce-cancel-1",
+        token=token,
+        workdir=repo_dir,
+        role="cases",
+    )
+
+    pid_file = repo_dir / "detached_marker.py"
+    spawn_script = (
+        "import os, pathlib, subprocess, sys, time\n"
+        "code = (\n"
+        "    'import os, pathlib, time\\n'\n"
+        "    'os.setsid()\\n'\n"
+        "    'pid = os.fork()\\n'\n"
+        "    'if pid > 0:\\n'\n"
+        "    '    os._exit(0)\\n'\n"
+        "    'pathlib.Path(\"detached_marker.py\").write_text(\"# ready\", encoding=\"utf-8\")\\n'\n"
+        "    'time.sleep(60)\\n'\n"
+        ")\n"
+        "subprocess.Popen([sys.executable, '-c', code])\n"
+        "time.sleep(60)\n"
+    )
+    exec_result_holder: list[dict] = []
+
+    def _run_bg():
+        res = adapter.execute_in_sandbox(
+            [sys.executable, "-c", spawn_script],
+            target_paths=["detached_marker.py"],
+            budgets={"timeout_s": 30.0},
+        )
+        exec_result_holder.append(res)
+
+    bg_thread = threading.Thread(target=_run_bg, daemon=True)
+    bg_thread.start()
+
+    # Wait until detached_marker.py is written inside the sandbox
+    deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline and not pid_file.exists():
+        time.sleep(0.05)
+    assert pid_file.exists(), "Detached grandchild did not start inside sandbox"
+
+    active_host_pids = adapter.active_sandbox_pids()
+    assert len(active_host_pids) >= 1
+
+    # Cancel with mismatched identity must fail closed with status="unknown"
+    bad_cancel = adapter.cancel(
+        expected_job="wrong-job",
+        expected_attempt="att-cancel-1",
+        expected_nonce="nonce-cancel-1",
+        expected_token=token,
+    )
+    assert bad_cancel["ok"] is False
+    assert bad_cancel["status"] == "unknown"
+    assert bad_cancel["quiescent"] is False
+    assert bad_cancel["new_actions_blocked"] is True
+
+    # Now perform valid two-phase cancel
+    cancel_receipt = adapter.cancel(
+        expected_job="job-cancel-1",
+        expected_attempt="att-cancel-1",
+        expected_nonce="nonce-cancel-1",
+        expected_token=token,
+    )
+    bg_thread.join(timeout=5.0)
+
+    assert cancel_receipt["ok"] is True
+    assert cancel_receipt["status"] == "stopped"
+    assert cancel_receipt["quiescent"] is True
+    assert cancel_receipt["new_actions_blocked"] is True
+
+    # Verify all recorded host PIDs are completely gone
+    for hpid in active_host_pids:
+        with pytest.raises(ProcessLookupError):
+            os.kill(hpid, 0)
+
+    # Phase 1 guarantee: any subsequent execution attempt after cancel is immediately refused
+    with pytest.raises(PermissionError, match="attempt_binding_verification_failed:attempt_already_stopped_or_cancelled"):
+        adapter.execute_in_sandbox(
+            [sys.executable, "-c", "print('after cancel')"],
+        )
+
+
+def test_m1_worker_sigkill_crash_reaps_sandbox_and_setsid_descendants(tmp_path: Path, monkeypatch):
+    """When the worker process crashes with SIGKILL (kill -9), the sandbox subreaper detects control socket EOF and reaps all descendants."""
+    env_paths = _init_isolated_test_env_and_repo(tmp_path, monkeypatch)
+    repo_dir = env_paths["repo_dir"]
+    token = containment.new_token()
+    attempt_dir = tmp_path / "attempt_sigkill"
+
+    containment.AttemptBoundSandboxAdapter.create_host_bound(
+        attempt_dir=attempt_dir,
+        job="job-sigkill-1",
+        attempt="att-sigkill-1",
+        nonce="nonce-sigkill-1",
+        token=token,
+        workdir=repo_dir,
+        role="cases",
+    )
+
+    ready_file = repo_dir / "sigkill_ready.py"
+    worker_code = (
+        "import pathlib, sys\n"
+        "from agentcore import colleague_containment as containment\n"
+        f"adapter = containment.AttemptBoundSandboxAdapter.from_binding_file({str(attempt_dir / 'binding.json')!r}, workdir={str(repo_dir)!r})\n"
+        "inner_code = (\n"
+        "    'import os, pathlib, subprocess, sys, time\\n'\n"
+        "    'child = (\\n'\n"
+        "    '    \"import os, pathlib, time\\\\n\"\\n'\n"
+        "    '    \"os.setsid()\\\\n\"\\n'\n"
+        "    '    \"pid = os.fork()\\\\n\"\\n'\n"
+        "    '    \"if pid > 0: os._exit(0)\\\\n\"\\n'\n"
+        "    '    \"pathlib.Path(\\'sigkill_ready.py\\').write_text(\\'# ready\\', encoding=\\'utf-8\\')\\\\n\"\\n'\n"
+        "    '    \"time.sleep(60)\\\\n\"\\n'\n"
+        "    ')\\n'\n"
+        "    'subprocess.Popen([sys.executable, \"-c\", child])\\n'\n"
+        "    'time.sleep(60)\\n'\n"
+        ")\n"
+        "adapter.execute_in_sandbox([sys.executable, '-c', inner_code], target_paths=['sigkill_ready.py'], budgets={'timeout_s': 60.0})\n"
+    )
+    worker_proc = subprocess.Popen([sys.executable, "-c", worker_code])
+    try:
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline and not ready_file.exists():
+            time.sleep(0.05)
+        assert ready_file.exists(), "Sandbox inner process did not become ready before SIGKILL"
+
+        # Find all live processes carrying the attempt token before SIGKILL
+        live_before = containment.tagged(token)
+        assert len(live_before) >= 1
+
+        # Kill the worker immediately with SIGKILL (simulating sudden worker crash)
+        os.kill(worker_proc.pid, signal.SIGKILL)
+        worker_proc.wait(timeout=5.0)
+
+        # Wait up to 3s for the sandbox subreaper to detect control-socket EOF and reap bwrap + descendants
+        reap_deadline = time.monotonic() + 3.0
+        while time.monotonic() < reap_deadline:
+            still_alive = containment.tagged(token)
+            if not still_alive:
+                break
+            time.sleep(0.05)
+
+        assert containment.tagged(token) == [], (
+            f"Leaked tagged processes after worker SIGKILL: {containment.tagged(token)}"
+        )
+    finally:
+        if worker_proc.poll() is None:
+            worker_proc.kill()
+            worker_proc.wait(timeout=2.0)
+
+
+def test_m1_end_to_end_dev_runner_and_pool_with_attempt_bound_sandbox_adapter(tmp_path: Path, monkeypatch):
+    """End-to-end verification: both model tool execution and verification checks run inside AttemptBoundSandboxAdapter."""
+    env_paths = _init_isolated_test_env_and_repo(tmp_path, monkeypatch)
+    repo_dir = env_paths["repo_dir"]
+    pool_dir = env_paths["pool_dir"]
+
+    token = containment.new_token()
+    attempt_dir = tmp_path / "attempt_e2e_dev"
+    adapter = containment.AttemptBoundSandboxAdapter.create_host_bound(
+        attempt_dir=attempt_dir,
+        job="job-e2e-dev-1",
+        attempt="att-e2e-dev-1",
+        nonce="nonce-e2e-dev-1",
+        token=token,
+        workdir=repo_dir,
+        role="cases",
+        allowed_tools=["bash", "pytest"],
+    )
+
+    def _sandboxed_model_runner(_prompt, options):
+        bound_adapter = options["execution_backend_adapter"]
+        fix_code = (
+            "import pathlib\n"
+            "pathlib.Path('calc.py').write_text('def add(a: int, b: int) -> int:\\n    return a + b\\n', encoding='utf-8')\n"
+        )
+        exec_res = bound_adapter.execute_in_sandbox(
+            [sys.executable, "-c", fix_code],
+            tool="bash",
+            target_paths=["calc.py"],
+            action="write",
+        )
+        return {
+            "ok": exec_res["ok"],
+            "final_text": "Fixed calc.py in sandbox",
+            "tool_calls": [{"name": "bash", "exit_code": exec_res["exit_code"]}],
+        }
+
+    job_env = {
+        "job": "job-e2e-dev-1",
+        "attempt": "att-e2e-dev-1",
+        "payload": {
+            "role": "cases",
+            "goal": "Fix add(a, b) in calc.py",
+            "target_paths": ["calc.py"],
+            "verification_checks": [
+                {"check_id": "unit_tests", "command": f"{sys.executable} -m unittest test_calc.py"},
+            ],
+        },
+    }
+    policy = {
+        "allowed_roots": [str(repo_dir)],
+        "require_verification": True,
+        "verification_checks": [
+            {"check_id": "unit_tests", "command": f"{sys.executable} -m unittest test_calc.py"},
+        ],
+    }
+
+    out_dir = tmp_path / "artifacts"
+    res = run_dev_job(
+        job=job_env,
+        policy=policy,
+        role="# Cases Role",
+        workdir=repo_dir,
+        agent_dir=tmp_path / "agent",
+        output_dir=out_dir,
+        sandbox=True,
+        runner_callable=_sandboxed_model_runner,
+        execution_backend_adapter=adapter,
+    )
+
+    assert res["ok"] is True, f"Dev job failed: {res}"
+    assert res["execution_completed"] is True
+    assert res["verification_passed"] is True
+    assert res["artifacts_valid"] is True
+
+    report = json.loads((out_dir / "report.json").read_text(encoding="utf-8"))
+    assert report["containment_binding"]["backend"] == "bwrap_subreaper"
+    # 1 pre-execution check in run_dev_job + 1 model tool execution + 1 verification check = 3 audit entries
+    assert len(report["containment_audit_log"]) >= 2
+    assert report["containment_evidence"]["quiescent"] is True
+
+    # Also test Pool -> attempt_supervisor -> colleague_worker CLI end-to-end with AttemptBoundSandboxAdapter.from_environment
+    bootstrap_mod = tmp_path / "trusted_e2e_bootstrap.py"
+    bootstrap_mod.write_text(
+        f"""
+import sys
+from pathlib import Path
+from agentcore import colleague_containment as containment
+
+class SandboxedWorkerRunner:
+    attempt_containment = "runner_and_descendants"
+    trusted_containment = True
+
+    def __init__(self):
+        self.execution_backend_adapter = containment.AttemptBoundSandboxAdapter.from_environment(
+            workdir=Path({str(repo_dir)!r}),
+            role="cases",
+            allowed_tools=["bash", "pytest"],
+        )
+
+    def run(self, *, member_id, generation, request_id, prompt, owner_profile, owner_session):
+        res = self.execution_backend_adapter.execute_in_sandbox(
+            [sys.executable, "-m", "unittest", "test_calc.py"],
+            tool="pytest",
+            target_paths=["test_calc.py"],
+            action="read",
+        )
+        if not res["ok"]:
+            raise RuntimeError("sandbox_unittest_failed")
+        return {{
+            "request_id": request_id,
+            "requested_by": {{"profile": owner_profile, "session": owner_session}},
+            "executed_by": {{"member_id": member_id, "generation": generation}},
+            "text": res["stdout"].strip() or "ok",
+        }}
+
+def make():
+    return SandboxedWorkerRunner(), lambda owner, member_id, generation: True
+""",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    existing_pp = env.get("PYTHONPATH", "")
+    repo_root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = f"{tmp_path}:{repo_root}" + (f":{existing_pp}" if existing_pp else "")
+    monkeypatch.setenv("PYTHONPATH", env["PYTHONPATH"])
+
+    from agentcore.colleague_dispatch import ColleagueDispatch
+    os.chmod(pool_dir, 0o700)
+    pool = Pool(pool_dir)
+    dispatch = ColleagueDispatch(
+        pool,
+        authorize_assignment=lambda owner, member_id, generation: True,
+        dedicated=True,
+    )
+    sub = dispatch.submit(
+        owner={"profile": "trusted_exec_test_profile", "session": "session_e2e_001"},
+        member_id="dev",
+        generation=1,
+        request_id="req-e2e-001",
+        prompt="Verify fixed calc.py in isolated sandbox",
+    )
+    job_id = sub["job_id"]
+    claimed = pool.claim(lease=30)
+    assert claimed is not None
+    row, _fd = claimed
+    attempt_uuid = row["attempt"]
+
+    ok = pool.run_claimed(
+        claimed,
+        [sys.executable, "-m", "agentcore.colleague_worker", "--bootstrap", "trusted_e2e_bootstrap:make"],
+        timeout=15,
+        lease=30,
+    )
+    assert ok is True
+    st = pool.status(job_id)
+    assert st["status"] == "completed", f"Pool job did not succeed: {st}"
+
+    # Verify binding.json and stop.json were created in the attempt directory and match instance_id & generation
+    attempt_path = pool_dir / "attempts" / attempt_uuid
+    binding_file = attempt_path / "binding.json"
+    stop_file = attempt_path / "stop.json"
+    assert binding_file.is_file()
+    assert stop_file.is_file()
+    binding_data = json.loads(binding_file.read_text(encoding="utf-8"))
+    stop_data = json.loads(stop_file.read_text(encoding="utf-8"))
+    assert binding_data["instance_id"] == stop_data["instance_id"]
+    assert binding_data["generation"] == stop_data["generation"] == 1
+    assert stop_data["quiescent"] is True
+
+

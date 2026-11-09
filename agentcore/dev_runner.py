@@ -163,12 +163,75 @@ def run_dev_job(
     lock_root: Optional[Path] = None,
     runner_callable: Optional[Callable[[str, Any], dict[str, Any]]] = None,
     verification_executor: Optional[Callable[..., dict[str, Any]]] = None,
+    execution_backend_adapter: Optional[Any] = None,
 ) -> dict[str, Any]:
     """Execute a development task for a colleague role in an isolated worktree."""
     goal = _goal(job)
+    from agentcore.colleague_containment import FORBIDDEN_PAYLOAD_BINDING_KEYS, is_forbidden_host_path
+    from agentcore.colleague_dev import DEV_ROLES, validate_role_path_access
     from agentcore.verification_gate import (
         MAX_VERIFICATION_CHECKS, evaluate_verification_checks, normalize_verification_check,
     )
+    # Queued task payload must never self-declare or override host attempt bindings.
+    forbidden_payload_keys = FORBIDDEN_PAYLOAD_BINDING_KEYS & set(job["payload"].keys())
+    if forbidden_payload_keys:
+        raise PermissionError("payload_binding_self_declaration_forbidden")
+
+    # Pre-execution network and role path access enforcement.
+    if job["payload"].get("network_access") is True and not policy.get("allow_network", False):
+        raise PermissionError("unauthorized_network_access_denied")
+    declared_role = str(job["payload"].get("role") or "cases").strip().lower()
+    target_paths = job["payload"].get("target_paths") or ()
+    if not isinstance(target_paths, (list, tuple)):
+        raise PermissionError("invalid_target_paths")
+    target_action = str(job["payload"].get("action") or "write")
+    for raw_target in target_paths:
+        if not isinstance(raw_target, (str, Path)):
+            raise PermissionError("invalid_target_path")
+        forbid_host, forbid_reason = is_forbidden_host_path(raw_target)
+        if forbid_host:
+            raise PermissionError(f"forbidden_host_access:{forbid_reason}")
+        t_path = Path(raw_target)
+        cand = (workdir / t_path).resolve(strict=False) if not t_path.is_absolute() else t_path.resolve(strict=False)
+        if not (cand == workdir.resolve() or cand.is_relative_to(workdir.resolve())):
+            raise PermissionError("path_outside_authorized_workdir")
+        if declared_role in DEV_ROLES:
+            rel_t = cand.relative_to(workdir.resolve()).as_posix()
+            allowed_p, reason_p = validate_role_path_access(declared_role, rel_t, action=target_action, root=workdir)
+            if not allowed_p:
+                raise PermissionError(f"role_ownership_violation:{reason_p}")
+
+    containment_binding = None
+    if execution_backend_adapter is not None:
+        if not hasattr(execution_backend_adapter, "verify_attempt_binding") or not callable(
+            execution_backend_adapter.verify_attempt_binding
+        ):
+            raise PermissionError("invalid_execution_backend_adapter")
+        exp_job = str(job.get("job") or getattr(execution_backend_adapter, "job", "") or "")
+        exp_att = str(job.get("attempt") or getattr(execution_backend_adapter, "attempt", "") or "")
+        exp_non = str(getattr(execution_backend_adapter, "nonce", "") or "")
+        exp_tok = str(getattr(execution_backend_adapter, "token", "") or "")
+        containment_binding = execution_backend_adapter.verify_attempt_binding(
+            expected_job=exp_job,
+            expected_attempt=exp_att,
+            expected_nonce=exp_non,
+            expected_token=exp_tok,
+        )
+        if not isinstance(containment_binding, dict) or containment_binding.get("ok") is not True:
+            raise PermissionError(
+                f"unverified_execution_backend_adapter:{(containment_binding or {}).get('reason', 'unknown')}"
+            )
+        if target_paths and hasattr(execution_backend_adapter, "authorize_execution"):
+            execution_backend_adapter.authorize_execution(
+                target_paths=target_paths,
+                action=target_action,
+                network_access=bool(job["payload"].get("network_access")),
+                payload=job["payload"],
+                raise_on_deny=True,
+            )
+        if verification_executor is None and hasattr(execution_backend_adapter, "verification_executor"):
+            verification_executor = execution_backend_adapter.verification_executor
+
     # The queued task is data, not permission to run additional host commands.
     # Freeze administrator contracts before any model code or filesystem writes.
     configured = policy.get("verification_checks", [])
@@ -253,6 +316,7 @@ def run_dev_job(
             "tools": tools,
             "timeout": timeout,
             "sandbox": sandbox,
+            "execution_backend_adapter": execution_backend_adapter,
         })
         payload = raw_result if isinstance(raw_result, dict) else raw_result.to_dict()
 
@@ -304,6 +368,13 @@ def run_dev_job(
         from agentcore.failure_mender import decide_failure
         failure_decision = decide_failure(err, source=f"dev_runner:{job.get('job', 'unknown')}")
 
+    containment_audit_log = getattr(execution_backend_adapter, "audit_log", None) if execution_backend_adapter is not None else None
+    containment_evidence = (
+        execution_backend_adapter.trusted_containment_evidence()
+        if execution_backend_adapter is not None and hasattr(execution_backend_adapter, "trusted_containment_evidence")
+        else None
+    )
+
     report = {
         "ok": ok,
         "execution_completed": execution_completed,
@@ -323,6 +394,9 @@ def run_dev_job(
         "events": payload.get("events") or [],
         "failure_decision": failure_decision,
         "verification_receipt": verification_receipt,
+        "containment_binding": containment_binding,
+        "containment_audit_log": containment_audit_log,
+        "containment_evidence": containment_evidence,
     }
 
     _atomic(out / "report.json", json.dumps(report, ensure_ascii=False, indent=2))
@@ -337,6 +411,7 @@ def run_dev_job(
         "degradation_reason": degradation_reason,
         "provider": provider,
         "tool_calls": payload.get("tool_calls") or [],
+        "containment_binding": containment_binding,
     }, ensure_ascii=False, indent=2))
 
     if ok:

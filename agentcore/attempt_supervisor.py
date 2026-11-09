@@ -90,6 +90,8 @@ def main():
     signal.signal(signal.SIGINT, request_stop)
     proc, code, ready = None, 125, False
     child_started = False
+    instance_id = str(config.get("instance_id") or os.urandom(16).hex())
+    generation = int(config.get("generation") or 1) if isinstance(config.get("generation"), int) and config.get("generation", 0) >= 1 else 1
     try:
         _enable_subreaper()  # No child may exist before this succeeds.
         ready = True
@@ -106,6 +108,35 @@ def main():
         authorized = control.recv(16) == b"go"
         if authorized and state == STATE_RUNNING:
             try:
+                sup_pid = os.getpid()
+                sup_start = process_start(sup_pid)
+                boot_id = sup_start.split(":", 1)[0] if sup_start and ":" in sup_start else ""
+                binding_path = Path.cwd() / "binding.json"
+                binding_payload = json.dumps({
+                    "schema_version": "attempt_binding/v1",
+                    "proof_type": "attempt_pre_execution_binding",
+                    "backend": "bwrap_subreaper",
+                    "job": str(config.get("job") or ""),
+                    "attempt": str(config.get("attempt") or ""),
+                    "token": str(config.get("token") or ""),
+                    "nonce": str(config.get("nonce") or ""),
+                    "instance_id": instance_id,
+                    "generation": generation,
+                    "boot_id": boot_id,
+                    "supervisor_pid": sup_pid,
+                    "supervisor_start": sup_start,
+                    "max_file": limit,
+                    "created_at": time.time(),
+                }, sort_keys=True).encode("utf-8")
+                bfd = os.open(binding_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+                try:
+                    bwritten = 0
+                    while bwritten < len(binding_payload):
+                        bwritten += os.write(bfd, binding_payload[bwritten:])
+                    os.fsync(bfd)
+                finally:
+                    os.close(bfd)
+
                 command = [sys.executable, str(Path(__file__).with_name("exec_runner.py")),
                            str(limit)] + config["command"]
                 env = dict(os.environ)
@@ -115,6 +146,14 @@ def main():
                     env["SUPERAGENT_JOB_ID"] = str(config["job"])
                 if config.get("attempt"):
                     env["SUPERAGENT_ATTEMPT_ID"] = str(config["attempt"])
+                if config.get("nonce"):
+                    env["SUPERAGENT_SUPERVISOR_NONCE"] = str(config["nonce"])
+                env["SUPERAGENT_SUPERVISOR_PID"] = str(sup_pid)
+                if sup_start:
+                    env["SUPERAGENT_SUPERVISOR_START"] = str(sup_start)
+                env["SUPERAGENT_ATTEMPT_BINDING_PATH"] = str(binding_path)
+                env["SUPERAGENT_INSTANCE_ID"] = instance_id
+                env["SUPERAGENT_ATTEMPT_GENERATION"] = str(generation)
                 env["SUPERAGENT_ATTEMPT_DIR"] = str(Path.cwd())
                 # The runner inherits neither control/evidence descriptors nor
                 # the lock. The supervisor retains it until its tree is reaped.
@@ -185,6 +224,7 @@ def main():
         proof = {name: config[name] for name in ("job", "attempt", "token", "nonce")}
         proof.update(quiescent=quiescent, proof_scope="subreaper_tree" if ready else "not_started",
                      supervisor_pid=os.getpid(), supervisor_start=process_start(os.getpid()),
+                     instance_id=instance_id, generation=generation,
                      child_started=child_started, exit_code=code)
         if not quiescent:
             try:
