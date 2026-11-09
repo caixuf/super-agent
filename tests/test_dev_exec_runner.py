@@ -269,6 +269,40 @@ def test_progress_monitor_streams_steps_and_writes_progress_json(tmp_path):
     assert pdata_final["progress"] == 1.0
 
 
+def test_harvest_attempt_artifacts_stages_report_files_into_attempt_dir(monkeypatch, tmp_path):
+    module = _module()
+    fake_home = tmp_path / "home" / "worker"
+    reports_dir = fake_home / "reports" / "2026-11-09_arch"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    html_file = reports_dir / "agent_arch.html"
+    html_file.write_text("<html><body>arch</body></html>", encoding="utf-8")
+    png_file = reports_dir / "agent_arch.png"
+    png_file.write_bytes(b"\x89PNG\r\n\x1a\n")
+    page2_png = reports_dir / "agent_arch.page-02.png"
+    page2_png.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    attempt_dir = tmp_path / "attempts" / ("a" * 32)
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    (attempt_dir / "progress.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(module.Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.setenv("SUPERAGENT_ATTEMPT_DIR", str(attempt_dir))
+
+    summary = (
+        f"产出文件：\n"
+        f"- HTML：`{html_file}`\n"
+        f"- PNG：`{png_file}`、`{page2_png}`\n"
+    )
+    harvested = module._harvest_attempt_artifacts(summary)
+    assert harvested == [
+        str(attempt_dir.resolve() / "agent_arch.html"),
+        str(attempt_dir.resolve() / "agent_arch.png"),
+    ]
+    assert (attempt_dir / "agent_arch.html").read_text(encoding="utf-8") == "<html><body>arch</body></html>"
+    assert (attempt_dir / "agent_arch.png").read_bytes() == b"\x89PNG\r\n\x1a\n"
+
+
+
 
 
 

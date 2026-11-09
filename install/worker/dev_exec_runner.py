@@ -38,6 +38,7 @@ _SSH_HOST_RE = re.compile(r"^[A-Za-z0-9._@-]{1,128}\Z")
 def _decorate_goal(goal: str) -> str:
     duty = (os.environ.get("DEV_EXPERT_DUTY") or "").strip()
     target_host = (os.environ.get("DEV_TARGET_HOST") or "").strip()
+    attempt_dir = (os.environ.get("SUPERAGENT_ATTEMPT_DIR") or "").strip()
     if not duty and not target_host:
         return goal
     lines = [
@@ -46,6 +47,8 @@ def _decorate_goal(goal: str) -> str:
         "- Progressive Delivery: Follow conclusion-first progressive delivery (Phase 1: deliver core text analysis, Markdown report, and checkpoint output immediately; Phase 2: heavy diagram/browser rendering is an out-of-band enhancement. Never block, delay, or withhold Phase 1 text delivery due to rendering failures, delays, or timeouts).",
         "- Colleague Collaboration & Fault Tolerance: You can inspect the team roster (`colleague_list`), assign/consult specialist colleagues (`colleague_assign` / `colleague_task_status` for architect/cases/reviewer/test/triage/ops/backend/frontend), or spawn parallel subagents (`delegate_task`) when cross-role collaboration or failover speeds up or recovers a task.",
     ]
+    if attempt_dir:
+        lines.append(f"- Deliverable Staging Directory: {attempt_dir} (copy any final deliverable files such as .html, .pdf, or cover .png into this directory so they are automatically attached to the chat completion)")
     if duty:
         lines.append(f"- Duty: {duty}")
     if target_host:
@@ -223,6 +226,101 @@ def _workdir() -> Path:
     return path if path.is_dir() else Path.home()
 
 
+_DELIVERABLE_EXTS = {
+    ".html", ".htm", ".pdf", ".zip", ".csv", ".xlsx", ".docx",
+    ".png", ".jpg", ".jpeg", ".webp", ".svg",
+}
+_INTERNAL_ATTEMPT_FILES = {
+    "binding.json", "input.json", "progress.json", "progress.json.tmp",
+    "stop.json", "manifest.json", "report.json", "checkpoint.json",
+    "stdout", "stderr", "stdout.log", "stderr.log",
+}
+_ABS_FILE_RE = re.compile(r"(?<![A-Za-z0-9_.\-/])(/(?:home|tmp|data)(?:/[A-Za-z0-9_.\-]+)+\.[A-Za-z0-9]+)")
+
+
+def _harvest_attempt_artifacts(summary: str, checkpoint_data: dict | None = None) -> list[str]:
+    """Stage newly generated deliverable files into SUPERAGENT_ATTEMPT_DIR and return their paths."""
+    attempt_env = (os.environ.get("SUPERAGENT_ATTEMPT_DIR") or "").strip()
+    if not attempt_env:
+        return []
+    attempt_dir = Path(attempt_env)
+    if not attempt_dir.is_dir() or attempt_dir.is_symlink():
+        return []
+    resolved_attempt = attempt_dir.resolve()
+    staged: list[str] = []
+    seen_names: set[str] = set()
+
+    # 1. Existing deliverable files already placed directly inside SUPERAGENT_ATTEMPT_DIR
+    try:
+        for item in sorted(resolved_attempt.iterdir()):
+            if (item.name.startswith(".") or item.name in _INTERNAL_ATTEMPT_FILES
+                    or item.is_symlink() or not item.is_file()):
+                continue
+            ext = ".tar.gz" if item.name.lower().endswith(".tar.gz") else item.suffix.lower()
+            if ext in _DELIVERABLE_EXTS or ext == ".tar.gz":
+                if item.stat().st_size <= 16 * 1024 * 1024 and len(staged) < 8:
+                    staged.append(str(item))
+                    seen_names.add(item.name)
+    except Exception:
+        pass
+
+    # 2. Deliverable files referenced in checkpoint_data or summary text
+    candidates: list[str] = []
+    if isinstance(checkpoint_data, dict) and isinstance(checkpoint_data.get("artifacts"), list):
+        for p in checkpoint_data["artifacts"]:
+            if isinstance(p, str) and p.startswith("/"):
+                candidates.append(p)
+    if isinstance(summary, str) and summary:
+        for m in _ABS_FILE_RE.finditer(summary):
+            candidates.append(m.group(1).rstrip(".,;:)`'\""))
+
+    home_resolved = Path.home().resolve()
+    tmp_resolved = Path("/tmp").resolve()
+    now = time.time()
+
+    for raw_path in candidates:
+        if len(staged) >= 8:
+            break
+        try:
+            src = Path(raw_path)
+            if src.name.startswith(".") or src.name in _INTERNAL_ATTEMPT_FILES or src.is_symlink():
+                continue
+            if re.search(r"\.page-\d+\.png$", src.name, re.IGNORECASE):
+                continue
+            ext = ".tar.gz" if src.name.lower().endswith(".tar.gz") else src.suffix.lower()
+            if ext not in _DELIVERABLE_EXTS and ext != ".tar.gz":
+                continue
+            resolved_src = src.resolve(strict=True)
+            if not resolved_src.is_file():
+                continue
+            st = resolved_src.stat()
+            if st.st_size == 0 or st.st_size > 16 * 1024 * 1024:
+                continue
+            if resolved_src.parent == resolved_attempt:
+                if resolved_src.name not in seen_names:
+                    staged.append(str(resolved_src))
+                    seen_names.add(resolved_src.name)
+                continue
+            # Only stage fresh deliverable outputs created within safe report/temp roots
+            in_safe_root = (
+                resolved_src.is_relative_to(home_resolved / "reports")
+                or resolved_src.is_relative_to(tmp_resolved)
+                or resolved_src.is_relative_to(resolved_attempt)
+            )
+            if not in_safe_root or (now - st.st_mtime) > 7200:
+                continue
+            dest = resolved_attempt / resolved_src.name
+            if dest.name not in seen_names:
+                if not dest.exists():
+                    shutil.copyfile(resolved_src, dest, follow_symlinks=False)
+                staged.append(str(dest))
+                seen_names.add(dest.name)
+        except Exception:
+            continue
+
+    return staged[:8]
+
+
 def _find_and_load_checkpoint() -> dict | None:
     engine = _engine_root()
     if str(engine) not in sys.path:
@@ -347,6 +445,9 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
         "stderr": err,
         "returncode": done.returncode,
     }
+    artifacts = _harvest_attempt_artifacts(payload["summary"], checkpoint_data)
+    if artifacts:
+        payload["artifacts"] = artifacts
     if checkpoint_data:
         payload["checkpoint"] = checkpoint_data
         payload["checkpoint_delivered"] = True
@@ -391,6 +492,9 @@ def run_pi(goal: str, *, route: dict | None = None) -> dict:
     payload = {"ok": ok, "summary": text.strip(), "output": text, "stderr": "", "returncode": result.exit_code,
                "stop_reason": result.stop_reason, "tool_calls": result.tool_calls,
                "duration_ms": result.duration_ms, "model": model}
+    artifacts = _harvest_attempt_artifacts(payload["summary"], _find_and_load_checkpoint())
+    if artifacts:
+        payload["artifacts"] = artifacts
     if not ok:
         payload["error"] = result.error_message or result.stop_reason or "pi_failed"
     return payload
