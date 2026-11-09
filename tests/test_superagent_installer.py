@@ -18,6 +18,7 @@ import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 TOOL = REPO / "tools/superagent.py"
+os.environ.setdefault("SUPERAGENT_SOURCE_DIRTY", "0")
 
 
 def _load_installer():
@@ -110,6 +111,7 @@ def _seal_test_release(release, version):
 def _run(home: Path, *args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ, HOME=str(home))
     env.pop("HERMES_HOME", None)
+    env.setdefault("SUPERAGENT_SOURCE_DIRTY", "0")
     command = [
         sys.executable, str(TOOL),
         "--profile", "demo",
@@ -1685,7 +1687,7 @@ def test_prune_releases_removes_old_releases_and_tarballs_keeping_only_active(tm
     (stale_dir / "dummy.txt").write_text("stale")
     stale_tar = root / "releases" / "old-bundle.tar.gz"
     stale_tar.write_bytes(b"tarball")
-    pruned = json.loads(_run(tmp_path, "prune-releases", check=True).stdout)
+    pruned = json.loads(_run(tmp_path, "prune-releases", "--keep", "0", check=True).stdout)
     assert pruned["status"] == "pruned"
     assert set(pruned["removed"]) == {"old-release-001", "old-bundle.tar.gz"}
     remaining = [p.name for p in (root / "releases").iterdir()]

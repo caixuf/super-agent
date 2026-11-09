@@ -112,6 +112,22 @@ bash scripts/ops/uninstall-legacy.sh
 
 ---
 
+### 2.5 部署源锁定与防降级防护 (Deploy Source Locking & Downgrade Prevention)
+
+为杜绝从错误仓库目录更新、历史旧提交静默降级覆盖以及脏工作区代码混入生产，安装器在 `install` / `update` 阶段默认开启部署源硬锁：
+
+#### 核心防护与拦截项：
+- **`source_dirty`**：源码工作区包含未提交改动时阻断发布；临时调试可使用 `--allow-dirty` 绕过；
+- **`source_repo_mismatch`**：发布执行目录与历史 `install-manifest.json` 中记录的源路径不符时阻断；若需正式变更发布目录，使用 `--adopt-source` 显式接管；
+- **`downgrade_or_divergent`** / **`previous_commit_unknown_to_source`**：待发布提交不是当前线上版本的 Git 后代时阻断；紧急强制回退可通过 `--allow-downgrade`，标准回退请使用 `rollback`；
+- **`unexpected_commit`**：使用 `--expect-commit <commit-sha>` 可显式锁死预期发布的 Git 提交，防止分支误切。
+
+#### 版本漂移与真实性检查 (`doctor drift`)：
+当执行 `doctor` 体检时，`deploy_version_observation` 节点会自动对账当前线上版本与发布源状态。若检测到线上版本落后于源码源、脏版本安装或有未随发布重启的常驻进程（`stale_processes`），`doctor` 会标记为 `drift` 状态（退出码 1），提示运维人员及时处置。
+
+
+---
+
 ## 3. 生产环境常见问题处置矩阵 (Troubleshooting Matrix & FAQ)
 
 ### Q1: 为什么后台任务长时间处于 RUNNING 状态且卡片无任何输出？

@@ -132,3 +132,51 @@ python3 tools/redeploy_check.py --skip-docker
 journalctl --user -u hermes-gateway-<profile>.service -n 100 -f
 journalctl --user -u superagent-worker-<profile>.service -n 100 -f
 ```
+
+---
+
+## 6. 部署源锁定与防降级
+
+为避免生产运维过程中的多仓并发更新、历史版本意外覆盖与未重启进程残留，运维体系引入部署源锁定与防降级门禁机制。
+
+### 6.1 核心防护原则
+1. **单一发布源绑定（One Deploy Source per Host）**：每个受管主机 Profile 绑定首次部署的源码真实路径（`source_repo`），避免多目录交叉部署导致状态紊乱。
+2. **提交祖先防降级（Downgrade Prevention）**：升级时新提交必须是当前生效版本的 Git 祖先派生（`git merge-base --is-ancestor <prev> <new>`），防止旧代码静默覆盖生产环境。
+3. **工作区干净度校验（Clean Tree Assertion）**：禁止直接将带有未提交修改的脏工作区打包发布为正式版本。
+4. **多版本滚动保留（Release Retention）**：发布后保留当前激活版本及最近 N 个历史版本（默认 N=3），绝不清空历史记录，保障随时可秒级回滚。
+
+### 6.2 拦截检查项（Blockers）与绕过参数
+当命中国防门禁条件时，`install` 或 `update` 操作将直接阻断并输出 `{"status": "blocked", "blockers": [...]}`，系统状态零改动：
+
+| 拦截标识 (Blocker) | 触发条件 | 绕过/覆盖参数 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `source_dirty` | 当前发布源码树包含未提交的修改 | `--allow-dirty` | 允许发布包含未提交改动的临时版本 |
+| `source_repo_mismatch` | 当前执行安装的源码仓库路径与历史清单不一致 | `--adopt-source` | 显式将发布源变更为当前仓库路径 |
+| `downgrade_or_divergent` | 新提交不是已安装提交的 Git 后代分支（分支分叉或落后） | `--allow-downgrade` | 允许显式降级或强制覆盖 |
+| `previous_commit_unknown_to_source` | 历史安装提交在当前仓库 Git 数据库中不存在 | `--allow-downgrade` | 允许跨非共享历史仓库部署 |
+| `unexpected_commit` | 指定了 `--expect-commit <sha>` 但当前仓库 HEAD 提交不符 | 核对后重新指定匹配的 commit SHA | 防止运维操作发错提交 |
+
+### 6.3 自动化运维与精准发布（`--expect-commit`）
+运维发布脚本或流水线可通过 `--expect-commit` 显式锁死预期发版提交，防止分支切错：
+```bash
+./install/superagent.sh update --profile <profile> --expect-commit 4b825dc --apply
+```
+
+### 6.4 历史版本保留与清理策略
+- 默认在 `install` / `update` 时自动保留激活版本及最近 3 个历史 Release。
+- 历史清理命令：
+  ```bash
+  # 保留最近 3 个历史版本
+  python3 tools/superagent.py prune-releases --profile <profile> --keep 3 --apply
+
+  # 仅保留当前活跃版本，清理全部历史 Release
+  python3 tools/superagent.py prune-releases --profile <profile> --keep 0 --apply
+  ```
+- 回滚命令（`superagent rollback --apply`）不受降级拦截限制，作为受控的标准回滚途径。
+
+### 6.5 版本漂移对账（Doctor Drift）
+`superagent doctor` 的 `deploy_version_observation` 节点对账当前运行态与源码态：
+- 字段覆盖：`installed_commit`、`installed_dirty`、`source_repo`、`source_head`、`source_dirty`。
+- `stale_processes`：检查已启动常驻进程的启动时间是否早于当前 Release 安装时间 `installed_at`。
+- 若存在版本落后（`installed_behind_source`）、脏版本安装（`installed_dirty`）或未随新版本重启的常驻进程（`stale_processes`），`doctor` 状态判定为 `drift`（非 ready，退出码 1）。
+

@@ -33,7 +33,7 @@ from typing import Any, Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agentcore.profile_overlay import apply_profile_overlay
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(os.environ.get("SUPERAGENT_REPO") or Path(__file__).resolve().parents[1]).resolve()
 DEFAULT_ROOT = Path.home() / "super_agent"
 DEFAULT_HERMES = Path.home() / ".hermes" / "hermes-agent"
 PLUGIN_SOURCES = tuple(sorted(p for p in (REPO / "plugins").glob("*/")))
@@ -76,7 +76,22 @@ def _run(
     return proc
 
 
-def _git_identity(root: Path = REPO) -> tuple[str, str]:
+class GitIdentity(tuple):
+    version: str
+    identity: str
+    source_commit: str
+    source_dirty: bool
+
+    def __new__(cls, version: str, identity: str, source_commit: str = "", source_dirty: bool = False):
+        obj = super().__new__(cls, (version, identity))
+        obj.version = version
+        obj.identity = identity
+        obj.source_commit = source_commit
+        obj.source_dirty = source_dirty
+        return obj
+
+
+def _git_identity(root: Path = REPO) -> GitIdentity:
     descriptor = root / "release.json"
     if descriptor.is_file() and not (root / ".git").exists():
         release = json.loads(descriptor.read_text(encoding="utf-8"))
@@ -110,12 +125,19 @@ def _git_identity(root: Path = REPO) -> tuple[str, str]:
         if (digest.hexdigest() != release.get("tree_sha256")
                 or _release_files(root, ignored_roots=_SOURCE_BUILD_DIRS) != files):
             raise ValueError("release bundle integrity check failed")
-        return release["version"], release["identity"]
+        commit = release.get("source_commit") or ""
+        dirty = not release.get("publishable", True) or "-dirty" in release.get("identity", "")
+        return GitIdentity(release["version"], release["identity"], commit, bool(dirty))
+    if "SUPERAGENT_SOURCE_DIRTY" in os.environ:
+        dirty = os.environ["SUPERAGENT_SOURCE_DIRTY"] == "1"
+    else:
+        dirty = bool(_run(["git", "status", "--porcelain"], cwd=root).stdout.strip())
+    commit = _run(["git", "rev-parse", "HEAD"], cwd=root).stdout.strip()
     short = _run(["git", "rev-parse", "--short", "HEAD"], cwd=root).stdout.strip() or "unknown"
-    dirty = bool(_run(["git", "status", "--porcelain"], cwd=root).stdout.strip())
     describe = _run(["git", "describe", "--tags", "--always", "--dirty"], cwd=root).stdout.strip()
     version = describe or short
-    return version, short + ("-dirty" if dirty else "")
+    identity = short + ("-dirty" if dirty else "")
+    return GitIdentity(version, identity, commit, dirty)
 
 
 def _managed_root(args: argparse.Namespace) -> Path:
@@ -636,7 +658,18 @@ def _check_runtime_invariants(manifest_path: Path, profile_home: Path, profile: 
 
 
 def build_plan(args: argparse.Namespace) -> dict[str, Any]:
-    version, identity = _git_identity()
+    git_id = _git_identity()
+    version, identity = git_id[0], git_id[1]
+    source_commit = getattr(git_id, "source_commit", "") or ""
+    if not source_commit:
+        source_commit = _run(["git", "rev-parse", "HEAD"], cwd=REPO).stdout.strip() or "unknown"
+    source_dirty = getattr(git_id, "source_dirty", None)
+    if source_dirty is None:
+        if "SUPERAGENT_SOURCE_DIRTY" in os.environ:
+            source_dirty = os.environ["SUPERAGENT_SOURCE_DIRTY"] == "1"
+        else:
+            source_dirty = bool(_run(["git", "status", "--porcelain"], cwd=REPO).stdout.strip())
+    source_repo = str(REPO.resolve())
     profile_home = _profile_home(args)
     root = _managed_root(args)
     hermes_root = args.hermes_root.expanduser().resolve()
@@ -706,6 +739,9 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "action": "superagent-managed-install",
         "version": version,
         "identity": identity,
+        "source_commit": source_commit,
+        "source_repo": source_repo,
+        "source_dirty": source_dirty,
         "managed_root": str(root),
         "release": str(release),
         "profile_home": str(profile_home),
@@ -1372,7 +1408,85 @@ def _stage_release(plan: dict[str, Any]) -> Path:
     return release
 
 
+def _check_deploy_source_guard(args: argparse.Namespace, plan: dict[str, Any], root: Path) -> tuple[list[str], list[str]]:
+    blockers: list[str] = []
+    warnings: list[str] = []
+
+    # 1. source_dirty
+    source_dirty = plan.get("source_dirty", False)
+    if source_dirty and not getattr(args, "allow_dirty", False):
+        blockers.append("source_dirty")
+
+    # 2. unexpected_commit
+    expect_commit = getattr(args, "expect_commit", None)
+    source_commit = plan.get("source_commit", "")
+    if expect_commit:
+        resolved = _run(["git", "rev-parse", "--verify", f"{expect_commit}^{{commit}}"], cwd=REPO)
+        if resolved.returncode != 0:
+            resolved = _run(["git", "rev-parse", "--verify", expect_commit], cwd=REPO)
+        if resolved.returncode != 0:
+            blockers.append("unexpected_commit")
+        else:
+            if resolved.stdout.strip() != source_commit:
+                blockers.append("unexpected_commit")
+
+    # 3. Previous manifest checks
+    manifest_path = root / "install-manifest.json"
+    if manifest_path.is_file():
+        try:
+            prev_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            prev_manifest = {}
+
+        if isinstance(prev_manifest, dict):
+            # Check source_repo_mismatch
+            prev_repo = prev_manifest.get("source_repo")
+            if prev_repo:
+                try:
+                    prev_repo_resolved = Path(prev_repo).resolve()
+                    curr_repo_resolved = Path(plan.get("source_repo", str(REPO.resolve()))).resolve()
+                    if prev_repo_resolved != curr_repo_resolved and not getattr(args, "adopt_source", False):
+                        blockers.append("source_repo_mismatch")
+                except Exception:
+                    if not getattr(args, "adopt_source", False):
+                        blockers.append("source_repo_mismatch")
+
+            # Check previous commit
+            prev_commit = prev_manifest.get("source_commit")
+            if not prev_commit:
+                identity = prev_manifest.get("identity")
+                if identity and isinstance(identity, str):
+                    candidate = identity.removesuffix("-dirty")
+                    res = _run(["git", "rev-parse", "--verify", f"{candidate}^{{commit}}"], cwd=REPO)
+                    if res.returncode == 0:
+                        prev_commit = res.stdout.strip()
+                    else:
+                        warnings.append("legacy_manifest_unpinned")
+                else:
+                    warnings.append("legacy_manifest_unpinned")
+
+            if prev_commit:
+                cat_check = _run(["git", "cat-file", "-e", f"{prev_commit}^{{commit}}"], cwd=REPO)
+                if cat_check.returncode != 0:
+                    if not getattr(args, "allow_downgrade", False):
+                        blockers.append("previous_commit_unknown_to_source")
+                else:
+                    if source_commit:
+                        anc_check = _run(["git", "merge-base", "--is-ancestor", prev_commit, source_commit], cwd=REPO)
+                        if anc_check.returncode != 0:
+                            if not getattr(args, "allow_downgrade", False):
+                                blockers.append("downgrade_or_divergent")
+
+    return blockers, warnings
+
+
 def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
+    root = Path(plan["managed_root"])
+    guard_blockers, guard_warnings = _check_deploy_source_guard(args, plan, root)
+    if guard_blockers:
+        print(json.dumps({"status": "blocked", "blockers": guard_blockers}, indent=2))
+        return 1
+
     # First installs and same-version repairs do not have update's rollback
     # wrapper. Refuse a predicted migration mismatch before any mutation.
     runtime_manifest = getattr(args, "runtime_manifest", None)
@@ -1388,7 +1502,6 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         except Exception:
             print(json.dumps({"status": "blocked", "reason": "migration_preview_unavailable"}))
             return 1
-    root = Path(plan["managed_root"])
     current = root / "current"
     previous = current.resolve() if current.is_symlink() else None
     manifest_path = root / "install-manifest.json"
@@ -1433,9 +1546,14 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     release_history = list(previous_history)
     if previous is not None and previous.resolve() != release.resolve():
         release_history = [*release_history, str(previous.resolve())][-10:]
+    installed_at = time.time()
     manifest = {
         **plan,
         "status": "installed",
+        "installed_at": installed_at,
+        "source_commit": plan.get("source_commit", ""),
+        "source_repo": plan.get("source_repo", str(REPO.resolve())),
+        "source_dirty": plan.get("source_dirty", False),
         "tree_sha256": _release_tree_hash(release),
         "release_history": release_history,
         "backup": str(backup),
@@ -1450,8 +1568,12 @@ def install(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     }
     manifest_path = root / "install-manifest.json"
     _write_json_atomic(manifest_path, manifest)
-    _prune_old_releases(root, release, manifest_path)
-    print(json.dumps({"status": "installed", **manifest}, ensure_ascii=False, indent=2))
+    _prune_old_releases(root, release, manifest_path, keep=getattr(args, "keep", 3))
+    out = {"status": "installed", **manifest}
+    if guard_warnings:
+        out["warnings"] = guard_warnings
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return 0
     return 0
 
 
@@ -1480,18 +1602,42 @@ def _sync_profile_skills(profile_home: Path, release: Path) -> list[str]:
     return synced
 
 
-def _prune_old_releases(root: Path, active_release: Path, manifest_path: Path | None = None) -> list[str]:
-    """Delete all non-active release directories and tarballs under root/releases."""
+def _prune_old_releases(root: Path, active_release: Path, manifest_path: Path | None = None, keep: int = 3) -> list[str]:
+    """Delete old release directories and tarballs under root/releases keeping active + N from history."""
     releases_dir = root / "releases"
     if not releases_dir.is_dir():
         return []
     active_resolved = active_release.resolve()
+
+    manifest = None
+    if manifest_path is not None and manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            manifest = None
+
+    history: list[str] = []
+    if isinstance(manifest, dict):
+        history = list(manifest.get("release_history") or [])
+
+    if keep > 0:
+        kept_history = history[-keep:]
+    else:
+        kept_history = []
+
+    kept_dirs = {active_resolved}
+    for item in kept_history:
+        try:
+            kept_dirs.add(Path(item).resolve())
+        except OSError:
+            pass
+
     removed = []
     for entry in sorted(releases_dir.iterdir()):
         if entry.name.startswith(".staging-"):
             continue
         try:
-            if not entry.is_symlink() and entry.resolve() == active_resolved:
+            if not entry.is_symlink() and entry.resolve() in kept_dirs:
                 continue
         except OSError:
             pass
@@ -1503,12 +1649,10 @@ def _prune_old_releases(root: Path, active_release: Path, manifest_path: Path | 
             removed.append(entry.name)
         except OSError:
             pass
-    if manifest_path is not None and manifest_path.is_file():
+    if manifest is not None and manifest_path is not None:
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if isinstance(manifest, dict) and manifest.get("release_history"):
-                manifest["release_history"] = []
-                _write_json_atomic(manifest_path, manifest)
+            manifest["release_history"] = kept_history
+            _write_json_atomic(manifest_path, manifest)
         except (OSError, ValueError):
             pass
     return removed
@@ -1525,7 +1669,8 @@ def prune_releases(args: argparse.Namespace) -> int:
         print(json.dumps({"status": "refused", "reason": "no_active_release"}))
         return 1
     active = current.resolve()
-    removed = _prune_old_releases(root, active, path)
+    keep = getattr(args, "keep", 3)
+    removed = _prune_old_releases(root, active, path, keep=keep)
     print(json.dumps({"status": "pruned", "active_release": str(active), "removed": removed}, indent=2))
     return 0
 def _manifest(args: argparse.Namespace) -> tuple[Path, dict[str, Any]] | None:
@@ -1591,6 +1736,36 @@ def rollback(args: argparse.Namespace) -> int:
                       "previous": str(previous) if previous else None}, indent=2))
     return 0
 
+
+
+def _process_start_time(pid: int) -> float | None:
+    try:
+        stat_path = Path(f"/proc/{pid}/stat")
+        if stat_path.is_file():
+            raw = stat_path.read_text()
+            after_comm = raw[raw.rfind(")") + 2:]
+            fields = after_comm.split()
+            starttime_ticks = int(fields[19])
+            clk_tck = os.sysconf("SC_CLK_TCK")
+            btime = 0
+            proc_stat = Path("/proc/stat")
+            if proc_stat.is_file():
+                for line in proc_stat.read_text().splitlines():
+                    if line.startswith("btime "):
+                        btime = int(line.split()[1])
+                        break
+            if btime > 0 and clk_tck > 0:
+                return float(btime + (starttime_ticks / clk_tck))
+    except Exception:
+        pass
+    try:
+        proc = _run(["ps", "-p", str(pid), "-o", "etimes="])
+        if proc.returncode == 0 and proc.stdout.strip().isdigit():
+            elapsed_seconds = int(proc.stdout.strip())
+            return float(time.time() - elapsed_seconds)
+    except Exception:
+        pass
+    return None
 
 
 def _gateway_runtime_observation(profile: str, expected_hermes_root: str | None) -> dict[str, Any]:
@@ -1939,6 +2114,81 @@ def _browser_observation(engine_root: Path) -> dict[str, Any]:
         return {"status": "missing", "error": str(exc)}
 
 
+def _deploy_version_observation(manifest: dict[str, Any], current: Path, profile: str) -> dict[str, Any]:
+    installed_commit = manifest.get("source_commit")
+    if not installed_commit:
+        identity = manifest.get("identity", "")
+        if identity and isinstance(identity, str):
+            cand = identity.removesuffix("-dirty")
+            res = _run(["git", "rev-parse", "--verify", f"{cand}^{{commit}}"], cwd=REPO)
+            installed_commit = res.stdout.strip() if res.returncode == 0 else cand
+        else:
+            installed_commit = "unknown"
+
+    installed_dirty_val = manifest.get("source_dirty")
+    if installed_dirty_val is not None:
+        installed_dirty = bool(installed_dirty_val)
+    elif manifest.get("identity"):
+        installed_dirty = "-dirty" in str(manifest.get("identity", ""))
+    else:
+        installed_dirty = "unknown"
+
+    source_repo = manifest.get("source_repo") or "unknown"
+    source_head = "unknown"
+    source_dirty = "unknown"
+
+    if source_repo != "unknown" and Path(source_repo).is_dir() and (Path(source_repo) / ".git").exists():
+        rev = _run(["git", "rev-parse", "HEAD"], cwd=Path(source_repo))
+        if rev.returncode == 0 and rev.stdout.strip():
+            source_head = rev.stdout.strip()
+        st = _run(["git", "status", "--porcelain"], cwd=Path(source_repo))
+        if st.returncode == 0:
+            if "SUPERAGENT_SOURCE_DIRTY" in os.environ:
+                source_dirty = os.environ["SUPERAGENT_SOURCE_DIRTY"] == "1"
+            else:
+                source_dirty = bool(st.stdout.strip())
+
+    stale_processes: list[str] = []
+    installed_at = manifest.get("installed_at")
+    gateway_obs = _gateway_runtime_observation(profile, manifest.get("hermes_root"))
+    worker_obs = _worker_runtime_observation(profile, current)
+    if isinstance(installed_at, (int, float)):
+        for obs in (gateway_obs, worker_obs):
+            pid = obs.get("main_pid")
+            if isinstance(pid, int) and pid > 0:
+                p_start = _process_start_time(pid)
+                if p_start is not None and p_start < installed_at:
+                    svc = obs.get("service")
+                    if svc and svc not in stale_processes:
+                        stale_processes.append(svc)
+
+    reasons: list[str] = []
+    if installed_dirty is True:
+        reasons.append("installed_dirty")
+
+    if source_repo != "unknown" and Path(source_repo).is_dir() and (Path(source_repo) / ".git").exists() and installed_commit != "unknown":
+        cat_check = _run(["git", "cat-file", "-e", f"{installed_commit}^{{commit}}"], cwd=Path(source_repo))
+        if cat_check.returncode != 0:
+            reasons.append("installed_not_in_source")
+        elif source_head != "unknown" and source_head != installed_commit:
+            anc_check = _run(["git", "merge-base", "--is-ancestor", installed_commit, source_head], cwd=Path(source_repo))
+            if anc_check.returncode == 0:
+                reasons.append("installed_behind_source")
+
+    if stale_processes:
+        reasons.append("stale_processes")
+
+    return {
+        "installed_commit": installed_commit,
+        "installed_dirty": installed_dirty,
+        "source_repo": source_repo,
+        "source_head": source_head,
+        "source_dirty": source_dirty,
+        "stale_processes": stale_processes,
+        "reasons": reasons,
+    }
+
+
 def doctor(args: argparse.Namespace) -> int:
     found = _manifest(args)
     if found is None:
@@ -1964,7 +2214,20 @@ def doctor(args: argparse.Namespace) -> int:
         and card_observation["status"] not in ("mismatch", "unknown")
         and feishu_dep_observation["status"] not in ("missing_feishu_extra", "unknown")
     )
-    print(json.dumps({"status": "ready" if ok else "broken",
+    version_observation = _deploy_version_observation(manifest, current, args.profile)
+    reasons = version_observation.get("reasons", [])
+    if not ok:
+        status = "broken"
+        ret = 1
+    elif reasons:
+        status = "drift"
+        ret = 1
+    else:
+        status = "ready"
+        ret = 0
+
+    print(json.dumps({"status": status,
+                      "deploy_version_observation": version_observation,
                       "feishu_card_observation": card_observation,
                       "feishu_dependency_observation": feishu_dep_observation,
                       "release_valid": release_ok, "plugin_links_valid": links_ok,
@@ -1979,7 +2242,7 @@ def doctor(args: argparse.Namespace) -> int:
                       "cron_observation": _cron_observation(profile_home),
                       "recall_diagnostics_observation": _recall_diagnostics_observation(profile_home, current),
                       "manifest": manifest}, indent=2))
-    return 0 if ok else 1
+    return ret
 
 
 def uninstall(args: argparse.Namespace) -> int:
@@ -2346,6 +2609,10 @@ def _managed_service_import_observation(service: str, managed_current: Path, *, 
 
 def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     root = _managed_root(args)
+    guard_blockers, guard_warnings = _check_deploy_source_guard(args, plan, root)
+    if guard_blockers:
+        print(json.dumps({"status": "blocked", "blockers": guard_blockers}, indent=2))
+        return 1
     current = root / "current"
     previous = current.resolve() if current.is_symlink() else None
     profile_home = Path(plan["profile_home"])
@@ -2441,6 +2708,18 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
                 # before calling systemd so recovery must stop it as well.
                 started_during_update.append((label, name))
                 _run(["systemctl", "--user", "start", name], check=True)
+        installed_at = manifest.get("installed_at")
+        if installed_at is not None:
+            for label, name in started_during_update:
+                show = _run(["systemctl", "--user", "show", name,
+                             "--property=ActiveState", "--property=MainPID"])
+                if show.returncode == 0:
+                    fields = dict(line.split("=", 1) for line in show.stdout.splitlines() if "=" in line)
+                    pid = int(fields.get("MainPID", "0"))
+                    if pid > 0:
+                        p_start = _process_start_time(pid)
+                        if p_start is not None and p_start < installed_at:
+                            raise RuntimeError("service_not_restarted_on_new_release")
         if was_active["worker"] and getattr(args, "legacy_engine_root", None):
             observed = _worker_runtime_observation(args.profile, root / "current")
             if observed.get("process_pythonpath_matches") is not True:
@@ -2454,7 +2733,7 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
                 if time.monotonic() >= deadline:
                     raise RuntimeError("managed_service_import_path_unproven:" + name)
                 time.sleep(0.2)
-        _prune_old_releases(root, Path(manifest["release"]), _path)
+        _prune_old_releases(root, Path(manifest["release"]), _path, keep=getattr(args, "keep", 3))
         return 0
     except Exception as exc:
         rollback_errors = []
@@ -2518,11 +2797,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="Explicit host runtime manifest; missing files fail deployment")
     parser.add_argument("--skip-overlay", action="store_true",
                         help="Skip applying profile overlay even if present in release archive")
+    parser.add_argument("--allow-dirty", action="store_true",
+                        help="Allow installation from a dirty git working tree")
+    parser.add_argument("--adopt-source", action="store_true",
+                        help="Adopt a new source repository path when mismatched")
+    parser.add_argument("--allow-downgrade", action="store_true",
+                        help="Allow installing a commit that is not a descendant of the prior commit")
+    parser.add_argument("--expect-commit", type=str, default=None,
+                        help="Require source_commit to resolve to this commit")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("plan", "install", "update", "doctor", "uninstall",
                  "activate-release", "rollback", "prune-releases", "migrate-config", "candidate-hermes", "install-hermes-candidate", "switch-gateway-source"):
         cmd = commands.add_parser(name)
         cmd.add_argument("--keep-data", action="store_true")
+        if name in ("install", "update"):
+            cmd.add_argument("--allow-dirty", action="store_true",
+                             help="Allow installation from a dirty git working tree")
+            cmd.add_argument("--adopt-source", action="store_true",
+                             help="Adopt a new source repository path when mismatched")
+            cmd.add_argument("--allow-downgrade", action="store_true",
+                             help="Allow installing a commit that is not a descendant of the prior commit")
+            cmd.add_argument("--expect-commit", type=str, default=None,
+                             help="Require source_commit to resolve to this commit")
+        if name == "prune-releases":
+            cmd.add_argument("--keep", type=int, default=3,
+                             help="Number of previous releases from history to keep (default 3, 0 deletes all)")
         if name == "activate-release":
             cmd.add_argument("--release", type=Path, required=True)
     raw = list(argv if argv is not None else sys.argv[1:])
