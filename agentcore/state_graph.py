@@ -249,6 +249,52 @@ def _state_hash(state: Dict[str, Any]) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def check_worktree_harvest(
+    worktree: Union[str, Path],
+    base: Optional[str] = None,
+) -> bool:
+    """Verify that a git worktree has no uncommitted dirty changes or stranded unmerged commits."""
+    p = Path(worktree).resolve()
+    if not p.is_dir() or not (p / ".git").exists():
+        return True
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(p),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        dirty = bool(status.stdout.strip())
+        candidates = [base] if base else ["main", "master"]
+        unharvested_commits: List[str] = []
+        for base_candidate in candidates:
+            if not base_candidate:
+                continue
+            ahead_check = subprocess.run(
+                ["git", "rev-list", f"{base_candidate}..HEAD"],
+                cwd=str(p),
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if ahead_check.returncode == 0:
+                unharvested_commits = [c for c in ahead_check.stdout.split() if c.strip()]
+                break
+    except Exception as exc:
+        logger.warning("Worktree harvest check inspect failed: %s", exc)
+        return True
+
+    if dirty or unharvested_commits:
+        raise WorktreeStrandedError(
+            f"Worktree at '{p}' has {len(unharvested_commits)} unmerged commits "
+            f"or dirty changes ({dirty}) that have not been harvested!"
+        )
+    return True
+
+
 class StateGraph:
     """Declarative directed graph managing state transitions, conditional edges, and reducers."""
 

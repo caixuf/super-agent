@@ -64,6 +64,7 @@ from .state_graph import (
     StateGraph,
     StateGraphError,
     WorktreeStrandedError,
+    check_worktree_harvest,
 )
 from .verification_gate import (
     VerificationCheck,

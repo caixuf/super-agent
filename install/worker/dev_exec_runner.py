@@ -70,6 +70,15 @@ def _profile_home() -> Path:
     return Path(env).expanduser() if env else Path.home() / ".hermes"
 
 
+def _set_file_limit() -> None:
+    try:
+        import resource
+        limit = int(os.environ.get("DEV_MAX_FILE", "536870912"))
+        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+    except Exception:
+        pass
+
+
 def _hermes_bin() -> str | None:
     explicit = os.environ.get("DEV_HERMES_BIN")
     if explicit and Path(explicit).is_file():
@@ -284,7 +293,7 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
             return {"ok": False, "error": "hermes_unavailable"}
         cmd = [binary, "chat", "-q", effective_goal, "--oneshot",
                "--run-budget", str(budget), "--max-turns", str(max_turns)]
-        run_kwargs = {"cwd": str(_workdir()), "env": _clean_env(route)}
+        run_kwargs = {"cwd": str(_workdir()), "env": _clean_env(route), "preexec_fn": _set_file_limit}
     try:
         done = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=budget + 60, **run_kwargs)

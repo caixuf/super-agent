@@ -106,6 +106,26 @@ def _role(value: str) -> str:
     return text
 
 
+def _detect_tool_stagnation(tool_calls: list[Any], threshold: int = 3) -> bool:
+    """Detect if the execution loop is repeating identical tool calls without progress."""
+    if not tool_calls or len(tool_calls) < threshold:
+        return False
+    recent = tool_calls[-threshold:]
+    signatures = []
+    for call in recent:
+        if isinstance(call, dict):
+            name = call.get("name") or call.get("function", {}).get("name") or ""
+            args = call.get("args") or call.get("arguments") or call.get("function", {}).get("arguments") or ""
+            try:
+                args_str = json.dumps(args, sort_keys=True) if isinstance(args, (dict, list)) else str(args)
+            except Exception:
+                args_str = str(args)
+            signatures.append((name, args_str))
+        else:
+            signatures.append(str(call))
+    return len(signatures) == threshold and len(set(signatures)) == 1
+
+
 @contextlib.contextmanager
 def worktree_lock(workdir: Path, lock_root: Optional[Path] = None):
     """One writer per worktree, across processes."""
@@ -234,6 +254,9 @@ def run_dev_job(
         payload = raw_result if isinstance(raw_result, dict) else raw_result.to_dict()
 
         ok = bool(payload.get("ok"))
+        if ok and _detect_tool_stagnation(payload.get("tool_calls") or []):
+            ok = False
+            payload["error"] = "tool_loop_stagnation_detected"
         if ok and verification_checks:
             # Keep the same worktree locked through verification; checking a
             # later task's files cannot certify this task's output.
@@ -241,6 +264,12 @@ def run_dev_job(
                 verification_checks, workdir, executor=verification_executor)
             if not verification_receipt.get("all_passed"):
                 ok = False
+        if ok and workdir.is_dir() and (workdir / ".git").exists():
+            from agentcore.state_graph import check_worktree_harvest, WorktreeStrandedError
+            try:
+                check_worktree_harvest(workdir)
+            except WorktreeStrandedError as exc:
+                payload["worktree_harvest_warning"] = str(exc)
     out = (output_dir or Path.cwd()).resolve()
 
     failure_decision = None

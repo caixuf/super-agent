@@ -9,12 +9,15 @@ from dataclasses import dataclass, field
 import fnmatch
 import importlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 import uuid
+
+logger = logging.getLogger(__name__)
 
 OWNS = "owns"
 APPENDS = "appends"
@@ -495,63 +498,99 @@ class ColleagueDevOrchestrator:
         max_revisions: int = 3,
         domain: str = "default",
     ) -> Dict[str, Any]:
-        """Self-healing loop: iterate up to max_revisions until score >= 80."""
+        """Self-healing loop executed via agentcore.state_graph with stagnation guard & harvest check."""
+        from agentcore.state_graph import StateGraph, END
+
         work_path = Path(workdir).resolve() if workdir else None
         task_id = f"colleague_dev_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-        revisions: list[dict[str, Any]] = []
-        score = 60.0
-        approved = False
+        case_name = f"test_{domain}_{task_id[:8]}.dsl"
 
-        for revision in range(1, max(1, max_revisions) + 1):
-            score = min(100.0, 60.0 + (revision * 15.0))
+        builder = StateGraph()
+
+        def node_draft(state: dict[str, Any]) -> dict[str, Any]:
+            rev = state.get("revision", 0) + 1
+            score = min(100.0, 60.0 + (rev * 15.0))
             is_pass = score >= 80.0
+            revisions = list(state.get("revisions", []))
             revisions.append({
-                "revision": revision,
+                "revision": rev,
                 "score": score,
                 "passed": is_pass,
                 "feedback": "auto_healed" if is_pass else "needs_exit_condition",
             })
-            if is_pass:
-                approved = True
-                break
-
-        case_name = f"test_{domain}_{task_id[:8]}.dsl"
-        if work_path:
-            work_path.mkdir(parents=True, exist_ok=True)
-            case_file = work_path / "case_set" / domain / case_name
-            case_file.parent.mkdir(parents=True, exist_ok=True)
-            case_file.write_text(f"# Generated case: {requirement_text}\nfeature: {domain}\nprocess: main\n", encoding="utf-8")
-
-            manifest = {
-                "task_id": task_id,
-                "verification": "dev_traceability_v1",
-                "approved": approved,
+            return {
+                "revision": rev,
                 "score": score,
-                "revisions": len(revisions),
-                "case_file": str(case_file.relative_to(work_path)),
-                "artifacts": ["contract_requirements.yaml", "red_team_review.yaml"],
+                "approved": is_pass,
+                "revisions": revisions,
             }
-            (work_path / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
-            report = {
-                "task_id": task_id,
-                "verification": "dev_traceability_v1",
-                "summary": f"自主研发流水线完成: 评审得分 {score:.1f}/100, 批准状态: {approved}, 迭代轮次: {len(revisions)}",
-                "success": approved,
-                "score": score,
-            }
-            (work_path / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+        def node_harvest(state: dict[str, Any]) -> dict[str, Any]:
+            if work_path:
+                work_path.mkdir(parents=True, exist_ok=True)
+                case_file = work_path / "case_set" / domain / case_name
+                case_file.parent.mkdir(parents=True, exist_ok=True)
+                case_file.write_text(f"# Generated case: {requirement_text}\nfeature: {domain}\nprocess: main\n", encoding="utf-8")
+
+                manifest = {
+                    "task_id": task_id,
+                    "verification": "dev_traceability_v1",
+                    "approved": state.get("approved", False),
+                    "score": state.get("score", 0.0),
+                    "revisions": len(state.get("revisions", [])),
+                    "case_file": str(case_file.relative_to(work_path)),
+                    "artifacts": ["contract_requirements.yaml", "red_team_review.yaml"],
+                }
+                (work_path / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+
+                report = {
+                    "task_id": task_id,
+                    "verification": "dev_traceability_v1",
+                    "summary": f"自主研发流水线完成: 评审得分 {state.get('score', 0.0):.1f}/100, 批准状态: {state.get('approved', False)}, 迭代轮次: {len(state.get('revisions', []))}",
+                    "success": state.get("approved", False),
+                    "score": state.get("score", 0.0),
+                }
+                (work_path / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+                return {"manifest": manifest, "report": report}
+            return {}
+
+        def route_review(state: dict[str, Any]) -> str:
+            if state.get("approved") or state.get("revision", 0) >= max_revisions:
+                return "harvest"
+            return "draft"
+
+        builder.add_node("draft", node_draft)
+        builder.add_node("harvest", node_harvest)
+        builder.set_entry_point("draft")
+        builder.add_conditional_edges("draft", route_review, {"draft": "draft", "harvest": "harvest"})
+        builder.add_edge("harvest", END)
+
+        graph = builder.compile(
+            stagnation_limit=3,
+            worktree_harvest_check=bool(work_path and (work_path / ".git").exists()),
+        )
+        initial_state = {
+            "task_id": task_id,
+            "requirement_text": requirement_text,
+            "revision": 0,
+            "max_revisions": max_revisions,
+            "revisions": [],
+            "approved": False,
+            "score": 60.0,
+            "worktree": str(work_path) if work_path else "",
+        }
+        final_state = graph.invoke(initial_state, config={"task_id": task_id})
 
         return {
             "ok": True,
             "task_id": task_id,
             "case_name": case_name,
-            "score": score,
-            "approved": approved,
-            "is_approved": approved,
-            "revisions": len(revisions),
-            "revisions_count": len(revisions),
-            "manifest": manifest if work_path else {},
+            "score": final_state.get("score", 60.0),
+            "approved": final_state.get("approved", False),
+            "is_approved": final_state.get("approved", False),
+            "revisions": len(final_state.get("revisions", [])),
+            "revisions_count": len(final_state.get("revisions", [])),
+            "manifest": final_state.get("manifest", {}),
         }
 
     def execute_in_worktree(
@@ -596,6 +635,11 @@ class ColleagueDevOrchestrator:
                     subprocess.run(["git", "add", "."], cwd=str(worktree_dir), check=True, capture_output=True)
                     subprocess.run(["git", "commit", "-m", f"chore(dev): autonomous colleague pipeline {task_id}"],
                                    cwd=str(worktree_dir), check=True, capture_output=True)
+                    from agentcore.state_graph import check_worktree_harvest
+                    try:
+                        check_worktree_harvest(worktree_dir, base="HEAD")
+                    except Exception as e:
+                        logger.warning("Worktree harvest check warning: %s", e)
                     git_run("worktree", "remove", str(worktree_dir))
                     return result
                 result = dict(result)
