@@ -566,21 +566,8 @@ class DispatchService:
         card_requested = (self.task_cards_enabled and origin.get('channel') == 'feishu'
                           and bool(origin.get('route')) and bool(origin.get('chat')))
         options = {'request_card': True} if card_requested else {}
-        is_dedup = False
-        try:
-            submit_res = self.pool.submit(dedupe, payload, replay_safe=True, max_tries=2,
-                                         origin=origin, return_meta=True, **options)
-            if isinstance(submit_res, tuple):
-                job, is_dedup = submit_res
-            else:
-                job = submit_res
-        except TypeError:
-            if hasattr(self.pool, 'job_by_dedupe'):
-                try:
-                    is_dedup = bool(self.pool.job_by_dedupe(dedupe))
-                except Exception:
-                    is_dedup = False
-            job = self.pool.submit(dedupe, payload, replay_safe=True, max_tries=2, origin=origin, **options)
+        job, is_dedup = self.pool.submit(dedupe, payload, replay_safe=True, max_tries=2,
+                                          origin=origin, return_meta=True, **options)
         ledger = self._resolve_liveness()
         if ledger is not None:
             try:
@@ -589,12 +576,11 @@ class DispatchService:
             except Exception:
                 pass
         status_info = self.pool.status(job)
-        status_val = status_info['status'] if isinstance(status_info, dict) and 'status' in status_info else 'queued'
         if is_scheduled:
-            result = {'ok': True, 'task_id': job, 'status': status_val,
+            result = {'ok': True, 'task_id': job, 'status': status_info['status'],
                       'deduplicated': is_dedup}
         else:
-            result = {'ok': True, 'task_id': job, 'status': status_val,
+            result = {'ok': True, 'task_id': job, 'status': status_info['status'],
                       'next_action': 'Return the task ID to the user and finish this turn. Do not poll.'}
         if ignored_sources:
             result['sources_ignored'] = ignored_sources
@@ -827,17 +813,32 @@ class DispatchService:
             raise PermissionError('task unavailable in this session')
         proof = json.loads(row['payload']).get('_dispatch_owner')
         if proof == owner:return
+        try:
+            origin = json.loads(row['origin']) if row['origin'] else {}
+        except Exception:
+            origin = {}
         # Only explicit administrative provenance can recover old CLI work.
         if proof is None and row['repaired_origin'] is not None and row['repaired_origin']==row['origin']:
-            origin = json.loads(row['origin'])
-            if origin.get('profile')==self.profile and origin.get('session')==session_id:return
-        if allow_cross_session:
-            try:
-                origin = json.loads(row['origin']) if row['origin'] else {}
-                if isinstance(origin, dict) and origin.get('profile') == self.profile:
+            if isinstance(origin, dict) and origin.get('profile')==self.profile and origin.get('session')==session_id:return
+        if isinstance(origin, dict) and origin.get('scheduled') is True:
+            if origin.get('profile') == self.profile:
+                try:
+                    route_info = self.route_provider(session_id)
+                except Exception:
+                    route_info = {}
+                caller_route = None
+                if isinstance(route_info, dict):
+                    caller_route = route_info.get('route')
+                elif isinstance(route_info, str):
+                    caller_route = route_info
+                stored_route = origin.get('route')
+                if (isinstance(caller_route, str) and caller_route.strip()
+                        and isinstance(stored_route, str) and stored_route.strip()
+                        and caller_route.strip() == stored_route.strip()):
                     return
-            except Exception:
-                pass
+        if allow_cross_session:
+            if isinstance(origin, dict) and origin.get('profile') == self.profile:
+                return
         raise PermissionError('task unavailable in this session')
 
     def status(self, session_id, args):

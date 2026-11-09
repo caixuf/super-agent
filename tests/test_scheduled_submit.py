@@ -450,3 +450,213 @@ def test_concurrent_cli_processes_expect_new(tmp_path):
     returncodes = sorted([res1.returncode, res2.returncode])
     assert returncodes == [0, 2], f"expected [0, 2], got: {returncodes}"
 
+
+def test_scheduled_task_status_and_cancel_by_route(tmp_path):
+    env = _make_fixture(tmp_path)
+    session_routes = {
+        "caller_same_route": {
+            "route": "frontdesk:channel:session_1",
+            "channel": "feishu",
+            "chat": "chat_daily_001",
+        },
+        "caller_other_route": {
+            "route": "frontdesk:channel:session_diff",
+            "channel": "feishu",
+            "chat": "chat_diff_999",
+        },
+        "caller_no_route": {},
+    }
+
+    def route_provider(sid):
+        return session_routes.get(sid, {})
+
+    services = build_dispatch_services(env["settings"], "frontdesk", route_provider=route_provider)
+    dev_service = services["dev"]
+
+    # 1. Submit scheduled task for daily_triage (route: "frontdesk:channel:session_1")
+    res = dev_service.submit_scheduled(
+        "Execute daily triage\n",
+        route_name="daily_triage",
+        idempotency_key="key-sched-status-01",
+    )
+    sched_job = res["task_id"]
+    assert res["status"] == "queued"
+
+    # Same-route caller can query status
+    status_res = dev_service.status("caller_same_route", {"task_id": sched_job})
+    assert status_res["ok"] is True
+    assert status_res["task_id"] == sched_job
+    assert status_res["status"] == "queued"
+    assert status_res["cancellation_requested"] is False
+
+    # Different-route caller is refused status
+    with pytest.raises(PermissionError, match="task unavailable in this session"):
+        dev_service.status("caller_other_route", {"task_id": sched_job})
+
+    # Caller with no route is refused status
+    with pytest.raises(PermissionError, match="task unavailable in this session"):
+        dev_service.status("caller_no_route", {"task_id": sched_job})
+
+    # Foreign profile caller with matching route is refused status and cancel
+    foreign_service = DispatchService(
+        str(env["dev_queue"]),
+        "foreign_profile",
+        env["settings"]["allowed_roots"],
+        role="dev",
+        route_provider=route_provider,
+    )
+    with pytest.raises(PermissionError, match="task unavailable in this session"):
+        foreign_service.status("caller_same_route", {"task_id": sched_job})
+    with pytest.raises(PermissionError, match="task unavailable in this session"):
+        foreign_service.cancel("caller_same_route", {"task_id": sched_job})
+
+    # Different-route caller cannot cancel
+    with pytest.raises(PermissionError, match="task unavailable in this session"):
+        dev_service.cancel("caller_other_route", {"task_id": sched_job})
+
+    # Caller with no route cannot cancel
+    with pytest.raises(PermissionError, match="task unavailable in this session"):
+        dev_service.cancel("caller_no_route", {"task_id": sched_job})
+
+    # Same-route caller can cancel
+    cancel_res = dev_service.cancel("caller_same_route", {"task_id": sched_job})
+    assert cancel_res["ok"] is True
+    assert cancel_res["task_id"] == sched_job
+    assert cancel_res["cancellation_requested"] is True
+    assert cancel_res["status"] == "queued"
+
+    # Status after cancel shows cancellation_requested=True
+    status_after = dev_service.status("caller_same_route", {"task_id": sched_job})
+    assert status_after["status"] == "queued"
+    assert status_after["cancellation_requested"] is True
+
+
+def test_non_scheduled_task_unaffected_by_same_route(tmp_path):
+    env = _make_fixture(tmp_path)
+    # Both alice and bob are in the same chat/route
+    session_routes = {
+        "alice_session": {
+            "route": "frontdesk:channel:session_1",
+            "channel": "feishu",
+            "chat": "chat_daily_001",
+        },
+        "bob_session": {
+            "route": "frontdesk:channel:session_1",
+            "channel": "feishu",
+            "chat": "chat_daily_001",
+        },
+    }
+
+    def route_provider(sid):
+        return session_routes.get(sid, {})
+
+    services = build_dispatch_services(env["settings"], "frontdesk", route_provider=route_provider)
+    dev_service = services["dev"]
+
+    # Alice submits a regular (non-scheduled) task
+    submit_res = dev_service.submit("alice_session", {
+        "goal": "Regular task from alice\n",
+        "request_key": "req-alice-01",
+    })
+    normal_job = submit_res["task_id"]
+
+    # Alice can query status and cancel her own task
+    alice_status = dev_service.status("alice_session", {"task_id": normal_job})
+    assert alice_status["ok"] is True
+    assert alice_status["task_id"] == normal_job
+
+    # Bob has the EXACT same route, but because the task is non-scheduled,
+    # Bob is refused access
+    with pytest.raises(PermissionError, match="task unavailable in this session"):
+        dev_service.status("bob_session", {"task_id": normal_job})
+
+    with pytest.raises(PermissionError, match="task unavailable in this session"):
+        dev_service.cancel("bob_session", {"task_id": normal_job})
+
+    # Alice can cancel her own task
+    cancel_res = dev_service.cancel("alice_session", {"task_id": normal_job})
+    assert cancel_res["ok"] is True
+    assert cancel_res["cancellation_requested"] is True
+
+
+def test_scheduled_task_status_and_cancel_via_tools(tmp_path):
+    from plugins.durable_dispatch import register
+    import plugins.durable_dispatch as dd_mod
+
+    env = _make_fixture(tmp_path)
+    session_routes = {
+        "chat_user_session": {
+            "route": "frontdesk:channel:session_1",
+            "channel": "feishu",
+            "chat": "chat_daily_001",
+        },
+        "outsider_session": {
+            "route": "frontdesk:channel:other_route",
+            "channel": "feishu",
+            "chat": "chat_other",
+        },
+    }
+
+    class ContextStub:
+        def __init__(self, settings):
+            self.settings = settings
+            self.profile_name = "frontdesk"
+            self.tools = {}
+            self.prompt_sections = {}
+
+        def get_config(self, key, default=None):
+            return self.settings.get(key, default)
+
+        def register_tool(self, **kwargs):
+            self.tools[kwargs["name"]] = kwargs
+
+        def register_system_prompt_section(self, id, content, **kwargs):
+            self.prompt_sections[id] = {"content": content, **kwargs}
+
+    orig_bound_route = dd_mod._bound_route
+    try:
+        dd_mod._bound_route = lambda sid: session_routes.get(sid, {})
+        ctx = ContextStub(env["settings"])
+        register(ctx)
+
+        services = build_dispatch_services(env["settings"], "frontdesk", route_provider=dd_mod._bound_route)
+        dev_service = services["dev"]
+        res = dev_service.submit_scheduled(
+            "Scheduled work for chat user\n",
+            route_name="daily_triage",
+            idempotency_key="key-sched-tool-01",
+        )
+        task_id = res["task_id"]
+
+        status_handler = ctx.tools["durable_status"]["handler"]
+        cancel_handler = ctx.tools["durable_cancel"]["handler"]
+
+        # Outsider cannot query status
+        raw_out_status = status_handler({"task_id": task_id}, session_id="outsider_session")
+        out_status = json.loads(raw_out_status)
+        assert out_status["ok"] is False
+        assert "task unavailable in this session" in out_status["error"]
+
+        # Chat user on same route CAN query status
+        raw_user_status = status_handler({"task_id": task_id}, session_id="chat_user_session")
+        user_status = json.loads(raw_user_status)
+        assert user_status["ok"] is True
+        assert user_status["task_id"] == task_id
+        assert user_status["status"] == "queued"
+
+        # Outsider cannot cancel
+        raw_out_cancel = cancel_handler({"task_id": task_id}, session_id="outsider_session")
+        out_cancel = json.loads(raw_out_cancel)
+        assert out_cancel["ok"] is False
+        assert "task unavailable in this session" in out_cancel["error"]
+
+        # Chat user on same route CAN cancel
+        raw_user_cancel = cancel_handler({"task_id": task_id}, session_id="chat_user_session")
+        user_cancel = json.loads(raw_user_cancel)
+        assert user_cancel["ok"] is True
+        assert user_cancel["task_id"] == task_id
+        assert user_cancel["cancellation_requested"] is True
+    finally:
+        dd_mod._bound_route = orig_bound_route
+
+
