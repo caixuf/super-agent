@@ -18,7 +18,6 @@ from typing import Any
 TASK_TOOLS = frozenset({
     "durable_submit", "durable_status", "durable_cancel",
     "durable_roster", "task_status", "colleague_list",
-    "colleague_assign", "colleague_task_status",
     "lan_node_list", "lan_node_probe",
 })
 MEMORY_READ_TOOLS = frozenset({

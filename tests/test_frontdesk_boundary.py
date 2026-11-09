@@ -38,7 +38,8 @@ def _enable(home, *, memory=False):
 
 
 @pytest.mark.parametrize("name", [
-    "terminal", "execute_code", "delegate_task", "write_file", "read_file",
+    "terminal", "execute_code", "delegate_task", "colleague_assign",
+    "colleague_task_status", "colleague_catalog", "write_file", "read_file",
     "patch", "process", "tool_call", "tool_search", "manage_connections",
     "connectors__service__run", "unknown_plugin_tool", "memory", "cronjob",
 ])

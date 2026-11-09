@@ -231,8 +231,9 @@ def register(ctx) -> None:
                       schema=_SCHEMA, handler=_handle)
     ctx.register_system_prompt_section(
         "task-liveness",
-        "When the user asks whether a long task is still running, call task_status once "
-        "(inspect with its task id, or list active tasks). Report state, elapsed, heartbeat "
+        "When the user asks whether a long task is still running, prefer durable_status for "
+        "dispatched tasks (such as analysis_*/dev_*/role_*) or call task_status once for local "
+        "processes (inspect with its task id, or list active tasks). Report state, elapsed, heartbeat "
         "age, phase and the bounded tail as evidence. Do not loop, sleep or re-run the task; "
         "if the ledger has no record, say unknown and name what was checked.",
         position="after_memory", max_chars=800)

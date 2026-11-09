@@ -61,7 +61,7 @@ def _decorate_goal(goal: str) -> str:
         "[Expert Context]",
         "- Mode: Backend executor (execute directly with terminal/file/MCP tools and return concrete evidence; do NOT call durable_submit).",
         "- Progressive Delivery: Follow conclusion-first progressive delivery (Phase 1: deliver core text analysis, Markdown report, and checkpoint output immediately; Phase 2: heavy diagram/browser rendering is an out-of-band enhancement. Never block, delay, or withhold Phase 1 text delivery due to rendering failures, delays, or timeouts).",
-        "- Colleague Collaboration & Fault Tolerance: You can inspect the team roster (`colleague_list`), assign/consult specialist colleagues (`colleague_assign` / `colleague_task_status` for architect/cases/reviewer/test/triage/ops/backend/frontend), or spawn parallel subagents (`delegate_task`) when cross-role collaboration or failover speeds up or recovers a task.",
+        "- Colleague Collaboration & Fault Tolerance: You can inspect the team roster (`colleague_list`) or spawn parallel subagents (`delegate_task`) when cross-role collaboration or parallel execution speeds up or recovers a task (do NOT call `durable_submit` or `colleague_assign` from a backend worker).",
     ]
     if attempt_dir:
         lines.append(f"- Deliverable Staging Directory: {attempt_dir} (copy any final deliverable files such as .html, .pdf, or cover .png into this directory so they are automatically attached to the chat completion)")
