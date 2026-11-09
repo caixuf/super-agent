@@ -192,6 +192,9 @@ def run_dev_job(
             raise ValueError
     except (TypeError, ValueError, OverflowError):
         raise PermissionError("verification_checks_not_authorized") from None
+    require_verification = bool(policy.get("require_verification") or job["payload"].get("require_verification"))
+    if require_verification and not verification_checks:
+        raise ValueError("required_verification_checks_missing")
     if verification_executor is not None and not callable(verification_executor):
         raise ValueError("invalid_verification_executor")
     if sandbox and verification_checks and verification_executor is None:
@@ -267,6 +270,9 @@ def run_dev_job(
                 verification_checks, workdir, executor=verification_executor)
             if not verification_receipt.get("all_passed"):
                 ok = False
+        elif ok and require_verification and not verification_receipt:
+            ok = False
+            payload["error"] = "required_verification_missing_receipt"
         if ok and workdir.is_dir() and (workdir / ".git").exists():
             from agentcore.state_graph import check_worktree_harvest, WorktreeStrandedError
             try:
@@ -274,6 +280,7 @@ def run_dev_job(
             except WorktreeStrandedError as exc:
                 payload["worktree_harvest_warning"] = str(exc)
     out = (output_dir or Path.cwd()).resolve()
+    artifact_paths = [str(out / name) for name in ("report.json", "report.md", "manifest.json")]
 
     failure_decision = None
     err = payload.get("error_message") or payload.get("error")
@@ -287,6 +294,9 @@ def run_dev_job(
 
     report = {
         "ok": ok,
+        "execution_completed": True,
+        "verification_passed": bool(verification_receipt and verification_receipt.get("all_passed")),
+        "artifacts_valid": bool(out.is_dir()),
         "role": job["payload"].get("role"),
         "job": job.get("job"),
         "attempt": job.get("attempt"),
@@ -317,7 +327,6 @@ def run_dev_job(
         "tool_calls": payload.get("tool_calls") or [],
     }, ensure_ascii=False, indent=2))
 
-    artifact_paths = [str(out / name) for name in ("report.json", "report.md", "manifest.json")]
     if ok:
         try:
             from agentcore.skill_forge import AgentCase, SkillForge
@@ -329,7 +338,7 @@ def run_dev_job(
                 quality_score=100.0 if not degraded else 85.0,
                 role=str(job["payload"].get("role") or "cases"),
                 verified_files=[str(p) for p in artifact_paths],
-                approved=True,
+                approved=False,
             )
             forge.record_case(case)
         except Exception:

@@ -462,6 +462,7 @@ class ColleagueDevOrchestrator:
         workdir: Optional[Union[str, Path]] = None,
         max_revisions: int = 3,
         domain: str = "default",
+        demo_mode: bool = False,
     ) -> Dict[str, Any]:
         """Run the proactive, multi-stage autonomous case development pipeline."""
         try:
@@ -480,8 +481,19 @@ class ColleagueDevOrchestrator:
             res["revisions"] = revisions
             res["revisions_count"] = revisions
             return res
-        except Exception:
-            # Standalone self-healing fallback when bridge is unconfigured
+        except Exception as exc:
+            # Standalone self-healing fallback ONLY when demo_mode is explicitly enabled
+            if not demo_mode and not os.environ.get("AGENTCORE_DEMO_MODE"):
+                return {
+                    "ok": False,
+                    "approved": False,
+                    "is_approved": False,
+                    "score": 0.0,
+                    "revisions": 0,
+                    "revisions_count": 0,
+                    "error": f"colleague_bridge_unavailable: {exc}. Real autonomous execution requires an active bridge or test executor; synthetic fallback is disabled.",
+                    "synthetic": False,
+                }
             return self._standalone_self_healing_pipeline(
                 requirement_text=requirement_text,
                 source_input=source_input,
@@ -540,6 +552,8 @@ class ColleagueDevOrchestrator:
                     "revisions": len(state.get("revisions", [])),
                     "case_file": str(case_file.relative_to(work_path)),
                     "artifacts": ["contract_requirements.yaml", "red_team_review.yaml"],
+                    "synthetic": True,
+                    "claim_boundary": "Synthetic demo execution only; cannot serve as verified success proof",
                 }
                 (work_path / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -549,6 +563,8 @@ class ColleagueDevOrchestrator:
                     "summary": f"自主研发流水线完成: 评审得分 {state.get('score', 0.0):.1f}/100, 批准状态: {state.get('approved', False)}, 迭代轮次: {len(state.get('revisions', []))}",
                     "success": state.get("approved", False),
                     "score": state.get("score", 0.0),
+                    "synthetic": True,
+                    "claim_boundary": "Synthetic demo execution only; cannot serve as verified success proof",
                 }
                 (work_path / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
                 return {"manifest": manifest, "report": report}
@@ -591,6 +607,8 @@ class ColleagueDevOrchestrator:
             "revisions": len(final_state.get("revisions", [])),
             "revisions_count": len(final_state.get("revisions", [])),
             "manifest": final_state.get("manifest", {}),
+            "synthetic": True,
+            "claim_boundary": "Synthetic demo execution only; cannot serve as verified success proof",
         }
 
     def execute_in_worktree(
@@ -602,6 +620,7 @@ class ColleagueDevOrchestrator:
         domain: str = "default",
         max_revisions: int = 3,
         branch: Optional[str] = None,
+        demo_mode: bool = False,
     ) -> Dict[str, Any]:
         """Run a colleague task in a new worktree, preserving any failed workspace."""
         import subprocess
@@ -629,9 +648,10 @@ class ColleagueDevOrchestrator:
                 result = self.execute_autonomous_case_dev(
                     requirement_text=requirement_text, source_input=source_input,
                     workdir=worktree_dir, max_revisions=max_revisions, domain=domain,
+                    demo_mode=demo_mode,
                 )
                 manifest_file = worktree_dir / "manifest.json"
-                if manifest_file.is_file():
+                if result.get("ok") and manifest_file.is_file():
                     subprocess.run(["git", "add", "."], cwd=str(worktree_dir), check=True, capture_output=True)
                     subprocess.run(["git", "commit", "-m", f"chore(dev): autonomous colleague pipeline {task_id}"],
                                    cwd=str(worktree_dir), check=True, capture_output=True)

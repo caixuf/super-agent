@@ -205,14 +205,72 @@ def verify_docker_containment(container: str, *, attempt_token: str | None = Non
             "status": status, "exit_code": state.get("ExitCode")}
 
 
+def verify_subreaper_containment(proof: dict, *,
+                                 expected_token: str | None = None,
+                                 expected_job: str | None = None,
+                                 expected_attempt: str | None = None) -> dict:
+    """Verify quiescence proof emitted by attempt_supervisor or trusted subreaper.
+
+    Validates that:
+    1. The proof dictionary is valid and scoped to subreaper_tree.
+    2. Quiescence is proven (all child processes reaped, unquiesced_pids is empty).
+    3. Job, attempt, and token match expected values if specified.
+    """
+    if not isinstance(proof, dict):
+        return {"ok": False, "reason": "invalid_proof_format", "quiescent": False}
+    if proof.get("proof_scope") != "subreaper_tree":
+        return {"ok": False, "reason": "invalid_proof_scope", "quiescent": False}
+    if proof.get("quiescent") is not True:
+        return {"ok": False, "reason": "attempt_not_quiescent", "quiescent": False,
+                "unquiesced_pids": proof.get("unquiesced_pids", [])}
+    if proof.get("unquiesced_pids"):
+        return {"ok": False, "reason": "unquiesced_descendants_remain", "quiescent": False,
+                "unquiesced_pids": proof.get("unquiesced_pids")}
+
+    token = proof.get("token")
+    try:
+        checked_token(token)
+    except ValueError:
+        return {"ok": False, "reason": "invalid_proof_token", "quiescent": False}
+
+    if expected_token and token != expected_token:
+        return {"ok": False, "reason": "proof_token_mismatch", "quiescent": False}
+    if expected_job and proof.get("job") != expected_job:
+        return {"ok": False, "reason": "proof_job_mismatch", "quiescent": False}
+    if expected_attempt and proof.get("attempt") != expected_attempt:
+        return {"ok": False, "reason": "proof_attempt_mismatch", "quiescent": False}
+
+    evidence = {
+        "ok": True,
+        "token": token,
+        "job": proof.get("job"),
+        "attempt": proof.get("attempt"),
+        "nonce": proof.get("nonce"),
+        "supervisor_pid": proof.get("supervisor_pid"),
+        "quiescent": True,
+        "proof_scope": "subreaper_tree",
+        "observed_at": time.time(),
+        "exit_code": proof.get("exit_code"),
+    }
+    eid = evidence_id(evidence)
+    if eid is None:
+        return {"ok": False, "reason": "cannot_compute_evidence_id", "quiescent": False}
+    evidence["evidence_id"] = eid
+    return evidence
+
+
 def sweep_and_verify(token: str, *,
                      systemd_unit: str | None = None,
                      docker_container: str | None = None,
                      runner_contained: bool = False,
+                     supervisor_proof: dict | None = None,
                      grace: float = 2.0,
                      timeout: float = 10.0) -> dict:
-    """Best-effort cleanup; currently no supplied option proves whole-attempt containment."""
+    """Best-effort cleanup; verifies attempt containment if a valid proof or adapter is provided."""
     token = checked_token(token)
+    if supervisor_proof is not None:
+        return verify_subreaper_containment(supervisor_proof, expected_token=token)
+
     base_sweep = sweep(token, grace=grace, timeout=timeout)
     if base_sweep.get("survivors"):
         return base_sweep
@@ -235,13 +293,24 @@ def sweep_and_verify(token: str, *,
 
 def evidence_id(evidence) -> str | None:
     """Stable identity for one quiescence observation, or None when it is not evidence."""
-    if (not isinstance(evidence, dict) or evidence.get("quiescent") is not True
-            or evidence.get("proof_scope") != "whole_attempt"):
+    if not isinstance(evidence, dict) or evidence.get("quiescent") is not True:
+        return None
+    scope = evidence.get("proof_scope")
+    if scope not in ("whole_attempt", "subreaper_tree"):
         return None
     try:
         token = checked_token(evidence.get("token"))
     except ValueError:
         return None
-    payload = json.dumps([token, sorted(evidence.get("survivors") or []),
-                          list(evidence.get("signalled") or [])], separators=(",", ":"))
-    return hashlib.sha256(payload.encode()).hexdigest()[:32]
+    if scope == "whole_attempt":
+        payload = json.dumps([token, sorted(evidence.get("survivors") or []),
+                              list(evidence.get("signalled") or [])], separators=(",", ":"))
+        return hashlib.sha256(payload.encode()).hexdigest()[:32]
+    elif scope == "subreaper_tree":
+        if evidence.get("unquiesced_pids") or evidence.get("survivors"):
+            return None
+        payload = json.dumps([token, evidence.get("job"), evidence.get("attempt"),
+                              evidence.get("nonce"), evidence.get("supervisor_pid")],
+                             separators=(",", ":"))
+        return hashlib.sha256(payload.encode()).hexdigest()[:32]
+    return None

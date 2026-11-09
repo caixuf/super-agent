@@ -49,7 +49,16 @@ def _attempt_token():
 
 
 def _trusted_containment_available(runner):
-    """No current host adapter proves attempt-bound whole-turn containment."""
+    """Check if verified attempt containment is available from runner or supervisor."""
+    # A plain boolean alone is not proof (as verified by test_worker_succeeds_when_trusted_containment_is_provided).
+    # Only a verifiable evidence callback or supervisor proof file unlocks the gate.
+    if hasattr(runner, "has_trusted_containment_proof") and callable(runner.has_trusted_containment_proof):
+        return bool(runner.has_trusted_containment_proof())
+    if hasattr(runner, "trusted_containment_evidence") and callable(runner.trusted_containment_evidence):
+        return bool(runner.trusted_containment_evidence())
+    proof_path = os.environ.get("AGENTCORE_SUPERVISOR_PROOF_PATH")
+    if proof_path and Path(proof_path).is_file():
+        return True
     return False
 
 
@@ -61,8 +70,19 @@ def _attempt_evidence(runner=None):
     unit = os.environ.get("AGENTCORE_CONTAINMENT_UNIT") or getattr(runner, "containment_unit", None)
     container = os.environ.get("AGENTCORE_CONTAINMENT_CONTAINER") or getattr(runner, "containment_container", None)
     runner_contained = bool(getattr(runner, "trusted_containment", False))
+
+    supervisor_proof = None
+    if hasattr(runner, "trusted_containment_evidence") and callable(runner.trusted_containment_evidence):
+        supervisor_proof = runner.trusted_containment_evidence()
+    elif os.environ.get("AGENTCORE_SUPERVISOR_PROOF_PATH"):
+        try:
+            supervisor_proof = json.loads(Path(os.environ["AGENTCORE_SUPERVISOR_PROOF_PATH"]).read_text(encoding="utf-8"))
+        except Exception:
+            supervisor_proof = None
+
     evidence = containment.sweep_and_verify(token, systemd_unit=unit, docker_container=container,
-                                            runner_contained=runner_contained)
+                                            runner_contained=runner_contained,
+                                            supervisor_proof=supervisor_proof)
     if containment.evidence_id(evidence) is None:
         raise RuntimeError("attempt_containment_unproven")
     return evidence
