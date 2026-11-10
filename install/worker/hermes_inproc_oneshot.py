@@ -68,8 +68,10 @@ def _run_inproc_turn(
     run_budget: float | None = None,
     usage_file: str | None = None,
 ) -> int:
+    from gateway.session_context import declare_stateless_channel
     from hermes_cli.config import get_hermes_home, load_config
     from hermes_cli.env_loader import load_hermes_dotenv
+    from hermes_cli.fallback_config import get_fallback_chain
     from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build
     from hermes_cli.oneshot import (
         _attach_auxiliary_usage,
@@ -81,11 +83,10 @@ def _run_inproc_turn(
         _resolve_model_and_provider,
         _write_usage_file,
     )
-    from hermes_cli.runtime_provider import get_fallback_chain, resolve_runtime_with_fallback
+    from hermes_cli.runtime_provider import resolve_runtime_with_fallback
     from hermes_cli.tools_config import _get_platform_tools
     from hermes_constants import parse_reasoning_effort, resolve_reasoning_config
     from run_agent import AIAgent
-    from tools.process_registry import declare_stateless_channel
 
     hermes_home = get_hermes_home()
     try:
