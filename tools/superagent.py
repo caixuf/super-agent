@@ -1270,7 +1270,8 @@ def _sync_bound_colleague_profiles(profile_home: Path, release: Path, args: argp
             plugins_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             continue
-        desired_plugins: set[str] = set()
+        desired_plugins: set[str] = {"write-guard"}
+        disabled_plugins: set[str] = set()
         member_cfg = member_home / "config.yaml"
         if member_cfg.is_file():
             try:
@@ -1279,8 +1280,12 @@ def _sync_bound_colleague_profiles(profile_home: Path, release: Path, args: argp
                     enabled = (cfg.get("plugins") or {}).get("enabled")
                     if isinstance(enabled, list):
                         desired_plugins.update(p for p in enabled if isinstance(p, str))
+                    disabled = (cfg.get("plugins") or {}).get("disabled")
+                    if isinstance(disabled, list):
+                        disabled_plugins.update(p for p in disabled if isinstance(p, str))
             except Exception:
                 pass
+        desired_plugins -= disabled_plugins
         try:
             desired_plugins.update(p.name for p in plugins_dir.iterdir() if p.exists() or p.is_symlink())
         except OSError:

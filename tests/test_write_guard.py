@@ -302,3 +302,62 @@ def test_post_hook_logs_but_never_raises(tmp_path):
     assert guard._on_post_tool_call(tool_name="write_file", args=None, result=None) is None
     assert guard._on_post_tool_call(tool_name="terminal", args={"command": "ls"},
                                     task_id="", session_id="", tool_call_id="c") is None
+
+
+def test_pre_verify_catches_syntax_errors_and_passes_valid_files(tmp_path):
+    import sys
+
+    good_py = tmp_path / "good.py"
+    good_py.write_text("x = 1 + 2\n", encoding="utf-8")
+    good_json = tmp_path / "good.json"
+    good_json.write_text('{"ok": true}\n', encoding="utf-8")
+
+    # 1. Valid files pass cleanly (returns None -> turn finishes without extra cost)
+    assert guard._on_pre_verify(changed_paths=[str(good_py), str(good_json)], attempt=0) is None
+
+    # 2. Broken Python syntax triggers continue directive with file & line info
+    bad_py = tmp_path / "bad.py"
+    bad_py.write_text("def broken(\n", encoding="utf-8")
+    out = guard._on_pre_verify(changed_paths=[str(good_py), str(bad_py)], attempt=0)
+    assert out is not None
+    assert out["action"] == "continue"
+    assert "bad.py" in out["message"]
+
+    # 3. Attempt >= 3 stops nudging so turn cannot loop forever
+    assert guard._on_pre_verify(changed_paths=[str(bad_py)], attempt=3) is None
+
+    # 4. Configured custom recipe validator in verify_commands
+    checker = tmp_path / "check_dsl.py"
+    checker.write_text(
+        'import pathlib, sys\n'
+        'txt = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")\n'
+        'if "REQUIRED_HEADER" not in txt:\n'
+        '    print("missing REQUIRED_HEADER", file=sys.stderr)\n'
+        '    sys.exit(2)\n',
+        encoding="utf-8",
+    )
+
+    class DummyCtx:
+        def __init__(self, cmds):
+            self.cmds = cmds
+            self.hooks = {}
+
+        def get_config(self, key, default=None):
+            return self.cmds if key == "verify_commands" else default
+
+        def register_hook(self, name, fn):
+            self.hooks[name] = fn
+
+    ctx = DummyCtx([{"glob": "*.customdsl", "argv": [sys.executable, str(checker), "{path}"]}])
+    guard.register(ctx)
+    assert "pre_verify" in ctx.hooks
+
+    bad_dsl = tmp_path / "sample.customdsl"
+    bad_dsl.write_text("invalid body\n", encoding="utf-8")
+    res_dsl = guard._on_pre_verify(changed_paths=[str(bad_dsl)], attempt=0)
+    assert res_dsl is not None and res_dsl["action"] == "continue"
+    assert "missing REQUIRED_HEADER" in res_dsl["message"]
+
+    bad_dsl.write_text("REQUIRED_HEADER\nok\n", encoding="utf-8")
+    assert guard._on_pre_verify(changed_paths=[str(bad_dsl)], attempt=0) is None
+    guard._CTX = None

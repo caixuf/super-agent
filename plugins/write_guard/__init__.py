@@ -54,13 +54,22 @@
 
 from __future__ import annotations
 
+import ast
+import fnmatch
 import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Optional
+import shutil
+import subprocess
+from typing import Any, Optional, Sequence
 
 logger = logging.getLogger(__name__)
+
+_CTX: Any = None
+_MAX_VERIFY_FILE_BYTES = 2 * 1024 * 1024
+_MAX_VERIFY_FILES = 16
+_MAX_VERIFY_ATTEMPTS = 3
 
 #: ``content`` 超过它就拒绝派发，要求分块写。见模块文档「阈值为什么是 8000 字符」。
 DEFAULT_MAX_CHARS = 8000
@@ -302,7 +311,166 @@ def _on_transform_tool_result(tool_name: str = "", args: Any = None, result: Any
         return None
 
 
+def _configured_verify_commands(ctx: Any = None) -> list[dict[str, Any]]:
+    active_ctx = ctx if ctx is not None else _CTX
+    if active_ctx is None or not hasattr(active_ctx, "get_config"):
+        return []
+    try:
+        raw = active_ctx.get_config("verify_commands", None)
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    valid: list[dict[str, Any]] = []
+    for item in raw[:16]:
+        if not isinstance(item, dict):
+            continue
+        glob_pat = item.get("glob")
+        argv = item.get("argv")
+        if (
+            isinstance(glob_pat, str)
+            and glob_pat.strip()
+            and isinstance(argv, list)
+            and argv
+            and all(isinstance(tok, str) and tok for tok in argv)
+        ):
+            valid.append({"glob": glob_pat.strip(), "argv": list(argv)})
+    return valid
+
+
+def verify_changed_file(
+    path: str | Path,
+    verify_commands: Sequence[dict[str, Any]] = (),
+) -> Optional[str]:
+    """Run deterministic syntax and configured recipe checks on a single modified file."""
+    try:
+        target = Path(path).expanduser()
+        if not target.exists() or target.is_symlink() or not target.is_file():
+            return None
+        size = target.stat().st_size
+        if size > _MAX_VERIFY_FILE_BYTES:
+            return None
+    except OSError:
+        return None
+
+    suffix = target.suffix.lower()
+    if suffix in (".py", ".json", ".yaml", ".yml"):
+        try:
+            text = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            return f"{target}: UTF-8 编码错误 ({exc})"
+        except OSError:
+            return None
+
+        if suffix == ".py":
+            try:
+                ast.parse(text, filename=str(target))
+            except SyntaxError as exc:
+                return f"{target}:{exc.lineno or 1}: Python 语法错误: {exc.msg}"
+        elif suffix == ".json":
+            try:
+                json.loads(text)
+            except ValueError as exc:
+                return f"{target}: JSON 语法错误: {exc}"
+        elif suffix in (".yaml", ".yml"):
+            try:
+                import yaml
+            except ImportError:
+                yaml = None  # type: ignore[assignment]
+            if yaml is not None:
+                try:
+                    list(yaml.safe_load_all(text))
+                except Exception as exc:
+                    msg = str(exc).splitlines()[0][:240]
+                    return f"{target}: YAML 语法错误: {msg}"
+    elif suffix in (".sh", ".bash"):
+        bash_bin = shutil.which("bash")
+        if bash_bin:
+            try:
+                proc = subprocess.run(
+                    [bash_bin, "-n", str(target)],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if proc.returncode != 0:
+                    detail = (proc.stderr or proc.stdout or "").strip()[:300]
+                    return f"{target}: Shell 语法错误: {detail}"
+            except Exception:
+                pass
+
+    posix_str = target.as_posix()
+    for rule in verify_commands:
+        glob_pat = rule.get("glob", "")
+        argv_tpl = rule.get("argv", [])
+        if not (fnmatch.fnmatch(target.name, glob_pat) or fnmatch.fnmatch(posix_str, glob_pat)):
+            continue
+        argv = [str(target) if tok == "{path}" else tok for tok in argv_tpl]
+        if "{path}" not in argv_tpl:
+            argv.append(str(target))
+        try:
+            proc = subprocess.run(
+                argv,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if proc.returncode != 0:
+                detail = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()[:400]
+                return f"{target}: 规范校验未通过 (rc={proc.returncode}): {detail}"
+        except subprocess.TimeoutExpired:
+            logger.warning("write-guard pre_verify command timed out for %s", target)
+        except OSError:
+            # Validator script absent on this host -> fail-open rather than blocking unrelated hosts
+            logger.debug("write-guard pre_verify command unavailable for %s", target, exc_info=True)
+
+    return None
+
+
+def _on_pre_verify(
+    changed_paths: Optional[list[str]] = None,
+    attempt: int = 0,
+    **_: Any,
+) -> Optional[dict[str, str]]:
+    """Hermes 原生回合末硬门禁钩子：对本轮改动文件做确定性语法/契约校验，不过关则自动打回返工。"""
+    if _is_off() or not changed_paths:
+        return None
+    try:
+        if int(attempt) >= _MAX_VERIFY_ATTEMPTS:
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        rules = _configured_verify_commands()
+        problems: list[str] = []
+        seen: set[str] = set()
+        for raw_p in list(changed_paths)[:_MAX_VERIFY_FILES]:
+            if not isinstance(raw_p, str) or not raw_p.strip() or raw_p in seen:
+                continue
+            seen.add(raw_p)
+            verdict = verify_changed_file(raw_p, verify_commands=rules)
+            if verdict:
+                problems.append(f"- {verdict}")
+        if not problems:
+            return None
+        msg = (
+            "pre_verify 硬门禁校验未通过 —— 本轮修改的文件存在以下语法或契约错误，请在结束回合前直接修复并重验：\n"
+            + "\n".join(problems)
+        )
+        return {"action": "continue", "message": msg}
+    except Exception:
+        logger.debug("write-guard pre_verify failed", exc_info=True)
+        return None
+
+
 def register(ctx) -> None:
+    global _CTX
+    _CTX = ctx
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     ctx.register_hook("transform_tool_result", _on_transform_tool_result)
+    ctx.register_hook("pre_verify", _on_pre_verify)

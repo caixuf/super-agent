@@ -223,6 +223,8 @@ def _clean_env(route: dict | None = None) -> dict[str, str]:
     env["HERMES_SESSION_PLATFORM"] = "api_server"
     # Backend execution is unattended: no approval prompts may block a job.
     env["HERMES_YOLO_MODE"] = "1"
+    if os.environ.get("DEV_VERIFY_ON_STOP", "1").strip().lower() not in ("0", "false", "no", "off"):
+        env.setdefault("HERMES_VERIFY_ON_STOP", "1")
     # Tell durable_dispatch this turn is an executor, not a frontdesk: without
     # it the nested agent inherits the dispatch prompt and re-submits the work.
     env["SUPERAGENT_BACKEND_RUNNER"] = "1"
@@ -387,6 +389,8 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
             "HERMES_YOLO_MODE=1",
             "SUPERAGENT_BACKEND_RUNNER=1",
         ]
+        if os.environ.get("DEV_VERIFY_ON_STOP", "1").strip().lower() not in ("0", "false", "no", "off"):
+            env_parts.append("HERMES_VERIFY_ON_STOP=1")
         if route and route.get("selected_model"):
             env_parts.append("SUPERAGENT_MODEL_TIER=" + shlex.quote(str(route["selected_model"])))
         if has_colleague:
