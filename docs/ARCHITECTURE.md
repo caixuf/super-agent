@@ -38,6 +38,35 @@ flowchart TD
 2. **声明式业务规格（BusinessProfileSpec）**：
    - 通用骨架通过 `BusinessProfileSpec` 声明目标角色、拓扑依赖与队列需求；所有业务特化内容通过 `{{BUSINESS_OVERLAY}}` 占位符在部署时合成生效。
 
+### 1.2 宿主基石与协同共生：Hermes Agent 平台
+
+Super Agent 深度依托并服务于 **Hermes Agent** 开源宿主平台，双方在职责上形成完美互补的共生分工：
+
+```mermaid
+flowchart TD
+    subgraph Hermes["Hermes Agent 宿主平台（感官与通信中枢）"]
+        direction TB
+        H1["多端接入网关 (IM / Web / Terminal Ingress)"]
+        H2["标准对话 Session 与会话 Context 管理"]
+        H3["基础 Tool 调用循环与插件规范 (PluginManager)"]
+        H4["基础模型接口抽象与流式通信"]
+    end
+
+    subgraph SuperAgent["Super Agent 企业级认知大脑（认知与确定性工程）"]
+        direction TB
+        S1["持久任务池与进程崩溃自愈 (Pool / Worker / Attempt Fencing)"]
+        S2["突触长程记忆引擎 (Titans Surprise / ACT-R / 赫布拓扑)"]
+        S3["8 大研发同事协作团队 (Colleague Dev / Worktree 物理隔离)"]
+        S4["确定性状态图机 (StateGraph / 停滞熔断 / 验收门禁)"]
+        S5["CardKit 2.0 原生状态流与 Chromium 图文交付"]
+    end
+
+    Hermes <== "生命周期 Hooks / 标准插件契约" ==> SuperAgent
+```
+
+- **严守插件边界，绝不侵入修改宿主代码**：Super Agent 所有的增强能力均通过 Hermes 标准的插件机制（`plugins/`）、配置项（`config.yaml`）与钩子（`pre_llm_call`, `post_llm_call`, `on_session_end`）挂载，完全尊重 Hermes 官方的设计原则；
+- **双模并存**：日常短对话由 Hermes 原生快速响应；重型长任务自动交由 Super Agent 持久任务池与同事制团队异步稳健执行。
+
 ---
 
 ## 2. 系统十二层逻辑分层

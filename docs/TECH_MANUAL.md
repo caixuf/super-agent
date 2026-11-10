@@ -67,17 +67,36 @@ flowchart TD
     S --> U
 ```
 
+### 3.1 宿主生态基石：Hermes Agent 平台与协同契约
+
+Super Agent 深度依托并服务于 **Hermes Agent** 宿主生态。Hermes 提供了业界领先的轻量化交互网关、工具抽象与多平台消息适配；Super Agent 则作为企业级“认知增强与持久大脑”，二者构成正交互补的共生架构：
+
+| 领域 | Hermes Agent 宿主层 | Super Agent 认知增强层 |
+| :--- | :--- | :--- |
+| **系统定位** | 感官与通信中枢（Sensory & Interaction Backbone） | 认知皮层与持久化执行底座（Enterprise Cognitive Cortex） |
+| **连接与会话** | 多端接入网关（IM/Web/终端）、Session 状态机 | 持久任务池（SQLite WAL）、Attempt 栅栏、任务租约治理 |
+| **工具与插件** | `PluginManager`、标准工具 schema 暴露与调用 | 8 大研发同事契约（`DEV_ROLES`）、独立 Git Worktree 物理隔离 |
+| **记忆与认知** | 基础上下文装配、短程提示词拼接 | Google Titans 惊奇度门禁、ACT-R 幂律衰减、赫布扩散激活、双路 RRF 召回 |
+| **流程控制** | 单轮 ReAct 基础循环、即时流式输出 | 确定性状态图（`StateGraph`）、停滞检测熔断、端到端物理证据链验收 |
+
+#### 集成与接缝契约
+1. **非侵入式插件挂载**：Super Agent 所有通用能力通过标准 Hermes 插件机制（`plugins/<plugin_name>`）接入，严格遵守 Hermes 的 `plugin.yaml` 规范；
+2. **生命周期钩子（Lifecycle Hooks）**：通过 `pre_llm_call` 注入记忆召回切片，通过 `post_llm_call` 与 `on_session_end` 捕获回合事件并异步评估 Titans 惊奇度；
+3. **单根受管 Profile 拓扑**：所有运行时状态收敛于 `~/super_agent/<profile>`，通过符号链接与隔离环境变量无缝驱动底层 Hermes 实例。
+
+### 3.2 逻辑分层与核心模块
+
 | 层 | 项目中的主要入口 | 职责与边界 |
 | --- | --- | --- |
 | 宿主与入口 | `plugins/`、`runtime/`、`patches/` | 将真实身份、会话及配置交给内核；插件安装与实际工具注册需分别核验 |
 | 任务内核 | `agentcore/pool.py`、`worker.py`、`scheduler.py` | 状态、依赖、租约、attempt、结果 outbox 与本机有界执行 |
 | 同事与工作流 | `colleague_*.py`、`pipeline_dag.py`、`plan_gate.py` | 角色描述、编排、工作流和验收；角色文本本身不提供授权 |
 | 模型与上下文 | `model_routing.py`、`model_context.py`、`ccp_config.py` | 路由策略、窗口发现与配置；最终实际模型取决于接线和运行配置 |
-| 记忆 | `agentcore/memory/`、`plugins/localvec/`、`plugins/memory_bridge/` | 事实存储、索引、召回、准入和身份路由；各功能开关独立 |
-| 交付 | `completion_delivery.py`、`direct_completion.py`、`feishu_transport.py`、卡片相关模块 | 会话归属、发送、回执和展示；传输与客户端渲染须分别验收 |
+| 记忆与突触 | `agentcore/memory/`、`plugins/localvec/`、`plugins/memory_bridge/` | Titans 惊奇度门禁、ACT-R 衰减、赫布扩散、双路召回与身份路由 |
+| 交付与卡片 | `completion_delivery.py`、`direct_completion.py`、`feishu_transport.py`、卡片相关模块 | 会话归属、发送、回执和展示；传输与客户端渲染须分别验收 |
 | 治理 | `verification_gate.py`、`liveness.py`、`ops_alerts.py`、`preflight.py` | 验收、状态、诊断和告警；有事件不等于有告警发送器 |
 
-**源码**：`docs/POOL_RUNTIME.md` 将持久账本作为任务身份、依赖、租约、重放和结果 outbox 的权威；`AgentScheduler` 管理本进程执行；`Worker` 连接两者。不要把内存 Future 当作可恢复任务，也不要让展示层写入任务终态。
+**源码**：持久账本（`agentcore.pool`）作为任务身份、依赖、租约、重放和结果 outbox 的权威；`AgentScheduler` 管理本进程执行；`Worker` 连接两者。不要把内存 Future 当作可恢复任务，也不要让展示层写入任务终态。
 
 ## 4 大模型和 Agent 的工作原理
 

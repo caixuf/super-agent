@@ -1,5 +1,26 @@
 # super-agent —— 通用智能体本体
 
+> **致敬宿主基石**：Super Agent 深度构建于优秀的 **[Hermes Agent](https://github.com/nousresearch/hermes-agent)** 宿主生态之上。Hermes 提供了极其敏捷、模块化的智能体交互网关、工具抽象与多平台消息适配；Super Agent 则作为企业级“认知增强与持久大脑”，通过非侵入式插件体系为 Hermes 赋予长任务持久池、突触长期记忆、8 大研发同事协作与确定性状态机。
+
+---
+
+## 宿主基石与共生哲学：Hermes Agent
+
+Super Agent 绝非另起炉灶的封闭系统，而是深深植根于 **Hermes Agent** 开源智能体生态的模块化土壤之中：
+
+- **Hermes 是敏捷的“感官与交互中枢”（Sensory & Interaction Backbone）**：
+  Hermes 承担了基础的宿主环境（Host Runtime）、多端交互网关（IM/Web/终端）、插件管理生命周期（PluginManager）、Session 状态机以及标准大模型调用循环。其轻巧优雅的设计，让智能体能够极速响应用户的日常对话与即时工具调用。
+- **Super Agent 是稳健的“企业级认知皮层”（Enterprise Cognitive Cortex）**：
+  在真实的严肃工业研发场景中，智能体面临进程重启崩溃自愈、长耗时任务卡死、复杂多角色协作冲突、跨会话记忆漂移与幻觉风险。Super Agent 在 Hermes 的标准钩子（Hooks）与插件面之上，通过正交分层注入了：
+  1. **持久任务池（`agentcore.pool`）**：让长耗时异步任务跨进程重启不死、具备租约与 attempt 围栏保护；
+  2. **突触长期记忆（`agentcore.memory`）**：融合 Google Titans 惊奇度范式与 ACT-R 认知动力学，赋予智能体真正的跨会话沉淀与自愈能力；
+  3. **同事制研发团队（`agentcore.colleague_dev`）**：8 大岗位契约与独立 Worktree 隔离，化“单兵作战”为“企业级研发流水线”；
+  4. **确定性状态图（`agentcore.state_graph`）**：以状态图机取代盲目试错打转，提供严格的工程验收门禁。
+
+二者**知白守黑、相得益彰**：Hermes 让智能体轻快立足，Super Agent 让智能体行稳致远。
+
+---
+
 ## 官方用户与架构 Wiki (User & Architecture Wiki)
 
 欢迎查阅全新上线的 **[Super Agent 用户与架构 Wiki](docs/wiki/Home.md)**，为初学者与系统架构师提供结构化、模块化、带导航图谱的沉浸式查阅体验：
