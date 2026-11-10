@@ -890,7 +890,8 @@ if [ "$DO_BASELINE" = "1" ]; then
               "delegation.max_spawn_depth 3" \
               "approvals.mode off" \
               "approvals.timeout 900" \
-              "agent.restart_drain_timeout 300"; do
+              "agent.restart_drain_timeout 300" \
+              "gateway.message_timestamps.enabled true"; do
       k="${kv%% *}"; v="${kv#* }"
       cur="$("${HCMD[@]}" config get "$k" 2>/dev/null | tr -d '"' | head -1 || true)"
       if [ "$cur" = "$v" ]; then
