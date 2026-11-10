@@ -466,7 +466,7 @@ class TestGraphAugmentedRecall:
         for r in recall_res["results"]:
             assert str(r.get("validity_state") or "").upper() != "SUPERSEDED"
 
-    def test_graph_causal_expansion_in_recall(self):
+    def test_graph_causal_expansion_in_recall(self, isolated_memory_env):
         """测试顺着图因果边自动捞取关联的前置依赖知识 (rank_mode='graph_causal')。"""
         # 1. 写入一个核心配置规则
         res_cfg = write_fact(
@@ -486,8 +486,13 @@ class TestGraphAugmentedRecall:
 
         add_edge(case_fid, "DEPENDS_ON", cfg_fid, weight=1.0)
 
-        # 3. 针对用例进行召回，开启图因果扩展
-        res = recall_hybrid("HNP超速退出 用例", limit=5, enable_graph_expansion=True)
+        # 3. 针对用例进行召回，开启图因果扩展并使用测试隔离的实体库
+        res = recall_hybrid(
+            "HNP超速退出 用例",
+            entity_db=isolated_memory_env["entity_db"],
+            limit=10,
+            enable_graph_expansion=True,
+        )
         assert res["ok"]
         recalled_fids = [r.get("fact_id") for r in res["results"]]
         # 即使查询词主要针对用例，前置依赖配置也应被顺藤摸瓜一并召回！
