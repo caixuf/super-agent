@@ -1333,6 +1333,146 @@ class AttemptBoundSandboxAdapter:
         cmd.extend(["--", bootstrap_py, "-c", rlimit_bootstrap, *[str(a) for a in argv]])
         return cmd
 
+    @staticmethod
+    def is_bwrap_functional() -> bool:
+        """Check whether bubblewrap is installed and permitted to create user/mount namespaces on this host."""
+        bwrap_bin = shutil.which("bwrap")
+        if not bwrap_bin:
+            return False
+        true_bin = shutil.which("true") or "/bin/true"
+        try:
+            probe = subprocess.run(
+                [bwrap_bin, "--unshare-user", "--die-with-parent", "--ro-bind", "/", "/", "--", true_bin],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3.0,
+            )
+            return probe.returncode == 0
+        except Exception:
+            return False
+
+    def build_worker_bwrap_argv(
+        self,
+        argv: Sequence[str],
+        workdir: Path,
+        *,
+        attempt_dir: Optional[Path] = None,
+        writable_paths: Sequence[str | Path] = (),
+    ) -> list[str]:
+        """Construct a production worker bubblewrap command line with read-only root, isolated /tmp, and masked credentials."""
+        bwrap_bin = shutil.which("bwrap")
+        if not bwrap_bin:
+            raise RuntimeError("bwrap_backend_unavailable")
+        wdir = workdir.resolve(strict=True)
+        if self.allowed_workdir is not None and not (
+            wdir == self.allowed_workdir or wdir.is_relative_to(self.allowed_workdir)
+        ):
+            raise PermissionError("workdir_outside_adapter_allowed_workdir")
+
+        cmd: list[str] = [
+            bwrap_bin,
+            "--unshare-user",
+            "--die-with-parent",
+            "--new-session",
+        ]
+        if self.network_policy == "allowed":
+            cmd.append("--share-net")
+        else:
+            cmd.append("--unshare-net")
+
+        cmd.extend([
+            "--ro-bind", "/", "/",
+            "--dev", "/dev",
+            "--proc", "/proc",
+            "--tmpfs", "/tmp",
+        ])
+
+        bound_rw: set[str] = set()
+
+        def _bind_rw(target: Path | str | None) -> None:
+            if not target:
+                return
+            try:
+                p = Path(target).expanduser()
+                if not p.exists():
+                    return
+                resolved = p.resolve(strict=True)
+            except OSError:
+                return
+            forb, _ = is_forbidden_host_path(resolved)
+            if forb:
+                return
+            r_str = str(resolved)
+            if r_str in bound_rw or r_str == "/":
+                return
+            cmd.extend(["--bind", r_str, r_str])
+            bound_rw.add(r_str)
+
+        _bind_rw(wdir)
+        if attempt_dir is not None:
+            _bind_rw(attempt_dir)
+        for wp in writable_paths:
+            _bind_rw(wp)
+
+        if argv:
+            try:
+                exe_p = Path(str(argv[0])).expanduser()
+                if exe_p.is_file():
+                    exe_res = exe_p.resolve(strict=True)
+                    exe_str = str(exe_res)
+                    if exe_str not in bound_rw and not any(
+                        exe_str == bp or exe_str.startswith(bp + "/") for bp in bound_rw
+                    ):
+                        if exe_res.is_relative_to(Path("/tmp")):
+                            cmd.extend(["--ro-bind", exe_str, exe_str])
+            except OSError:
+                pass
+
+        # Mask host credential directories and files after writable binds so they remain inaccessible and read-only
+        masked_credentials: list[str] = []
+        home_dir = Path.home().resolve(strict=False)
+        for cred_dir_name in (".ssh", ".gnupg", ".aws", ".kube", ".docker"):
+            cred_dir = home_dir / cred_dir_name
+            if cred_dir.is_dir() and not cred_dir.is_symlink():
+                c_str = str(cred_dir)
+                cmd.extend(["--tmpfs", c_str, "--remount-ro", c_str])
+                masked_credentials.append(c_str)
+        for cred_file_name in (".netrc", ".git-credentials", ".npmrc", ".pypirc"):
+            cred_file = home_dir / cred_file_name
+            if cred_file.is_file() and not cred_file.is_symlink():
+                c_str = str(cred_file)
+                cmd.extend(["--ro-bind", "/dev/null", c_str])
+                masked_credentials.append(c_str)
+
+        cmd.extend([
+            "--setenv", ENV, self.token,
+            "--setenv", "SUPERAGENT_JOB_ID", self.job,
+            "--setenv", "SUPERAGENT_ATTEMPT_ID", self.attempt,
+            "--setenv", "SUPERAGENT_INSTANCE_ID", self.instance_id,
+            "--setenv", "SUPERAGENT_SANDBOX_BACKEND", "bwrap",
+            "--chdir", str(wdir),
+            "--",
+            *[str(a) for a in argv],
+        ])
+
+        self.audit_log.append({
+            "timestamp": time.time(),
+            "job": self.job,
+            "attempt": self.attempt,
+            "instance_id": self.instance_id,
+            "role": self.role,
+            "action": "build_worker_bwrap_argv",
+            "tool": "bwrap",
+            "workdir": str(wdir),
+            "attempt_dir": str(attempt_dir) if attempt_dir else None,
+            "writable_binds": sorted(bound_rw),
+            "masked_credentials": masked_credentials,
+            "allowed": True,
+            "reason": "worker_bwrap_sandbox_prepared",
+        })
+        return cmd
+
     def active_sandbox_pids(self) -> list[int]:
         """Return live host PIDs currently executing inside this adapter's sandbox tree."""
         with self._lock:

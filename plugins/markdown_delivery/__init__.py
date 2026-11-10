@@ -110,16 +110,51 @@ class _TenantToken:
         self._ctx = ctx
         self._value = ""
         self._expires_at = 0.0
+        self._lark_client = None
 
     def _credentials(self):
         app_id = (self._ctx.get_config("app_id", "") or "").strip()
         app_secret = (self._ctx.get_config("app_secret", "") or "").strip()
-        env_file = _env_file(self._ctx)
-        app_id = app_id or _env_value(env_file, "FEISHU_APP_ID") or ""
-        app_secret = app_secret or _env_value(env_file, "FEISHU_APP_SECRET") or ""
+        candidate_files = []
+        try:
+            candidate_files.append(_env_file(self._ctx))
+        except ValueError:
+            pass
+        hermes_home = os.environ.get("HERMES_HOME", "").strip()
+        if hermes_home:
+            candidate_files.append(os.path.join(hermes_home, ".env"))
+        for first_path in list(candidate_files):
+            parent = Path(first_path).parent
+            if parent.parent.name == "profiles" and parent.parent.is_dir():
+                for sib in sorted(parent.parent.glob("*/.env")):
+                    if str(sib) not in candidate_files:
+                        candidate_files.append(str(sib))
+        for env_path in candidate_files:
+            if app_id and app_secret:
+                break
+            app_id = app_id or _env_value(env_path, "FEISHU_APP_ID") or ""
+            app_secret = app_secret or _env_value(env_path, "FEISHU_APP_SECRET") or ""
+        app_id = app_id or os.environ.get("FEISHU_APP_ID", "").strip()
+        app_secret = app_secret or os.environ.get("FEISHU_APP_SECRET", "").strip()
         if not app_id or not app_secret:
             raise RuntimeError("app credentials are not configured for markdown delivery")
         return app_id, app_secret
+
+    def lark_client(self):
+        """Return a cached lark_oapi.Client for built-in feishu_doc_* / feishu_drive_* tools."""
+        if self._lark_client is not None:
+            return self._lark_client
+        app_id, app_secret = self._credentials()
+        import lark_oapi as lark
+        domain_name = (os.environ.get("FEISHU_DOMAIN", "feishu") or "feishu").strip().lower()
+        sdk_domain = getattr(lark, "LARK_DOMAIN", None) if domain_name == "lark" else getattr(lark, "FEISHU_DOMAIN", None)
+        builder = lark.Client.builder().app_id(app_id).app_secret(app_secret)
+        if sdk_domain is not None:
+            builder = builder.domain(sdk_domain)
+        if hasattr(lark, "LogLevel"):
+            builder = builder.log_level(lark.LogLevel.WARNING)
+        self._lark_client = builder.build()
+        return self._lark_client
 
     def authorization(self):
         if self._value and time.time() < self._expires_at - 60:
@@ -232,25 +267,53 @@ def _handler(deliver, resolve, ctx, token):
 
 
 def _guide(*, user_message="", **kwargs):
-    if not isinstance(user_message, str) or not _DOCUMENT_REQUEST.search(user_message):
+    try:
+        if not isinstance(user_message, str) or not _DOCUMENT_REQUEST.search(user_message):
+            return None
+        return {"context": (
+            "Markdown delivery rule: Routine questions, status checks, short/medium explanations, and normal "
+            "task summaries MUST be answered directly in chat. Do NOT create an online document unless the user "
+            "explicitly requested one or the content is a heavy structured deep-dive report (>1500 words / multi-table audit). "
+            "When an online document is generated, write the .md into the return-file directory, then call md_deliver "
+            "with that path and put its returned document link in the answer. Do not emit a ##FILE: marker for Markdown. "
+            "The delivery engine automatically sets tenant-editable link permissions and collaborator permissions. "
+            "Even when delivering an online document, you MUST include the core executive summary and main conclusions "
+            "directly in the chat reply. If md_deliver reports state pending, say the document is still converting, "
+            "keep the .md in place, give the ticket, and finish it next turn with md_resolve(path=..., ticket=...).")}
+    except Exception:
         return None
-    return {"context": (
-        "Markdown delivery rule: Routine questions, status checks, short/medium explanations, and normal "
-        "task summaries MUST be answered directly in chat. Do NOT create an online document unless the user "
-        "explicitly requested one or the content is a heavy structured deep-dive report (>1500 words / multi-table audit). "
-        "When an online document is generated, write the .md into the return-file directory, then call md_deliver "
-        "with that path and put its returned document link in the answer. Do not emit a ##FILE: marker for Markdown. "
-        "The delivery engine automatically sets tenant-editable link permissions and collaborator permissions. "
-        "Even when delivering an online document, you MUST include the core executive summary and main conclusions "
-        "directly in the chat reply. If md_deliver reports state pending, say the document is still converting, "
-        "keep the .md in place, give the ticket, and finish it next turn with md_resolve(path=..., ticket=...).")}
+
+
+def _make_pre_tool_call(token):
+    """Lazily inject a thread-local lark_oapi Client before feishu_doc_* / feishu_drive_* calls."""
+    def _on_pre_tool_call(*, tool_name="", **kwargs):
+        if not isinstance(tool_name, str) or not (
+            tool_name.startswith("feishu_doc_") or tool_name.startswith("feishu_drive_")
+        ):
+            return None
+        try:
+            import sys
+            from tools import feishu_lark
+            if feishu_lark.get_client() is None:
+                client = token.lark_client()
+                feishu_lark.set_client(client)
+                for mod_name in ("tools.feishu_doc_tool", "tools.feishu_drive_tool"):
+                    mod = sys.modules.get(mod_name)
+                    if mod is not None and hasattr(mod, "set_client"):
+                        mod.set_client(client)
+        except Exception:
+            pass
+        return None
+
+    return _on_pre_tool_call
 
 
 def register(ctx):
     if ctx.get_config("enabled", False) is not True:
         return
     deliver, resolve = _engine(ctx)
-    handlers = _handler(deliver, resolve, ctx, _TenantToken(ctx))
+    token = _TenantToken(ctx)
+    handlers = _handler(deliver, resolve, ctx, token)
     tools = (
         ("md_deliver",
          "Import a Markdown report from the outbox as an online document; returns its link. "
@@ -273,3 +336,4 @@ def register(ctx):
                               "properties": properties, "required": required}},
                           handler=handlers[name])
     ctx.register_hook("pre_llm_call", _guide)
+    ctx.register_hook("pre_tool_call", _make_pre_tool_call(token))

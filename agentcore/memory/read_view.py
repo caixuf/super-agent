@@ -146,6 +146,11 @@ class MemoryReadView:
                 quoted=','.join('"'+key.replace('"','""')+'"' for key in names)
                 self.conn.executemany('INSERT INTO '+table+' ('+quoted+') VALUES ('+','.join('?' for _ in columns)+')',
                                       [tuple(row[key] for key in columns) for row in rows])
+            try:
+                from . import memory_scale
+                memory_scale.sync_fts_rows(self.conn, ids, commit=False)
+            except Exception:
+                pass
             if indexed:
                 for fid in ids:
                     self.conn.execute('DELETE FROM vec_facts WHERE fact_id=?',(fid,))

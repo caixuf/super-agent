@@ -207,16 +207,23 @@ def recall_hybrid(
         if isinstance(ref_res, dict) and ref_res.get("ok") is True:
             reference_hits = ref_res.get("results") or []
 
-    # 进化二：1-Hop 赫布突触扩散激活（问 A 自动联想伴生经验 B）
+    # 进化二：1-Hop 赫布突触扩散激活（问 A 自动联想伴生经验 B，并对共激活候选做 RRF 协同加权）
     spread_hits: List[Dict[str, Any]] = []
     if enable_spreading:
-        seed_fids = [
+        top_seeds = [
+            str(item.get("fact_id") or "").strip()
+            for item in [*memory_hits[:1], *entity_hits[:1]]
+            if str(item.get("fact_id") or "").strip()
+        ]
+        all_seeds = [
             str(item.get("fact_id") or "").strip()
             for item in [*memory_hits, *entity_hits]
             if str(item.get("fact_id") or "").strip()
         ]
-        if seed_fids:
-            activated = synapse.spreading_activation(seed_fids, top_k=max(2, max_items))
+        if top_seeds:
+            activated = synapse.spreading_activation(top_seeds, top_k=max(2, max_items))
+            if not activated and len(all_seeds) > len(top_seeds):
+                activated = synapse.spreading_activation(all_seeds, top_k=max(2, max_items))
             if activated:
                 act_ids = [a["fact_id"] for a in activated]
                 act_by_id = {a["fact_id"]: a for a in activated}
@@ -261,6 +268,14 @@ def recall_hybrid(
             except Exception as exc:
                 _LOG.warning("failed to record memory_trace for task %s: %s", task_id, exc)
 
+    from . import memory_scale
+    db_strategy = mem_res.get("strategy")
+    if not db_strategy:
+        try:
+            db_strategy = memory_scale.index_stats(str(memory_store._db_path())).get("strategy", "fts5_bm25_only")
+        except Exception:
+            db_strategy = "fts5_bm25_only"
+
     payload: Dict[str, Any] = {
         "ok": True,
         "results": fused,
@@ -269,6 +284,8 @@ def recall_hybrid(
         "spread_count": len(spread_hits),
         "reference_count": len(reference_hits),
         "fusion": fusion,
+        "rrf_k": int(rrf_k),
+        "strategy": db_strategy,
     }
     if not fused:
         payload["empty_reason"] = mem_res.get("empty_reason", "no_match")

@@ -1,6 +1,6 @@
 """Agent 运行设计域 (ODD) 与安全包络守卫。
 
-借鉴 KunAutoDrive 自动驾驶安全包络与最小风险动作 (MRM) 思想：
+运行设计域 (ODD) 与最小风险降级 (MRM) 守卫契约：
 1. 上下文体积守卫 (Context Envelope):
    - 500K Tokens / 2MB 安全上限，杜绝无节制膨胀拖垮上游模型。
    - 跨天自然日自动建议/触发开启新分支 (Session Reset on Date Rollover)。

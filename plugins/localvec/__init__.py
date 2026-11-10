@@ -516,23 +516,52 @@ class LocalVecProvider(MemoryProvider):
                 scope = ("f.user_id=? AND f.agent_id=? AND f.status='active' "
                          "AND EXISTS (SELECT 1 FROM fact_tags t WHERE t.fact_id=f.fact_id "
                          "AND t.key='profile' AND t.value=?)")
-                # Do not depend on the host importing the engine package.
-                # All terms are bounded and passed as SQL parameters.
-                terms = [term[:128] for term in re.findall(r"[\w\u4e00-\u9fff]+", query[:4096])[:8]]
-                if not terms:
-                    return None
-                clauses = []
-                parameters = []
-                for term in terms:
-                    term = term.replace("!", "!!").replace("%", "!%").replace("_", "!_")
-                    clauses.append("(f.statement LIKE ? ESCAPE '!' OR f.subject LIKE ? ESCAPE '!')")
-                    parameters.extend(["%" + term + "%", "%" + term + "%"])
-                rows = conn.execute(
-                    f"SELECT f.fact_id, f.statement, f.subject FROM working_fact f "
-                    f"WHERE {scope} AND (" + " OR ".join(clauses) + ") "
-                    "ORDER BY f.created_at DESC LIMIT ?",
-                    (user, agent, profile, *parameters, self._limit),
-                ).fetchall()
+                rows = []
+                # Prefer real SQLite FTS5 BM25 query when fact_fts virtual table exists.
+                has_fts = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fact_fts'"
+                ).fetchone() is not None
+                if has_fts:
+                    fts_terms: list[str] = []
+                    for tok in re.findall(r"[a-z0-9_]{2,}", query[:4096].lower()):
+                        fts_terms.append(tok[:128])
+                    for seg in re.findall(r"[\u4e00-\u9fff]+", query[:4096]):
+                        if len(seg) == 1:
+                            fts_terms.append(seg)
+                        else:
+                            for i in range(len(seg) - 1):
+                                fts_terms.append(seg[i : i + 2])
+                    fts_terms = list(dict.fromkeys(fts_terms))[:16]
+                    if fts_terms:
+                        match_expr = " OR ".join('"' + t.replace('"', '""') + '"' for t in fts_terms)
+                        try:
+                            rows = conn.execute(
+                                f"SELECT f.fact_id, f.statement, f.subject FROM fact_fts "
+                                f"JOIN working_fact f ON f.rowid = fact_fts.rowid "
+                                f"WHERE fact_fts MATCH ? AND {scope} "
+                                "ORDER BY bm25(fact_fts, 1.0, 2.0) ASC, f.created_at DESC LIMIT ?",
+                                (match_expr, user, agent, profile, self._limit),
+                            ).fetchall()
+                        except Exception:
+                            rows = []
+                if not rows:
+                    # Do not depend on the host importing the engine package.
+                    # All terms are bounded and passed as SQL parameters.
+                    terms = [term[:128] for term in re.findall(r"[\w\u4e00-\u9fff]+", query[:4096])[:8]]
+                    if not terms:
+                        return None
+                    clauses = []
+                    parameters = []
+                    for term in terms:
+                        term = term.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+                        clauses.append("(f.statement LIKE ? ESCAPE '!' OR f.subject LIKE ? ESCAPE '!')")
+                        parameters.extend(["%" + term + "%", "%" + term + "%"])
+                    rows = conn.execute(
+                        f"SELECT f.fact_id, f.statement, f.subject FROM working_fact f "
+                        f"WHERE {scope} AND (" + " OR ".join(clauses) + ") "
+                        "ORDER BY f.created_at DESC LIMIT ?",
+                        (user, agent, profile, *parameters, self._limit),
+                    ).fetchall()
                 if not rows:
                     return None
                 formatted = [{"fact_id": r["fact_id"], "statement": r["statement"], "subject": r["subject"]}

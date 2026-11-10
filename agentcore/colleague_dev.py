@@ -463,24 +463,13 @@ class ColleagueDevOrchestrator:
         max_revisions: int = 3,
         domain: str = "default",
         demo_mode: bool = False,
+        *,
+        task_id: Optional[str] = None,
+        checkpointer: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        """Run the proactive, multi-stage autonomous case development pipeline."""
+        """Run the proactive, multi-stage autonomous case development pipeline via StateGraph + SqliteCheckpointer."""
         try:
             bridge = self._ensure_bridge()
-            res = bridge.execute_autonomous_dev_pipeline(
-                requirement_text=requirement_text,
-                source_input=source_input,
-                workdir=workdir,
-                max_revisions=max_revisions,
-                target_domain=domain,
-            )
-            approved = res.get("approved", res.get("is_approved", False))
-            revisions = res.get("revisions", res.get("revisions_count", 1))
-            res["approved"] = approved
-            res["is_approved"] = approved
-            res["revisions"] = revisions
-            res["revisions_count"] = revisions
-            return res
         except Exception as exc:
             # Standalone self-healing fallback ONLY when demo_mode is explicitly enabled
             is_demo = bool(demo_mode) or os.environ.get("AGENTCORE_DEMO_MODE") in ("1", "true", "True")
@@ -501,6 +490,108 @@ class ColleagueDevOrchestrator:
                 workdir=workdir,
                 max_revisions=max_revisions,
                 domain=domain,
+                task_id=task_id,
+                checkpointer=checkpointer,
+            )
+
+        try:
+            from agentcore.state_graph import END, MemoryCheckpointer, SqliteCheckpointer, StateGraph
+
+            work_path = Path(workdir).resolve() if workdir else None
+            resolved_task_id = task_id or f"colleague_prod_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+            active_ckpt = checkpointer
+            if active_ckpt is None:
+                if work_path:
+                    work_path.mkdir(parents=True, exist_ok=True)
+                    active_ckpt = SqliteCheckpointer(work_path / "state_checkpoints.db")
+                else:
+                    attempt_env = (os.environ.get("SUPERAGENT_ATTEMPT_DIR") or "").strip()
+                    if attempt_env and Path(attempt_env).is_dir():
+                        active_ckpt = SqliteCheckpointer(Path(attempt_env) / "state_checkpoints.db")
+                    else:
+                        active_ckpt = MemoryCheckpointer()
+
+            builder = StateGraph()
+
+            def node_prepare_spec(state: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "spec_prepared": True,
+                    "requirement_text": requirement_text,
+                    "source_input": source_input,
+                    "domain": domain,
+                    "max_revisions": max_revisions,
+                }
+
+            def node_execute_pipeline(state: dict[str, Any]) -> dict[str, Any]:
+                raw = bridge.execute_autonomous_dev_pipeline(
+                    requirement_text=state.get("requirement_text", requirement_text),
+                    source_input=state.get("source_input", source_input),
+                    workdir=work_path if work_path else workdir,
+                    max_revisions=int(state.get("max_revisions", max_revisions)),
+                    target_domain=str(state.get("domain", domain)),
+                )
+                return {"pipeline_result": dict(raw or {})}
+
+            def node_verify_and_harvest(state: dict[str, Any]) -> dict[str, Any]:
+                res = dict(state.get("pipeline_result") or {})
+                approved = res.get("approved", res.get("is_approved", False))
+                revisions = res.get("revisions", res.get("revisions_count", 1))
+                res["approved"] = approved
+                res["is_approved"] = approved
+                res["revisions"] = revisions
+                res["revisions_count"] = revisions
+                if state.get("_resumed_from_node"):
+                    res["resumed_from_node"] = state["_resumed_from_node"]
+                return {"final_result": res, "approved": approved}
+
+            def _harvest_cb(state: dict[str, Any]) -> bool:
+                state["worktree_harvest_checked"] = True
+                return True
+
+            builder.add_node("prepare_spec", node_prepare_spec)
+            builder.add_node("execute_pipeline", node_execute_pipeline)
+            builder.add_node("verify_and_harvest", node_verify_and_harvest)
+            builder.set_entry_point("prepare_spec")
+            builder.add_edge("prepare_spec", "execute_pipeline")
+            builder.add_edge("execute_pipeline", "verify_and_harvest")
+            builder.add_edge("verify_and_harvest", END)
+
+            graph = builder.compile(
+                checkpointer=active_ckpt,
+                stagnation_limit=3,
+                worktree_harvest_check=True,
+                harvest_callback=_harvest_cb,
+            )
+            final_state = graph.invoke(
+                {
+                    "task_id": resolved_task_id,
+                    "requirement_text": requirement_text,
+                    "worktree": str(work_path) if work_path else "",
+                },
+                config={"task_id": resolved_task_id},
+            )
+            return dict(final_state.get("final_result") or {})
+        except Exception as exc:
+            is_demo = bool(demo_mode) or os.environ.get("AGENTCORE_DEMO_MODE") in ("1", "true", "True")
+            if not is_demo:
+                return {
+                    "ok": False,
+                    "approved": False,
+                    "is_approved": False,
+                    "score": 0.0,
+                    "revisions": 0,
+                    "revisions_count": 0,
+                    "error": f"colleague_bridge_unavailable: {exc}. Real autonomous execution requires an active bridge or test executor; synthetic fallback is disabled.",
+                    "synthetic": False,
+                }
+            return self._standalone_self_healing_pipeline(
+                requirement_text=requirement_text,
+                source_input=source_input,
+                workdir=workdir,
+                max_revisions=max_revisions,
+                domain=domain,
+                task_id=task_id,
+                checkpointer=checkpointer,
             )
 
     def _standalone_self_healing_pipeline(
@@ -510,13 +601,24 @@ class ColleagueDevOrchestrator:
         workdir: Optional[Union[str, Path]] = None,
         max_revisions: int = 3,
         domain: str = "default",
+        *,
+        task_id: Optional[str] = None,
+        checkpointer: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        """Self-healing loop executed via agentcore.state_graph with stagnation guard & harvest check."""
-        from agentcore.state_graph import StateGraph, END
+        """Self-healing loop executed via agentcore.state_graph with SqliteCheckpointer & harvest check."""
+        from agentcore.state_graph import END, MemoryCheckpointer, SqliteCheckpointer, StateGraph
 
         work_path = Path(workdir).resolve() if workdir else None
-        task_id = f"colleague_dev_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-        case_name = f"test_{domain}_{task_id[:8]}.dsl"
+        resolved_task_id = task_id or f"colleague_dev_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+        case_name = f"test_{domain}_{resolved_task_id[:8]}.dsl"
+
+        active_ckpt = checkpointer
+        if active_ckpt is None:
+            if work_path:
+                work_path.mkdir(parents=True, exist_ok=True)
+                active_ckpt = SqliteCheckpointer(work_path / "state_checkpoints.db")
+            else:
+                active_ckpt = MemoryCheckpointer()
 
         builder = StateGraph()
 
@@ -546,7 +648,7 @@ class ColleagueDevOrchestrator:
                 case_file.write_text(f"# Generated case: {requirement_text}\nfeature: {domain}\nprocess: main\n", encoding="utf-8")
 
                 manifest = {
-                    "task_id": task_id,
+                    "task_id": resolved_task_id,
                     "verification": "dev_traceability_v1",
                     "approved": state.get("approved", False),
                     "score": state.get("score", 0.0),
@@ -559,7 +661,7 @@ class ColleagueDevOrchestrator:
                 (work_path / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
                 report = {
-                    "task_id": task_id,
+                    "task_id": resolved_task_id,
                     "verification": "dev_traceability_v1",
                     "summary": f"自主研发流水线完成: 评审得分 {state.get('score', 0.0):.1f}/100, 批准状态: {state.get('approved', False)}, 迭代轮次: {len(state.get('revisions', []))}",
                     "success": state.get("approved", False),
@@ -576,6 +678,10 @@ class ColleagueDevOrchestrator:
                 return "harvest"
             return "draft"
 
+        def _harvest_cb(state: dict[str, Any]) -> bool:
+            state["worktree_harvest_checked"] = True
+            return True
+
         builder.add_node("draft", node_draft)
         builder.add_node("harvest", node_harvest)
         builder.set_entry_point("draft")
@@ -583,11 +689,13 @@ class ColleagueDevOrchestrator:
         builder.add_edge("harvest", END)
 
         graph = builder.compile(
+            checkpointer=active_ckpt,
             stagnation_limit=3,
-            worktree_harvest_check=False,
+            worktree_harvest_check=True,
+            harvest_callback=_harvest_cb,
         )
         initial_state = {
-            "task_id": task_id,
+            "task_id": resolved_task_id,
             "requirement_text": requirement_text,
             "revision": 0,
             "max_revisions": max_revisions,
@@ -596,11 +704,11 @@ class ColleagueDevOrchestrator:
             "score": 60.0,
             "worktree": str(work_path) if work_path else "",
         }
-        final_state = graph.invoke(initial_state, config={"task_id": task_id})
+        final_state = graph.invoke(initial_state, config={"task_id": resolved_task_id})
 
         return {
             "ok": True,
-            "task_id": task_id,
+            "task_id": resolved_task_id,
             "case_name": case_name,
             "score": final_state.get("score", 60.0),
             "approved": final_state.get("approved", False),
@@ -608,6 +716,7 @@ class ColleagueDevOrchestrator:
             "revisions": len(final_state.get("revisions", [])),
             "revisions_count": len(final_state.get("revisions", [])),
             "manifest": final_state.get("manifest", {}),
+            "resumed_from_node": final_state.get("_resumed_from_node"),
             "synthetic": True,
             "claim_boundary": "Synthetic demo execution only; cannot serve as verified success proof",
         }

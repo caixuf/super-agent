@@ -287,6 +287,19 @@ def consolidate_memories(
     if prune_vectors:
         prune_stats = memory_store.prune_dormant_vectors(dry_run=dry_run, vacuum=False)
 
+    # ------------------------------------------------------------------
+    # 阶段 4：SkillForge 案例自动蒸馏（Case -> ProceduralSkill）
+    # ------------------------------------------------------------------
+    distilled_skill_ids: List[str] = []
+    if not dry_run:
+        try:
+            from agentcore.skill_forge import SkillForge
+            forge = SkillForge()
+            distilled = forge.auto_distill_from_cases()
+            distilled_skill_ids = [s.skill_id for s in distilled]
+        except Exception as exc:
+            logger.debug("SkillForge 自动蒸馏跳过: %s", type(exc).__name__)
+
     return {
         "ok": True,
         "dry_run": dry_run,
@@ -295,4 +308,6 @@ def consolidate_memories(
         "compacted_count": len(compacted_ids),
         "compacted_fact_ids": compacted_ids,
         "dormant_vectors_pruned": prune_stats.get("embeddings_deleted", 0),
+        "skills_distilled_count": len(distilled_skill_ids),
+        "distilled_skill_ids": distilled_skill_ids,
     }

@@ -55,7 +55,7 @@ flowchart TD
     subgraph SuperAgent["Super Agent 企业级认知大脑（认知与确定性工程）"]
         direction TB
         S1["持久任务池与进程崩溃自愈 (Pool / Worker / Attempt Fencing)"]
-        S2["突触长程记忆引擎 (Titans Surprise / ACT-R / 赫布拓扑)"]
+        S2["突触长程记忆引擎 (Heuristic Surprise Gate / ACT-R / 赫布拓扑)"]
         S3["8 大研发同事协作团队 (Colleague Dev / Worktree 物理隔离)"]
         S4["确定性状态图机 (StateGraph / 停滞熔断 / 验收门禁)"]
         S5["CardKit 2.0 原生状态流与 Chromium 图文交付"]
@@ -179,15 +179,14 @@ Super Agent 生产部署统一收敛至 `<managed_root>/<profile>`（默认 `~/s
 - 观测器持续统计召回时延、Top-K 相似度分布、命中率及缓存有效性。
 - `tools/superagent.py doctor` 自动化巡检各 Profile 的磁盘绑定（`disk_bindings`）与最新观测报告。
 
-### 5.3 神经长程记忆哲学：Google Titans 架构的工程映射
-针对大模型上下文窗口“中间迷失”与海量历史交互下注意力二次方计算开销的根本瓶颈，系统设计全面借鉴了 Google Titans（*Titans: Learning to Memorize at Test Time*, 2025）前沿记忆范式：
-1. **短程注意力与神经记忆双轨解耦**：
-   - 保持 Prompt 上下文高频敏捷，只容纳当前轮次与 RRF 精炼结果；
-   - 将长程经验剥离至持久化状态账本中，实现无界跨会话沉淀。
-2. **惊奇度准入门禁（Surprise-Driven Gating）**：
-   对应 Titans 以损失梯度作为惊奇度度量的思想，`memory_gate.py` 执行信息增量（Novelty）、实体锚定与一致性校验三道门禁，拒绝平庸流水账污染记忆库。
-3. **测试期动态突触可塑性（Synaptic Plasticity）**：
-   对应 Titans 在测试期依据反馈信号动态调整记忆权重，`memory_plasticity.py` 在任务终态自动对所引用事实施行正向强化（Potentiation）或负向抑制（Depression），实现自适应的知识进化。
+### 5.3 多维启发式惊奇度打分门禁与三频段连续体记忆（Heuristic Surprise Gate & Continuum Memory）
+理论借鉴自 Google Research 的 **Titans**（*Learning to Memorize at Test Time*, arXiv:2501.00663，惊奇度驱动记忆门控与动量衰减）及其演进架构 **HOPE**（*Nested Learning / Continuum Memory System*，多频谱连续体记忆与自指更新）。由于生产智能体运行在冻结权重的黑盒大模型之上（不直接对神经网络权重做梯度更新），Super Agent 在 Agent 工程层（SQLite FTS5 + `vec0` + Markdown 技能库）将其转化为确定性的三频段连续体记忆系统：
+1. **高频层（Turn 级，多维启发式惊奇度准入门禁 Heuristic Surprise Gate）**：
+   `memory_surprise.py` 与 `memory_gate.py` 结合向量余弦新颖度（Embedding Cosine Novelty）、大模型语义纠错判定（LLM Semantic Judge）、实体锚定与一致性校验执行准入门禁，拒绝平庸流水账污染记忆库。
+2. **中频层（Task 终态级，自指突触可塑性 Synaptic Plasticity）**：
+   `memory_plasticity.py` 与 `synapse.py` 在任务终态依据真实执行反馈（成功或失败）自动对本轮召回引用的事实与 1-Hop 共激活边施行正向强化（Potentiation）或负向抑制（Depression）。
+3. **低频层（Consolidation 级，SkillForge 过程技能蒸馏固化）**：
+   `memory_consolidate.py` 与 `skill_forge.py` 将多轮验证通过的高分案例（`AgentCase`）自动蒸馏固化为结构化 `ProceduralSkill` Markdown 规程，并在新任务派发时自动挂载注入。
 
 ---
 

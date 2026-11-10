@@ -13,7 +13,7 @@ Super Agent 绝非另起炉灶的封闭系统，而是深深植根于 **Hermes A
 - **Super Agent 是稳健的“企业级认知皮层”（Enterprise Cognitive Cortex）**：
   在真实的严肃工业研发场景中，智能体面临进程重启崩溃自愈、长耗时任务卡死、复杂多角色协作冲突、跨会话记忆漂移与幻觉风险。Super Agent 在 Hermes 的标准钩子（Hooks）与插件面之上，通过正交分层注入了：
   1. **持久任务池（`agentcore.pool`）**：让长耗时异步任务跨进程重启不死、具备租约与 attempt 围栏保护；
-  2. **突触长期记忆（`agentcore.memory`）**：融合 Google Titans 惊奇度范式与 ACT-R 认知动力学，赋予智能体真正的跨会话沉淀与自愈能力；
+  2. **突触长期记忆（`agentcore.memory`）**：结合多维启发式惊奇度打分门禁（Heuristic Surprise Gate）与 ACT-R 认知动力学，赋予智能体跨会话沉淀与自愈能力；
   3. **同事制研发团队（`agentcore.colleague_dev`）**：8 大岗位契约与独立 Worktree 隔离，化“单兵作战”为“企业级研发流水线”；
   4. **确定性状态图（`agentcore.state_graph`）**：以状态图机取代盲目试错打转，提供严格的工程验收门禁。
 
@@ -152,11 +152,11 @@ bash install/superagent.sh package --allow-dirty --out-dir /absolute/candidate-o
 Python、Git、Hermes、可选工具和凭据的独立运行镜像；仍须准备对应宿主依赖。
 受管版本先在临时目录构建，再发布完整目录；同名版本只能按相同内容复用，
 不允许原地覆盖修复，损坏目录会保留并拒绝激活/回滚。
-当前验收状态和未完成门禁见 [`docs/RELEASE_READINESS.md`](docs/RELEASE_READINESS.md)。
+当前验收状态和未完成门禁见 [`docs/DEPLOY.md`](docs/DEPLOY.md)。
 
 前台专用 profile 的宿主工具权限边界已加入候选构建，固定允许持久任务 API，
 执行前独立拦截执行工具、间接入口及执行命令；默认不启用，不改现场 profile。
-配置与限制见 [`docs/FRONTDESK_BOUNDARY.md`](docs/FRONTDESK_BOUNDARY.md)。
+配置与限制见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 候选宿主也会在本轮持久提交回执后确定性确认并释放回合，不再调用模型轮询；
 真实 Agent/队列的隔离反例已覆盖。这仍不等于后台闭环或真实 IM 验收完成。
 
@@ -422,7 +422,7 @@ super-agent/
 │   └── autotask/jobs/         # 生产定时巡检作业模板
 ├── patches/                   # 宿主平台适配补丁（Card 2.4 / 流式卡片等）
 ├── docker/                    # 干净室部署验证 (verify.sh, Dockerfile, Dockerfile.cleanroom)
-├── docs/                      # 架构、迁移与规范文档 (INDEX.md, TECH_MANUAL.md, ARCHITECTURE.md)
+├── docs/                      # 架构、迁移与规范文档 (README.md, TECH_MANUAL.md, ARCHITECTURE.md)
 └── tests/                     # 仓级门禁、单测与集成测试
 ```
 

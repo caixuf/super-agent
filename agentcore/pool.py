@@ -633,7 +633,7 @@ class Pool:
         return current is None or current != pid_start
 
     def reconcile_watchdog(self, now=None, *, lease=60):
-        """Prefer-D6: OpenHands-style watchdog reconcile on the SQLite pool ledger.
+        """Prefer-D6: Deterministic watchdog reconcile on the SQLite pool ledger.
 
         One clear sweeper: runs Prefer-D2 ``enforce_windows`` first, then closes
         finish-callback-loss into conditional terminal OR replay-safe requeue when

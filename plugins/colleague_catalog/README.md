@@ -47,7 +47,7 @@ Set `pack_import_export: true` alongside `enabled: true`. Tools accept an
 **absolute host path only** — there is no model-writable import without that
 host gate.
 
-Pack discipline (OpenMausBot pattern citation, not a vendor tree):
+Pack discipline (strict security boundary, no vendor tree):
 
 - roles use catalog `display_name` / `duty` / `can_do` / `boundaries`
 - no secrets, tokens, cookies, absolute host paths, or harness blobs in pack bytes

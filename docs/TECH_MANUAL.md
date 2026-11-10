@@ -15,7 +15,7 @@ Super Agent 是一个以持久任务、受控执行、记忆与结果回投为�
 | **渠道实测** | 指定账号在真实消息渠道发出并回读了测试消息 | 只证明被测试的传输及其测试场景，不证明完整生产业务链 |
 | **建议** | 基于系统设计、研究或行业实践提出的目标能力 | 需设计、实现并验收，不能作为当前承诺 |
 
-业务地址、凭据、模型、profile、插件、队列根和宿主版本由部署方维护。运行状态以目标进程、配置、服务和实际探测为准。仓库中的历史发布记录与本文引用的测试数字均有时间及提交范围；版本变化后需要重验。项目模块边界、最小验收和可选能力可进一步参考仓库 `docs/RELEASE_CAPABILITIES.md`、`docs/POOL_RUNTIME.md` 和 `docs/REDEPLOY.md`。
+业务地址、凭据、模型、profile、插件、队列根和宿主版本由部署方维护。运行状态以目标进程、配置、服务和实际探测为准。仓库中的历史发布记录与本文引用的测试数字均有时间及提交范围；版本变化后需要重验。项目模块边界、最小验收和可选能力可进一步参考仓库 `docs/ARCHITECTURE.md`、`docs/DEPLOY.md` 和 `docs/OPERATIONS.md`。
 
 ### 1.1 术语与责任
 
@@ -76,12 +76,12 @@ Super Agent 深度依托并服务于 **Hermes Agent** 宿主生态。Hermes 提�
 | **系统定位** | 感官与通信中枢（Sensory & Interaction Backbone） | 认知皮层与持久化执行底座（Enterprise Cognitive Cortex） |
 | **连接与会话** | 多端接入网关（IM/Web/终端）、Session 状态机 | 持久任务池（SQLite WAL）、Attempt 栅栏、任务租约治理 |
 | **工具与插件** | `PluginManager`、标准工具 schema 暴露与调用 | 8 大研发同事契约（`DEV_ROLES`）、独立 Git Worktree 物理隔离 |
-| **记忆与认知** | 基础上下文装配、短程提示词拼接 | Google Titans 惊奇度门禁、ACT-R 幂律衰减、赫布扩散激活、双路 RRF 召回 |
+| **记忆与认知** | 基础上下文装配、短程提示词拼接 | 多维启发式惊奇度打分门禁（Heuristic Surprise Gate）、ACT-R 幂律衰减、赫布扩散激活、双路 RRF 召回 |
 | **流程控制** | 单轮 ReAct 基础循环、即时流式输出 | 确定性状态图（`StateGraph`）、停滞检测熔断、端到端物理证据链验收 |
 
 #### 集成与接缝契约
 1. **非侵入式插件挂载**：Super Agent 所有通用能力通过标准 Hermes 插件机制（`plugins/<plugin_name>`）接入，严格遵守 Hermes 的 `plugin.yaml` 规范；
-2. **生命周期钩子（Lifecycle Hooks）**：通过 `pre_llm_call` 注入记忆召回切片，通过 `post_llm_call` 与 `on_session_end` 捕获回合事件并异步评估 Titans 惊奇度；
+2. **生命周期钩子（Lifecycle Hooks）**：通过 `pre_llm_call` 注入记忆召回切片，通过 `post_llm_call` 与 `on_session_end` 捕获回合事件并异步评估多维启发式惊奇度；
 3. **单根受管 Profile 拓扑**：所有运行时状态收敛于 `~/super_agent/<profile>`，通过符号链接与隔离环境变量无缝驱动底层 Hermes 实例。
 
 ### 3.2 逻辑分层与核心模块
@@ -92,7 +92,7 @@ Super Agent 深度依托并服务于 **Hermes Agent** 宿主生态。Hermes 提�
 | 任务内核 | `agentcore/pool.py`、`worker.py`、`scheduler.py` | 状态、依赖、租约、attempt、结果 outbox 与本机有界执行 |
 | 同事与工作流 | `colleague_*.py`、`pipeline_dag.py`、`plan_gate.py` | 角色描述、编排、工作流和验收；角色文本本身不提供授权 |
 | 模型与上下文 | `model_routing.py`、`model_context.py`、`ccp_config.py` | 路由策略、窗口发现与配置；最终实际模型取决于接线和运行配置 |
-| 记忆与突触 | `agentcore/memory/`、`plugins/localvec/`、`plugins/memory_bridge/` | Titans 惊奇度门禁、ACT-R 衰减、赫布扩散、双路召回与身份路由 |
+| 记忆与突触 | `agentcore/memory/`、`plugins/localvec/`、`plugins/memory_bridge/` | 启发式惊奇度门禁、ACT-R 衰减、赫布扩散、双路召回与身份路由 |
 | 交付与卡片 | `completion_delivery.py`、`direct_completion.py`、`feishu_transport.py`、卡片相关模块 | 会话归属、发送、回执和展示；传输与客户端渲染须分别验收 |
 | 治理 | `verification_gate.py`、`liveness.py`、`ops_alerts.py`、`preflight.py` | 验收、状态、诊断和告警；有事件不等于有告警发送器 |
 
@@ -138,49 +138,45 @@ Transformer 的一个常见缩放点积注意力形式是 `Attention(Q,K,V) = so
 
 针对一次分析任务，可以要求最终结论分别指向：输入文档的版本和位置、实际运行的检查与退出码、生成产物的摘要，以及无法验证的假设。对于必须改变外部状态的任务，还需提供目标、授权依据、执行回执与可查询状态；不存在回执时，结论应保留未知，而非由模型补全。
 
-### 4.7 长程记忆新范式：从 Transformer 上下文到 Google Titans 神经记忆架构
+### 4.7 长程记忆架构：多维启发式惊奇度打分门禁与双轨记忆治理
 
 传统 Transformer 依靠固定权重与注意力窗口处理序列。随着长任务的展开，标准注意力不仅面临算力与 KV Cache 内存的二次方/线性暴涨，更在长程跨度中深陷“注意力稀释”与“中间迷失”（Lost in the Middle）困境。更本质的是：静态权重的预训练大模型在推理测试期（Test-Time）是天然“无状态”的，会话一旦重置，上下文即刻归零。
 
-#### 4.7.1 Google Titans 架构核心原理
+#### 4.7.1 核心设计原理
 
-Google 提出的 Titans 架构（*Titans: Learning to Memorize at Test Time*, 2025）为打破这一物理天花板指明了神经记忆方向：
-1. **短程注意力与神经记忆双轨解耦**：
-   - **工作记忆（Short-Term Attention）**：高精细度处理当前的局部上下文；
-   - **神经长程记忆（Neural Memory Module）**：将长程记忆内化为一个动态参数化前馈网络（Fast Weights / MLP），在推理测试期（Test Time）实时更新记忆权重。
-2. **惊奇度度量驱动记忆（Surprise Metric & Gradient as Surprise）**：
-   Titans 提出模型不应机械盲目地把所有 token 写入记忆，而是以当前预测误差的损失梯度作为“惊奇度”（Surprise）。只有遇到高信息增量、反直觉模式或重大意外事实时，系统才产生强烈的惊奇度信号并驱动记忆参数更新。
-3. **自适应动量与遗忘门控（Momentum & Adaptive Forgetting Gate）**：
-   引入类似短期记忆向长期记忆迁移的遗忘机制：
-   $$M_t = (1 - \alpha_t) M_{t-1} + \eta_t S_t$$
-   通过遗忘率 $\alpha_t$ 与学习率 $\eta_t$ 平衡新知识的吸收与陈旧知识的衰减，彻底避免了长程运行时的记忆饱和与容量爆炸。
+Super Agent 采用短程注意力窗口与外部结构化长程记忆解耦的双轨设计：
+1. **短程工作窗口与持久长程记忆双轨解耦**：
+   - **工作记忆（Short-Term Context）**：高精细度处理当前的局部上下文；
+   - **持久化长程记忆（Structured Synaptic Memory）**：将高价值经验沉淀于外部 SQLite FTS5 + `vec0` 向量库与突触拓扑图谱中，并在任务终态执行可塑性权重更新。
+2. **多维启发式惊奇度打分门禁（Heuristic Surprise Gate）**：
+   系统不机械盲目地把所有对话写入记忆，而是结合向量余弦新颖度（或 Bigram Jaccard 距离）与启发式规则信号（指令铁律、信念翻转、因果修复、代码书签）计算惊奇度分值。只有遇到高信息增量或关键工程事实时，才准许落盘。
+3. **自适应衰减与容量治理**：
+   引入基于 ACT-R 幂律衰减与置信度调节的遗忘机制，平衡新知识的吸收与陈旧知识的淘汰，避免长程运行时的记忆饱和与噪音堆积。
 
-#### 4.7.2 Super Agent 对 Titans 架构的工程降维映射
-
-在真实的生产部署环境中，直接在客户端/端侧对数百亿参数大模型执行在线反向传播梯度更新存在显著的硬件开销、推理延迟与权重漂移（Catastrophic Forgetting）风险。Super Agent 创新性地将 Titans 的学术哲学在系统工程层进行解耦降维：
+#### 4.7.2 Super Agent 双轨记忆工程架构
 
 ```mermaid
 flowchart LR
-    subgraph Titans["Google Titans 学术架构"]
+    subgraph Principles["核心认知与工程机制"]
         direction TB
         T1["短程 Attention 窗口"]
-        T2["惊奇度度量 (Surprise / Gradient)"]
-        T3["测试期动态更新 (Test-Time Training)"]
-        T4["动量衰减与遗忘门 (Momentum / Forgetting)"]
+        T2["多维启发式惊奇度度量 (Heuristic Surprise)"]
+        T3["任务终态反馈强化 (Outcome Feedback)"]
+        T4["幂律衰减与容量守恒 (ACT-R & Pruning)"]
     end
 
     subgraph SuperAgent["Super Agent 工程化实现"]
         direction TB
-        S1["Prompt 紧凑窗口 + 双路精炼召回 (BM25 + 向量)"]
+        S1["Prompt 紧凑窗口 + 双路精炼召回 (FTS5 BM25 + vec0 向量)"]
         S2["三道准入门禁 (Memory Gate: 增量/实体/无冲突)"]
         S3["突触可塑性 (Synaptic Plasticity: 终态成功强化/失败抑制)"]
         S4["代际硬隔离 (workspace_id) + 半衰期衰减与容量治理"]
     end
 
-    T1 -.->|工程映射| S1
-    T2 -.->|工程映射| S2
-    T3 -.->|工程映射| S3
-    T4 -.->|工程映射| S4
+    T1 -.->|工程实现| S1
+    T2 -.->|工程实现| S2
+    T3 -.->|工程实现| S3
+    T4 -.->|工程实现| S4
 ```
 
 1. **惊奇度门禁（`memory_gate.py`）**：
@@ -241,7 +237,7 @@ sequenceDiagram
 
 ### 6.2 防重入、取消与重放
 
-**源码**：本机路径使用任务锁与 attempt 栅栏；本地受监控子进程由 attempt 绑定的监管器停止回执参与判断。取消请求和停止事实分离，协作式线程取消也不能强杀忽略取消的函数。重放默认不视为安全，必须满足显式策略、预算、停止证明及外部副作用的幂等条件。详情见 `docs/POOL_RUNTIME.md` 和 `docs/ATTEMPT_STOP_CONTRACT.md`。
+**源码**：本机路径使用任务锁与 attempt 栅栏；本地受监控子进程由 attempt 绑定的监管器停止回执参与判断。取消请求和停止事实分离，协作式线程取消也不能强杀忽略取消的函数。重放默认不视为安全，必须满足显式策略、预算、停止证明及外部副作用的幂等条件。详情见 `docs/ARCHITECTURE.md` 和 `docs/OPERATIONS.md`。
 
 **建议**：对远程 API、浏览器、邮件或外部作业记录下游请求 ID、幂等键、授权范围及查询接口；让外部执行器也能证明指定代次已停止。不能观察外部效果时，保留 `unknown` 并人工核对。升级涉及在途任务时应先协调旧、新 worker，不能仅因新代码有栅栏就假定旧进程遵守它。
 
@@ -259,7 +255,7 @@ sequenceDiagram
 
 **建议**：建立机器可验证的身份—资源—动作—条件策略；策略由受信管理员配置，默认拒绝，不能由模型或任务 payload 自行扩大。执行前和资源使用时均校验；插件、内联工具、委派、代码执行和连接器要覆盖同一授权边界。高风险能力使用专用身份、独立工作区、凭据最小化、受控网络出口及资源限制；必要时引入受信容器或更强隔离，进行逃逸与停止验证。
 
-仓库的 `docs/FRONTDESK_BOUNDARY.md` 记录了一个候选宿主前台权限补丁：它在若干真实派发接缝做执行前检查，属于受信宿主边界，不是针对同进程恶意插件或任意 Python 的沙箱，也不证明已部署在当前实例。
+`runtime/hermes_frontdesk_policy.py` 与 `docs/ARCHITECTURE.md` 记录了宿主前台权限边界：它在若干真实派发接缝做执行前检查，属于受信宿主边界，不是针对同进程恶意插件或任意 Python 的沙箱。
 
 ### 7.2 多角色协作的控制面
 
@@ -287,7 +283,7 @@ sequenceDiagram
 
 ## 8 记忆、检索与知识治理（突触记忆神经工程）
 
-Super Agent 的记忆系统摒弃了简单粗暴的“把对话历史一股脑塞给模型”或“机械文本向量检索”，而是深度融合了认知神经科学（ACT-R 认知架构、赫布突触理论）与前沿大模型神经记忆（Google Titans 惊奇度范式），构建了具备**自主筛选、突触强化/抑制、关联扩散与代际隔离**的企业级确定性长期记忆底座。
+Super Agent 的记忆系统摒弃了简单粗暴的“把对话历史一股脑塞给模型”或“机械文本向量检索”，而是融合了认知科学（ACT-R 认知激活模型、赫布突触共激活理论）与多维启发式惊奇度打分门禁（Heuristic Surprise Gate），构建了具备**自主筛选、突触强化/抑制、关联扩散与代际隔离**的企业级确定性长期记忆底座。
 
 ### 8.1 记忆分层体系
 
@@ -300,9 +296,9 @@ Super Agent 的记忆系统摒弃了简单粗暴的“把对话历史一股脑�
 
 ---
 
-### 8.2 Titans 惊奇度门禁（Surprise Metric & Admission Gate）
+### 8.2 多维启发式惊奇度门禁（Heuristic Surprise Gate）
 
-根据 Google Titans 思想，系统不应机械记录平庸流水账，唯有产生高“惊奇度”（Surprise）的高价值信息方可落盘。
+系统不机械记录平庸流水账，唯有经多维启发式惊奇度评估达到阈值的高价值信息方可落盘。
 
 #### 8.2.1 向量语义新颖度（Embedding Semantic Novelty）
 首先计算候选陈述 $s_{\text{new}}$ 与既有记忆集合 $\{s_i\}_{i=1}^M$ 在语义向量空间中的最大余弦相似度：
@@ -477,7 +473,7 @@ OpenTelemetry 已提供生成式 AI 语义约定入口，规范在演进，接�
 | 密钥和访问令牌 | 受限凭据存储或本地受控文件 | 最小权限、轮换、撤销；文档、命令行和日志不包含明文 |
 | 模型及外部服务 | 显式端点、模型与超时配置 | 保留实际配置来源和降级策略；不要只检查配置文件是否存在 |
 
-当前 Python 包声明最低版本 3.11；真实部署还取决于宿主、可选依赖、操作系统和受信执行器。`docs/REDEPLOY.md` 提供安装路径、插件发现、worker 和记忆接线说明。安装可能生成配置或启动服务，必须先阅读目标版本安装器的具体行为，不应把演示命令直接复制到生产。
+当前 Python 包声明最低版本 3.11；真实部署还取决于宿主、可选依赖、操作系统和受信执行器。`docs/DEPLOY.md` 提供安装路径、插件发现、worker 和记忆接线说明。安装可能生成配置或启动服务，必须先阅读目标版本安装器的具体行为，不应把演示命令直接复制到生产。
 
 ### 12.2 发布流程
 
@@ -588,7 +584,7 @@ python3 -m agentcore.pool --root /absolute/private/test-queue submit --help
 python3 -m agentcore.pool --root /absolute/private/test-queue worker --help
 ```
 
-示例只展示接口发现；实际执行器必须由管理员配置受信 argv、资源预算及验收规则。不要从任务正文接收 shell 命令。完整隔离操作及配置示例以该版本 `docs/POOL_RUNTIME.md` 为准。`status`、`cancel` 和诊断也必须绑定目标实例及授权主体；查看命令帮助不证明实例已安装或运行。
+示例只展示接口发现；实际执行器必须由管理员配置受信 argv、资源预算及验收规则。不要从任务正文接收 shell 命令。完整隔离操作及配置示例以该版本 `docs/OPERATIONS.md` 为准。`status`、`cancel` 和诊断也必须绑定目标实例及授权主体；查看命令帮助不证明实例已安装或运行。
 
 ### 15.3 建议的任务交接记录
 
@@ -638,9 +634,8 @@ python3 -m agentcore.pool --root /absolute/private/test-queue worker --help
 
 面向下一代高阶自主智能体演进，本项目在巩固确定性工程底座的同时，确立了三大核心前沿演进方向：
 
-#### 16.3.1 端侧 Titans 神经记忆与测试期微调演进（Test-Time Memorization & Native Titans Head）
-- **学术前沿**：Google Titans 等前沿架构证明，将记忆内化为推理期的动态神经权重参数，是彻底跨越当前 Transformer 注意力窗口瓶颈与 KV Cache 内存墙的根本路径。
-- **演进路线**：探索在本地紧凑模型（SLM / 8B 级边缘模型）前置微型线性神经记忆头（Linear RNN / Associative Memory 模块）或端侧 Streaming Attention Sink；结合受控的动态 LoRA-on-the-fly，尝试在不依赖外置庞大向量数据库的前提下，由模型权重在交互过程中直接完成低延迟参数化记忆更新与内化。
+#### 16.3.1 端侧参数化记忆与测试期自适应微调探索
+- **演进方向**：探索在本地紧凑模型（SLM / 8B 级边缘模型）前置轻量级关联记忆模块或受控的动态 LoRA-on-the-fly，在结构化 SQLite + 向量记忆库之外进一步降低高频领域知识的调用延迟。
 
 #### 16.3.2 海马体-大脑皮层双轨认知巩固（Sleep-Time Memory Consolidation）
 - **生物认知机制借鉴**：模拟哺乳动物在睡眠期由海马体快速暂存经验向大脑皮层长期稳定知识转移的生物学认知过程。
@@ -675,7 +670,6 @@ python3 -m agentcore.pool --root /absolute/private/test-queue worker --help
 
 ### 17.2 外部一手资料
 
-- [Titans: Learning to Memorize at Test Time](https://arxiv.org/abs/2501.00663)：Google 提出的短程注意力与测试期神经长程记忆（Neural Long-Term Memory）解耦架构。
 - [Attention Is All You Need](https://arxiv.org/abs/1706.03762)：Transformer 注意力架构。
 - [ReAct](https://arxiv.org/abs/2210.03629)：推理与行动交替的研究方法。
 - [Retrieval-Augmented Generation](https://arxiv.org/abs/2005.11401)：参数与外部检索记忆结合。

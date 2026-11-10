@@ -23,6 +23,97 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 import uuid
 
 
+_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "from", "that", "this", "into", "when", "then",
+    "how", "what", "why", "who", "are", "was", "were", "will", "can", "should",
+    "任务", "执行", "进行", "一个", "我们", "需要", "以及", "通过", "使用", "完成",
+})
+
+
+def _extract_skill_tokens(text: str) -> List[str]:
+    """Extract normalized alphanumeric tokens and CJK 2-grams/phrases for skill matching."""
+    if not text:
+        return []
+    lowered = text.lower()
+    tokens: List[str] = []
+    seen: set[str] = set()
+
+    def _add(tok: str) -> None:
+        t = tok.strip("._-")
+        if len(t) >= 2 and t not in _STOPWORDS and t not in seen:
+            seen.add(t)
+            tokens.append(t)
+
+    for m in re.finditer(r"[a-z0-9_.\-]+", lowered):
+        word = m.group(0)
+        _add(word)
+        if "_" in word or "-" in word or "." in word:
+            for part in re.split(r"[_\-.]+", word):
+                _add(part)
+
+    for m in re.finditer(r"[\u4e00-\u9fff]+", lowered):
+        chunk = m.group(0)
+        n = len(chunk)
+        if 2 <= n <= 6:
+            _add(chunk)
+        for i in range(n - 1):
+            _add(chunk[i : i + 2])
+
+    return tokens
+
+
+def _synthesize_skill_content(
+    cases: Sequence["AgentCase"],
+    *,
+    domain: str = "default",
+) -> tuple[str, str, str]:
+    """Auto-synthesize (name, description, procedure_markdown) from a list of AgentCase records."""
+    primary = cases[0]
+    role_label = (primary.role or domain or "default").strip()
+    raw_intent = re.sub(r"\s+", " ", (primary.task_intent or "").strip())
+    short_intent = raw_intent[:42] if raw_intent else f"{role_label} standard procedure"
+    name = f"[{domain}/{role_label}] {short_intent}"
+
+    intents = []
+    insights = []
+    approaches = []
+    verified: List[str] = []
+    for c in cases:
+        ci = re.sub(r"\s+", " ", (c.task_intent or "").strip())
+        if ci and ci not in intents:
+            intents.append(ci[:160])
+        ca = re.sub(r"\s+", " ", (c.approach or "").strip())
+        if ca and ca not in approaches:
+            approaches.append(ca[:360])
+        ck = re.sub(r"\s+", " ", (c.key_insight or "").strip())
+        if ck and ck not in insights:
+            insights.append(ck[:200])
+        for vf in c.verified_files:
+            vf_name = Path(str(vf)).name if vf else ""
+            if vf_name and vf_name not in verified:
+                verified.append(vf_name)
+
+    description = f"从 {len(cases)} 个真实执行案例自动蒸馏的标准作业流程，适用场景：{'；'.join(intents[:3])}"
+    step_lines = [
+        f"1. **目标识别与上下文对齐**：确认任务意图匹配 `{short_intent}`（领域：`{domain}`，角色：`{role_label}`）。",
+    ]
+    if approaches:
+        for idx, app in enumerate(approaches[:3], start=2):
+            step_lines.append(f"{idx}. **核心执行方案 ({idx - 1})**：{app}")
+    else:
+        step_lines.append("2. **核心执行方案**：遵循最小改动与确定性验证原则执行目标操作。")
+
+    next_idx = len(step_lines) + 1
+    if insights:
+        step_lines.append(f"{next_idx}. **关键工程洞察**：{'；'.join(insights[:3])}")
+        next_idx += 1
+    if verified:
+        step_lines.append(f"{next_idx}. **产物与门禁核验**：确保生成并核验关键产物文件（`{', '.join(verified[:6])}`）。")
+
+    procedure_markdown = "\n".join(step_lines)
+    return name, description, procedure_markdown
+
+
 @dataclass
 class AgentCase:
     """An execution trace and outcome record of an agent/colleague task."""
@@ -220,8 +311,11 @@ class SkillForge:
     def __init__(self, storage_dir: Optional[Union[str, Path]] = None, in_memory: bool = False):
         self.in_memory = in_memory
         if storage_dir is None:
-            base = Path.home() / ".hermes" / "state" / "skill-forge"
-            self.storage_dir = base
+            env_dir = (os.environ.get("SUPERAGENT_SKILL_FORGE_DIR") or "").strip()
+            if env_dir:
+                self.storage_dir = Path(env_dir).expanduser().resolve()
+            else:
+                self.storage_dir = Path.home() / ".hermes" / "state" / "skill-forge"
         else:
             self.storage_dir = Path(storage_dir).resolve()
 
@@ -326,17 +420,22 @@ class SkillForge:
     def distill_skill_from_cases(
         self,
         cases: Sequence[AgentCase],
-        name: str,
-        description: str,
-        procedure_markdown: str,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        procedure_markdown: Optional[str] = None,
         domain: str = "default",
         trigger_patterns: Optional[List[str]] = None,
         profile: str = "default",
         subject: str = "default",
         team: str = "default",
         approved: bool = False,
+        skill_id: Optional[str] = None,
     ) -> ProceduralSkill:
-        """Distill a collection of successful cases into an authoritative ProceduralSkill."""
+        """Distill a collection of successful cases into an authoritative ProceduralSkill.
+
+        When name, description, or procedure_markdown are omitted, automatically synthesizes
+        canonical Markdown skill content from the supplied AgentCase records.
+        """
         if not cases:
             raise ValueError("cannot_distill_from_empty_cases")
 
@@ -347,6 +446,11 @@ class SkillForge:
                 if not c.verification_receipt_id and not c.verified_files:
                     raise ValueError(f"Cannot distill approved skill: source case '{c.case_id}' lacks verification evidence")
 
+        auto_name, auto_desc, auto_proc = _synthesize_skill_content(cases, domain=domain)
+        final_name = (name or "").strip() or auto_name
+        final_desc = (description or "").strip() or auto_desc
+        final_proc = (procedure_markdown or "").strip() or auto_proc
+
         case_ids = [c.case_id for c in cases]
         avg_score = sum(c.quality_score for c in cases) / len(cases)
         # Higher score and more case corroboration yields higher initial maturity
@@ -354,19 +458,18 @@ class SkillForge:
 
         triggers = list(trigger_patterns or [])
         if not triggers:
-            # Extract common terms from intents
             for c in cases:
-                for token in re.findall(r"[\w]+", c.task_intent.lower()):
-                    if len(token) >= 2 and token not in triggers:
+                for token in _extract_skill_tokens(c.task_intent + " " + (c.approach or "")):
+                    if token not in triggers:
                         triggers.append(token)
-            triggers = triggers[:8]
+            triggers = triggers[:12]
 
-        skill_id = f"skill_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+        resolved_skill_id = skill_id or f"skill_{int(time.time())}_{uuid.uuid4().hex[:6]}"
         skill = ProceduralSkill(
-            skill_id=skill_id,
-            name=name,
-            description=description,
-            procedure_markdown=procedure_markdown,
+            skill_id=resolved_skill_id,
+            name=final_name,
+            description=final_desc,
+            procedure_markdown=final_proc,
             domain=domain,
             trigger_patterns=triggers,
             confidence=round(min(1.0, avg_score / 100.0), 2),
@@ -380,6 +483,72 @@ class SkillForge:
         )
         self.register_skill(skill)
         return skill
+
+    def auto_distill_from_cases(
+        self,
+        *,
+        domain: Optional[str] = None,
+        role: Optional[str] = None,
+        min_cases: int = 1,
+        min_quality: float = 80.0,
+    ) -> List[ProceduralSkill]:
+        """Automatically distill or update ProceduralSkill Markdown files from recorded AgentCases."""
+        eligible: List[AgentCase] = []
+        for c in self._cases.values():
+            if domain and c.domain != domain:
+                continue
+            if role and c.role != role:
+                continue
+            if c.quality_score < min_quality:
+                continue
+            if not (c.task_intent or "").strip() or not (c.approach or "").strip():
+                continue
+            eligible.append(c)
+
+        if not eligible:
+            return []
+
+        # Group cases by (domain, role, profile, subject, team) and cluster by primary intent token
+        groups: Dict[tuple[str, str, str, str, str, str], List[AgentCase]] = {}
+        for c in sorted(eligible, key=lambda x: x.timestamp, reverse=True):
+            toks = _extract_skill_tokens(c.task_intent)
+            topic_key = toks[0] if toks else (c.role or "general")
+            gkey = (c.domain or "default", c.role or "cases", c.profile, c.subject, c.team, topic_key)
+            groups.setdefault(gkey, []).append(c)
+
+        distilled: List[ProceduralSkill] = []
+        for (g_domain, g_role, g_profile, g_subject, g_team, topic_key), group_cases in groups.items():
+            if len(group_cases) < min_cases:
+                continue
+            safe_topic = re.sub(r"[^a-zA-Z0-9_\u4e00-\u9fff]+", "_", topic_key).strip("_")[:24] or "general"
+            det_skill_id = f"skill_auto_{g_domain}_{g_role}_{safe_topic}"
+            existing = self._skills.get(det_skill_id)
+            group_ids = [c.case_id for c in group_cases]
+            if existing and set(group_ids).issubset(set(existing.source_case_ids)):
+                # Already up to date on disk; ensure file exists
+                if not self.in_memory:
+                    skill_file = self.storage_dir / "skills" / existing.domain / f"{existing.skill_id}.md"
+                    if not skill_file.is_file():
+                        self.register_skill(existing)
+                distilled.append(existing)
+                continue
+
+            all_approved = all(
+                c.approved and bool(c.verification_receipt_id or c.verified_files)
+                for c in group_cases
+            )
+            skill = self.distill_skill_from_cases(
+                cases=group_cases,
+                domain=g_domain,
+                profile=g_profile,
+                subject=g_subject,
+                team=g_team,
+                approved=all_approved,
+                skill_id=det_skill_id,
+            )
+            distilled.append(skill)
+
+        return distilled
 
     def approve_skill(self, skill_id: str) -> ProceduralSkill:
         """Approve a procedural skill for production usage."""
@@ -492,7 +661,8 @@ class SkillForge:
         team: Optional[str] = None,
     ) -> List[ProceduralSkill]:
         """Hybrid intent recall combining trigger matching, textual similarity, and maturity score."""
-        q_tokens = set(re.findall(r"[\w]+", query.lower()))
+        q_lower = (query or "").lower()
+        q_tokens = set(_extract_skill_tokens(query)) | set(re.findall(r"[\w]+", q_lower))
         scored: List[tuple[float, ProceduralSkill]] = []
 
         allow_unapproved = not only_approved if include_unapproved is None else include_unapproved
@@ -514,12 +684,18 @@ class SkillForge:
                 continue
 
             # 1. Trigger patterns match (highest weight)
-            trigger_hits = sum(1 for t in skill.trigger_patterns if t.lower() in query.lower() or t.lower() in q_tokens)
+            trigger_hits = sum(
+                1 for t in skill.trigger_patterns
+                if t and (t.lower() in q_lower or t.lower() in q_tokens)
+            )
 
             # 2. Name & description token overlap
-            name_tokens = set(re.findall(r"[\w]+", skill.name.lower()))
-            desc_tokens = set(re.findall(r"[\w]+", skill.description.lower()))
+            name_tokens = set(_extract_skill_tokens(skill.name)) | set(re.findall(r"[\w]+", skill.name.lower()))
+            desc_tokens = set(_extract_skill_tokens(skill.description)) | set(re.findall(r"[\w]+", skill.description.lower()))
             overlap = len(q_tokens.intersection(name_tokens | desc_tokens))
+
+            if trigger_hits == 0 and overlap == 0:
+                continue
 
             # Composite ranking score: triggers (0.5) + text overlap (0.2) + maturity (0.3)
             score = (trigger_hits * 0.5) + (overlap * 0.2) + (skill.maturity_score * 0.3)

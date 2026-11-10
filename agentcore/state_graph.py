@@ -525,8 +525,12 @@ class CompiledGraph:
         if checkpointer:
             last_ckpt = checkpointer.get(task_id)
             if last_ckpt:
-                state = copy.deepcopy(last_ckpt.state)
+                merged = copy.deepcopy(initial_state)
+                merged.update(copy.deepcopy(last_ckpt.state))
+                state = merged
                 step = last_ckpt.step
+                state["_resumed_from_node"] = last_ckpt.node
+                state["_resumed_from_step"] = last_ckpt.step
                 logger.info("Resuming task %s from checkpoint step %d at node %s", task_id, step, last_ckpt.node)
                 # Next node is routed from the checkpoint's node
                 if last_ckpt.node in self.conditional_edges:

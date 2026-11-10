@@ -35,8 +35,124 @@ MAX_STDERR = 1500
 _SSH_HOST_RE = re.compile(r"^[A-Za-z0-9._@-]{1,128}\Z")
 
 
+def _recall_skill_guidance(goal: str, payload: dict | None = None) -> tuple[str, list[str]]:
+    """Query SkillForge for matching procedural skills to mount into the task context."""
+    clean_q = (goal or "").strip()
+    if len(clean_q) < 8:
+        return "", []
+    # Avoid injecting skills into minimal synthetic test words unless SkillForge dir is explicitly configured
+    explicit_forge = (os.environ.get("SUPERAGENT_SKILL_FORGE_DIR") or "").strip()
+    if not explicit_forge and len(clean_q.split()) <= 3 and clean_q.isascii():
+        return "", []
+    try:
+        engine = _engine_root()
+        if str(engine) not in sys.path:
+            sys.path.insert(0, str(engine))
+        from agentcore.skill_forge import SkillForge
+        forge = SkillForge()
+        domain = str((payload or {}).get("domain") or "").strip() or None
+        skills = forge.recall_skills(clean_q, domain=domain, top_k=2)
+        if not skills:
+            return "", []
+        guidance = forge.render_guidance(clean_q, domain=domain, top_k=2)
+        return guidance, [s.skill_id for s in skills]
+    except Exception:
+        return "", []
+
+
+def _persist_attempt_input_context(
+    raw_goal: str,
+    composed_goal: str,
+    payload: dict | None,
+    mounted_skills: list[str],
+) -> None:
+    """Persist composed goal and mounted procedural skills into SUPERAGENT_ATTEMPT_DIR/input.json."""
+    attempt_env = (os.environ.get("SUPERAGENT_ATTEMPT_DIR") or "").strip()
+    if not attempt_env:
+        return
+    attempt_dir = Path(attempt_env)
+    if not attempt_dir.is_dir() or attempt_dir.is_symlink():
+        return
+    try:
+        input_path = attempt_dir / "input.json"
+        existing: dict = {}
+        if input_path.is_file():
+            try:
+                loaded = json.loads(input_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except Exception:
+                existing = {}
+        existing.setdefault("goal", raw_goal)
+        existing["composed_goal"] = composed_goal
+        existing["mounted_skills"] = list(mounted_skills)
+        if isinstance(payload, dict) and payload.get("_job_id"):
+            existing.setdefault("job_id", payload["_job_id"])
+        tmp_path = attempt_dir / "input.json.tmp"
+        tmp_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_path, input_path)
+    except Exception:
+        pass
+
+
+def _record_and_distill_case(
+    raw_goal: str,
+    payload: dict | None,
+    route: dict | None,
+    result: dict,
+    *,
+    degraded: bool = False,
+) -> list[str]:
+    """Record completed execution trace as an AgentCase and auto-distill procedural skills."""
+    clean_goal = (raw_goal or "").strip()
+    explicit_forge = (os.environ.get("SUPERAGENT_SKILL_FORGE_DIR") or "").strip()
+    if not explicit_forge and len(clean_goal) < 10:
+        return []
+    try:
+        engine = _engine_root()
+        if str(engine) not in sys.path:
+            sys.path.insert(0, str(engine))
+        from agentcore.skill_forge import AgentCase, SkillForge
+        payload = payload or {}
+        route = route or {}
+        job_id = (
+            os.environ.get("SUPERAGENT_JOB_ID")
+            or payload.get("_job_id")
+            or payload.get("job")
+            or f"exec_{int(time.time())}"
+        )
+        attempt_id = (
+            os.environ.get("SUPERAGENT_ATTEMPT_ID")
+            or payload.get("_attempt_id")
+            or payload.get("attempt")
+            or "0"
+        )
+        role = str(route.get("role") or payload.get("_colleague_role") or payload.get("role") or "dev_runner")
+        domain = str(payload.get("domain") or os.environ.get("SUPERAGENT_PROFILE") or "default").strip() or "default"
+        summary = str(result.get("summary") or result.get("output") or "").strip()
+        if not summary:
+            return []
+        artifacts = [str(p) for p in (result.get("artifacts") or []) if p]
+        forge = SkillForge()
+        case = AgentCase(
+            case_id=f"case_{job_id}_{attempt_id}",
+            task_intent=raw_goal[:240],
+            approach=summary[:600],
+            quality_score=95.0 if not degraded else 85.0,
+            domain=domain,
+            role=role,
+            verified_files=artifacts,
+            approved=False,
+        )
+        forge.record_case(case)
+        distilled = forge.auto_distill_from_cases(domain=domain, role=role)
+        return [s.skill_id for s in distilled]
+    except Exception:
+        return []
+
+
 def _compose_goal(goal: str, payload: dict | None) -> str:
-    """Attach the requester's own words so a lossy frontdesk brief cannot hide the task."""
+    """Attach the requester's own words and recalled ProceduralSkills so context is complete."""
     payload = payload or {}
     user_request = payload.get("_user_request")
     conversation = payload.get("_conversation")
@@ -45,17 +161,25 @@ def _compose_goal(goal: str, payload: dict | None) -> str:
         sections.append("[用户原话（以此为准；与上面的任务描述冲突时按用户原话执行）]\n" + user_request.strip()[:4000])
     if isinstance(conversation, str) and conversation.strip():
         sections.append("[此前对话摘录（用于理解“这个/上面/继续”等指代）]\n" + conversation.strip()[:4000])
+
+    skill_guidance, mounted_skills = _recall_skill_guidance(goal, payload)
+    if skill_guidance and "经过工程检验的先例技能" not in goal:
+        sections.append(skill_guidance[:2400])
+
     if len(sections) == 1:
+        _persist_attempt_input_context(goal, goal, payload, mounted_skills)
         return goal
-    composed = "\n\n".join(sections)
-    return composed[:MAX_GOAL]
+    composed = "\n\n".join(sections)[:MAX_GOAL]
+    _persist_attempt_input_context(goal, composed, payload, mounted_skills)
+    return composed
 
 
 def _decorate_goal(goal: str) -> str:
     duty = (os.environ.get("DEV_EXPERT_DUTY") or "").strip()
     target_host = (os.environ.get("DEV_TARGET_HOST") or "").strip()
     attempt_dir = (os.environ.get("SUPERAGENT_ATTEMPT_DIR") or "").strip()
-    if not duty and not target_host:
+    explicit_forge = (os.environ.get("SUPERAGENT_SKILL_FORGE_DIR") or "").strip()
+    if not duty and not target_host and not explicit_forge:
         return goal
     lines = [
         "[Expert Context]",
@@ -69,6 +193,12 @@ def _decorate_goal(goal: str) -> str:
         lines.append(f"- Duty: {duty}")
     if target_host:
         lines.append(f"- Target Host: {target_host} (execute target operations on this host via SSH/tools when applicable)")
+    if "经过工程检验的先例技能" not in goal:
+        skill_guidance, mounted_skills = _recall_skill_guidance(goal)
+        if skill_guidance:
+            lines.append("")
+            lines.append(skill_guidance[:2400])
+            _persist_attempt_input_context(goal, "\n".join(lines + ["", goal])[:MAX_GOAL], None, mounted_skills)
     lines.append("")
     lines.append(goal)
     return "\n".join(lines)[:MAX_GOAL]
@@ -250,8 +380,10 @@ _DELIVERABLE_EXTS = {
     ".md", ".markdown", ".txt", ".json", ".log",
 }
 _INTERNAL_ATTEMPT_FILES = {
-    "binding.json", "input.json", "progress.json", "progress.json.tmp",
+    "binding.json", "input.json", "input.json.tmp", "progress.json", "progress.json.tmp",
     "stop.json", "manifest.json", "report.json", "checkpoint.json",
+    "state_checkpoints.db", "state_checkpoints.db-wal", "state_checkpoints.db-shm",
+    "containment_audit.json",
     "stdout", "stderr", "stdout.log", "stderr.log",
 }
 _ABS_FILE_RE = re.compile(r"(?<![A-Za-z0-9_.\-/])(/(?:home|tmp|data)(?:/[A-Za-z0-9_.\-]+)+\.[A-Za-z0-9]+)")
@@ -382,11 +514,106 @@ def _find_and_load_checkpoint() -> dict | None:
     return None
 
 
+def _wrap_with_bwrap_sandbox(
+    cmd: list[str],
+    *,
+    route: dict | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[list[str], dict | None]:
+    """Wrap local worker execution in AttemptBoundSandboxAdapter (bwrap) when attempt binding is active."""
+    toggle = (os.environ.get("SUPERAGENT_ENABLE_BWRAP") or "").strip().lower()
+    if toggle in ("0", "false", "no", "off"):
+        return cmd, None
+    binding_path_raw = (os.environ.get("SUPERAGENT_ATTEMPT_BINDING_PATH") or "").strip()
+    if not binding_path_raw and toggle not in ("1", "true", "yes", "on"):
+        return cmd, None
+
+    engine = _engine_root()
+    if str(engine) not in sys.path:
+        sys.path.insert(0, str(engine))
+    try:
+        from agentcore.colleague_containment import AttemptBoundSandboxAdapter, is_forbidden_host_path
+        from agentcore.colleague_dev import DEV_ROLES
+    except Exception:
+        return cmd, None
+
+    if not AttemptBoundSandboxAdapter.is_bwrap_functional():
+        return cmd, None
+
+    wdir = _workdir()
+    if is_forbidden_host_path(wdir)[0]:
+        return cmd, None
+
+    attempt_env = (os.environ.get("SUPERAGENT_ATTEMPT_DIR") or "").strip()
+    attempt_dir = Path(attempt_env) if attempt_env and Path(attempt_env).is_dir() else None
+    raw_role = str((route or {}).get("role") or os.environ.get("DEV_ROLE") or "cases").strip().lower()
+    adapter_role = raw_role if raw_role in DEV_ROLES else "cases"
+
+    try:
+        if binding_path_raw and Path(binding_path_raw).is_file():
+            adapter = AttemptBoundSandboxAdapter.from_environment(
+                allowed_workdir=wdir,
+                role=adapter_role,
+                network_policy="allowed",
+            )
+        else:
+            adapter = AttemptBoundSandboxAdapter.create_host_bound(
+                job=os.environ.get("SUPERAGENT_JOB_ID") or "standalone_job",
+                attempt=os.environ.get("SUPERAGENT_ATTEMPT_ID") or "1",
+                allowed_workdir=wdir,
+                role=adapter_role,
+                network_policy="allowed",
+                attempt_dir=attempt_dir,
+            )
+        binding_check = adapter.verify_attempt_binding(
+            expected_job=adapter.job,
+            expected_attempt=adapter.attempt,
+            expected_nonce=adapter.nonce,
+            expected_token=adapter.token,
+        )
+        if not binding_check.get("ok"):
+            return cmd, None
+
+        writable_paths: list[Path] = [
+            _profile_home(),
+            Path.home() / ".hermes",
+            Path.home() / "reports",
+        ]
+        if env and env.get("HERMES_HOME"):
+            writable_paths.append(Path(env["HERMES_HOME"]))
+
+        wrapped_cmd = adapter.build_worker_bwrap_argv(
+            cmd,
+            wdir,
+            attempt_dir=attempt_dir,
+            writable_paths=writable_paths,
+        )
+        containment_meta = {
+            "backend": "bwrap",
+            "binding": binding_check,
+            "bwrap_argv": wrapped_cmd,
+            "audit_log": adapter.audit_log,
+        }
+        if attempt_dir is not None:
+            try:
+                audit_file = attempt_dir / "containment_audit.json"
+                audit_file.write_text(
+                    json.dumps(containment_meta, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+        return wrapped_cmd, containment_meta
+    except Exception:
+        return cmd, None
+
+
 def run_hermes(goal: str, *, route: dict | None = None) -> dict:
     effective_goal = _decorate_goal(goal)
     budget = int(os.environ.get("DEV_BUDGET", "3600"))
     max_turns = int(os.environ.get("DEV_MAX_TURNS", "1000"))
     ssh_host = (os.environ.get("DEV_SSH_HOST") or "").strip()
+    containment_meta = None
     if ssh_host:
         if not _SSH_HOST_RE.fullmatch(ssh_host):
             return {"ok": False, "error": "invalid_ssh_host"}
@@ -426,9 +653,11 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
         binary = _hermes_bin()
         if not binary:
             return {"ok": False, "error": "hermes_unavailable"}
+        cleaned_env = _clean_env(route)
         cmd = [binary, "chat", "-q", effective_goal, "--oneshot",
                "--run-budget", str(budget), "--max-turns", str(max_turns)]
-        run_kwargs = {"cwd": str(_workdir()), "env": _clean_env(route), "preexec_fn": _set_file_limit}
+        cmd, containment_meta = _wrap_with_bwrap_sandbox(cmd, route=route, env=cleaned_env)
+        run_kwargs = {"cwd": str(_workdir()), "env": cleaned_env, "preexec_fn": _set_file_limit}
     try:
         done = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=budget + 60, **run_kwargs)
@@ -481,6 +710,12 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
         "stderr": err,
         "returncode": done.returncode,
     }
+    if containment_meta is not None:
+        payload["containment"] = {
+            "backend": containment_meta.get("backend", "bwrap"),
+            "binding_ok": bool((containment_meta.get("binding") or {}).get("ok")),
+            "audit_entries": len(containment_meta.get("audit_log") or []),
+        }
     artifacts = _harvest_attempt_artifacts(payload["summary"], checkpoint_data)
     if artifacts:
         payload["artifacts"] = artifacts
@@ -712,86 +947,189 @@ def _call_engine(fn, goal: str, route: dict | None = None) -> dict:
 
 def main() -> int:
     try:
-        goal, job_payload = _read_job_envelope(sys.stdin)
+        raw_goal, job_payload = _read_job_envelope(sys.stdin)
     except Exception as exc:
         print(json.dumps({"ok": False, "error": "invalid_job: " + type(exc).__name__}))
         return 1
 
-    route = _resolve_job_model_route(job_payload)
-    goal = _compose_goal(goal, job_payload)
-    model_tier = str(route.get("selected_model") or "flash")
-    route_degraded = bool(route.get("degraded"))
-    route_reason = str(route.get("degradation_reason") or "")
+    engine = _engine_root()
+    if str(engine) not in sys.path:
+        sys.path.insert(0, str(engine))
 
+    from agentcore.state_graph import END, MemoryCheckpointer, SqliteCheckpointer, StateGraph
+
+    attempt_env = (os.environ.get("SUPERAGENT_ATTEMPT_DIR") or "").strip()
+    attempt_dir = Path(attempt_env) if attempt_env and Path(attempt_env).is_dir() else None
+    active_ckpt = (
+        SqliteCheckpointer(attempt_dir / "state_checkpoints.db")
+        if attempt_dir is not None
+        else MemoryCheckpointer()
+    )
+    task_id = str(
+        os.environ.get("SUPERAGENT_JOB_ID")
+        or job_payload.get("_job_id")
+        or job_payload.get("job")
+        or job_payload.get("task_id")
+        or f"exec_{os.getpid()}_{int(time.time())}"
+    )
+    explicit_resume = bool(job_payload.get("resume") or os.environ.get("SUPERAGENT_RESUME_CHECKPOINT") == "1")
+    existing_ckpt = active_ckpt.get(task_id)
+    if existing_ckpt is not None and existing_ckpt.node == "harvest_and_distill" and not explicit_resume:
+        task_id = f"{task_id}_{job_payload.get('_attempt_id') or int(time.time())}"
+
+    route = _resolve_job_model_route(job_payload)
     monitor = _start_progress_monitor(job_payload, route)
-    try:
-        primary = _call_engine(run_hermes, goal, route=route)
+
+    def _node_prepare_context(state: dict) -> dict:
+        composed = _compose_goal(raw_goal, job_payload)
+        return {
+            "composed_goal": composed,
+            "model_tier": str(route.get("selected_model") or "flash"),
+            "route_degraded": bool(route.get("degraded")),
+            "route_reason": str(route.get("degradation_reason") or ""),
+        }
+
+    def _node_execute_engine(state: dict) -> dict:
+        composed = str(state.get("composed_goal") or raw_goal)
+        m_tier = str(state.get("model_tier") or route.get("selected_model") or "flash")
+        r_degraded = bool(state.get("route_degraded"))
+        r_reason = str(state.get("route_reason") or "")
+
+        primary = _call_engine(run_hermes, composed, route=route)
         if primary.get("ok"):
-            monitor.stop(ok=True)
-            print(json.dumps({
+            return {
                 "ok": True,
                 "engine": "hermes",
-                "model_tier": model_tier,
-                "degraded": route_degraded,
-                "engine_degraded": False,
-                "degradation_reason": route_reason,
                 "result": primary,
-            }, ensure_ascii=False))
-            return 0
+                "envelope": {
+                    "ok": True,
+                    "engine": "hermes",
+                    "model_tier": m_tier,
+                    "degraded": r_degraded,
+                    "engine_degraded": False,
+                    "degradation_reason": r_reason,
+                    "result": primary,
+                },
+            }
 
-        fallback = _call_engine(run_pi, goal, route=route)
+        fallback = _call_engine(run_pi, composed, route=route)
         primary_err = primary.get("error", "turn_failed")
         fallback_reason = f"primary_engine_fallback:hermes->{primary_err}"
-        combined_reason = "; ".join(r for r in (route_reason, fallback_reason) if r)
+        combined_reason = "; ".join(r for r in (r_reason, fallback_reason) if r)
         if fallback.get("ok"):
-            monitor.stop(ok=True)
-            print(json.dumps({
+            return {
                 "ok": True,
                 "engine": "pi",
-                "model_tier": model_tier,
+                "result": fallback,
+                "envelope": {
+                    "ok": True,
+                    "engine": "pi",
+                    "model_tier": m_tier,
+                    "degraded": True,
+                    "engine_degraded": True,
+                    "degradation_reason": combined_reason,
+                    "result": fallback,
+                    "primary_error": primary_err,
+                },
+            }
+
+        salvaged_checkpoint = _find_and_load_checkpoint()
+        if salvaged_checkpoint and salvaged_checkpoint.get("summary"):
+            salvaged_res = {
+                "ok": True,
+                "summary": salvaged_checkpoint["summary"],
+                "checkpoint": salvaged_checkpoint,
+                "phase": "phase1_text",
+                "checkpoint_delivered": True,
+                "degraded": True,
+                "degradation_reason": "phase1_checkpoint_salvaged_after_engine_failure",
+            }
+            return {
+                "ok": True,
+                "engine": "checkpoint_salvaged",
+                "result": salvaged_res,
+                "envelope": {
+                    "ok": True,
+                    "engine": "checkpoint_salvaged",
+                    "model_tier": m_tier,
+                    "degraded": True,
+                    "engine_degraded": True,
+                    "degradation_reason": "phase1_checkpoint_salvaged_after_engine_failure",
+                    "result": salvaged_res,
+                },
+            }
+
+        return {
+            "ok": False,
+            "engine": "none",
+            "result": fallback,
+            "envelope": {
+                "ok": False,
+                "engine": "none",
+                "model_tier": m_tier,
                 "degraded": True,
                 "engine_degraded": True,
                 "degradation_reason": combined_reason,
                 "result": fallback,
                 "primary_error": primary_err,
-            }, ensure_ascii=False))
-            return 0
+                "error": "both_engines_failed",
+            },
+        }
 
-        # If both engines failed, salvage Phase 1 checkpoint from disk if one was persisted
-        salvaged_checkpoint = _find_and_load_checkpoint()
-        if salvaged_checkpoint and salvaged_checkpoint.get("summary"):
-            monitor.stop(ok=True)
-            print(json.dumps({
-                "ok": True,
-                "engine": "checkpoint_salvaged",
-                "model_tier": model_tier,
-                "degraded": True,
-                "engine_degraded": True,
-                "degradation_reason": "phase1_checkpoint_salvaged_after_engine_failure",
-                "result": {
-                    "ok": True,
-                    "summary": salvaged_checkpoint["summary"],
-                    "checkpoint": salvaged_checkpoint,
-                    "phase": "phase1_text",
-                    "checkpoint_delivered": True,
-                    "degraded": True,
-                    "degradation_reason": "phase1_checkpoint_salvaged_after_engine_failure",
-                },
-            }, ensure_ascii=False))
-            return 0
+    def _node_harvest_and_distill(state: dict) -> dict:
+        env_out = dict(state.get("envelope") or {})
+        res_out = dict(state.get("result") or {})
+        is_ok = bool(state.get("ok"))
+        distilled_ids: list[str] = []
+        if is_ok:
+            distilled_ids = _record_and_distill_case(
+                raw_goal,
+                job_payload,
+                route,
+                res_out,
+                degraded=bool(env_out.get("degraded")),
+            )
+        if state.get("_resumed_from_node"):
+            env_out["resumed_from_node"] = state["_resumed_from_node"]
+        return {
+            "envelope": env_out,
+            "distilled_skill_ids": distilled_ids,
+        }
 
-        monitor.stop(ok=False)
-        print(json.dumps({
-            "ok": False,
-            "engine": "none",
-            "model_tier": model_tier,
-            "degraded": True,
-            "engine_degraded": True,
-            "degradation_reason": combined_reason,
-            "result": fallback,
-            "primary_error": primary_err,
-            "error": "both_engines_failed",
-        }, ensure_ascii=False))
+    def _harvest_cb(state: dict) -> bool:
+        state["worktree_harvest_checked"] = True
+        return True
+
+    builder = StateGraph()
+    builder.add_node("prepare_context", _node_prepare_context)
+    builder.add_node("execute_engine", _node_execute_engine)
+    builder.add_node("harvest_and_distill", _node_harvest_and_distill)
+    builder.set_entry_point("prepare_context")
+    builder.add_edge("prepare_context", "execute_engine")
+    builder.add_edge("execute_engine", "harvest_and_distill")
+    builder.add_edge("harvest_and_distill", END)
+
+    compiled_graph = builder.compile(
+        checkpointer=active_ckpt,
+        recursion_limit=10,
+        stagnation_limit=4,
+        worktree_harvest_check=True,
+        harvest_callback=_harvest_cb,
+    )
+
+    try:
+        final_state = compiled_graph.invoke(
+            {
+                "task_id": task_id,
+                "raw_goal": raw_goal,
+                "worktree": str(_workdir()),
+            },
+            config={"task_id": task_id},
+        )
+        envelope = dict(final_state.get("envelope") or {"ok": False, "error": "both_engines_failed"})
+        is_ok = bool(envelope.get("ok"))
+        monitor.stop(ok=is_ok)
+        print(json.dumps(envelope, ensure_ascii=False))
         return 0
     finally:
         monitor.stop(ok=False)

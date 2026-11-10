@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""进化一：Titans 惊奇度算子（Surprise Metric）与「报错/纠错 -> 修复」因果三元组捕获。
+"""进化一：多维启发式惊奇度打分门禁（Heuristic Surprise Gate）与「报错/纠错 -> 修复」因果三元组捕获。
+
+理论参考与工程边界说明：
+- 理论灵感源自 Google Research 的 Titans（Learning to Memorize at Test Time, arXiv:2501.00663）惊奇度驱动记忆门控
+  及其演进架构 HOPE（Nested Learning / Continuum Memory System 多频谱连续体记忆与自指更新）。
+- 本模块在 Agent 工程层（SQLite + vec0，非神经网络权重梯度更新）将其落地为确定性的「多维启发式惊奇度打分门禁
+  （Heuristic Surprise Gate）」，并与高频工作事实（memory_store）、中频突触可塑性（memory_plasticity / synapse）、
+  低频技能蒸馏固化（memory_consolidate / skill_forge）共同组成三频段连续体记忆系统（Continuum Memory System）。
 
 架构设计（双层语义模型驱动，摒弃死板正则墙）：
 1. 向量语义新颖度（Embedding Cosine Distance）：
@@ -31,7 +38,7 @@ logger = logging.getLogger(logger_name("surprise"))
 SURPRISE_FLASH_THRESHOLD = 0.65
 SURPRISE_ADMIT_THRESHOLD = 0.35
 
-SURPRISE_SYSTEM = """你是智能体海马体记忆系统的「惊奇度与因果三元组评估器（Titans Surprise & Causal Extractor）」。
+SURPRISE_SYSTEM = """你是智能体海马体记忆系统的「多维启发式惊奇度与因果三元组评估器（Heuristic Surprise & Causal Extractor）」。
 请对用户输入与助手回复进行深度语义理解，判断该轮交互是否包含值得写入长期记忆的高惊奇度信息（如用户当面纠错、长期铁律指令、方案/参数翻转、或排障根因闭环），并提取标准化四格错题卡。
 
 输出严格 JSON（不要 markdown 代码块）：
@@ -203,7 +210,7 @@ def compute_surprise(
     user_message: str = "",
     assistant_reply: str = "",
 ) -> Dict[str, Any]:
-    """计算一条候选事实的 Titans 惊奇度分数与组成明细（向量余弦新颖度 + 语义大模型评估）。"""
+    """计算一条候选事实的多维启发式惊奇度分数与组成明细（向量余弦新颖度 + 语义大模型评估）。"""
     stmt = (statement or "").strip()
     combined = (user_message + "\n" + stmt).strip() if user_message else stmt
     bookmarks = extract_bookmarks(combined + "\n" + (assistant_reply or ""))

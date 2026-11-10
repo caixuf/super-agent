@@ -78,6 +78,11 @@
    累计到阈值进入候选、人审后固化；长期无人使用的旧工具应当摘除。
 7. **不许按工具名一禁了之**：不同名的工具可能同性质，禁一个名只会换来换一个；纪律是分层不是禁止
    ——把 agent 绑死到完不成任务，代价更大。
+8. **官方内置工具高效原语（零轮询与单轮折叠）**：
+   - **批量探查优先用 `execute_code`（PTC 编程式工具调用）**：当一项检查需要连续执行 3 次以上 `search_files` 或 `read_file`（如跨目录多路查重、批量聚合字段），优先在单次 `execute_code` 中编写 Python 循环批量调用并只打印过滤后的精简结论，将数十轮推理折叠为 1 轮。
+   - **原生文件与检索原语**：优先使用 `search_files`（底层 Ripgrep 极速检索）与 `read_file`（原生支持直读 `.docx`、`.xlsx`、`.ipynb` 并自动处理 UTF-16 编码），避免动辄拉起 `terminal` 跑 `grep`/`find` 或手写解析脚本。
+   - **在线文档与评论原语**：读取在线文档或处理文档评论时，优先直接调用内置 `feishu_doc_read` 与 `feishu_drive_*`（`list_comments` / `get_comment` / `add_comment` / `reply_comment`）工具。
+   - **长耗时命令心跳与完工唤醒**：确需在 `terminal` 执行耗时超过 30 秒的命令时，必须开启 `background=true, pty=true, notify_on_complete=true, heartbeat=60`，由底层心跳与完工事件主动推送进展，严禁在回合内手写 `sleep` 循环轮询。
 
 ---
 

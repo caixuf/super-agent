@@ -35,13 +35,14 @@ def main():
     parser.add_argument("--agent", required=True)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--embed-url", default="", help="optional embedding endpoint; omit for keyword-only memory recall")
-    parser.add_argument("--fusion", choices=("interleave", "rrf"), default="interleave")
+    parser.add_argument("--fusion", choices=("interleave", "rrf"), default=None)
     parser.add_argument("--in-process", action="store_true", help="Run both stores in-process without subprocesses")
     parser.add_argument("--include-reference", action="store_true", help="Include reference scope book/doc chunks")
     parser.add_argument("--diagnostic-file", default="", help="Optional atomic JSON diagnostic output path")
     args = parser.parse_args()
     if not 1 <= args.limit <= 20:
         parser.error("invalid limit")
+    effective_fusion = args.fusion or ("rrf" if args.in_process else "interleave")
 
     from agentcore.memory.hybrid_recall import recall_hybrid, rrf_fuse
 
@@ -70,7 +71,7 @@ def main():
             profile=args.profile,
             exclude_reference=not args.include_reference,
             include_reference=args.include_reference,
-            fusion=args.fusion,
+            fusion=effective_fusion,
         )
         rows = []
         for r in hybrid.get("results", []):
@@ -95,7 +96,7 @@ def main():
             memory,
             query=args.query,
             limit=args.limit,
-            interleave=(args.fusion == "interleave"),
+            interleave=(effective_fusion == "interleave"),
         )
     if args.diagnostic_file:
         try:

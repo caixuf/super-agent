@@ -202,6 +202,30 @@ def run_dev_job(
                 raise PermissionError(f"role_ownership_violation:{reason_p}")
 
     containment_binding = None
+    if execution_backend_adapter is None:
+        binding_env_path = (os.environ.get("SUPERAGENT_ATTEMPT_BINDING_PATH") or "").strip()
+        if binding_env_path and Path(binding_env_path).is_file():
+            try:
+                from agentcore.colleague_containment import AttemptBoundSandboxAdapter
+                if AttemptBoundSandboxAdapter.is_bwrap_functional() and not is_forbidden_host_path(workdir)[0]:
+                    adapter_role = declared_role if declared_role in DEV_ROLES else "cases"
+                    net_pol = "allowed" if policy.get("allow_network", False) else "isolated"
+                    auto_adapter = AttemptBoundSandboxAdapter.from_environment(
+                        allowed_workdir=workdir,
+                        role=adapter_role,
+                        network_policy=net_pol,
+                    )
+                    chk = auto_adapter.verify_attempt_binding(
+                        expected_job=str(job.get("job") or auto_adapter.job),
+                        expected_attempt=str(job.get("attempt") or auto_adapter.attempt),
+                        expected_nonce=auto_adapter.nonce,
+                        expected_token=auto_adapter.token,
+                    )
+                    if chk.get("ok"):
+                        execution_backend_adapter = auto_adapter
+            except Exception:
+                pass
+
     if execution_backend_adapter is not None:
         if not hasattr(execution_backend_adapter, "verify_attempt_binding") or not callable(
             execution_backend_adapter.verify_attempt_binding
@@ -264,91 +288,201 @@ def run_dev_job(
         # The legacy model launcher does not contain this separate command path.
         # Never silently run a sandboxed task's verification on the host.
         raise RuntimeError("sandbox_verification_executor_required")
+    if runner_callable is None:
+        raise RuntimeError("runner_adapter_required")
 
-    # Single source of truth for model routing & financial overdraft guard (ADR-S1, ADR-S2):
-    # Resolve via agentcore.model_routing instead of duplicating ad-hoc 'pro' -> 'flash' rules.
-    from agentcore.model_routing import EXECUTION_ROLES, resolve_model_route
-    raw_role = str(job["payload"].get("role") or "dev_runner").strip().lower()
-    routing_role = raw_role if raw_role in EXECUTION_ROLES else "dev_runner"
-    clean_model = (model or "").strip() or "flash"
-    route = resolve_model_route("super-agent", role=routing_role, requested_model=clean_model)
-    model = route["selected_model"] or "flash"
-    degraded = bool(route.get("degraded"))
-    degradation_reason = str(route.get("degradation_reason") or "")
-    if degraded and degradation_reason:
-        sys.stderr.write(degradation_reason + "\n")
+    from agentcore.state_graph import (
+        END,
+        MemoryCheckpointer,
+        NodeExecutionError,
+        SqliteCheckpointer,
+        StateGraph,
+        WorktreeStrandedError,
+        check_worktree_harvest,
+    )
 
-    memory = ""
-    if memory_file:
-        try:
-            memory = Path(memory_file).read_text(encoding="utf-8")[:12000]
-        except OSError:
-            memory = ""
-
-    # Inject procedural skill guidance from SkillForge if available (EverOS Agent Track)
-    skill_guidance = ""
+    out = (output_dir or Path.cwd()).resolve()
     try:
-        from agentcore.skill_forge import SkillForge
-        forge = SkillForge()
-        skill_guidance = forge.render_guidance(goal)
-    except Exception:
-        skill_guidance = ""
+        out.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError:
+        pass
+    artifacts_valid = bool(out.is_dir())
+    ckpt_db_path = out / "state_checkpoints.db" if artifacts_valid else None
+    active_ckpt = SqliteCheckpointer(ckpt_db_path) if ckpt_db_path is not None else MemoryCheckpointer()
 
-    prompt_parts = [role]
-    if memory:
-        prompt_parts.append(f"\n## 共享记忆快照\n{memory}")
-    if skill_guidance:
-        prompt_parts.append(f"\n{skill_guidance}")
-    prompt_parts.append(f"\n## 任务\n{goal}\n")
-    prompt = "\n".join(prompt_parts)
+    base_task_id = str(job.get("job") or job["payload"].get("_job_id") or "dev_job")
+    explicit_resume = bool(job.get("resume") or job["payload"].get("resume"))
+    existing_ckpt = active_ckpt.get(base_task_id)
+    if existing_ckpt is not None and existing_ckpt.node == "harvest_artifacts" and not explicit_resume:
+        # Completed previous run in the same output_dir; isolate new non-resume invocation by attempt
+        attempt_suffix = str(job.get("attempt") or int(os.times().elapsed * 1000))
+        graph_task_id = f"{base_task_id}_{attempt_suffix}"
+        existing_After = active_ckpt.get(graph_task_id)
+        if existing_After is not None and existing_After.node == "harvest_artifacts":
+            graph_task_id = f"{base_task_id}_{attempt_suffix}_{os.getpid()}"
+    else:
+        graph_task_id = base_task_id
 
     agent_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-    verification_receipt = None
-    with worktree_lock(workdir, lock_root=lock_root):
-        if runner_callable is None:
-            raise RuntimeError("runner_adapter_required")
-        raw_result = runner_callable(prompt, {
+    def _node_prepare_context(state: dict[str, Any]) -> dict[str, Any]:
+        # Single source of truth for model routing & financial overdraft guard (ADR-S1, ADR-S2)
+        from agentcore.model_routing import EXECUTION_ROLES, resolve_model_route
+        raw_role = str(job["payload"].get("role") or "dev_runner").strip().lower()
+        routing_role = raw_role if raw_role in EXECUTION_ROLES else "dev_runner"
+        clean_model = (model or "").strip() or "flash"
+        route = resolve_model_route("super-agent", role=routing_role, requested_model=clean_model)
+        sel_model = route["selected_model"] or "flash"
+        is_degraded = bool(route.get("degraded"))
+        deg_reason = str(route.get("degradation_reason") or "")
+        if is_degraded and deg_reason:
+            sys.stderr.write(deg_reason + "\n")
+
+        mem_text = ""
+        if memory_file:
+            try:
+                mem_text = Path(memory_file).read_text(encoding="utf-8")[:12000]
+            except OSError:
+                mem_text = ""
+
+        skill_guidance = ""
+        mounted_ids: list[str] = []
+        try:
+            from agentcore.skill_forge import SkillForge
+            forge = SkillForge()
+            recalled_skills = forge.recall_skills(goal, top_k=2) if hasattr(forge, "recall_skills") else []
+            mounted_ids = [s.skill_id for s in recalled_skills]
+            skill_guidance = forge.render_guidance(goal)
+        except Exception:
+            skill_guidance = ""
+
+        prompt_parts = [role]
+        if mem_text:
+            prompt_parts.append(f"\n## 共享记忆快照\n{mem_text}")
+        if skill_guidance:
+            prompt_parts.append(f"\n{skill_guidance}")
+        prompt_parts.append(f"\n## 任务\n{goal}\n")
+        return {
+            "prompt": "\n".join(prompt_parts),
+            "selected_model": sel_model,
+            "degraded": is_degraded,
+            "degradation_reason": deg_reason,
+            "mounted_skill_ids": mounted_ids,
+        }
+
+    def _node_execute_model(state: dict[str, Any]) -> dict[str, Any]:
+        sel_model = state.get("selected_model") or model or "flash"
+        prompt_str = state.get("prompt") or f"{role}\n\n## 任务\n{goal}\n"
+        raw_result = runner_callable(prompt_str, {
             "workdir": workdir,
             "agent_dir": agent_dir,
-            "model": model,
+            "model": sel_model,
             "provider": provider,
             "tools": tools,
             "timeout": timeout,
             "sandbox": sandbox,
             "execution_backend_adapter": execution_backend_adapter,
         })
-        payload = raw_result if isinstance(raw_result, dict) else raw_result.to_dict()
+        pl = raw_result if isinstance(raw_result, dict) else raw_result.to_dict()
+        pl = dict(pl)
+        run_ok = bool(pl.get("ok"))
+        t_calls = pl.get("tool_calls")
+        if not t_calls and isinstance(pl.get("result"), dict):
+            t_calls = pl["result"].get("tool_calls")
+        if run_ok and _detect_tool_stagnation(t_calls or []):
+            run_ok = False
+            pl["error"] = "tool_loop_stagnation_detected"
+        return {
+            "payload": pl,
+            "ok": run_ok,
+        }
 
-        ok = bool(payload.get("ok"))
-        tool_calls = payload.get("tool_calls")
-        if not tool_calls and isinstance(payload.get("result"), dict):
-            tool_calls = payload["result"].get("tool_calls")
-        if ok and _detect_tool_stagnation(tool_calls or []):
-            ok = False
-            payload["error"] = "tool_loop_stagnation_detected"
-        if ok and verification_checks:
-            # Keep the same worktree locked through verification; checking a
-            # later task's files cannot certify this task's output.
-            verification_receipt = evaluate_verification_checks(
-                verification_checks, workdir, executor=verification_executor)
-            if not verification_receipt.get("all_passed"):
-                ok = False
-        elif ok and require_verification and not verification_receipt:
-            ok = False
-            payload["error"] = "required_verification_missing_receipt"
-        if ok and workdir.is_dir() and (workdir / ".git").exists():
-            from agentcore.state_graph import check_worktree_harvest, WorktreeStrandedError
+    def _node_verify_outputs(state: dict[str, Any]) -> dict[str, Any]:
+        pl = dict(state.get("payload") or {})
+        run_ok = bool(state.get("ok"))
+        v_receipt = None
+        if run_ok and verification_checks:
+            v_receipt = evaluate_verification_checks(
+                verification_checks, workdir, executor=verification_executor
+            )
+            if not v_receipt.get("all_passed"):
+                run_ok = False
+        elif run_ok and require_verification and not v_receipt:
+            run_ok = False
+            pl["error"] = "required_verification_missing_receipt"
+        if run_ok and workdir.is_dir() and (workdir / ".git").exists():
             try:
                 check_worktree_harvest(workdir)
             except WorktreeStrandedError as exc:
-                payload["worktree_harvest_warning"] = str(exc)
-    out = (output_dir or Path.cwd()).resolve()
-    try:
-        out.mkdir(parents=True, exist_ok=True, mode=0o700)
-    except OSError:
-        pass
-    artifact_paths = [str(out / name) for name in ("report.json", "report.md", "manifest.json")]
+                pl["worktree_harvest_warning"] = str(exc)
+        return {
+            "payload": pl,
+            "ok": run_ok,
+            "verification_receipt": v_receipt,
+        }
+
+    def _node_harvest_artifacts(state: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "harvested": True,
+            "artifact_paths": [str(out / name) for name in ("report.json", "report.md", "manifest.json")],
+        }
+
+    def _harvest_cb(state: dict[str, Any]) -> bool:
+        pl = dict(state.get("payload") or {})
+        if state.get("ok") and workdir.is_dir() and (workdir / ".git").exists():
+            try:
+                check_worktree_harvest(workdir)
+            except WorktreeStrandedError as exc:
+                pl["worktree_harvest_warning"] = str(exc)
+                state["payload"] = pl
+        return True
+
+    builder = StateGraph()
+    builder.add_node("prepare_context", _node_prepare_context)
+    builder.add_node("execute_model", _node_execute_model)
+    builder.add_node("verify_outputs", _node_verify_outputs)
+    builder.add_node("harvest_artifacts", _node_harvest_artifacts)
+    builder.set_entry_point("prepare_context")
+    builder.add_edge("prepare_context", "execute_model")
+    builder.add_edge("execute_model", "verify_outputs")
+    builder.add_edge("verify_outputs", "harvest_artifacts")
+    builder.add_edge("harvest_artifacts", END)
+
+    compiled_graph = builder.compile(
+        checkpointer=active_ckpt,
+        recursion_limit=15,
+        stagnation_limit=5,
+        worktree_harvest_check=True,
+        harvest_callback=_harvest_cb,
+    )
+
+    with worktree_lock(workdir, lock_root=lock_root):
+        try:
+            final_state = compiled_graph.invoke(
+                {
+                    "task_id": graph_task_id,
+                    "goal": goal,
+                    "worktree": str(workdir),
+                },
+                config={"task_id": graph_task_id},
+            )
+        except NodeExecutionError as exc:
+            if exc.__cause__ is not None:
+                raise exc.__cause__ from None
+            raise
+
+    payload = dict(final_state.get("payload") or {})
+    ok = bool(final_state.get("ok"))
+    verification_receipt = final_state.get("verification_receipt")
+    model = str(final_state.get("selected_model") or model or "flash")
+    degraded = bool(final_state.get("degraded"))
+    degradation_reason = str(final_state.get("degradation_reason") or "")
+    mounted_skill_ids = list(final_state.get("mounted_skill_ids") or [])
+    resumed_from_node = final_state.get("_resumed_from_node")
+    artifact_paths = list(
+        final_state.get("artifact_paths")
+        or [str(out / name) for name in ("report.json", "report.md", "manifest.json")]
+    )
 
     execution_completed = bool(payload.get("ok")) and payload.get("error") != "tool_loop_stagnation_detected"
     verification_passed = bool(verification_receipt and verification_receipt.get("all_passed"))
@@ -401,6 +535,13 @@ def run_dev_job(
 
     _atomic(out / "report.json", json.dumps(report, ensure_ascii=False, indent=2))
     _atomic(out / "report.md", f"# Development colleague report\n\n{payload.get('final_text') or err or ''}\n")
+    if containment_binding is not None:
+        _atomic(out / "containment_audit.json", json.dumps({
+            "backend": "bwrap",
+            "binding": containment_binding,
+            "audit_log": containment_audit_log or [],
+            "evidence": containment_evidence,
+        }, ensure_ascii=False, indent=2))
     _atomic(out / "manifest.json", json.dumps({
         "job": job.get("job"),
         "attempt": job.get("attempt"),
@@ -412,6 +553,9 @@ def run_dev_job(
         "provider": provider,
         "tool_calls": payload.get("tool_calls") or [],
         "containment_binding": containment_binding,
+        "mounted_skills": mounted_skill_ids,
+        "checkpoint_db": str(ckpt_db_path) if ckpt_db_path else None,
+        "resumed_from_node": resumed_from_node,
     }, ensure_ascii=False, indent=2))
 
     if ok:
@@ -428,6 +572,9 @@ def run_dev_job(
                 approved=False,
             )
             forge.record_case(case)
+            auto_distill = getattr(forge, "auto_distill_from_cases", None)
+            if callable(auto_distill):
+                auto_distill(role=case.role)
         except Exception:
             pass
 

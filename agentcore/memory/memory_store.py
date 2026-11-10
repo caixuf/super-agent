@@ -162,6 +162,11 @@ def _connect() -> sqlite3.Connection:
         """
     )
     conn.commit()
+    try:
+        from . import memory_scale
+        memory_scale.ensure_fts(conn)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(logger_name("store")).debug("FTS5 初始化跳过: %s", exc)
     return conn
 
 
@@ -422,6 +427,11 @@ def write_fact(
                     superseded.append(old_id)
             if superseded:
                 _delete_vectors_for_facts(conn, superseded)
+        try:
+            from . import memory_scale
+            memory_scale.sync_fts_rows(conn, [fid, *superseded], commit=False)
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(logger_name("store")).debug("FTS5 增量同步跳过: %s", exc)
         conn.commit()
         out = {"ok": True, "written": True, "fact_id": fid,
                "workspace_id": bucket, "tags": tag_map}
@@ -1120,6 +1130,11 @@ def activate_candidate_fact(*, fact_id: str, user_id: str, agent_id: str,
                  old_id, user_id, agent_id, profile))
             if cur.rowcount:
                 superseded.append(old_id)
+        try:
+            from . import memory_scale
+            memory_scale.sync_fts_rows(conn, [fact_id, *superseded], commit=False)
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(logger_name("store")).debug("FTS5 激活同步跳过: %s", exc)
         if verify_recall:
             # Verify through the real recall path while the activation and any
             # supersede updates are still uncommitted. A failure rolls the
@@ -1424,37 +1439,44 @@ def recall_facts(
                 return {'ok': True, 'results': entries, 'total': len(entries),
                         'searched_buckets': buckets, 'searched_tags': want}
 
-        # 两阶段检索的第一阶段：先粗筛再全取。
-        # 记忆库从 46 条涨到几万条后，把全表拉进 Python 再逐条比对会直接拖垮召回。
-        # 有 FTS 时用 BM25 把候选收窄到 COARSE_CANDIDATES（毫秒级）；
-        # 没有 FTS 或查询无可用词时，退化为「按时间取最近 N 条」，与原行为一致。
-        # 第二阶段（向量精排）仍在 _rank 里做，用的是 fact_embeddings 持久化向量。
+        # 两阶段双路混合召回：FTS5 BM25 倒排粗筛 + vec0 KNN 语义召回，在精排阶段执行 RRF (k=60) 融合。
         rid_list = None
+        bm25_ranks: Dict[str, int] = {}
+        bm25_scores: Dict[str, float] = {}
+        strategy_used = "bucket_only"
         if (query or "").strip():
-            # 粗筛优先走向量 KNN（语义召回），LIKE 只在 KNN 不可用时兜底。
-            # 为什么必须这样：中文被 unicode61 当整段，LIKE 处理的是**字面子串**，
-            # 「李龙飞是谁」永远匹配不上「李龙飞自称菜虚虚飞...」，而语义检索可以。
-            # 这也是做规模化最关键的一步：数据越多，字面匹配越不可靠。
-            rid_list = _knn_rowids(conn, query, buckets=buckets or None,
+            fts_rids: List[int] = []
+            try:
+                from .memory_scale import COARSE_CANDIDATES, fts_bm25_search
+                fts_hits = fts_bm25_search(
+                    conn,
+                    query or "",
+                    buckets=buckets or None,
+                    kinds=want_kinds or None,
+                    scopes=scopes,
+                    user_id=user_id,
+                    agent_id=None if shared_legacy else agent_id,
+                    profile=None if shared_legacy else profile,
+                    shared_legacy=shared_legacy,
+                    limit=COARSE_CANDIDATES,
+                )
+                fts_rids = [h["rowid"] for h in fts_hits]
+                bm25_ranks = {h["fact_id"]: int(h["bm25_rank"]) for h in fts_hits if h.get("fact_id")}
+                bm25_scores = {h["fact_id"]: float(h["bm25_score"]) for h in fts_hits if h.get("fact_id")}
+            except Exception as exc:  # noqa: BLE001
+                logging.getLogger(logger_name("store")).debug("FTS5 BM25 粗筛跳过: %s", exc)
+
+            knn_rids = _knn_rowids(conn, query, buckets=buckets or None,
                                    kinds=want_kinds or None, scopes=scopes,
                                    user_id=user_id,
                                    agent_id=None if shared_legacy else agent_id,
                                    profile=None if shared_legacy else profile)
-            if rid_list is None:
-                try:
-                    from .memory_scale import COARSE_CANDIDATES, coarse_filter
-                except ImportError:
-                    try:
-                        from .memory_scale import COARSE_CANDIDATES, coarse_filter
-                    except Exception as exc:  # noqa: BLE001 —— 拿不到就退回全量
-                        logging.getLogger(logger_name("store")).debug("粗筛模块不可用: %s", exc)
-                        COARSE_CANDIDATES = 50
-                        coarse_filter = None
-                if coarse_filter is not None:
-                    rid_list = coarse_filter(conn, query or "", buckets=buckets or None,
-                                             kinds=want_kinds or None, scopes=scopes,
-                                             user_id=user_id,
-                                             limit=COARSE_CANDIDATES)
+            if knn_rids is not None:
+                rid_list = list(dict.fromkeys([*fts_rids, *knn_rids]))
+                strategy_used = "fts5_bm25+vec0_rrf" if fts_rids else "vec0_only"
+            else:
+                rid_list = fts_rids
+                strategy_used = "fts5_bm25_only"
         if rid_list is not None:
             if not rid_list:
                 rows = []
@@ -1478,8 +1500,6 @@ def recall_facts(
             elif want:
                 reason = "no_match_for_tags"
             elif rid_list is not None and not rid_list:
-                # 粗筛全滤掉 = 关键词一个都没命中。这比「代际桶里没有」更准确：
-                # 桶是存在的，只是没有任何一条提到这些词。报错原因要指向真正的那一层。
                 reason = "no_keyword_match"
             else:
                 reason = "no_match_for_ebm"
@@ -1503,8 +1523,10 @@ def recall_facts(
         # 只有查询指定了代际时才按代际优先；否则 exact_ebm 是本次筛选的产物，
         # 拿它当排序依据会把 G1/G2 那两条无关经验强行顶到所有查询的第一位
         # （实测：任何查询都返回「门限-制动踏板」）。
-        ranked = (_rank(picked, query, prefer_ebm=bool(ebm), connection=conn)
-                  if _connection is not None else _rank(picked, query, prefer_ebm=bool(ebm)))
+        ranked = (_rank(picked, query, prefer_ebm=bool(ebm), connection=conn,
+                        bm25_ranks=bm25_ranks, bm25_scores=bm25_scores)
+                  if _connection is not None else _rank(picked, query, prefer_ebm=bool(ebm),
+                                                        bm25_ranks=bm25_ranks, bm25_scores=bm25_scores))
         # 相关性下限：向量召回永远能凑出 top-N，但「总能返回」不等于「相关」。
         # 实测「完全无关的词汇xyz123」在 45 条库里也照样返回 3 条；这类噪声塞进
         # 诊断结果反而制造干扰。低于门限的一律不返回，由 empty_reason 说明。
@@ -2115,40 +2137,45 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
 
 
 def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True,
-          *, connection=None) -> List[Dict[str, Any]]:
-    """在给定候选集内排序：有可用向量就按余弦，否则退回关键词重合度。
+          *, connection=None, bm25_ranks: Optional[Dict[str, int]] = None,
+          bm25_scores: Optional[Dict[str, float]] = None, rrf_k: int = 60) -> List[Dict[str, Any]]:
+    """在给定候选集内执行 FTS5 BM25 + 向量余弦 RRF (k=60) 融合精排；无向量时按 FTS5 BM25 / 关键词重合度排序。
 
     注意排序**只作用于传入的 items**：调用方已经按代际桶和标签过滤过了，
     这里不会引入候选集之外的记忆。
     """
     q = set(w.lower() for w in (query or "").replace("/", " ").split() if len(w) > 1)
+    bm25_ranks = bm25_ranks or {}
+    bm25_scores = bm25_scores or {}
 
     def kw_score(it):
+        fid = str(it.get("fact_id") or "")
         text = (it.get("subject") or "") + " " + (it.get("statement") or "")
         low = text.lower()
-        # subject 命中算 2 分：它是人为给的标签，命中其含义远强于正文里偶然出现。
         subj = (it.get("subject") or "").lower()
         hit = sum(2 if w in subj else (1 if w in low else 0) for w in q)
+        if fid in bm25_ranks:
+            # FTS5 bm25_score 为负数（越小越相关），将其纳入词法打分
+            hit += max(1, 20 - int(bm25_ranks[fid]))
         if _bookmark_boost(it, query) > 0:
             hit += 5
-        return (hit, it.get("created_at") or "")
+        return (hit, -float(bm25_scores.get(fid, 0.0)), it.get("created_at") or "")
 
     qtext = (query or "").strip()
     if len(qtext) >= 2 and items:
-        # 直接嵌原文（subject + statement），不做任何加权或截断：
         cand = [((it.get("subject") or "") + " " + (it.get("statement") or "")).strip()
                 for it in items]
         fact_ids = [it.get("fact_id") or "" for it in items]
-        
+
         # 1. 尝试从 SQLite 持久化表获取已存在的向量
         persisted = (_get_persisted_embeddings(fact_ids, connection=connection)
                      if connection is not None else _get_persisted_embeddings(fact_ids))
-        
+
         # 2. 检查哪些候选文本需要补算向量
         missing_texts = []
         missing_indices = []
         cvs: List[Optional[List[float]]] = [None] * len(items)
-        
+
         for idx, (fid, ctext) in enumerate(zip(fact_ids, cand)):
             if fid and fid in persisted:
                 vec, thash = persisted[fid]
@@ -2157,21 +2184,20 @@ def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True,
             if cvs[idx] is None:
                 missing_indices.append(idx)
                 missing_texts.append(ctext)
-                
+
         # 3. 只有未持久化命中 / query 才请求向量模型
         req_texts = [qtext] + missing_texts
         fresh_vecs = _embed_with_cache(req_texts)
-        
+
         if fresh_vecs and len(fresh_vecs) == len(req_texts):
             qv = fresh_vecs[0]
             fresh_cvs = fresh_vecs[1:]
             for idx, fvec in zip(missing_indices, fresh_cvs):
                 cvs[idx] = fvec
-                # 异步或顺手持久化补充
                 fid = fact_ids[idx]
                 if fid:
                     _persist_fact_embedding(fid, cand[idx], fvec)
-                    
+
             scored = []
             for it, cv in zip(items, cvs):
                 if cv is None:
@@ -2180,18 +2206,41 @@ def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True,
                 it["rank_mode"] = "vector"
                 scored.append((_cosine(qv, cv), it))
 
-            # 纯向量排序。此前为弥补 embo-01 对中文短句的弱区分力，叠过
-            # 「subject 重复加权」「关键词混合」「kw: 触发词标签」三层补偿；
-            # 换成 bge-m3 后纯余弦已能正确排序（实测目标条目 0.73 vs 次优 0.60），
-            # 这些补偿反而在打乱顺序，一并撤掉。代际精确匹配仍然优先。
-            # 排序 = 代际精确优先 > 相似度 × 置信度权重。
-            # 没有置信度参与时，强化只是数字变化，行为完全不变 —— 那等于没学。
             weights = _confidence_weights([it.get("fact_id") for _, it in scored])
+            # 先计算向量通道名次 vec_rank，再与 FTS5 BM25 通道名次执行 RRF (k=60) 倒数秩融合
             scored.sort(
                 key=lambda x: (
                     0 if (prefer_ebm and x[1].get("apply_match") == "exact_ebm") else 1,
                     -((x[0] + _bookmark_boost(x[1], query)) * weights.get(x[1].get("fact_id"), 1.0)),
                 ))
+            k = max(1, int(rrf_k))
+            vec_rank_by_id: Dict[str, int] = {}
+            for v_idx, (_sc, it_obj) in enumerate(scored, start=1):
+                fid_key = str(it_obj.get("fact_id") or "")
+                if fid_key:
+                    vec_rank_by_id[fid_key] = v_idx
+
+            def _rrf_sort_key(pair):
+                sc_val, it_obj = pair
+                fid_key = str(it_obj.get("fact_id") or "")
+                w_val = weights.get(fid_key, 1.0)
+                bm_val = _bookmark_boost(it_obj, query)
+                vec_rk = vec_rank_by_id.get(fid_key, len(scored) + 1)
+                rrf_val = 1.0 / float(k + vec_rk)
+                bm25_rk = bm25_ranks.get(fid_key)
+                if bm25_rk is not None:
+                    rrf_val += 0.35 / float(k + int(bm25_rk))
+                if bm_val > 0:
+                    rrf_val += 0.05
+                return (
+                    0 if (prefer_ebm and it_obj.get("apply_match") == "exact_ebm") else 1,
+                    -round((sc_val + bm_val) * w_val + rrf_val * 0.25, 6),
+                    -((sc_val + bm_val) * w_val),
+                )
+
+            if bm25_ranks:
+                scored.sort(key=_rrf_sort_key)
+
             for sc, it in scored:
                 it["rank_mode"] = "vector"
                 bm = _bookmark_boost(it, query)
@@ -2206,13 +2255,10 @@ def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True,
         it = dict(it)
         it["rank_mode"] = "keyword"
         out.append(it)
-    # 先按代际精确匹配分组，再在组内按关键词重合度降序。
-    # 用两次排序而不是复合 key：kw_score 的第二项是时间字符串，不能取负。
     out.sort(key=kw_score, reverse=True)
     if prefer_ebm:
         out.sort(key=lambda it: 0 if it.get("apply_match") == "exact_ebm" else 1)
     return out
-
 
 
 def drop_fact(fact_id: str, reason: str = "manual") -> Dict[str, Any]:
@@ -2224,6 +2270,11 @@ def drop_fact(fact_id: str, reason: str = "manual") -> Dict[str, Any]:
             (reason, fact_id))
         if cur.rowcount > 0:
             _delete_vectors_for_facts(conn, [fact_id])
+            try:
+                from . import memory_scale
+                memory_scale.sync_fts_rows(conn, [fact_id], commit=False)
+            except Exception:
+                pass
         conn.commit()
         return {"ok": cur.rowcount > 0, "fact_id": fact_id, "reason": reason}
     finally:
@@ -2246,6 +2297,11 @@ def supersede(old_fact_id: str, new_fact_id: str, reason: str = "") -> Dict[str,
              old_fact_id))
         if cur.rowcount > 0:
             _delete_vectors_for_facts(conn, [old_fact_id])
+            try:
+                from . import memory_scale
+                memory_scale.sync_fts_rows(conn, [old_fact_id, new_fact_id], commit=False)
+            except Exception:
+                pass
         conn.commit()
         return {"ok": cur.rowcount > 0, "fact_id": old_fact_id,
                 "superseded_by": new_fact_id, "reason": reason}

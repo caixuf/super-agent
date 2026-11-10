@@ -1,6 +1,6 @@
 """Portable colleague pack discipline (Prefer B thin).
 
-OpenMausBot pattern citation only — map onto colleague_catalog / colleague_dev.
+Maps onto colleague_catalog / colleague_dev.
 No vendor trees. Pack text is untrusted selection metadata (same NOTICE as
 colleague_catalog); it grants no dispatch permissions, never auto-hires, and
 never silently overwrites existing role definitions.
@@ -29,7 +29,7 @@ PACK_FORMAT = "colleague_pack/v1"
 PACK_NOTICE = NOTICE
 
 # Keys that must never appear in accepted pack bytes (case-insensitive match on
-# leaf key names). Pattern citation: OpenMausBot "no secrets in packs".
+# leaf key names). Security rule: no secrets in packs.
 _BANNED_KEY_RE = re.compile(
     r"(?i)\A(.*_)?(secret|token|api[_-]?key|password|passwd|cookie|"
     r"credential|authorization|auth[_-]?header|private[_-]?key|"
