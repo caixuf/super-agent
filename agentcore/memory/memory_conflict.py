@@ -81,6 +81,62 @@ def _similarity(a: str, b: str) -> float:
     return len(ga & gb) / len(ga | gb)
 
 
+#: 证据权威等级（Evidence Tier）
+TIER_VERIFIED_TEST = 4     # 实测全绿、回归验证通过 (test_pass, replay_pass)
+TIER_CODE_FACT = 3         # 静态代码结构、契约、proto (code_contract, git_commit)
+TIER_USER_EXPLICIT = 2     # 用户显式指令、人工专家录入 (user_explicit, manual)
+TIER_INFERENCE = 1         # 概率性推测、未验证猜想 (hypothesis, auto_infer)
+
+
+def get_evidence_tier(fact: Dict[str, Any]) -> int:
+    """根据来源、证据标签和置信度评估事实的证据权重等级。"""
+    source = str(fact.get("source") or "").lower()
+    evidence_refs = fact.get("evidence_refs") or []
+    if isinstance(evidence_refs, str):
+        try:
+            evidence_refs = json.loads(evidence_refs)
+        except Exception:
+            evidence_refs = [evidence_refs]
+    ev_str = " ".join(str(e).lower() for e in evidence_refs)
+    statement = str(fact.get("statement") or "").lower()
+
+    if any(k in ev_str or k in statement for k in ("test_pass", "实测已绿", "测试全绿", "ci_pass", "replay_pass")):
+        return TIER_VERIFIED_TEST
+    if any(k in source for k in ("test", "ci", "verification", "empirical")):
+        return TIER_VERIFIED_TEST
+
+    if any(k in ev_str or k in statement for k in ("code_contract", "git_commit", "proto", "idl", "interface")):
+        return TIER_CODE_FACT
+    if any(k in source for k in ("git", "repo", "ast", "code")):
+        return TIER_CODE_FACT
+
+    if any(k in source for k in ("user", "manual", "flash_write", "expert")):
+        return TIER_USER_EXPLICIT
+
+    return TIER_INFERENCE
+
+
+def has_semantic_polarity_conflict(new_stmt: str, old_stmt: str) -> bool:
+    """快速检测中英文命题是否存在明显的正反极性对立（如可测 vs 不可测，支持 vs 不支持）。"""
+    n, o = new_stmt.lower(), old_stmt.lower()
+    polar_pairs = [
+        (("可测", "已测", "已覆盖", "已跑通", "已绿"), ("不可测", "未覆盖", "无法测试", "阻断", "缺口")),
+        (("支持", "已实现", "已激活"), ("不支持", "未实现", "禁止", "未激活")),
+        (("true", "enable", "on", "允许"), ("false", "disable", "off", "拒绝")),
+    ]
+    for pos_set, neg_set in polar_pairs:
+        # 新正旧负 或 新负旧正
+        new_is_pos = any(w in n for w in pos_set)
+        old_is_neg = any(w in o for w in neg_set)
+        if new_is_pos and old_is_neg:
+            return True
+        new_is_neg = any(w in n for w in neg_set)
+        old_is_pos = any(w in o for w in pos_set)
+        if new_is_neg and old_is_pos:
+            return True
+    return False
+
+
 def classify_by_rules(new: Dict[str, Any], old: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """规则层。能定就返回结论，定不了返回 None 交给 LLM。
 
@@ -102,6 +158,38 @@ def classify_by_rules(new: Dict[str, Any], old: Dict[str, Any]) -> Optional[Dict
     if sim >= DUPLICATE_SIMILARITY:
         return {"relation": "duplicate", "reason": "near_identical_text",
                 "similarity": round(sim, 3), "by": "rule"}
+
+    # 证据等级对决规则（Evidence Tier Overrule）：
+    # 1. 围绕同一 subject 且新证据等级显著高于旧证据（如实测 Tier 4 > 旧推论 Tier 1/2）
+    # 2. 或存在明确的正反极性冲突
+    new_subject = _norm(new.get("subject", ""))
+    old_subject = _norm(old.get("subject", ""))
+    if new_subject and new_subject == old_subject:
+        new_tier = get_evidence_tier(new)
+        old_tier = get_evidence_tier(old)
+        if new_tier > old_tier and new_tier >= TIER_VERIFIED_TEST:
+            return {
+                "relation": "supersede",
+                "reason": f"empirical_test_overrules_unverified (tier {new_tier} > tier {old_tier})",
+                "by": "evidence_tier_rule",
+            }
+        # 同为最高级实测验证，最新测试结论自然演更旧版本基线
+        if new_tier == old_tier == TIER_VERIFIED_TEST:
+            return {
+                "relation": "supersede",
+                "reason": "later_verified_test_updates_previous_baseline",
+                "by": "evidence_tier_rule",
+            }
+        new_stmt = new.get("statement", "")
+        old_stmt = old.get("statement", "")
+        if has_semantic_polarity_conflict(new_stmt, old_stmt):
+            if new_tier >= old_tier:
+                return {
+                    "relation": "supersede",
+                    "reason": f"polarity_conflict_higher_or_equal_tier (tier {new_tier} >= tier {old_tier})",
+                    "by": "evidence_tier_rule",
+                }
+
     return None
 
 

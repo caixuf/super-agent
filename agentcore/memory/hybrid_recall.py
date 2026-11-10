@@ -150,6 +150,7 @@ def recall_hybrid(
     exclude_reference: bool = True,
     include_reference: bool = False,
     enable_spreading: bool = True,
+    enable_graph_expansion: bool = True,
     task_id: Optional[str] = None,
     fusion: str = "rrf",
     rrf_k: int = 60,
@@ -244,16 +245,59 @@ def recall_hybrid(
                     enriched["activated_by"] = meta.get("activated_by", [])
                     spread_hits.append(enriched)
 
+    # 进化三：强类型拓扑因果图展开（Graph Causal Expansion）
+    graph_hits: List[Dict[str, Any]] = []
+    if enable_graph_expansion:
+        top_seed_ids = [
+            str(item.get("fact_id") or "").strip()
+            for item in [*memory_hits[:2], *entity_hits[:2]]
+            if str(item.get("fact_id") or "").strip()
+        ]
+        if top_seed_ids:
+            try:
+                from . import memory_graph
+                for sid in top_seed_ids:
+                    paths = memory_graph.traverse_paths(
+                        sid,
+                        relation_types=[
+                            memory_graph.REL_DEPENDS_ON,
+                            memory_graph.REL_DERIVED_FROM,
+                            memory_graph.REL_TESTS,
+                        ],
+                        max_depth=2,
+                    )
+                    graph_target_ids = [p["to_node"] for p in paths if p.get("to_node")]
+                    if graph_target_ids:
+                        loaded_g = memory_store.get_facts_by_ids(
+                            graph_target_ids,
+                            user_id=user_id,
+                            agent_id=agent_id,
+                            profile=profile,
+                        )
+                        for row in loaded_g.get("results") or []:
+                            enriched = memory_store.check_fact_freshness(dict(row))
+                            enriched["rank_mode"] = "graph_causal"
+                            enriched["causal_origin"] = sid
+                            graph_hits.append(enriched)
+            except Exception as g_exc:
+                _LOG.debug("拓扑图因果扩展跳过: %s", g_exc)
+
     fused = rrf_fuse(
         entity_hits,
         memory_hits,
-        spread_hits=spread_hits,
+        spread_hits=[*spread_hits, *graph_hits],
         reference_hits=reference_hits,
         query=q,
         limit=max_items,
         rrf_k=rrf_k,
         interleave=(fusion == "interleave"),
     )
+
+    # TMS 真值过滤：杜绝返回 superseded 淘汰知识
+    fused = [
+        item for item in fused
+        if str(item.get("validity_state") or item.get("status") or "").upper() != "SUPERSEDED"
+    ]
 
     if task_id:
         fact_ids = [

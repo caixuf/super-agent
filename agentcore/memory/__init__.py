@@ -17,16 +17,27 @@ from . import progressive
 from . import monthly_log
 from .hybrid_recall import recall_hybrid, rrf_fuse
 from .memory_consolidate import consolidate_memories
+from .memory_dream import MemoryDreamEngine
+from .memory_graph import (
+    add_edge,
+    add_edges_batch,
+    get_neighbors,
+    traverse_paths,
+    find_invalidation_blast_radius,
+)
+from .memory_conflict import get_evidence_tier, has_semantic_polarity_conflict
 from .memory_plasticity import apply_task_outcome
 from .memory_surprise import compute_surprise, extract_causal_triplet, should_flash_write
 from .memory_sync import sync_databases
 from .memory_store import (
     check_fact_freshness,
+    dispute_fact,
     drop_fact,
     flush_background,
     list_tags,
     normalize_ebm,
     prune_dormant_vectors,
+    query_fact_lineage,
     recall_facts,
     get_facts_by_ids,
     reindex_embeddings,
@@ -51,6 +62,16 @@ __all__ = [
     "extract_causal_triplet",
     "should_flash_write",
     "consolidate_memories",
+    "MemoryDreamEngine",
+    "add_edge",
+    "add_edges_batch",
+    "get_neighbors",
+    "traverse_paths",
+    "find_invalidation_blast_radius",
+    "get_evidence_tier",
+    "has_semantic_polarity_conflict",
+    "dispute_fact",
+    "query_fact_lineage",
     "check_fact_freshness",
     "sync_databases",
     "prune_dormant_vectors",

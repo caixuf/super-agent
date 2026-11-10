@@ -148,6 +148,25 @@ def _connect() -> sqlite3.Connection:
         " ON working_fact(user_id, workspace_id, subject, statement)")
     # 按来源批量作废/统计（nightly 重灌的阶段 1）走这条
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_source ON working_fact(source, status)")
+    # 动态检查并补齐 TMS 认知真值维护字段（零停机无损迁移）
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(working_fact)").fetchall()}
+    if "validity_state" not in cols:
+        conn.execute("ALTER TABLE working_fact ADD COLUMN validity_state TEXT NOT NULL DEFAULT 'ACTIVE'")
+    if "contradicted_by" not in cols:
+        conn.execute("ALTER TABLE working_fact ADD COLUMN contradicted_by TEXT")
+    if "confidence_level" not in cols:
+        conn.execute("ALTER TABLE working_fact ADD COLUMN confidence_level REAL NOT NULL DEFAULT 1.0")
+    if "evidence_refs" not in cols:
+        conn.execute("ALTER TABLE working_fact ADD COLUMN evidence_refs TEXT NOT NULL DEFAULT '[]'")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_validity ON working_fact(validity_state)")
+
+    # 拓扑轻量图引擎支持：初始化 memory_edges 边表与多维索引
+    try:
+        from . import memory_graph
+        memory_graph.ensure_graph_tables(conn)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(logger_name("store")).debug("初始化拓扑图表失败: %s", exc)
+
     # 向量持久化表：保存事实文本的高维嵌入，写入即持久化，召回时避免重复请求模型
     conn.execute(
         """
@@ -219,6 +238,7 @@ def write_fact(
     statement: str,
     *,
     ebm: Optional[str] = None,
+    workspace_id: Optional[str] = None,
     tags: Optional[Dict[str, Any]] = None,
     subject: str = "",
     details: str = "",
@@ -232,6 +252,10 @@ def write_fact(
     initial_status: str = 'active',
     dedupe_by_statement: bool = False,
     schedule_background_index: bool = True,
+    validity_state: str = "ACTIVE",
+    confidence_level: float = 1.0,
+    evidence_refs: Optional[List[str]] = None,
+    derived_from_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """确定性写入一条经验。同 (workspace_id, subject, statement) 视为同一条，幂等跳过。
 
@@ -243,6 +267,8 @@ def write_fact(
     默认关闭，是为了不改变既有调用点的语义（尤其是批量导入和测试夹具）。
     自动触发链路（tools/memory_trigger）显式打开它。
     """
+    if workspace_id and not ebm:
+        ebm = workspace_id
     stmt = (statement or "").strip()
     if initial_status not in ('active', 'candidate') or (initial_status == 'candidate' and resolve_conflict):
         raise ValueError('invalid initial fact status')
@@ -398,33 +424,74 @@ def write_fact(
                 from . import memory_conflict  # type: ignore
             candidates = _conflict_candidates(conn, stmt, bucket, user_id)
             verdict = memory_conflict.resolve(
-                {"statement": stmt, "subject": subject, "workspace_id": bucket},
+                {
+                    "statement": stmt,
+                    "subject": subject,
+                    "workspace_id": bucket,
+                    "source": source,
+                    "evidence_refs": evidence_refs or [],
+                    "confidence_level": confidence_level,
+                },
                 candidates)
             if verdict.get("action") == "skip":
                 return {"ok": True, "written": False, "reason": "rejected_by_conflict",
                         "workspace_id": bucket, "conflict": verdict}
 
         fid = fact_id or str(uuid.uuid4())
+        ev_json = json.dumps(evidence_refs or [], ensure_ascii=False)
+        v_state = str(validity_state or "ACTIVE").upper()
         conn.execute(
             "INSERT INTO working_fact"
             " (fact_id, user_id, agent_id, session_id, workspace_id, branch, source,"
             "  statement, files, subject, details, fact_link, derived_experience_ids,"
-            "  status, fact_chain_summary, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "  status, fact_chain_summary, created_at,"
+            "  validity_state, contradicted_by, confidence_level, evidence_refs)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (fid, user_id, agent_id, "default_session", bucket, branch, source,
              stmt, "[]", subject, details, None, "[]",
-             initial_status, "", time.strftime("%Y-%m-%dT%H:%M:%S")),
+             initial_status, "", time.strftime("%Y-%m-%dT%H:%M:%S"),
+             v_state, None, float(confidence_level), ev_json),
         )
         _put_tags(conn, fid, tag_map)
+
+        # 写入 DERIVED_FROM 拓扑图边
+        if derived_from_ids:
+            try:
+                from . import memory_graph
+                for pid in derived_from_ids:
+                    if pid and str(pid).strip():
+                        memory_graph.add_edge(fid, memory_graph.REL_DERIVED_FROM, str(pid).strip(), conn=conn)
+            except Exception as g_exc:  # noqa: BLE001
+                logging.getLogger(logger_name("store")).debug("写入 DERIVED_FROM 图边跳过: %s", g_exc)
+
         superseded: List[str] = []
+        disputed_cascades: List[str] = []
         if verdict.get("relation") == "supersede":
             for old_id in verdict.get("superseded") or []:
                 cur = conn.execute(
-                    "UPDATE working_fact SET status='superseded', fact_chain_summary=?"
-                    " WHERE fact_id=? AND status='active'",
-                    ("superseded_by:%s %s" % (fid, verdict.get("reason") or ""), old_id))
+                    "UPDATE working_fact SET status='superseded', validity_state='SUPERSEDED', contradicted_by=?,"
+                    " fact_chain_summary=? WHERE fact_id=? AND status='active'",
+                    (fid, "superseded_by:%s %s" % (fid, verdict.get("reason") or ""), old_id))
                 if cur.rowcount > 0:
                     superseded.append(old_id)
+                    # 建立拓扑图边 SUPERSEDES
+                    try:
+                        from . import memory_graph
+                        memory_graph.add_edge(fid, memory_graph.REL_SUPERSEDES, old_id,
+                                              weight=1.0, properties={"reason": verdict.get("reason") or ""}, conn=conn)
+                        # 级联失效判定：受影响面推导 (Blast Radius)
+                        blast = memory_graph.find_invalidation_blast_radius(old_id, conn=conn)
+                        for b_node in blast:
+                            b_id = b_node.get("to_node")
+                            if b_id and b_id != fid:
+                                conn.execute(
+                                    "UPDATE working_fact SET validity_state='DISPUTED',"
+                                    " fact_chain_summary=fact_chain_summary || ' [DISPUTED: parent ' || ? || ' superseded by ' || ? || ']'"
+                                    " WHERE fact_id=? AND validity_state='ACTIVE'",
+                                    (old_id, fid, b_id))
+                                disputed_cascades.append(b_id)
+                    except Exception as g_exc:  # noqa: BLE001
+                        logging.getLogger(logger_name("store")).debug("级联失效分析跳过: %s", g_exc)
             if superseded:
                 _delete_vectors_for_facts(conn, superseded)
         try:
@@ -434,10 +501,12 @@ def write_fact(
             logging.getLogger(logger_name("store")).debug("FTS5 增量同步跳过: %s", exc)
         conn.commit()
         out = {"ok": True, "written": True, "fact_id": fid,
-               "workspace_id": bucket, "tags": tag_map}
+               "workspace_id": bucket, "tags": tag_map, "validity_state": v_state}
         if resolve_conflict:
             out["conflict"] = verdict
             out["superseded"] = superseded
+            if disputed_cascades:
+                out["disputed_cascades"] = disputed_cascades
 
         # 写入即预热/持久化向量。用非 daemon 线程 + atexit 汇合：
         # daemon 线程会在进程退出时被直接杀掉，向量就静默丢了 —— 常驻服务里
@@ -1191,7 +1260,7 @@ def _conflict_candidates(conn: sqlite3.Connection, statement: str,
     buckets = [bucket] if bucket == UNKNOWN_BUCKET else [bucket, UNKNOWN_BUCKET]
     marks = ",".join("?" * len(buckets))
     rows = conn.execute(
-        "SELECT fact_id, workspace_id, subject, statement FROM working_fact"
+        "SELECT fact_id, workspace_id, subject, statement, source, evidence_refs, confidence_level FROM working_fact"
         " WHERE user_id=? AND status='active' AND workspace_id IN (" + marks + ")"
         " ORDER BY created_at DESC LIMIT ?",
         [user_id, *buckets, limit]).fetchall()
@@ -2282,19 +2351,20 @@ def drop_fact(fact_id: str, reason: str = "manual") -> Dict[str, Any]:
 
 
 def supersede(old_fact_id: str, new_fact_id: str, reason: str = "") -> Dict[str, Any]:
-    """被新事实取代。**不删除**：status=superseded + 记下取代者，保留时间线。
+    """被新事实取代。**不删除**：status=superseded + validity_state=SUPERSEDED + 记下取代者，保留时间线。
 
     和 drop_fact 的区别：deprecated 是「这条作废了」；superseded 是「这条被
     更新的结论顶掉了」—— 后者仍然要能回答「当时为什么这么定」，所以必须留
-    指向新记录的引用。
+    指向新记录的引用。并触发级联失效（Cascade Invalidation）对账。
     """
     conn = _connect()
     try:
         cur = conn.execute(
-            "UPDATE working_fact SET status='superseded', fact_chain_summary=?"
-            " WHERE fact_id=? AND status='active'",
-            ("superseded_by:%s%s" % (new_fact_id, (" " + reason) if reason else ""),
+            "UPDATE working_fact SET status='superseded', validity_state='SUPERSEDED', contradicted_by=?,"
+            " fact_chain_summary=? WHERE fact_id=? AND status='active'",
+            (new_fact_id, "superseded_by:%s%s" % (new_fact_id, (" " + reason) if reason else ""),
              old_fact_id))
+        disputed_cascades = []
         if cur.rowcount > 0:
             _delete_vectors_for_facts(conn, [old_fact_id])
             try:
@@ -2302,9 +2372,81 @@ def supersede(old_fact_id: str, new_fact_id: str, reason: str = "") -> Dict[str,
                 memory_scale.sync_fts_rows(conn, [old_fact_id, new_fact_id], commit=False)
             except Exception:
                 pass
+            # 拓扑图边记录与级联波及面分析
+            try:
+                from . import memory_graph
+                memory_graph.add_edge(new_fact_id, memory_graph.REL_SUPERSEDES, old_fact_id,
+                                      weight=1.0, properties={"reason": reason}, conn=conn)
+                blast = memory_graph.find_invalidation_blast_radius(old_fact_id, conn=conn)
+                for b_node in blast:
+                    b_id = b_node.get("to_node")
+                    if b_id and b_id != new_fact_id:
+                        conn.execute(
+                            "UPDATE working_fact SET validity_state='DISPUTED',"
+                            " fact_chain_summary=fact_chain_summary || ' [DISPUTED: parent ' || ? || ' superseded by ' || ? || ']'"
+                            " WHERE fact_id=? AND validity_state='ACTIVE'",
+                            (old_fact_id, new_fact_id, b_id))
+                        disputed_cascades.append(b_id)
+            except Exception as g_exc:  # noqa: BLE001
+                logging.getLogger(logger_name("store")).debug("拓扑级联处理跳过: %s", g_exc)
+
         conn.commit()
         return {"ok": cur.rowcount > 0, "fact_id": old_fact_id,
-                "superseded_by": new_fact_id, "reason": reason}
+                "superseded_by": new_fact_id, "reason": reason, "disputed_cascades": disputed_cascades}
+    finally:
+        conn.close()
+
+
+def dispute_fact(fact_id: str, disputed_by: str = "", reason: str = "") -> Dict[str, Any]:
+    """争议标记：当某条事实被外部测试失败或前提动摇质疑时，置为 DISPUTED。"""
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            "UPDATE working_fact SET validity_state='DISPUTED',"
+            " fact_chain_summary=fact_chain_summary || ' [DISPUTED_BY:' || ? || ' ' || ? || ']'"
+            " WHERE fact_id=?",
+            (disputed_by, reason, fact_id))
+        conn.commit()
+        return {"ok": cur.rowcount > 0, "fact_id": fact_id, "validity_state": "DISPUTED", "reason": reason}
+    finally:
+        conn.close()
+
+
+def query_fact_lineage(fact_id: str) -> Dict[str, Any]:
+    """查询单条事实的前世今生谱系（上下游因果与真值演进）。"""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT fact_id, subject, statement, status, validity_state, contradicted_by, confidence_level, evidence_refs, created_at"
+            " FROM working_fact WHERE fact_id=?", (fact_id,)).fetchone()
+        if not row:
+            return {"ok": False, "error": "fact_not_found"}
+        try:
+            ev_list = json.loads(row[7]) if row[7] else []
+        except Exception:
+            ev_list = []
+        info = {
+            "fact_id": row[0],
+            "subject": row[1],
+            "statement": row[2],
+            "status": row[3],
+            "validity_state": row[4],
+            "contradicted_by": row[5],
+            "confidence_level": row[6],
+            "evidence_refs": ev_list,
+            "created_at": row[8],
+        }
+        # 查询图关系
+        try:
+            from . import memory_graph
+            parents = memory_graph.get_neighbors(fact_id, direction="out", conn=conn)
+            children = memory_graph.get_neighbors(fact_id, direction="in", conn=conn)
+            info["out_edges"] = parents
+            info["in_edges"] = children
+        except Exception:
+            info["out_edges"] = []
+            info["in_edges"] = []
+        return {"ok": True, "lineage": info}
     finally:
         conn.close()
 
