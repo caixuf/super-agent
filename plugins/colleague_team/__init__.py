@@ -5,6 +5,7 @@ import importlib
 import importlib.util
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import sys
@@ -62,8 +63,13 @@ def register(ctx):
     registry_path = ctx.get_config('registry_path')
     if not isinstance(registry_path, str):
         raise ValueError('registry_path required')
-    registry = engine.Registry(registry_path, profile_id=team_id, primary_id=primary_id,
-                               primary_name=ctx.get_config('primary_name', 'Primary'))
+    backend_runner = os.environ.get('SUPERAGENT_BACKEND_RUNNER') == '1'
+    if backend_runner:
+        registry = engine.Registry(registry_path, profile_id=team_id, primary_id=primary_id,
+                                   primary_name=ctx.get_config('primary_name', 'Primary'), readonly=True)
+    else:
+        registry = engine.Registry(registry_path, profile_id=team_id, primary_id=primary_id,
+                                   primary_name=ctx.get_config('primary_name', 'Primary'))
     # Profile is provided by Hermes at registration; model arguments never select it.
     actor = engine.Actor(team_id, ctx.profile_name)
 
@@ -139,11 +145,15 @@ def register(ctx):
          {'member_id': slug, 'request_id': request}),
     ]
     for action, description, properties in defs:
+        if backend_runner and action != 'list':
+            continue
         name = 'colleague_' + action
         ctx.register_tool(name=name, toolset='colleague_team', description=description,
                           schema={'name': name, 'description': description, 'parameters': {
                               'type': 'object', 'additionalProperties': False, 'properties': properties,
                               'required': [] if action == 'list' else list(properties)}}, handler=handle(action))
+    if backend_runner:
+        return
 
     # Dispatch is a separate opt-in capability. The plugin never constructs a
     # Provisioner, Gateway connection, owner identity or session binding itself.

@@ -1491,9 +1491,14 @@ class AttemptBoundSandboxAdapter:
                 pm_res = Path(pm_target).expanduser().resolve(strict=True)
             except OSError:
                 continue
-            if pm_res.name not in {".install.lock", ".prepare.lock", ".leases"}:
+            is_shared_runtime_dir = pm_res == (hermes_root / "runtime") and pm_res.is_dir()
+            if not is_shared_runtime_dir and pm_res.name not in {".install.lock", ".prepare.lock", ".leases"}:
                 continue
-            if pm_res.is_relative_to(hermes_root / "installs") or not is_forbidden_host_path(pm_res)[0]:
+            if (
+                is_shared_runtime_dir
+                or pm_res.is_relative_to(hermes_root / "installs")
+                or not is_forbidden_host_path(pm_res)[0]
+            ):
                 _bind_rw_unchecked(pm_res)
 
         for ms_target in managed_state_paths:
@@ -1517,18 +1522,23 @@ class AttemptBoundSandboxAdapter:
                 _bind_rw_unchecked(ms_res)
 
         if argv:
-            try:
-                exe_p = Path(str(argv[0])).expanduser()
-                if exe_p.is_file():
-                    exe_res = exe_p.resolve(strict=True)
-                    exe_str = str(exe_res)
-                    if exe_str not in bound_rw and not any(
-                        exe_str == bp or exe_str.startswith(bp + "/") for bp in bound_rw
-                    ):
-                        if exe_res.is_relative_to(Path("/tmp")):
+            seen_tmp_ro: set[str] = set()
+            for arg_item in argv:
+                try:
+                    exe_p = Path(str(arg_item)).expanduser()
+                    if exe_p.is_file():
+                        exe_res = exe_p.resolve(strict=True)
+                        exe_str = str(exe_res)
+                        if (
+                            exe_str not in seen_tmp_ro
+                            and exe_str not in bound_rw
+                            and not any(exe_str == bp or exe_str.startswith(bp + "/") for bp in bound_rw)
+                            and exe_res.is_relative_to(Path("/tmp"))
+                        ):
                             cmd.extend(["--ro-bind", exe_str, exe_str])
-            except OSError:
-                pass
+                            seen_tmp_ro.add(exe_str)
+                except OSError:
+                    continue
 
         # Mask host credential directories and files after writable binds so they remain inaccessible and read-only
         masked_credentials: list[str] = []

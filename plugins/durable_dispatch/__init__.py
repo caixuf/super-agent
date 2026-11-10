@@ -1546,37 +1546,38 @@ def format_boost_status(services=None, ctx=None) -> str:
 def register(ctx):
     if ctx.get_config('enabled', False) is not True:
         return
-    # A backend runner is an executor, not a frontdesk: do not inject the
-    # dispatch rules or it will submit the same work again instead of doing it.
-    backend_runner = _backend_execution_session()
+    # A backend runner is an executor, not a frontdesk: never open dispatch
+    # queues (read-only inside bwrap), inject frontdesk prompts, expose
+    # durable_* tools, or spawn competing outbox/card backfill threads.
+    if _backend_execution_session():
+        return
     services = build_dispatch_services(ctx, ctx.profile_name)
-    if not backend_runner:
-        ctx.register_system_prompt_section(
-            'durable-dispatch-routing',
-            _render_routing_base(),
-            # The host DROPS a section over its budget (it does not truncate), so the
-            # budget must exceed the literal text below or the frontdesk never sees
-            # the routing rules. tests/test_durable_dispatch.py pins this.
-            position='after_memory', max_chars=_SECTION_BUDGET,
-        )
-        # Brief-writing rules and the expert roster live in their own section: in
-        # one section the roster overflowed the host cap and was silently dropped.
-        ctx.register_system_prompt_section(
-            'durable-dispatch-briefing',
-            _render_briefing_prompt(services),
-            position='after_memory', max_chars=_SECTION_BUDGET,
-        )
-        register_hook = getattr(ctx, 'register_hook', None)
-        if callable(register_hook):
-            def _capture_request(session_id='', user_message=None,
-                                 conversation_history=None, **_):
-                try:
-                    remember_request_context(session_id, user_message, conversation_history)
-                except Exception:
-                    logging.getLogger(__name__).debug('request context capture failed',
-                                                      exc_info=True)
-                return None
-            register_hook('pre_llm_call', _capture_request)
+    ctx.register_system_prompt_section(
+        'durable-dispatch-routing',
+        _render_routing_base(),
+        # The host DROPS a section over its budget (it does not truncate), so the
+        # budget must exceed the literal text below or the frontdesk never sees
+        # the routing rules. tests/test_durable_dispatch.py pins this.
+        position='after_memory', max_chars=_SECTION_BUDGET,
+    )
+    # Brief-writing rules and the expert roster live in their own section: in
+    # one section the roster overflowed the host cap and was silently dropped.
+    ctx.register_system_prompt_section(
+        'durable-dispatch-briefing',
+        _render_briefing_prompt(services),
+        position='after_memory', max_chars=_SECTION_BUDGET,
+    )
+    register_hook = getattr(ctx, 'register_hook', None)
+    if callable(register_hook):
+        def _capture_request(session_id='', user_message=None,
+                             conversation_history=None, **_):
+            try:
+                remember_request_context(session_id, user_message, conversation_history)
+            except Exception:
+                logging.getLogger(__name__).debug('request context capture failed',
+                                                  exc_info=True)
+            return None
+        register_hook('pre_llm_call', _capture_request)
     roster_path = ctx.get_config('roster_registry_path')
     if (not isinstance(roster_path, str) or not roster_path
             or not Path(roster_path).is_absolute()):
@@ -1613,27 +1614,23 @@ def register(ctx):
         ('roster', 'Read-only: list the administrator-configured colleague roles and, when a roster registry is configured, the count of active members. Answer roster/status questions with this instead of durable_submit; it creates no task and requires no source files.',
          {}, []),
     )
-    # A backend executor must not be able to dispatch again: without this the
-    # nested turn re-submits the same work and the real result lands in a local
-    # session instead of the conversation that asked for it.
-    if not backend_runner:
-        for action, description, properties, required in entries:
-            name = 'durable_' + action
-            ctx.register_tool(name=name, toolset='durable_dispatch', description=description,
-                              schema={'name': name, 'description': description, 'parameters': {
-                                  'type': 'object', 'additionalProperties': False,
-                                  'properties': properties, 'required': required}},
-                              handler=_handler(router, action))
+    for action, description, properties, required in entries:
+        name = 'durable_' + action
+        ctx.register_tool(name=name, toolset='durable_dispatch', description=description,
+                          schema={'name': name, 'description': description, 'parameters': {
+                              'type': 'object', 'additionalProperties': False,
+                              'properties': properties, 'required': required}},
+                          handler=_handler(router, action))
 
-        register_command = getattr(ctx, "register_command", None)
-        if callable(register_command):
-            def _cmd_boost(raw_args: str = "") -> str:
-                return format_boost_status(services=services, ctx=ctx)
-            register_command(
-                "boost", _cmd_boost,
-                "显示已配置的调度角色和回执投递设置",
-                args_hint="[status]"
-            )
+    register_command = getattr(ctx, "register_command", None)
+    if callable(register_command):
+        def _cmd_boost(raw_args: str = "") -> str:
+            return format_boost_status(services=services, ctx=ctx)
+        register_command(
+            "boost", _cmd_boost,
+            "显示已配置的调度角色和回执投递设置",
+            args_hint="[status]"
+        )
 
     if (ctx.get_config('deliver_completions', False) is True
             and ctx.get_config('completion_card_enabled', False) is True):

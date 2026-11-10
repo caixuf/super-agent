@@ -429,3 +429,110 @@ def test_doctor_worker_queue_health_observation_detects_degradation_without_leak
     assert obs["recent_completed_post_install"] == 1
     assert obs["recent_engine_degraded_post_install"] == 1
     assert "SECRET" not in repr(obs)
+
+
+def test_managed_hermes_launcher_rewrites_to_inproc_oneshot_inside_bwrap(tmp_path: Path, monkeypatch):
+    der = _load_runner()
+    att_dir = tmp_path / "attempt_1"
+    att_dir.mkdir(parents=True)
+    monkeypatch.setenv("SUPERAGENT_ATTEMPT_DIR", str(att_dir))
+
+    managed_bin = tmp_path / "hermes"
+    managed_bin.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "if sys.argv[1:2] == ['--print-runtime-command']:\n"
+        f"    print(json.dumps([{sys.executable!r}, '-I', '-c', "
+        "\"import os, sys, runpy; runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)\"]))\n"
+        "    raise SystemExit(0)\n"
+        "raise SystemExit(2)\n",
+        encoding="utf-8",
+    )
+    managed_bin.chmod(0o755)
+
+    cmd = der._build_local_hermes_cmd(
+        str(managed_bin),
+        budget=120,
+        max_turns=25,
+        route={"selected_model": "flash", "selected_reasoning_effort": "low"},
+        env=dict(os.environ),
+    )
+    assert cmd[0] == sys.executable
+    assert cmd[2] == "-c"
+    assert "hermes_inproc_oneshot.py" in cmd[3]
+    assert "hermes_cli.main" not in cmd[3]
+    assert "--model" in cmd and cmd[cmd.index("--model") + 1] == "flash"
+    assert "--reasoning" in cmd and cmd[cmd.index("--reasoning") + 1] == "low"
+    assert "--usage-file" in cmd and cmd[cmd.index("--usage-file") + 1].endswith("hermes_usage.json")
+
+
+def test_backend_runner_plugins_load_cleanly_against_readonly_state(tmp_path: Path, monkeypatch):
+    """Inside bwrap, state/ queues and colleague-team/registry.sqlite are read-only."""
+    from agentcore.colleague_registry import Registry
+
+    dd_plugin = _load_dispatch_plugin()
+    ct_spec = importlib.util.spec_from_file_location(
+        "ct_plugin_test", REPO / "plugins" / "colleague_team" / "__init__.py"
+    )
+    ct_plugin = importlib.util.module_from_spec(ct_spec)
+    ct_spec.loader.exec_module(ct_plugin)
+
+    reg_dir = tmp_path / "colleague-team"
+    reg_dir.mkdir(mode=0o700)
+    reg_file = reg_dir / "registry.sqlite"
+    # Host initializes registry first
+    Registry(reg_file, profile_id="team-alpha", primary_id="lead", primary_name="Lead")
+
+    # Make both queue parent and registry directory read-only (simulating bwrap --ro-bind)
+    ro_parent = tmp_path / "readonly_queues"
+    ro_parent.mkdir(mode=0o500)
+    reg_file.chmod(0o400)
+    reg_dir.chmod(0o500)
+
+    try:
+        monkeypatch.setenv("SUPERAGENT_BACKEND_RUNNER", "1")
+        tools_registered: dict[str, tuple[str, object]] = {}
+        prompts_registered: list[str] = []
+
+        dd_ctx = SimpleNamespace(
+            profile_name="lead",
+            get_config=lambda k, default=None: {
+                "enabled": True,
+                "queue_root": str(ro_parent / "analysis-queue"),
+                "allowed_roots": [str(tmp_path)],
+                "deliver_completions": True,
+            }.get(k, default),
+            register_tool=lambda **kw: tools_registered.__setitem__(kw["name"], (kw["toolset"], kw["handler"])),
+            register_system_prompt_section=lambda name, *a, **kw: prompts_registered.append(name),
+        )
+        # Must NOT open ro_parent/analysis-queue or start backfill threads!
+        dd_plugin.register(dd_ctx)
+        assert not tools_registered
+        assert not prompts_registered
+
+        ct_ctx = SimpleNamespace(
+            profile_name="lead",
+            get_config=lambda k, default=None: {
+                "enabled": True,
+                "engine_root": str(REPO),
+                "team_id": "team-alpha",
+                "primary_id": "lead",
+                "primary_name": "Lead",
+                "registry_path": str(reg_file),
+                "gateway_dispatch.enabled": True,
+            }.get(k, default),
+            register_tool=lambda **kw: tools_registered.__setitem__(kw["name"], (kw["toolset"], kw["handler"])),
+            register_system_prompt_section=lambda name, *a, **kw: prompts_registered.append(name),
+        )
+        ct_plugin.register(ct_ctx)
+        assert list(tools_registered) == ["colleague_list"]
+        toolset, list_handler = tools_registered["colleague_list"]
+        assert toolset == "colleague_team"
+        out = json.loads(list_handler({}, session_id="worker-sess-1"))
+        assert out["ok"] is True
+        assert any(m["member_id"] == "lead" for m in out["members"])
+    finally:
+        ro_parent.chmod(0o700)
+        reg_dir.chmod(0o700)
+        reg_file.chmod(0o600)
+

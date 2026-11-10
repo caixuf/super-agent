@@ -408,7 +408,7 @@ _INTERNAL_ATTEMPT_FILES = {
     "binding.json", "input.json", "input.json.tmp", "progress.json", "progress.json.tmp",
     "stop.json", "manifest.json", "report.json", "checkpoint.json",
     "state_checkpoints.db", "state_checkpoints.db-wal", "state_checkpoints.db-shm",
-    "containment_audit.json",
+    "containment_audit.json", "hermes_usage.json",
     "stdout", "stderr", "stdout.log", "stderr.log",
 }
 _ABS_FILE_RE = re.compile(r"(?<![A-Za-z0-9_.\-/])(/(?:home|tmp|data)(?:/[A-Za-z0-9_.\-]+)+\.[A-Za-z0-9]+)")
@@ -612,6 +612,13 @@ def _wrap_with_bwrap_sandbox(
             else _profile_home()
         )
         pm_writable_paths: list[Path] = []
+        hermes_shared_runtime = Path.home() / ".hermes" / "runtime"
+        try:
+            hermes_shared_runtime.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        if hermes_shared_runtime.is_dir():
+            pm_writable_paths.append(hermes_shared_runtime)
         installs_dir = Path.home() / ".hermes" / "installs"
         if installs_dir.is_dir():
             for inst_dir in sorted(installs_dir.iterdir()):
@@ -633,6 +640,18 @@ def _wrap_with_bwrap_sandbox(
                         pass
                     if prepare_lock.is_file():
                         pm_writable_paths.append(prepare_lock)
+                    gens_dir = pm_runtime_dir / "generations"
+                    if gens_dir.is_dir():
+                        for gen_dir in sorted(gens_dir.iterdir()):
+                            if not gen_dir.is_dir():
+                                continue
+                            gen_leases = gen_dir / ".leases"
+                            try:
+                                gen_leases.mkdir(exist_ok=True)
+                            except OSError:
+                                pass
+                            if gen_leases.is_dir():
+                                pm_writable_paths.append(gen_leases)
                 envs_dir = inst_dir / "environments"
                 if envs_dir.is_dir():
                     for env_dir in sorted(envs_dir.iterdir()):
@@ -703,6 +722,85 @@ def _wrap_with_bwrap_sandbox(
         return cmd, None
 
 
+def _build_local_hermes_cmd(
+    binary: str,
+    *,
+    budget: int,
+    max_turns: int,
+    route: dict | None = None,
+    env: dict[str, str] | None = None,
+) -> list[str]:
+    """Resolve an in-process sandboxed Hermes command when `binary` is a managed launcher.
+
+    Upstream `hermes chat --oneshot` and `hermes -z` dial the shared profile gateway
+    over WebSocket (`tui_gateway.ws`), which bypasses `bwrap` containment and fails
+    with `rc=1` whenever the gateway daemon is restarting or absent on colleague
+    profiles. Managed Hermes launchers expose `--print-runtime-command`, allowing the
+    worker to boot `hermes_bootstrap` directly inside `bwrap` and run `AIAgent`
+    in-process via `hermes_inproc_oneshot.py`.
+    """
+    fallback_cmd = [
+        binary, "chat", "--query-file", "-", "--oneshot",
+        "--run-budget", str(budget), "--max-turns", str(max_turns),
+    ]
+    if (os.environ.get("DEV_HERMES_CLI_MODE") or "").strip().lower() in ("1", "true", "chat"):
+        return fallback_cmd
+    inproc_script = Path(__file__).with_name("hermes_inproc_oneshot.py")
+    if not inproc_script.is_file():
+        return fallback_cmd
+    try:
+        bin_path = Path(binary)
+        if not bin_path.is_file() or bin_path.stat().st_size > 131072:
+            return fallback_cmd
+        launcher_head = bin_path.read_bytes()[:65536]
+        if b"--print-runtime-command" not in launcher_head:
+            return fallback_cmd
+        probe = subprocess.Popen(
+            [binary, "--print-runtime-command"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        stdout_text, _ = probe.communicate(timeout=10)
+        if probe.returncode != 0 or not stdout_text.strip():
+            return fallback_cmd
+        runtime_argv = json.loads(stdout_text.strip())
+        if (
+            not isinstance(runtime_argv, list)
+            or len(runtime_argv) < 4
+            or runtime_argv[2] != "-c"
+            or not isinstance(runtime_argv[3], str)
+        ):
+            return fallback_cmd
+        target_call = "runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)"
+        if target_call not in runtime_argv[3]:
+            return fallback_cmd
+        script_literal = repr(str(inproc_script.resolve()))
+        patched_bootstrap = runtime_argv[3].replace(
+            target_call,
+            f"runpy.run_path({script_literal}, run_name='__main__')",
+            1,
+        )
+        cmd = [str(runtime_argv[0]), * [str(x) for x in runtime_argv[1:3]], patched_bootstrap]
+        cmd.extend([
+            "--query-file", "-",
+            "--run-budget", str(budget),
+            "--max-turns", str(max_turns),
+        ])
+        if route:
+            if route.get("selected_model"):
+                cmd.extend(["--model", str(route["selected_model"])])
+            if route.get("selected_reasoning_effort"):
+                cmd.extend(["--reasoning", str(route["selected_reasoning_effort"])])
+        attempt_env = (os.environ.get("SUPERAGENT_ATTEMPT_DIR") or "").strip()
+        if attempt_env and Path(attempt_env).is_dir():
+            cmd.extend(["--usage-file", str(Path(attempt_env) / "hermes_usage.json")])
+        return cmd
+    except Exception:
+        return fallback_cmd
+
+
 def run_hermes(goal: str, *, route: dict | None = None) -> dict:
     effective_goal = _decorate_goal(goal)
     budget = int(os.environ.get("DEV_BUDGET", "3600"))
@@ -749,8 +847,13 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
         if not binary:
             return {"ok": False, "error": "hermes_unavailable"}
         cleaned_env = _clean_env(route)
-        cmd = [binary, "chat", "--query-file", "-", "--oneshot",
-               "--run-budget", str(budget), "--max-turns", str(max_turns)]
+        cmd = _build_local_hermes_cmd(
+            binary,
+            budget=budget,
+            max_turns=max_turns,
+            route=route,
+            env=cleaned_env,
+        )
         cmd, containment_meta = _wrap_with_bwrap_sandbox(cmd, route=route, env=cleaned_env)
         run_kwargs = {"cwd": str(_workdir()), "env": cleaned_env, "input": effective_goal, "preexec_fn": _set_file_limit}
     try:

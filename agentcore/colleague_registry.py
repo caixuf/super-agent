@@ -89,8 +89,9 @@ def _boundaries(value):
 class Registry:
     """One profile's persisted directory; workers and queues stay host-owned."""
 
-    def __init__(self, path, *, profile_id, primary_id, primary_name="Primary"):
+    def __init__(self, path, *, profile_id, primary_id, primary_name="Primary", readonly: bool = False):
         self.path = Path(path)
+        self.readonly = bool(readonly)
         if not self.path.is_absolute() or not self.path.parent.is_dir() or self.path.is_symlink():
             raise ValueError("absolute_registry_path_required")
         parent_info = self.path.parent.stat()
@@ -99,6 +100,12 @@ class Registry:
         self.profile_id = _identity(profile_id, "profile_id")
         primary_id = _identity(primary_id, "primary_id")
         primary_name = _label(primary_name)
+        if self.readonly:
+            if self.path.exists():
+                info = self.path.stat()
+                if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+                    raise ValueError("private_registry_file_required")
+            return
         # Never raw-open/close a SQLite database: same-process raw close drops
         # POSIX locks held by other connections. SQLite creates the file inside
         # an owner-only directory, and chmod does not open or close a database FD.
@@ -203,6 +210,17 @@ class Registry:
 
     @contextmanager
     def _db(self):
+        if getattr(self, "readonly", False):
+            from urllib.parse import quote
+
+            uri = f"file:{quote(str(self.path), safe='/')}?mode=ro&immutable=1"
+            db = sqlite3.connect(uri, uri=True, timeout=5)
+            db.row_factory = sqlite3.Row
+            try:
+                yield db
+            finally:
+                db.close()
+            return
         db = sqlite3.connect(str(self.path), timeout=30)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
