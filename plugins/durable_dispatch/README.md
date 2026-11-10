@@ -180,7 +180,7 @@ The plugin also logs one WARNING per changed backlog summary, which is what an
 operator reading `agent.log` sees when no sender is configured.
 
 Repairing a stuck receipt is an administrative action, not an automatic one; see
-`docs/COMPLETION_DELIVERY.md`.
+`docs/TECH_MANUAL.md`.
 - Plugin host isolation (`plugins.isolation: host`) runs the plugin in a separate
   process, so the gateway's bound session ContextVars are not visible there and
   route capture yields no route; completions then park. The current host serves this

@@ -15,7 +15,7 @@
     抽取、向量化、事实写入、租约回收属于 T2 worker，**不在本模块**。
     这里保证的是「事件不丢、不重、顺序可恢复」，而不是「事实已写入」。
 
-设计约束（见 docs/reports/2026-10-26_memory_automation.md）：
+设计约束（见 docs/TECH_MANUAL.md §3 突触记忆引擎）：
 
     1. 只有 ``status == "completed"`` 的回合入队。failed / interrupted 的回合
        仍可生成事件做审计，但绝不进入确认事实链路 —— 半途而废的回合里

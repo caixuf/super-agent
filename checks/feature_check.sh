@@ -228,7 +228,7 @@ cat <<'EOF'
      * 网关能否启动、消息能否收发 —— 需要真凭据与平台回调，属部署后验收
      * 模型路由是否可用 —— 本脚本只在本机已有路由上跑执行器一步，不验证多路由
      * 业务叠加层的**内容**（业务工具面 / 知识库 / 业务身份段）—— 本仓不含业务内容
-     * 跨机迁移后的账号级配置（systemd linger、profile 凭据）—— 见 docs/MIGRATION.md
+     * 跨机迁移后的账号级配置（systemd linger、profile 凭据）—— 见 docs/DEPLOY.md
 EOF
 
 step "结果"

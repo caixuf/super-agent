@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """宿主侧补丁：让「一任务一张卡」在工具边界不换消息，且只在真正终态转绿。
 
-背景（docs/reports/2026-10-26_delivery.md 的 T5 一节 / docs/reports/2026-10-26_t5_interaction_form.md §4）：
+背景（详见 docs/TECH_MANUAL.md §4 卡片流式状态机与完成态投递）：
 
 1. 网关在**工具边界**也会以 ``finalize=True`` 调 ``edit_message``（用来封一段前言）。
    卡片补丁把 ``finalize`` 直接当成终态 → 每次工具调用后卡片都转绿、并且摘掉卡片登记，

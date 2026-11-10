@@ -485,7 +485,7 @@ python3 -m agentcore.pool --root /absolute/private/test-queue worker --help
 
 | 主题 | 源码或文档 | 核对重点 |
 | --- | --- | --- |
-| 权威技术总览 | `docs/INDEX.md`、`docs/TECH_MANUAL.md` | 技术文档权威主导航与全局索引 |
+| 权威技术总览 | `docs/README.md`、`docs/TECH_MANUAL.md` | 技术文档权威主导航与全局索引 |
 | 系统全景架构 | `docs/ARCHITECTURE.md`、`docs/SUPERAGENT_ARCHITECTURE_DEEP_DIVE.md` | 十二层架构、单根拓扑与状态机确定性保证 |
 | 生产部署指南 | `docs/DEPLOY.md`、`docs/ONE_COMMAND_INSTALL.md`、`docs/REDEPLOY.md` | 单根安装器、身份暂存叠加、hermes-current 自动推断 |
 | 插件与工具面 | `docs/PLUGINS.md` | 16 款插件 + localvec 记忆提供方、两道启用门禁 |

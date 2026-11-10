@@ -13,26 +13,12 @@
 
 ---
 
-## 先进 Agent 架构与工程实践指南（核心技术导读）
-
-若希望系统学习本项目沉淀的**生产级常驻智能体（Always-on Production Agent）**核心架构、设计哲学与工程实现，请从 [`docs/guide/README.md`](docs/guide/README.md) 开始阅读：
-
-| 篇目 | 文档 | 核心技术与源码映射 |
-| :--- | :--- | :--- |
-| **第 0 篇** | [`docs/guide/00_ARCHITECTURE_OVERVIEW.md`](docs/guide/00_ARCHITECTURE_OVERVIEW.md) | **全景导览**：玩具 Agent 的六大生产死穴、十二层架构图、端到端请求生命周期、通用本体与声明式业务规格（`BusinessProfileSpec`）解耦范式 |
-| **第 1 篇** | [`docs/guide/01_COLLEAGUE_AND_ORCHESTRATION.md`](docs/guide/01_COLLEAGUE_AND_ORCHESTRATION.md) | **多智能体组织学**：同事制 vs 编排制/对等制、主同事五条铁律、8 大研发同事契约、Git Worktree + `fcntl.flock` 隔离、三级模型路由与 `ADR-S1 ~ ADR-S6` |
-| **第 2 篇** | [`docs/guide/02_DURABLE_RUNTIME_AND_LIVENESS.md`](docs/guide/02_DURABLE_RUNTIME_AND_LIVENESS.md) | **长任务运行时**：SQLite 持久任务池、Attempt Fencing 围栏、Linux Subreaper 进程树收割、活体心跳账本（`stalled` vs `lost`）、中途插话抢占（Barge-in）、双阶段零 LLM 主动探针（Proactive Hooks） |
-| **第 3 篇** | [`docs/guide/03_MEMORY_ENGINEERING.md`](docs/guide/03_MEMORY_ENGINEERING.md) | **生产级长期记忆**：为什么绕开黑盒 LLM 抽取覆写、`workspace_id` 代际分桶硬隔离、独立 `fact_tags` 表、向量与词法双路召回、常驻内存水位体检 |
-| **第 4 篇** | [`docs/guide/04_EVIDENCE_AND_VERIFICATION.md`](docs/guide/04_EVIDENCE_AND_VERIFICATION.md) | **防幻觉与确定性工程**：双轨物理证据门禁、CardKit 2.0 单在途合并与 `drain()` 屏障、服务端回读核对、零业务词棘轮门禁、死端口请求转储取证与干净室 20 项断言 |
-
----
-
 ## 权威技术规范与操作指南（v2.0 单根架构核心文档）
 
 系统级技术手册、全景架构、生产部署、插件与运维文档：
 
-- [`docs/INDEX.md`](docs/INDEX.md)：**全套技术文档权威导航索引**
-- [`docs/TECH_MANUAL.md`](docs/TECH_MANUAL.md)：**Super Agent 技术手册** —— 系统原理、执行边界、并发/恢复语义与故障处置矩阵
+- [`docs/README.md`](docs/README.md)：**全套技术文档权威导航与全景索引**
+- [`docs/TECH_MANUAL.md`](docs/TECH_MANUAL.md)：**Super Agent 技术手册** —— 系统原理、任务持久池、突触记忆引擎、并发/恢复语义与故障处置矩阵
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：**v2.0 架构全景深潜** —— 单根拓扑（`~/super_agent/<profile>`）、十二层分层机制、同事制多智能体与 ADR-S1~S6 守卫
 - [`docs/DEPLOY.md`](docs/DEPLOY.md)：**生产部署与生命周期指南** —— 单根受管安装、版本 Release 原子切换、身份暂存与业务叠加层挂载（`SOUL.generic.md`）、`hermes-current` 自动推断
 - [`docs/PLUGINS.md`](docs/PLUGINS.md)：**插件与工具面全景指南** —— 16 款受管插件（13 款通用内建 + 3 款受管外部）与 `localvec` 记忆提供方、两道启用门禁
@@ -44,13 +30,13 @@
 
 - **持久任务池**：`agentcore.pool` 负责持久任务、依赖、租约与结果 outbox；`agentcore.worker` 通过有界 `AgentScheduler` 调用 stdlib 或真实 `flowcoro_py` 后端。支持取消、超时、输出预算和旧 attempt 隔离。
 - **只读分析运行器**：`agentcore.analysis_runner` 执行只读分析任务，产出 `citation_traceability_only` 结构化引用事实。
-- **研发同事运行器**：`agentcore.dev_runner` 提供工作树编码与测试接缝，以跨进程 `fcntl.flock` 保持执行和验收单一写者；验收命令由管理员策略固定，任务不得自行执行宿主命令。CLI 可显式注入管理员审查的生成／验收适配器，不由任务选择模块；工作树、锁和适配器本身均不是安全沙箱，完整研发执行仍受可信隔离门禁约束，见 [验收授权边界](docs/POOL_RUNTIME.md#development-verification-authority)。
+- **研发同事运行器**：`agentcore.dev_runner` 提供工作树编码与测试接缝，以跨进程 `fcntl.flock` 保持执行和验收单一写者；验收命令由管理员策略固定，任务不得自行执行宿主命令。CLI 可显式注入管理员审查的生成／验收适配器，不由任务选择模块；工作树、锁和适配器本身均不是安全沙箱，完整研发执行仍受可信隔离门禁约束，见 [验收授权边界](docs/TECH_MANUAL.md#development-verification-authority)。
 - **研发同事模型**：`agentcore.colleague_dev` 定义了 8 大官方研发岗位契约（需求架构师、用例开发大师、红队评审员、仿真测试专家、归因专家、后端开发、前端卡片交互、运维巡检），支持编排闭环与平台 SOP 流水线原生桥接。
 - **确定性模型路由与 ADR 守卫**：`agentcore.model_routing` 提供纯函数三级模型路由（`pro` / `main` / `flash`）与 6 条架构不变量（`ADR-S1` ~ `ADR-S6`），包含 `pro` 角色白名单配额护栏、长上下文压缩底线保护（严禁 `compression`/`memory` 降级至 `flash`）及显式降级回执。
 - **双阶段主动探针引擎**：`agentcore.proactive_hooks` 提供零 LLM 快速路径预检（Pre-Hook Probe）与基于 `HookLedger` 冷却去重的幂等持久队列派单。
 - **声明式业务专家规格**：`agentcore.profile_spec` 与 `install/setup_profile.py` 提供业务无关的 `BusinessProfileSpec` 校验、确定性 `systemd` 单元渲染、队列拓扑初始化与可移植专家包分发。
 
-使用与恢复边界见 [docs/POOL_RUNTIME.md](docs/POOL_RUNTIME.md) 与 [docs/DISPATCH_ANALYSIS.md](docs/DISPATCH_ANALYSIS.md)。
+使用与恢复边界见 [`docs/TECH_MANUAL.md`](docs/TECH_MANUAL.md) 与 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
 
 **一句话定位**：把一个「和你一样强的智能体」拆成可 clone、可幂等安装的技术仓。
@@ -60,7 +46,7 @@
 业务侧一律以**叠加层**形式提供（业务技能源、业务工具面、业务知识库、业务身份段）。
 
 > 判定标准只有一句：**clone 一个仓，能不能把它原样立起来？**
-> 不能立起来的那几层，就是迁移之痛的来源 —— 见 `docs/MIGRATION.md` 与 `docker/` 的干净室验证。
+> 不能立起来的那几层，就是迁移之痛的来源 —— 见 `docs/DEPLOY.md` 与 `docker/` 的干净室验证。
 
 ---
 
@@ -76,12 +62,12 @@
 | 运行时 | `runtime/` | `<HERMES_HOME>/agentcore/runtime/` | 常驻服务单元骨架（占位符化，profile 名/服务名非写死）+ `BASELINE.md`（通用能力基线）+ `CONFIG_MAP.md`（段归属与并发语义）+ `autotask/` 定时作业规范 |
 | 技能库 | `skills/` | `<HERMES_HOME>/skills/` | 通用与示例技能库（`illustrated-doc-rendering`, `im-card-markdown`, `research-before-build`, `skill-distillation`），业务技能通过挂钩环境变量注入 |
 | 运维与审计工具 | `tools/` | —— | 部署复验 `redeploy_check.py`、T6 缺口审计 `t6_gap_audit.py`、AI 定时作业编译器 `tools/autotask/`、文档架构浏览器等 |
-| 文档 | `docs/` | —— | 权威导航 [`INDEX.md`](docs/INDEX.md)、技术手册 [`TECH_MANUAL.md`](docs/TECH_MANUAL.md)、架构深潜 [`ARCHITECTURE.md`](docs/ARCHITECTURE.md)、部署生命周期 [`DEPLOY.md`](docs/DEPLOY.md)、插件全景 [`PLUGINS.md`](docs/PLUGINS.md)、运维对账 [`OPERATIONS.md`](docs/OPERATIONS.md)、迁移清单 [`MIGRATION.md`](docs/MIGRATION.md) 等 |
+| 文档 | `docs/` | —— | 权威全景索引 [`docs/README.md`](docs/README.md)、技术手册 [`TECH_MANUAL.md`](docs/TECH_MANUAL.md)、架构深潜 [`ARCHITECTURE.md`](docs/ARCHITECTURE.md)、部署生命周期 [`DEPLOY.md`](docs/DEPLOY.md)、插件全景 [`PLUGINS.md`](docs/PLUGINS.md)、运维对账 [`OPERATIONS.md`](docs/OPERATIONS.md) 等 |
 | 平台适配补丁 | `patches/` | `<HERMES_HOME>/agentcore/patches/` | 消息平台适配：Card 2.4 流式卡片 + 纯文字审批；幂等重放与内容探针校验 |
 | 插件集与记忆 | `plugins/` | `<HERMES_HOME>/plugins/<name>` + profile `config.yaml` 的 `plugins.enabled` | 16 款受管插件（13 款通用内建 + 3 款受管外部）与 `localvec` 记忆提供方：`longtask_guard`、`task_status`、`durable_dispatch`、`colleague_team`、`colleague_catalog`、`markdown_delivery`、`lan_cluster`、`write_guard` 等 |
 | 安装与运维 | `install/superagent.sh` + `tools/superagent.py` + `scripts/ops/` | —— | v2.0 单根受管安装（`~/super_agent/<profile>`）、身份暂存挂载、`hermes-current` 自动推断、多布局感知运维对账（`scripts/ops/_layout.sh`）与原子回滚 |
 | 干净室验证 | `docker/` | —— | 容器里从一个空 HOME 装一遍，20 项断言 |
-| 迁移口径 | `docs/MIGRATION.md` | —— | 「只在盘上」的漏项清单 + 可量化验收 |
+| 迁移与部署口径 | `docs/DEPLOY.md` | —— | 单根受管拓扑 + 零业务词迁移与可量化验收 |
 
 ---
 
@@ -96,7 +82,7 @@ bash verify.sh --with-checks   # 再加宿主特性矩阵（需 Hermes 树 / Nod
 ## 一键安装 / 整包升级
 
 Super Agent 的统一安装根、版本账本、升级回滚和完整卸载入口见
-[`docs/ONE_COMMAND_INSTALL.md`](docs/ONE_COMMAND_INSTALL.md)。
+[`docs/DEPLOY.md`](docs/DEPLOY.md)。
 
 ```bash
 ./install/superagent.sh plan --profile <profile>
@@ -199,19 +185,15 @@ bash docker/verify.sh <commit>     # 验证某个已发布提交（发布前跑�
 | ⑥ | 合成生效身份：骨架 + 业务叠加层，`{{BUSINESS_OVERLAY}}` 必须被替换干净 |
 | ⑦ | 引擎端到端：写入 → 汇合 → 召回（离线确定性嵌入，不依赖网络/模型） |
 
-换机器上线只认一条路径：[`docs/REDEPLOY.md`](docs/REDEPLOY.md)（`tools/redeploy_check.py` 一条命令复验干净 clone，
+换机器上线只认一条路径：[`docs/DEPLOY.md`](docs/DEPLOY.md)（`tools/redeploy_check.py` 一条命令复验干净 clone，
 `tools/t6_gap_audit.py` 逐条报 T6 缺口；插件「装了」不等于「工具面里看得见」，清单与重启步骤都写在里面）。
 
-**最近一次验证报告**：[`docs/reports/2026-10-26_release_freeze_report.md`](docs/reports/2026-10-26_release_freeze_report.md)
-（候选提交 `6333c92`，干净室**退出码 0**；同一目录另有 `.html` 单文件版可分享。）
-> 更早的两份报告（`2026-10-25_clean_room_deploy_report.md`、`2026-10-26_identity_and_feature_verification_report.md`）
-> 验证对象停在 `74b13e0` / `2f23720`，**已过期**：其后 8~9 个提交引入的两处红没跟着复验。
-> 引用「通过率」时只认最新这份 —— 报告停在旧提交上，就是仓库自述与事实矛盾。
+**自动化干净室验证**：运行 `bash verify.sh --with-docker`，在无网络干扰容器中从空 HOME 装一遍并执行 20 项断言。
 
 **它已经抓到过什么**：`install/install.sh` ⑩ 段 heredoc 里的 `$HERMES_HOME` 没做兜底，
 在 `set -u` 下**空机器上会以 `unbound variable` 非 0 退出**（活全干完了却报失败）。
 本机因为恰好导出了那个变量，这个 bug 一直没暴露 —— 这类「只在我机器上能跑」的缺陷，
-就是本目录存在的理由。
+就是干净室验证存在的理由。
 
 ---
 
@@ -240,13 +222,7 @@ bash checks/identity_injection_check.sh   # 证明「身份文件真的进了发
 `identity_injection_check.sh` 的判定链值得一提：它把隔离 profile 的模型端点指向一个**死端口**，
 调用必然失败 → Hermes 在 API 出错时会**无条件**写请求转储 → 在转储里找骨架独有句。
 于是「身份是否注入」变成可机械判定的断言，**不需要可用凭据**；同时它备份生产 profile 的
-`config.yaml`，跑完 diff 必须无变化，证明隔离没串到生产。
-
-特性矩阵与身份注入的**上一轮**实测报告：`docs/reports/2026-10-26_identity_and_feature_verification_report.md`
-（特性矩阵 31 PASS / 注入判定 14 PASS，并列出当轮修掉的 7 个真缺陷）。
-> [说明] 该报告的验证对象是 `2f23720`，**本轮未复跑**（F7/F8 需真实 Hermes 树、Node 与可解析凭据）。
-> 最新一次干净室 + 本地结果只认 [`2026-10-26_release_freeze_report.md`](docs/reports/2026-10-26_release_freeze_report.md)；
-> 「特性」侧的未复跑状态记在该报告 §4 缺口。
+`config.yaml`，跑完 diff 必须无变化，证明隔离没串到生产。特性矩阵与身份注入验证可直接运行 `bash verify.sh --with-checks`。
 
 ---
 

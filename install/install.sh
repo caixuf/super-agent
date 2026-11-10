@@ -953,7 +953,7 @@ cat <<EOF
   #      --root <queue_root> --profile ${PROFILE:-default}
   #    - 队列根 = plugins.entries.durable-dispatch.settings.queue_root，以及每个 colleague 的 queue_root
   #    - deliverable=false 的条目 = **永远不会自动投递的存量无主回执**（历史遗留 / 别的 profile）
-  #      → 按 docs/COMPLETION_DELIVERY.md 的 §2 走带证明的管理性修复
+  #      → 按 docs/TECH_MANUAL.md 的完成态投递规范走带证明的管理性修复
   #    - 投递健康：积压连续 60s 未清会在共享 ops-alert outbox 入一条 fault 事件；
   #      宿主需跑 agentcore.ops_alert_daemon/发送器才会真正送达（否则只堆在库里 + 一条 WARNING）
 EOF

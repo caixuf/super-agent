@@ -19,4 +19,4 @@
 - [生产部署 (DEPLOY)](../DEPLOY.md)
 - [插件指南 (PLUGINS)](../PLUGINS.md)
 - [运维指南 (OPERATIONS)](../OPERATIONS.md)
-- [权威主索引 (INDEX)](../INDEX.md)
+- [文档总索引 (README)](../README.md)

@@ -108,13 +108,12 @@ flowchart TD
 
 若需深入理解特定子系统的底层源码与历史设计规范，可参考仓库中的权威活文档：
 
-- [`docs/INDEX.md`](../INDEX.md)：全套技术文档权威导航索引（Master Index）
+- [`docs/README.md`](../README.md)：文档主索引与全景导览（Master Index）
 - [`docs/TECH_MANUAL.md`](../TECH_MANUAL.md)：Super Agent 系统技术手册（原理、边界、恢复语义与故障处置矩阵）
 - [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md)：v2.0 架构全景深潜与 ADR 决策记录
 - [`docs/DEPLOY.md`](../DEPLOY.md)：生产部署与生命周期指南
 - [`docs/PLUGINS.md`](../PLUGINS.md)：插件与工具面全景指南（16 款受管插件机制）
 - [`docs/OPERATIONS.md`](../OPERATIONS.md)：布局感知运维与对账指南
-- [`docs/guide/README.md`](../guide/README.md)：先进常驻 Agent 架构精读指南系列教程
 
 ---
 

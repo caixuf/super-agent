@@ -109,6 +109,6 @@ cd "${HERMES_AGENT_DIR:-$HOME/.hermes/hermes-agent}" && git apply -R <patch>
 
 ## 合规
 
-本目录两个文件都在仓级门禁的**射程内**（见 `docs/MIGRATION.md`）。补丁里除
+本目录两个文件都在仓级门禁的**射程内**（见 `docs/DEPLOY.md` 与 `docs/TECH_MANUAL.md`）。补丁里除
 `plugins/platforms/feishu/adapter.py` 这个第三方适配器路径外，不得出现任何业务专名；
 新增注释也走同一口径。

@@ -152,7 +152,7 @@ curl -sS ".../im/v1/messages?container_id_type=chat&container_id=<chat>&page_siz
 排查顺序（先枚举，再动手）：
 
 1. **读仓库自己的集成文档**：`integrations/<name>/README.md`、`integrations/<name>/lock.json`、
-   `docs/handoff/*cutover*` / `*evaluation*`。这类集成通常有 pin 的上游版本、验收门和回滚快照，
+   `docs/DEPLOY.md`。这类集成通常有 pin 的上游版本、验收门和回滚快照，
    文档里往往已经写明"不得与另一个卡片生产者并存"。**不要靠猜某条卡片是谁发的**——
    grep 不到字样就先承认未知，别急着禁用某个插件。
 2. **列服务**：`systemctl --user list-units '<相关前缀>*' --all`，看有没有自带 sidecar 在跑。

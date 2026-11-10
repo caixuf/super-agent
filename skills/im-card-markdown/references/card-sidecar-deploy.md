@@ -6,8 +6,8 @@
 
 ## 先读仓库自述，再动手
 
-这类集成在仓库里几乎都有：`integrations/<name>/README.md`、`lock.json`、`docs/handoff/*cutover*`、
-`docs/reports/*`、`tools/<name>_acceptance.py`。先看三件事：
+这类集成在仓库里通常包含：`integrations/<name>/README.md`、`lock.json`、
+`tools/<name>_acceptance.py`。先看三件事：
 
 1. 锁定的是哪个上游 commit（补丁集基于它）；
 2. 评审报告里记录的**目标文件 sha256**（构建完用它校验）；
