@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import importlib.util
 from pathlib import Path
 import sqlite3
 import sys
@@ -14,7 +15,12 @@ import types
 
 from agentcore.pool import Pool
 from plugins.markdown_delivery import _TenantToken, _make_pre_tool_call
-from tools.nightly_review_gate import evaluate_gate
+
+_GATE_PATH = Path(__file__).resolve().parents[1] / "tools" / "nightly_review_gate.py"
+_gate_spec = importlib.util.spec_from_file_location("nightly_review_gate_test", _GATE_PATH)
+_gate_mod = importlib.util.module_from_spec(_gate_spec)
+_gate_spec.loader.exec_module(_gate_mod)
+evaluate_gate = _gate_mod.evaluate_gate
 
 
 class _DummyCtx:

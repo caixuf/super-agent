@@ -272,13 +272,13 @@ class TaskCardBridge:
 
         # Modern, human-centric metadata block
         meta_lines = [
-            f"📌 **任务** `{_sanitize_card_text(task_id)}`  |  👤 **角色** {clean_role}",
+            f"**任务** `{_sanitize_card_text(task_id)}`  |  **角色** {clean_role}",
         ]
         if clean_goal:
             goal_quoted = "\n> ".join(clean_goal.splitlines())
-            meta_lines.append(f"> 🎯 **目标**：\n> {goal_quoted}")
+            meta_lines.append(f"> **目标**：\n> {goal_quoted}")
         else:
-            meta_lines.append("> 🎯 **目标**：*通用协助*")
+            meta_lines.append("> **目标**：*通用协助*")
 
         sections = ["\n\n".join(meta_lines)]
 
@@ -288,16 +288,16 @@ class TaskCardBridge:
         if status in ("queued", "running", "progressive"):
             progress_lines = []
             if phase:
-                progress_lines.append(f"⚡ **当前状态**：{_sanitize_card_text(phase)}")
+                progress_lines.append(f"**阶段**：{_sanitize_card_text(phase)}")
             if progress > 0.0:
                 bar = _render_progress_bar(progress)
-                progress_lines.append(f"📊 **阶段进度**：`{bar}` **{int(progress * 100)}%**")
+                progress_lines.append(f"**进度**：`{bar}` **{int(progress * 100)}%**")
             if elapsed > 0.0:
-                progress_lines.append(f"⏱️ **执行耗时**：{elapsed:.1f}s")
+                progress_lines.append(f"**耗时**：{elapsed:.1f}s")
             if status == "queued":
-                progress_lines.append("⏳ *排队中：等待空闲 Worker 调度...*")
+                progress_lines.append("*排队中：等待空闲 Worker 调度...*")
             else:
-                progress_lines.append("🚀 *正在持续执行中，文字结论将优先直达。*")
+                progress_lines.append("*正在持续执行中，文字结论将优先直达。*")
             sections.append("\n\n".join(progress_lines))
 
         elif status == "completed":
@@ -310,22 +310,22 @@ class TaskCardBridge:
                     if last_nl > 800:
                         truncated_sum = truncated_sum[:last_nl]
                     clean_sum = f"{truncated_sum}\n\n*(长文本详细内容已作为附件发送至会话)*"
-                comp_lines.append(f"✨ **执行结论**：\n\n{clean_sum}")
+                comp_lines.append(f"**执行结论**：\n\n{clean_sum}")
             if artifacts:
-                art_items = ["📦 **交付制品**："]
+                art_items = ["**交付制品**："]
                 for art in artifacts:
-                    art_items.append(f"- 📄 `{Path(art).name}`")
+                    art_items.append(f"- `{Path(art).name}`")
                 comp_lines.append("\n".join(art_items))
             if elapsed > 0.0:
-                comp_lines.append(f"⏱️ **总耗时**：{elapsed:.1f}s")
+                comp_lines.append(f"**总耗时**：{elapsed:.1f}s")
             sections.append("\n\n".join(comp_lines))
 
         elif status in ("failed", "cancelled"):
             fail_lines = []
             fail_desc = _sanitize_card_text(error_msg or summary or "任务未达到预期终态或已取消")
-            fail_lines.append(f"⚠️ **未达成说明**：\n\n{fail_desc}")
+            fail_lines.append(f"**未达成说明**：\n\n{fail_desc}")
             if elapsed > 0.0:
-                fail_lines.append(f"⏱️ **耗时**：{elapsed:.1f}s")
+                fail_lines.append(f"**耗时**：{elapsed:.1f}s")
             sections.append("\n\n".join(fail_lines))
 
         time_part = now_str.split(" ")[1] if " " in now_str else now_str

@@ -93,12 +93,12 @@ def sanitize_and_extract_artifacts(
             if str(p) not in seen_paths:
                 artifacts.append({"kind": "image", "path": str(p), "name": p.name})
                 seen_paths.add(str(p))
-            return f"📷 [图片附件候选: {p.name}]"
+            return f"[图片附件候选: {p.name}]"
         elif ext in DOC_FILE_EXTS:
             if str(p) not in seen_paths:
                 artifacts.append({"kind": "file", "path": str(p), "name": p.name})
                 seen_paths.add(str(p))
-            return f"📎 [文件附件候选: {p.name}]"
+            return f"[文件附件候选: {p.name}]"
         else:
             # Code files or unknown extensions: sanitize server home
             parts = p.parts

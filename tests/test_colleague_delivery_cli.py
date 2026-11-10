@@ -249,8 +249,8 @@ def test_deliverable_transport_passes_attempt_artifacts_to_durable_transport(tmp
     # Local path should be replaced by friendly placeholder
     assert str(html_file) not in sent_msg["summary"]
     assert str(png_file) not in sent_msg["summary"]
-    assert "📎 [文件附件候选: review.html]" in sent_msg["summary"]
-    assert "📷 [图片附件候选: arch.png]" in sent_msg["summary"]
+    assert "[文件附件候选: review.html]" in sent_msg["summary"]
+    assert "[图片附件候选: arch.png]" in sent_msg["summary"]
 
     # Feishu upload actions should be triggered for both files
     assert sent_msg['artifacts'] == [str(html_file), str(png_file)]

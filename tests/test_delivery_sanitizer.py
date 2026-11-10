@@ -35,8 +35,8 @@ def test_sanitize_html_and_png_artifacts():
         assert str(png_path) not in sanitized
 
         # Placeholders should be in place
-        assert "📎 [文件附件候选: superagent-arch-review.html]" in sanitized
-        assert "📷 [图片附件候选: superagent-arch-review.png]" in sanitized
+        assert "[文件附件候选: superagent-arch-review.html]" in sanitized
+        assert "[图片附件候选: superagent-arch-review.png]" in sanitized
 
         # Artifacts list
         assert len(artifacts) == 2

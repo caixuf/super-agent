@@ -435,7 +435,7 @@ class ColleagueDevOrchestrator:
             return self._custom_bridge
         import sys
         if self.workspace_root and str(self.workspace_root) not in sys.path:
-            sys.path.insert(0, str(self.workspace_root))
+            sys.path.append(str(self.workspace_root))
         try:
             return importlib.import_module("autotest_server.agent_flow.colleague_bridge")
         except ImportError as exc:
