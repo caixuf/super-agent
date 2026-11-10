@@ -1,15 +1,15 @@
 # super-agent —— 通用智能体本体
 
-## 📚 官方用户与架构 Wiki (User & Architecture Wiki)
+## 官方用户与架构 Wiki (User & Architecture Wiki)
 
 欢迎查阅全新上线的 **[Super Agent 用户与架构 Wiki](docs/wiki/Home.md)**，为初学者与系统架构师提供结构化、模块化、带导航图谱的沉浸式查阅体验：
 
-- [🏠 **Wiki 首页与全局导览** (Home.md)](docs/wiki/Home.md) — 架构全景、核心概念与章节知识图谱
-- [🚀 **01. 5分钟快速上手与单根部署** (01-Quickstart-and-Install.md)](docs/wiki/01-Quickstart-and-Install.md) — 单根受管拓扑（`~/super_agent/<profile>`）、`superagent.sh` 一键安装、升级与秒级回滚
-- [🧩 **02. 业务知识挂载指南** (02-Business-Overlay-Guide.md)](docs/wiki/02-Business-Overlay-Guide.md) — 中性底座与业务叠加解耦、`SOUL.generic.md`、MCP 挂载、外部 Skills 与 9 角色团队装配
-- [🤖 **03. 前后台协同与 StateGraph** (03-Multi-Agent-and-StateGraph.md)](docs/wiki/03-Multi-Agent-and-StateGraph.md) — 前后台权责边界、8 大官方研发角色（`DEV_ROLES`）、Raven 路径所有权矩阵与 LangGraph 状态图
-- [📨 **04. 交互卡片与交付机制** (04-Feishu-Cards-and-Delivery.md)](docs/wiki/04-Feishu-Cards-and-Delivery.md) — CardKit 2.0 状态机、单在途合并去抖、`drain()` 屏障、实时动态进度流与 Chromium 图文交付
-- [🛠️ **05. 运维排障与 FAQ** (05-Operations-and-Troubleshooting.md)](docs/wiki/05-Operations-and-Troubleshooting.md) — 布局感知运维、`doctor` 体检、脱敏长期记忆召回诊断与常见故障处置矩阵
+- [**Wiki 首页与全局导览** (Home.md)](docs/wiki/Home.md) — 架构全景、核心概念与章节知识图谱
+- [**01. 5分钟快速上手与单根部署** (01-Quickstart-and-Install.md)](docs/wiki/01-Quickstart-and-Install.md) — 单根受管拓扑（`~/super_agent/<profile>`）、`superagent.sh` 一键安装、升级与秒级回滚
+- [**02. 业务知识挂载指南** (02-Business-Overlay-Guide.md)](docs/wiki/02-Business-Overlay-Guide.md) — 中性底座与业务叠加解耦、`SOUL.generic.md`、MCP 挂载、外部 Skills 与 9 角色团队装配
+- [**03. 前后台协同与 StateGraph** (03-Multi-Agent-and-StateGraph.md)](docs/wiki/03-Multi-Agent-and-StateGraph.md) — 前后台权责边界、8 大官方研发角色（`DEV_ROLES`）、Raven 路径所有权矩阵与 LangGraph 状态图
+- [**04. 交互卡片与交付机制** (04-Feishu-Cards-and-Delivery.md)](docs/wiki/04-Feishu-Cards-and-Delivery.md) — CardKit 2.0 状态机、单在途合并去抖、`drain()` 屏障、实时动态进度流与 Chromium 图文交付
+- [**05. 运维排障与 FAQ** (05-Operations-and-Troubleshooting.md)](docs/wiki/05-Operations-and-Troubleshooting.md) — 布局感知运维、`doctor` 体检、脱敏长期记忆召回诊断与常见故障处置矩阵
 
 ---
 
