@@ -444,6 +444,7 @@ def run_pi(
     cancel_event: threading.Event | None = None,
     events_path: str | os.PathLike | None = None,
     command_override: list[str] | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> PiResult:
     """在隔离目录里跑一次 Pi，返回结构化回执。
 
@@ -500,14 +501,23 @@ def run_pi(
         start_new_session=True,
     )
 
-    captured: dict[str, str] = {}
+    captured_chunks: dict[str, list[str]] = {"stdout": [], "stderr": []}
 
     def _reader(stream, key: str) -> None:  # type: ignore[no-untyped-def]
         try:
-            captured[key] = stream.read() or ""
+            for line in iter(stream.readline, ""):
+                captured_chunks[key].append(line)
+                if key == "stdout" and on_event is not None:
+                    raw_line = line[:-1] if line.endswith("\r\n") or line.endswith("\n") else line
+                    if raw_line.strip():
+                        try:
+                            ev = json.loads(raw_line)
+                            if isinstance(ev, dict):
+                                on_event(ev)
+                        except Exception:
+                            pass
         except Exception as exc:  # pragma: no cover
             _logger.debug("读取子进程 %s 流失败（不影响回执）: %s", key, exc)
-            captured[key] = ""
         finally:
             try:
                 stream.close()
@@ -543,8 +553,8 @@ def run_pi(
         t.join(timeout=5.0)
     duration_ms = int((time.monotonic() - t0) * 1000)
 
-    raw_stdout = captured.get("stdout", "")
-    raw_stderr = captured.get("stderr", "")
+    raw_stdout = "".join(captured_chunks.get("stdout", []))
+    raw_stderr = "".join(captured_chunks.get("stderr", []))
 
     if events_path is not None:
         # 原始事件流含 prompt 与工具参数 —— 仅在显式要求时落盘，且由调用方放到隔离目录。

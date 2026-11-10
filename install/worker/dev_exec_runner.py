@@ -654,10 +654,10 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
         if not binary:
             return {"ok": False, "error": "hermes_unavailable"}
         cleaned_env = _clean_env(route)
-        cmd = [binary, "chat", "-q", effective_goal, "--oneshot",
+        cmd = [binary, "chat", "--query-file", "-", "--oneshot",
                "--run-budget", str(budget), "--max-turns", str(max_turns)]
         cmd, containment_meta = _wrap_with_bwrap_sandbox(cmd, route=route, env=cleaned_env)
-        run_kwargs = {"cwd": str(_workdir()), "env": cleaned_env, "preexec_fn": _set_file_limit}
+        run_kwargs = {"cwd": str(_workdir()), "env": cleaned_env, "input": effective_goal, "preexec_fn": _set_file_limit}
     try:
         done = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=budget + 60, **run_kwargs)
@@ -730,7 +730,7 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
     return payload
 
 
-def run_pi(goal: str, *, route: dict | None = None) -> dict:
+def run_pi(goal: str, *, route: dict | None = None, on_event: Any | None = None) -> dict:
     engine = _engine_root()
     if str(engine) not in sys.path:
         sys.path.insert(0, str(engine))
@@ -755,6 +755,7 @@ def run_pi(goal: str, *, route: dict | None = None) -> dict:
             model=model, provider=provider, tools="read,write,edit,bash",
             timeout_s=timeout, env_extra={CCP_KEY_ENV_VAR: credentials.api_key},
             cli_path=os.environ.get("PI_EXECUTOR_CLI") or resolve_cli_path(None),
+            on_event=on_event,
         )
     except Exception as exc:
         return {"ok": False, "error": "pi_run_failed: " + type(exc).__name__}
@@ -882,6 +883,25 @@ class ProgressMonitor:
 
             self._record_progress(self.last_phase, self.last_progress, step=self.step)
 
+    def handle_pi_event(self, ev: dict[str, Any]) -> None:
+        """Process fine-grained events from Engine 2 (Pi) to update progress.json in real time."""
+        etype = ev.get("type")
+        if etype == "tool_execution_start":
+            tool_name = ev.get("toolName") or "tool"
+            self.last_phase = f"正在执行工具: {tool_name}..."
+            self._record_progress(self.last_phase, self.last_progress, step=self.step)
+        elif etype == "tool_execution_end":
+            tool_name = ev.get("toolName") or "tool"
+            self.step += 1
+            self.last_phase = f"工具执行完成: {tool_name} (第{self.step}步)"
+            self.last_progress = min(0.92, 0.05 + 0.87 * (1.0 - (0.93 ** self.step)))
+            self._record_progress(self.last_phase, self.last_progress, step=self.step)
+        elif etype == "message_end":
+            self.step += 1
+            self.last_phase = f"大模型交互完成 (第{self.step}步)"
+            self.last_progress = min(0.92, 0.05 + 0.87 * (1.0 - (0.93 ** self.step)))
+            self._record_progress(self.last_phase, self.last_progress, step=self.step)
+
     def stop(self, ok: bool = True) -> None:
         self._stop_event.set()
         if self._thread:
@@ -933,13 +953,18 @@ def _start_progress_monitor(payload: dict | None = None, route: dict | None = No
     return monitor
 
 
-def _call_engine(fn, goal: str, route: dict | None = None) -> dict:
+def _call_engine(fn, goal: str, route: dict | None = None, on_event: Any | None = None) -> dict:
     import inspect
     try:
         sig = inspect.signature(fn)
+        kwargs = {}
         if any(p.kind == inspect.Parameter.VAR_KEYWORD or p.name == "route"
                for p in sig.parameters.values()):
-            return fn(goal, route=route)
+            kwargs["route"] = route
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD or p.name == "on_event"
+               for p in sig.parameters.values()) and on_event is not None:
+            kwargs["on_event"] = on_event
+        return fn(goal, **kwargs)
     except (TypeError, ValueError):
         pass
     return fn(goal)
@@ -1012,7 +1037,7 @@ def main() -> int:
                 },
             }
 
-        fallback = _call_engine(run_pi, composed, route=route)
+        fallback = _call_engine(run_pi, composed, route=route, on_event=monitor.handle_pi_event)
         primary_err = primary.get("error", "turn_failed")
         fallback_reason = f"primary_engine_fallback:hermes->{primary_err}"
         combined_reason = "; ".join(r for r in (r_reason, fallback_reason) if r)
