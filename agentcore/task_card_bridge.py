@@ -313,7 +313,7 @@ class TaskCardBridge:
             body_lines.append(f"**未完成说明**：\n{fail_desc}")
 
         footer_notes = [
-            f"状态: {'✅ PASS' if status == 'completed' else ('⚠️ ' + status_suffix if is_failed else status_suffix)}",
+            f"状态: {'PASS' if status == 'completed' else (status_suffix if is_failed else status_suffix)}",
             "出站交付护栏 100% 路径脱敏",
             f"更新于 {now_str} · 卡片与任务严格解耦绑定",
         ]

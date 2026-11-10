@@ -30,7 +30,7 @@ import time
 
 MAX_INPUT = 131072
 MAX_GOAL = 12000
-MAX_OUTPUT = 8000
+MAX_OUTPUT = 32768
 MAX_STDERR = 1500
 _SSH_HOST_RE = re.compile(r"^[A-Za-z0-9._@-]{1,128}\Z")
 
@@ -420,7 +420,8 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
                               timeout=budget + 60, **run_kwargs)
     except subprocess.TimeoutExpired as exc:
         full_stdout = exc.stdout or ""
-        summary = _clean_hermes_output(full_stdout)[-MAX_OUTPUT:] if isinstance(full_stdout, str) else ""
+        cleaned = _clean_hermes_output(full_stdout) if isinstance(full_stdout, str) else ""
+        summary = cleaned[:MAX_OUTPUT] if len(cleaned) > MAX_OUTPUT else cleaned
         checkpoint_data = _find_and_load_checkpoint()
         if not summary.strip() and checkpoint_data and checkpoint_data.get("summary"):
             summary = checkpoint_data["summary"]
@@ -429,7 +430,7 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
             payload = {
                 "ok": True,
                 "summary": summary.strip(),
-                "output": (full_stdout[-MAX_OUTPUT:] if isinstance(full_stdout, str) else ""),
+                "output": (full_stdout[:MAX_OUTPUT] if isinstance(full_stdout, str) else ""),
                 "stderr": (exc.stderr or "")[-MAX_STDERR:] if isinstance(exc.stderr, str) else "",
                 "returncode": -1,
                 "degraded": True,
@@ -444,8 +445,9 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
     except Exception as exc:
         return {"ok": False, "error": "runner_spawn_failed: " + type(exc).__name__}
     full_stdout = done.stdout or ""
-    out = full_stdout[-MAX_OUTPUT:]
-    summary = _clean_hermes_output(full_stdout)[-MAX_OUTPUT:]
+    out = full_stdout[:MAX_OUTPUT] if len(full_stdout) > MAX_OUTPUT else full_stdout
+    cleaned = _clean_hermes_output(full_stdout) if isinstance(full_stdout, str) else ""
+    summary = cleaned[:MAX_OUTPUT] if len(cleaned) > MAX_OUTPUT else cleaned
     err = (done.stderr or "")[-MAX_STDERR:]
     ok = done.returncode == 0 and bool((summary or out).strip())
 
@@ -507,7 +509,8 @@ def run_pi(goal: str, *, route: dict | None = None) -> dict:
         )
     except Exception as exc:
         return {"ok": False, "error": "pi_run_failed: " + type(exc).__name__}
-    text = (result.final_text or "")[-MAX_OUTPUT:]
+    raw_text = result.final_text or ""
+    text = raw_text[:MAX_OUTPUT] if len(raw_text) > MAX_OUTPUT else raw_text
     ok = bool(result.ok) and bool(text.strip())
     payload = {"ok": ok, "summary": text.strip(), "output": text, "stderr": "", "returncode": result.exit_code,
                "stop_reason": result.stop_reason, "tool_calls": result.tool_calls,

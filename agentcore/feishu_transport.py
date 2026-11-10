@@ -389,12 +389,12 @@ def build_task_completion_card(
         for k, v in metrics.items():
             body_parts.append(f"- **{sanitize_card_text(k)}**: {sanitize_card_text(v)}")
     if docx_url:
-        body_parts.append(f"\n📄 **在线文档主交付物**：[{docx_url}]({docx_url})")
+        body_parts.append(f"\n[在线文档主交付物]：[{docx_url}]({docx_url})")
 
     main_text = "\n".join(body_parts)
 
     footer_items = [
-        f"状态: {'✅ PASS' if finalize else '⚠️ 异常'}",
+        f"状态: {'PASS' if finalize else '异常'}",
         "出站交付护栏 100% 路径脱敏",
         "附件随附于下方",
     ]
