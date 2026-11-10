@@ -1976,6 +1976,147 @@ def _gateway_queue_observation(profile_home: Path) -> dict[str, Any]:
         return report
 
 
+def _discover_pool_databases(root: Path) -> list[Path]:
+    state_dir = root / "state"
+    if not state_dir.is_dir() or state_dir.is_symlink():
+        return []
+    candidates = [
+        *sorted(state_dir.glob("*/pool.db")),
+        *sorted((state_dir / "colleague-queues").glob("*/pool.db")),
+    ]
+    return [p for p in candidates if p.is_file() and not p.is_symlink()]
+
+
+def _count_running_pool_jobs(root: Path) -> int:
+    import sqlite3
+    from contextlib import closing
+
+    running = 0
+    for db_path in _discover_pool_databases(root):
+        try:
+            with closing(sqlite3.connect(db_path.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+                db.execute("PRAGMA query_only = ON")
+                has_jobs = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'"
+                ).fetchone()
+                if has_jobs:
+                    running += int(
+                        db.execute("SELECT COUNT(*) FROM jobs WHERE status='running'").fetchone()[0]
+                    )
+        except (OSError, ValueError, sqlite3.Error):
+            continue
+    return running
+
+
+def _wait_for_running_jobs_drain(root: Path, timeout_s: float = 30.0) -> dict[str, Any]:
+    """Bounded pre-stop drain wait: returns immediately (0ms) when no pool jobs are running."""
+    initial = _count_running_pool_jobs(root)
+    if initial <= 0 or timeout_s <= 0:
+        return {"initial_running": initial, "remaining_running": initial, "waited_s": 0.0}
+    start = time.monotonic()
+    deadline = start + min(float(timeout_s), 300.0)
+    remaining = initial
+    while remaining > 0 and time.monotonic() < deadline:
+        time.sleep(min(0.5, max(0.05, deadline - time.monotonic())))
+        remaining = _count_running_pool_jobs(root)
+    return {
+        "initial_running": initial,
+        "remaining_running": remaining,
+        "waited_s": round(time.monotonic() - start, 3),
+    }
+
+
+def _worker_queue_health_observation(root: Path, installed_at: Any = None) -> dict[str, Any]:
+    """Read-only observation of worker SQLite queues without reading prompts or task outputs."""
+    import sqlite3
+    from contextlib import closing
+
+    dbs = _discover_pool_databases(root)
+    if not dbs:
+        return {
+            "state": "uninitialized",
+            "queues_observed": 0,
+            "running_jobs": 0,
+            "queued_jobs": 0,
+            "card_outbox_unknown": 0,
+            "card_outbox_parked": 0,
+            "recent_completed_post_install": 0,
+            "recent_engine_degraded_post_install": 0,
+            "healthy": True,
+        }
+    try:
+        min_created = float(installed_at) if installed_at is not None else 0.0
+    except (TypeError, ValueError):
+        min_created = 0.0
+
+    queues_observed = 0
+    running_jobs = 0
+    queued_jobs = 0
+    card_unknown = 0
+    card_parked = 0
+    recent_completed = 0
+    recent_degraded = 0
+
+    for db_path in dbs:
+        try:
+            with closing(sqlite3.connect(db_path.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+                db.execute("PRAGMA query_only = ON")
+                tables = {
+                    r[0]
+                    for r in db.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                if "jobs" not in tables:
+                    continue
+                queues_observed += 1
+                counts = dict(
+                    db.execute(
+                        "SELECT status, COUNT(*) FROM jobs WHERE status IN ('running','queued') GROUP BY status"
+                    ).fetchall()
+                )
+                running_jobs += int(counts.get("running", 0))
+                queued_jobs += int(counts.get("queued", 0))
+                if "card_outbox" in tables:
+                    c_counts = dict(
+                        db.execute(
+                            "SELECT state, COUNT(*) FROM card_outbox WHERE state IN ('unknown','parked') GROUP BY state"
+                        ).fetchall()
+                    )
+                    card_unknown += int(c_counts.get("unknown", 0))
+                    card_parked += int(c_counts.get("parked", 0))
+                rows = db.execute(
+                    "SELECT result FROM jobs WHERE status='completed' AND created>=? "
+                    "ORDER BY created DESC LIMIT 5",
+                    (min_created,),
+                ).fetchall()
+                for (raw_res,) in rows:
+                    recent_completed += 1
+                    if isinstance(raw_res, str) and raw_res:
+                        try:
+                            parsed = json.loads(raw_res)
+                            if isinstance(parsed, dict) and parsed.get("engine_degraded") is True:
+                                recent_degraded += 1
+                        except ValueError:
+                            pass
+        except (OSError, ValueError, sqlite3.Error):
+            continue
+
+    all_recent_degraded = recent_completed > 0 and recent_degraded == recent_completed
+    healthy = (card_unknown == 0) and not all_recent_degraded
+    return {
+        "state": "observed" if queues_observed > 0 else "uninitialized",
+        "queues_observed": queues_observed,
+        "running_jobs": running_jobs,
+        "queued_jobs": queued_jobs,
+        "card_outbox_unknown": card_unknown,
+        "card_outbox_parked": card_parked,
+        "recent_completed_post_install": recent_completed,
+        "recent_engine_degraded_post_install": recent_degraded,
+        "healthy": healthy,
+    }
+
+
 def _recall_diagnostics_observation(profile_home: Path, managed_current: Path | None = None) -> dict[str, Any]:
     """Observe configured recall reports; missing or old reports stay unknown."""
     import importlib.util
@@ -2234,7 +2375,17 @@ def doctor(args: argparse.Namespace) -> int:
         and feishu_dep_observation["status"] not in ("missing_feishu_extra", "unknown")
     )
     version_observation = _deploy_version_observation(manifest, current, args.profile)
-    reasons = version_observation.get("reasons", [])
+    worker_queue_observation = _worker_queue_health_observation(root, manifest.get("installed_at"))
+    reasons = list(version_observation.get("reasons", []))
+    if worker_queue_observation.get("healthy") is False:
+        if worker_queue_observation.get("card_outbox_unknown", 0) > 0:
+            reasons.append("card_outbox_unknown_requires_reconciliation")
+        if (
+            worker_queue_observation.get("recent_completed_post_install", 0) > 0
+            and worker_queue_observation.get("recent_engine_degraded_post_install", 0)
+            == worker_queue_observation.get("recent_completed_post_install", 0)
+        ):
+            reasons.append("primary_engine_consistently_degraded")
     if not ok:
         status = "broken"
         ret = 1
@@ -2255,6 +2406,7 @@ def doctor(args: argparse.Namespace) -> int:
                       "runtime_observation": _gateway_runtime_observation(
                           args.profile, manifest.get("hermes_root")),
                       "worker_observation": _worker_runtime_observation(args.profile, current),
+                      "worker_queue_observation": worker_queue_observation,
                       "browser_observation": _browser_observation(current.resolve() if current.exists() else root),
                       "colleague_settlement_observation": _legacy_colleague_settlement_observation(profile_home),
                       "gateway_queue_observation": _gateway_queue_observation(profile_home),
@@ -2682,8 +2834,12 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
         print(json.dumps({"status": "blocked", "reason": "service_stop_unproven",
                           "service": name, "error": str(exc)}))
         return 1
+    drain_timeout = float(getattr(args, "drain_timeout", 30.0))
+    if any(was_active[k] for k in was_active if k.startswith("worker")):
+        _wait_for_running_jobs_drain(root, timeout_s=drain_timeout)
     stopped = []
     try:
+        # Stop gateway before workers so new work is not admitted after drain
         for label, name in services.items():
             if was_active[label]:
                 _run(["systemctl", "--user", "stop", name], check=True)
@@ -2825,6 +2981,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="Allow installing a commit that is not a descendant of the prior commit")
     parser.add_argument("--expect-commit", type=str, default=None,
                         help="Require source_commit to resolve to this commit")
+    parser.add_argument("--drain-timeout", type=float, default=30.0,
+                        help="Seconds to wait for running worker jobs to finish before stopping services (default 30)")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("plan", "install", "update", "doctor", "uninstall",
                  "activate-release", "rollback", "prune-releases", "migrate-config", "candidate-hermes", "install-hermes-candidate", "switch-gateway-source"):
@@ -2839,6 +2997,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                              help="Allow installing a commit that is not a descendant of the prior commit")
             cmd.add_argument("--expect-commit", type=str, default=argparse.SUPPRESS,
                              help="Require source_commit to resolve to this commit")
+            cmd.add_argument("--drain-timeout", type=float, default=argparse.SUPPRESS,
+                             help="Seconds to wait for running worker jobs to finish before stopping services")
         if name == "prune-releases":
             cmd.add_argument("--keep", type=int, default=3,
                              help="Number of previous releases from history to keep (default 3, 0 deletes all)")

@@ -1,6 +1,6 @@
 # Super Agent 文档体系与全景导航
 
-本文档是 Super Agent v2.0 的统一文档索引与导航门户。为消除文档冗余、碎片化与版本冲突，仓库历史临时报告与散落草案已彻底清理，全面收敛为 **「5 篇权威技术规范 + 5 篇结构化 Wiki」** 极简架构。
+本文档是 Super Agent v2.0 的统一文档索引与导航门户。为消除文档冗余、碎片化与版本冲突，仓库历史临时报告与散落草案已彻底清理，全面收敛为 **「1 篇工程哲学宪章 + 5 篇权威技术规范 + 5 篇结构化 Wiki」** 极简架构。
 
 ---
 
@@ -9,6 +9,7 @@
 ```mermaid
 flowchart TD
     User([开发者 / 运维 / 架构师]) --> Choose{查阅诉求}
+    Choose -->|工程准则 / 稳定性宪章| Phil[工程哲学: PHILOSOPHY.md]
     Choose -->|新手上手 / 业务挂载| Wiki[官方 Wiki: wiki/Home.md]
     Choose -->|生产部署 / 升级回滚| Deploy[生产部署: DEPLOY.md]
     Choose -->|系统拓扑 / 多Agent协同| Arch[全景架构: ARCHITECTURE.md]
@@ -19,12 +20,13 @@ flowchart TD
 
 ---
 
-## 1. 五大权威技术规范（Core Technical Manuals）
+## 1. 工程哲学与五大权威技术规范（Philosophy & Core Manuals）
 
-这五篇文档为仓库内唯一的生产级权威技术规范，随代码变更持续演进：
+这六篇文档为仓库内唯一的生产级权威规范，随代码变更持续演进：
 
 | 文档 | 核心定位与管辖范围 | 适用场景 |
 | :--- | :--- | :--- |
+| **[`PHILOSOPHY.md`](PHILOSOPHY.md)** | **端到端可靠性工程哲学（最高准则）**<br>• 脊柱优先于器官（Spine Over Subsystems）<br>• 显式暴露退化（Fail-Visible, Never Mask Degradation）<br>• 有界收敛律、可中断可排空设计与分级工具路由 | 任何架构决策、接缝改动、异常处理与健康门禁设计的最高裁决准则 |
 | **[`ARCHITECTURE.md`](ARCHITECTURE.md)** | **v2.0 架构全景深潜**<br>• 单根架构拓扑（`~/super_agent/<profile>`）<br>• 十二层分层机制与全仓中立性定理<br>• 同事制多智能体协作与 8 大研发角色契约<br>• 前后台权责边界与 StateGraph 状态图 | 深入理解系统顶层设计、智能体通信拓扑与状态机流转 |
 | **[`TECH_MANUAL.md`](TECH_MANUAL.md)** | **Super Agent 技术手册**<br>• 任务持久池（Pool/Worker）与 Attempt 围栏契约<br>• 突触记忆双路召回引擎（BM25 + 向量）与代际分桶隔离<br>• 突触可塑性反馈与门禁（Plasticity & Memory Gate）<br>• CardKit 2.0 单在途合并与完成态安全投递 | 查询底层技术规范、协议细节、状态转移语义与算法实现 |
 | **[`DEPLOY.md`](DEPLOY.md)** | **生产部署与生命周期指南**<br>• 单根受管部署规范（`install/superagent.sh`）<br>• `SOUL.generic.md` 通用身份与业务叠加层（`--compose-soul`）<br>• 不可变 Release 原子发布、秒级平滑回滚与历史清理<br>• `hermes-current` 宿主解释器自动推断与干净室验证 | 一键安装新实例、全量整包升级、环境迁移与安全卸载 |

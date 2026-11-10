@@ -1359,6 +1359,9 @@ class AttemptBoundSandboxAdapter:
         *,
         attempt_dir: Optional[Path] = None,
         writable_paths: Sequence[str | Path] = (),
+        hermes_runtime_home: Optional[str | Path] = None,
+        hermes_pm_writable_paths: Sequence[str | Path] = (),
+        managed_state_paths: Sequence[str | Path] = (),
     ) -> list[str]:
         """Construct a production worker bubblewrap command line with read-only root, isolated /tmp, and masked credentials."""
         bwrap_bin = shutil.which("bwrap")
@@ -1389,6 +1392,19 @@ class AttemptBoundSandboxAdapter:
         ])
 
         bound_rw: set[str] = set()
+        ro_armored_paths: list[str] = []
+        home_dir = Path.home().resolve(strict=False)
+        hermes_root = home_dir / ".hermes"
+        super_agent_root = home_dir / "super_agent"
+        agentcore_state_root = home_dir / ".local" / "state" / "agentcore"
+
+        def _bind_rw_unchecked(resolved: Path) -> bool:
+            r_str = str(resolved)
+            if r_str in bound_rw or r_str == "/":
+                return False
+            cmd.extend(["--bind", r_str, r_str])
+            bound_rw.add(r_str)
+            return True
 
         def _bind_rw(target: Path | str | None) -> None:
             if not target:
@@ -1403,17 +1419,102 @@ class AttemptBoundSandboxAdapter:
             forb, _ = is_forbidden_host_path(resolved)
             if forb:
                 return
-            r_str = str(resolved)
-            if r_str in bound_rw or r_str == "/":
-                return
-            cmd.extend(["--bind", r_str, r_str])
-            bound_rw.add(r_str)
+            _bind_rw_unchecked(resolved)
 
         _bind_rw(wdir)
         if attempt_dir is not None:
-            _bind_rw(attempt_dir)
+            try:
+                att_p = Path(attempt_dir).expanduser()
+                if att_p.is_dir() and not att_p.is_symlink():
+                    att_res = att_p.resolve(strict=True)
+                    att_allowed = (
+                        not is_forbidden_host_path(att_res)[0]
+                        or (att_res.is_relative_to(super_agent_root) and att_res.parent.name == "attempts")
+                    )
+                    if att_allowed:
+                        _bind_rw_unchecked(att_res)
+                        binding_file = att_res / "binding.json"
+                        if binding_file.is_file():
+                            b_res = str(binding_file.resolve(strict=True))
+                            cmd.extend(["--ro-bind", b_res, b_res])
+                            ro_armored_paths.append(b_res)
+            except OSError:
+                pass
+
         for wp in writable_paths:
             _bind_rw(wp)
+
+        if hermes_runtime_home is not None:
+            try:
+                hr_p = Path(hermes_runtime_home).expanduser()
+                if hr_p.is_dir():
+                    hr_res = hr_p.resolve(strict=True)
+                    installs_root = hermes_root / "installs"
+                    in_hermes_profile = (
+                        (hr_res == hermes_root or hr_res.is_relative_to(hermes_root))
+                        and hr_res != installs_root
+                        and not hr_res.is_relative_to(installs_root)
+                    )
+                    if in_hermes_profile or not is_forbidden_host_path(hr_res)[0]:
+                        _bind_rw_unchecked(hr_res)
+                        for rel_guard in (
+                            "config.yaml",
+                            "profile.yaml",
+                            "SOUL.md",
+                            "AGENTS.md",
+                            "CLAUDE.md",
+                            ".env",
+                            "auth.json",
+                            "llm_config.json",
+                            "plugins",
+                            "skills",
+                            "hooks",
+                            "pairing",
+                            "worker",
+                            "cron/jobs.json",
+                        ):
+                            guard_candidate = hr_res / rel_guard
+                            try:
+                                if guard_candidate.exists():
+                                    g_str = str(guard_candidate.resolve(strict=True))
+                                    cmd.extend(["--ro-bind", g_str, g_str])
+                                    ro_armored_paths.append(g_str)
+                            except OSError:
+                                continue
+            except OSError:
+                pass
+
+        for pm_target in hermes_pm_writable_paths:
+            if not pm_target:
+                continue
+            try:
+                pm_res = Path(pm_target).expanduser().resolve(strict=True)
+            except OSError:
+                continue
+            if pm_res.name not in {".install.lock", ".prepare.lock", ".leases"}:
+                continue
+            if pm_res.is_relative_to(hermes_root / "installs") or not is_forbidden_host_path(pm_res)[0]:
+                _bind_rw_unchecked(pm_res)
+
+        for ms_target in managed_state_paths:
+            if not ms_target:
+                continue
+            try:
+                ms_res = Path(ms_target).expanduser().resolve(strict=True)
+            except OSError:
+                continue
+            if not ms_res.is_dir() or ms_res.name not in {
+                "memory-spool",
+                "recall-diagnostics",
+                "personal-memory-candidate",
+            }:
+                continue
+            if (
+                ms_res.is_relative_to(super_agent_root)
+                or ms_res.is_relative_to(agentcore_state_root)
+                or not is_forbidden_host_path(ms_res)[0]
+            ):
+                _bind_rw_unchecked(ms_res)
 
         if argv:
             try:
@@ -1431,7 +1532,6 @@ class AttemptBoundSandboxAdapter:
 
         # Mask host credential directories and files after writable binds so they remain inaccessible and read-only
         masked_credentials: list[str] = []
-        home_dir = Path.home().resolve(strict=False)
         for cred_dir_name in (".ssh", ".gnupg", ".aws", ".kube", ".docker"):
             cred_dir = home_dir / cred_dir_name
             if cred_dir.is_dir() and not cred_dir.is_symlink():
@@ -1467,6 +1567,7 @@ class AttemptBoundSandboxAdapter:
             "workdir": str(wdir),
             "attempt_dir": str(attempt_dir) if attempt_dir else None,
             "writable_binds": sorted(bound_rw),
+            "ro_armored_paths": sorted(set(ro_armored_paths)),
             "masked_credentials": masked_credentials,
             "allowed": True,
             "reason": "worker_bwrap_sandbox_prepared",

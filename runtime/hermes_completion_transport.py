@@ -357,7 +357,9 @@ def create_transport(ctx, service):
             receipt = service.pool.outbox_receipt(task_id) if hasattr(service.pool, 'outbox_receipt') else None
             if receipt is not None:
                 message = self._prepare_message(build_message(receipt).render())
-                return {'terminal': True, 'result': _finalize_card(self.card_bridge, task_id, message)}
+                final = _finalize_card(self.card_bridge, task_id, message)
+                self._record_card_finalization(task_id, final)
+                return {'terminal': True, 'result': final}
             st = service.pool.status(task_id) if hasattr(service.pool, 'status') else None
             if isinstance(st, dict) and st.get('status') in ('completed', 'failed', 'cancelled'):
                 result_payload = st.get('result') or {}
@@ -367,7 +369,9 @@ def create_transport(ctx, service):
                     'status': st['status'],
                     'summary': summary,
                 })
-                return {'terminal': True, 'result': _finalize_card(self.card_bridge, task_id, message)}
+                final = _finalize_card(self.card_bridge, task_id, message)
+                self._record_card_finalization(task_id, final)
+                return {'terminal': True, 'result': final}
             return {'terminal': False}
 
         def _record_card_finalization(self, task_id, final):
@@ -375,9 +379,14 @@ def create_transport(ctx, service):
             if isinstance(final, dict) and final.get('error') == 'task_not_found':
                 return
             patch = final.get('patch_result') if isinstance(final, dict) else None
+            degraded = isinstance(final, dict) and final.get('degraded') is True
+            if degraded:
+                service.pool.record_card_finalization_state(task_id, 'degraded', 'card_patch_degraded')
+                return
             if (isinstance(final, dict) and final.get('ok') is True
                     and (final.get('already_finalized') is True
                          or isinstance(patch, dict) and patch.get('ok') is True)):
+                service.pool.record_card_finalization_state(task_id, 'sent', None)
                 return
             if isinstance(final, dict) and final.get('ok') is True and patch is None:
                 # A bound task may finish before its initial card is created.
@@ -386,9 +395,8 @@ def create_transport(ctx, service):
                 if card is not None and not card.get('message_id'):
                     return
             unsent = isinstance(patch, dict) and patch.get('not_sent') is True
-            degraded = isinstance(final, dict) and final.get('degraded') is True
-            state = 'degraded' if degraded else ('pending' if unsent else 'unknown')
-            error = 'card_patch_degraded' if degraded else ('card_patch_not_sent' if unsent else 'card_patch_unknown')
+            state = 'pending' if unsent else 'unknown'
+            error = 'card_patch_not_sent' if unsent else 'card_patch_unknown'
             service.pool.record_card_finalization_state(task_id, state, error)
 
         def deliver(self, address, message, *, idempotency_key):

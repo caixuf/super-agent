@@ -990,6 +990,24 @@ class Pool:
             out["stage"] = display_stage(out)
             return out
 
+    def list_recent_jobs(self, *, limit=10):
+        """Return bounded recent jobs ordered by active-first then newest creation time."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError('limit must be positive')
+        with self.db() as db:
+            rows = db.execute(
+                "SELECT id,status,tries,cancel,result,heartbeat,created,origin,payload "
+                "FROM jobs ORDER BY CASE WHEN status IN ('running','queued') THEN 0 ELSE 1 END, "
+                "created DESC LIMIT ?",
+                (min(limit, 50),),
+            ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["stage"] = display_stage(item)
+            out.append(item)
+        return out
+
     def receipts(self):
         with self.db() as db:
             return [json.loads(r[0]) for r in db.execute('SELECT receipt FROM outbox WHERE acknowledged=0')]
@@ -1077,12 +1095,36 @@ class Pool:
 
     def record_card_finalization_state(self, job, state, error):
         """Record terminal card finalization status in card_outbox without raw SQL leakage."""
+        now = time.time()
         with self.db() as db:
-            db.execute(
-                "UPDATE card_outbox SET state=?,error=?,updated=? "
-                "WHERE job=? AND state IN ('pending','sent')",
-                (state, error, time.time(), job),
-            )
+            if state == 'sent':
+                db.execute(
+                    "UPDATE card_outbox SET state='sent',error=NULL,updated=? "
+                    "WHERE job=? AND state='unknown'",
+                    (now, job),
+                )
+            else:
+                db.execute(
+                    "UPDATE card_outbox SET state=?,error=?,updated=? "
+                    "WHERE job=? AND state IN ('pending','sent','unknown')",
+                    (state, error, now, job),
+                )
+
+    def terminal_unknown_card_jobs(self, *, limit=20, min_age=30.0, not_before=None, now=None):
+        """Return bounded jobs with card_outbox state='unknown' and error='card_patch_unknown' eligible for terminal retry."""
+        current = time.time() if now is None else float(now)
+        cutoff = current - max(0.0, float(min_age))
+        with self.db() as db:
+            return [
+                dict(row)
+                for row in db.execute(
+                    "SELECT c.job FROM card_outbox c JOIN jobs j ON j.id=c.job "
+                    "WHERE c.state='unknown' AND c.error='card_patch_unknown' "
+                    "AND c.updated<=? AND (? IS NULL OR j.created>=?) "
+                    "ORDER BY c.updated,c.job LIMIT ?",
+                    (cutoff, not_before, not_before, limit),
+                ).fetchall()
+            ]
 
     def pending_card_creations(self, *, limit=20, not_before=None):
         """Return bounded pending card creation intents with job origin and payload."""
@@ -1111,7 +1153,8 @@ class Pool:
             db.execute(
                 "UPDATE card_outbox SET progress_state='terminal' WHERE job IN "
                 "(SELECT c.job FROM card_outbox c JOIN jobs j ON j.id=c.job "
-                "WHERE c.state='sent' AND c.progress_state='pending' "
+                "WHERE c.state IN ('sent','degraded','unknown') "
+                "AND c.progress_state IN ('pending','unknown','sending') "
                 "AND j.status IN ('completed','failed','cancelled') LIMIT 100)"
             )
             return [
@@ -1843,6 +1886,9 @@ class Pool:
                         raise TimeoutError('supervisor stop confirmation unavailable')
                     time.sleep(min(0.05, lease / 4))
                 proc.wait()
+                if (proc.returncode in (-15, 143)
+                        and stop_event is not None and not stop_event.is_set()):
+                    stop_event.wait(0.05)
                 if reason is None:
                     if time.monotonic() > deadline:
                         reason = 'timeout'

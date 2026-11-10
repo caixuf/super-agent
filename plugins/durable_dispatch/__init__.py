@@ -298,6 +298,32 @@ class InjectionTransport:
                 'receipt_id': 'injected:' + digest[:32]}
 
 
+_META_STATUS_UTTERANCE_RE = re.compile(
+    r'^\s*(?:这个|刚才那个|上面那个|后台)?(?:任务|重跑|执行)?'
+    r'(?:跑了|重跑|执行了)?(?:这么久了[，,]?)?\s*'
+    r'(?:还没完事吗|还在跑吗|还在做吗|跑完了吗|做完了吗|好了吗|进度如何|到哪一步了|现在什么状态)'
+    r'(?:[，,]\s*(?:完事|跑完|做好)[^\n]{0,16})?[？?！!。.\s]*$'
+)
+_META_STATUS_GOAL_RE = re.compile(
+    r'^\s*(?:查询|查看|检查)(?:一下)?(?:刚才|当前|后台)(?:提交的)?任务(?:是否还在运行|运行状态|执行进度|状态)[。.\s]*$'
+)
+
+
+def _is_meta_status_inquiry(goal):
+    """Detect pure task-status inquiries that must call durable_status instead of spawning a meta-job."""
+    if not isinstance(goal, str) or not goal.strip():
+        return False
+    text = goal.strip()
+    m = re.match(r'^【用户原话】[：:]\s*([^\n]+)', text)
+    if m:
+        utterance = m.group(1).strip()
+        if _META_STATUS_UTTERANCE_RE.match(utterance):
+            return True
+    if len(text) <= 160 and (_META_STATUS_UTTERANCE_RE.match(text) or _META_STATUS_GOAL_RE.match(text)):
+        return True
+    return False
+
+
 def _public_result(raw):
     """Read structured results without slicing encoded JSON into invalid fragments."""
     if len(raw) > 8 * 1024 * 1024:
@@ -869,6 +895,27 @@ class DispatchService:
             outcomes.append({'task_id': job, 'elapsed': elapsed, 'phase': phase})
         return outcomes
 
+    def reconcile_terminal_cards(self, transport, *, limit=20, min_age=30.0, not_before=None, stop_event=None):
+        """Retry or retire terminal_unknown cards (3-strike degradation) without creating duplicate cards."""
+        reconcile = getattr(transport, 'reconcile_card', None)
+        if not callable(reconcile) or not hasattr(self.pool, 'terminal_unknown_card_jobs'):
+            return []
+        now = time.time()
+        rows = self.pool.terminal_unknown_card_jobs(
+            limit=limit, min_age=min_age, not_before=not_before, now=now
+        )
+        outcomes = []
+        for row in rows:
+            if stop_event is not None and stop_event.is_set():
+                break
+            job = row['job']
+            try:
+                checked = reconcile(job)
+                outcomes.append({'task_id': job, 'terminal': bool(isinstance(checked, dict) and checked.get('terminal'))})
+            except Exception as exc:
+                logging.getLogger(__name__).debug('card terminal unknown reconcile failed: %s', type(exc).__name__)
+        return outcomes
+
     def inspect_card_health(self, *, not_before=None, now=None, bridge=None):
         """Return aggregate operator health without task contents or destinations."""
         if not_before is not None and (isinstance(not_before, bool)
@@ -929,10 +976,63 @@ class DispatchService:
                 return
         raise PermissionError('task unavailable in this session')
 
+    def list_owned_statuses(self, session_id, *, limit=5):
+        """Return bounded active and recent tasks belonging to this session (or profile when cross_session_status=True)."""
+        if not hasattr(self.pool, 'list_recent_jobs'):
+            return {'ok': True, 'tasks': [], 'count': 0}
+        rows = self.pool.list_recent_jobs(limit=30)
+        ledger = self._resolve_liveness()
+        matched = []
+        for row in rows:
+            job = row['id']
+            try:
+                self._owned(session_id, job, allow_cross_session=self.cross_session_status)
+            except PermissionError:
+                continue
+            try:
+                payload = json.loads(row['payload']) if row.get('payload') else {}
+            except Exception:
+                payload = {}
+            item = {
+                'task_id': job,
+                'role': self.role,
+                'status': row['status'],
+                'tries': row['tries'],
+                'cancellation_requested': bool(row['cancel']),
+                'created': row.get('created'),
+            }
+            goal_text = payload.get('goal') if isinstance(payload, dict) else None
+            if isinstance(goal_text, str) and goal_text.strip():
+                preview = goal_text.strip().splitlines()[0][:100]
+                item['goal_preview'] = preview
+            if row.get('result'):
+                public, truncated = _public_result(row['result'])
+                item['result'] = public
+                if truncated:
+                    item['result_truncated'] = True
+            if ledger is not None:
+                try:
+                    live = ledger.inspect(job)
+                    if isinstance(live, dict) and live.get('ok'):
+                        if live.get('elapsed_s') is not None:
+                            item['elapsed_s'] = live.get('elapsed_s')
+                        if live.get('phase'):
+                            item['phase'] = live.get('phase')
+                        if live.get('progress'):
+                            item['progress'] = live.get('progress')
+                except Exception:
+                    pass
+            matched.append(item)
+            if len(matched) >= limit:
+                break
+        return {'ok': True, 'tasks': matched, 'count': len(matched)}
+
     def status(self, session_id, args):
-        if not isinstance(args, dict) or set(args) != {'task_id'}:
+        if not isinstance(args, dict) or (set(args) - {'task_id'}):
             raise ValueError('task_id required')
-        job = args['task_id']
+        job = args.get('task_id')
+        if job is None or (isinstance(job, str) and not job.strip()):
+            return self.list_owned_statuses(session_id, limit=5)
         self._owned(session_id, job, allow_cross_session=self.cross_session_status)
         status = self.pool.status(job)
         # Internal attempt tokens are not needed by a user-facing status tool.
@@ -1123,8 +1223,36 @@ class DispatchRouter:
             {key:value for key,value in args.items() if key != 'role'})
         return dict(result,role=role)
 
-    def submit(self,session_id,args): return self._call('submit',session_id,args)
-    def status(self,session_id,args): return self._call('status',session_id,args)
+    def submit(self,session_id,args):
+        if isinstance(args, dict) and _is_meta_status_inquiry(args.get('goal')):
+            raise ValueError('status_inquiry_use_durable_status: call durable_status({}) instead of durable_submit')
+        return self._call('submit',session_id,args)
+
+    def status(self,session_id,args):
+        if not isinstance(args, dict):
+            raise ValueError('dispatch arguments required')
+        task_id = args.get('task_id')
+        explicit_role = args.get('role')
+        if (task_id is None or (isinstance(task_id, str) and not task_id.strip())) and not explicit_role:
+            if set(args) - {'task_id', 'role'}:
+                raise ValueError('task_id required')
+            merged = []
+            for r_name, svc in sorted(self.services.items()):
+                listed = svc.list_owned_statuses(session_id, limit=5)
+                for item in listed.get('tasks', []):
+                    merged.append(dict(item, role=r_name))
+            merged.sort(
+                key=lambda x: (
+                    0 if x.get('status') in ('running', 'queued') else 1,
+                    -float(x.get('created') or 0.0),
+                )
+            )
+            top = merged[:8]
+            for item in top:
+                item.pop('created', None)
+            return {'ok': True, 'tasks': top, 'count': len(top)}
+        return self._call('status',session_id,args)
+
     def cancel(self,session_id,args): return self._call('cancel',session_id,args)
 
 
@@ -1301,6 +1429,9 @@ def start_backfill(ctx, service):
                     refresh = getattr(service, 'refresh_running_cards', None)
                     if callable(refresh):
                         refresh(transport, not_before=not_before, stop_event=stop)
+                    reconcile_unknown = getattr(service, 'reconcile_terminal_cards', None)
+                    if callable(reconcile_unknown):
+                        reconcile_unknown(transport, not_before=not_before, stop_event=stop)
                     now = time.monotonic()
                     if now >= next_inspection:
                         next_inspection = now + _DELIVERY_WARNING_INTERVAL
@@ -1356,8 +1487,8 @@ Pick the role by what the work needs, not by keywords.
 - If no listed role fits the work, submit it to dev as the general execution fallback instead of telling the user the work is unavailable. Report a genuine capability gap only when the returned task itself fails.
 - Every new request is a new task, even when an earlier task answered something similar: current state (today, now, again) changes, so submit again with a new request_key. durable_status only reports a task you already submitted; never answer a fresh request from an older task's result.
 - Task status inquiry vs new task:
-  * When user asks about task status, progress, or state (e.g. "这个还在做吗", "任务状态", "还在跑吗", "好了吗", "进度如何"), OR provides a 32-hex task ID:
-    NEVER call durable_submit! You MUST call durable_status with that task_id. Report the live status (queued, running, completed, failed) and details (phase, progress, verdict, summary) directly to the user.
+  * When user asks about task status, progress, or state (e.g. "这个还在做吗", "任务状态", "还在跑吗", "还没完事吗", "好了吗", "进度如何"), OR provides a 32-hex task ID:
+    NEVER call durable_submit! Call durable_status(task_id=...) or durable_status({}) to list chat tasks. Report the live status (queued, running, completed, failed) and details (phase, progress, verdict, summary) directly to the user.
     If running or queued, reassure the user the worker is actively executing. NEVER claim a role has no worker or that the task disappeared.
   * Only call durable_submit when the user is explicitly requesting a NEW piece of work, test, or investigation to be performed.
 - Conceptual, architectural, workflow, and colleague-role discussions (e.g. "你现在的agent架构是怎样的", "有用到langgraph么", "有哪些专家角色"): Answer directly in the current turn with deep expertise on Super Agent's 5-layer architecture (1. Thin Frontdesk + CardKit 2.0; 2. Durable SQLite Queue + Colleague Pool; 3. StateGraph + SqliteCheckpointer + AttemptSupervisor bwrap/subreaper sandbox + Hermes/Pi dual engines; 4. Synaptic Memory (Heuristic Surprise Gate + ACT-R + Hebbian Spreading + FTS5/vec0 RRF) + SkillForge; 5. Progressive Delivery + Outbound Sanitizer) and use durable_roster for colleague roles; NEVER call durable_submit to inspect systemd/host processes for architecture or role questions.
@@ -1475,8 +1606,8 @@ def register(ctx):
     entries = (
         ('submit', 'Persist a durable task. For the analysis role, sources are required (read-only evidence analysis). For an execution role, omit sources and describe the work in goal. Return its ID and finish the turn; do not wait or poll.',
           submit_properties, ['goal', 'request_key']),
-        ('status', 'Read a durable task belonging to this same session, only when progress is requested.',
-         {'task_id': {'type': 'string'},'role':role_schema}, ['task_id']),
+        ('status', 'Read durable task progress for this session or chat. Pass task_id for a specific task, or omit task_id (durable_status({})) to list active and recent tasks in this chat. Never call durable_submit to check if a task is running.',
+         {'task_id': {'type': 'string'},'role':role_schema}, []),
         ('cancel', 'Request cancellation of a durable task belonging to this same session.',
          {'task_id': {'type': 'string'},'role':role_schema}, ['task_id']),
         ('roster', 'Read-only: list the administrator-configured colleague roles and, when a roster registry is configured, the count of active members. Answer roster/status questions with this instead of durable_submit; it creates no task and requires no source files.',

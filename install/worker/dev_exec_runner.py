@@ -23,16 +23,30 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
+from typing import Any
 
 MAX_INPUT = 131072
 MAX_GOAL = 12000
 MAX_OUTPUT = 32768
 MAX_STDERR = 1500
+EX_TEMPFAIL = 75
 _SSH_HOST_RE = re.compile(r"^[A-Za-z0-9._@-]{1,128}\Z")
+_SHUTDOWN_SIGNAL = 0
+
+
+class _InterruptedShutdownError(RuntimeError):
+    """Raised when SIGTERM/SIGINT interrupts worker execution so fallback engines do not spawn."""
+
+
+def _handle_shutdown_signal(signum: int, _frame: Any) -> None:
+    global _SHUTDOWN_SIGNAL
+    _SHUTDOWN_SIGNAL = int(signum)
 
 
 def _recall_skill_guidance(goal: str, payload: dict | None = None) -> tuple[str, list[str]]:
@@ -206,9 +220,19 @@ def _decorate_goal(goal: str) -> str:
 
 def _clean_hermes_output(raw: str) -> str:
     text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", raw or "")
+    text = re.sub(
+        r"^(?:\s*(?:警告[：:]\s*未知的工具集[：:]|Warning:\s*unknown toolset:)[^\n]*(?:\n|$))+",
+        "",
+        text,
+    )
     parts = re.split(r"(?:^|\n)[─╭]*\s*[☤⚕]\s*Hermes[^\n]*\n", text)
     if len(parts) > 1:
         text = parts[-1]
+    text = re.sub(
+        r"^(?:\s*(?:警告[：:]\s*未知的工具集[：:]|Warning:\s*unknown toolset:)[^\n]*(?:\n|$))+",
+        "",
+        text,
+    )
     text = re.split(r"\n[─]{10,}\s*\n+\s*(?:恢复此会话[：:]|Resume this session:)", text)[0]
     text = re.split(r"\n+\s*(?:恢复此会话[：:]|Resume this session:)", text)[0]
     return text.strip()
@@ -298,14 +322,15 @@ def _resolve_job_model_route(payload: dict | None = None) -> dict:
         sys.path.insert(0, str(engine))
     payload = payload or {}
     role = (
-        os.environ.get("DEV_MODEL_ROLE")
-        or payload.get("_colleague_role")
+        payload.get("_colleague_role")
+        or os.environ.get("DEV_MODEL_ROLE")
         or payload.get("role")
         or "dev_runner"
     )
     requested_model = (
-        os.environ.get("DEV_MODEL_TIER")
-        or payload.get("_model_tier")
+        payload.get("_model_tier")
+        or payload.get("model_tier")
+        or os.environ.get("DEV_MODEL_TIER")
         or os.environ.get("DEV_PI_MODEL")
         or ""
     )
@@ -574,19 +599,89 @@ def _wrap_with_bwrap_sandbox(
         if not binding_check.get("ok"):
             return cmd, None
 
-        writable_paths: list[Path] = [
-            _profile_home(),
-            Path.home() / ".hermes",
-            Path.home() / "reports",
-        ]
-        if env and env.get("HERMES_HOME"):
-            writable_paths.append(Path(env["HERMES_HOME"]))
+        reports_dir = Path.home() / "reports"
+        try:
+            reports_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        writable_paths: list[Path] = [reports_dir]
+
+        runtime_home = (
+            Path(env["HERMES_HOME"]).expanduser()
+            if env and env.get("HERMES_HOME")
+            else _profile_home()
+        )
+        pm_writable_paths: list[Path] = []
+        installs_dir = Path.home() / ".hermes" / "installs"
+        if installs_dir.is_dir():
+            for inst_dir in sorted(installs_dir.iterdir()):
+                if not inst_dir.is_dir():
+                    continue
+                install_lock = inst_dir / ".install.lock"
+                try:
+                    install_lock.touch(exist_ok=True)
+                except OSError:
+                    pass
+                if install_lock.is_file():
+                    pm_writable_paths.append(install_lock)
+                pm_runtime_dir = inst_dir / "pm-runtime"
+                if pm_runtime_dir.is_dir():
+                    prepare_lock = pm_runtime_dir / ".prepare.lock"
+                    try:
+                        prepare_lock.touch(exist_ok=True)
+                    except OSError:
+                        pass
+                    if prepare_lock.is_file():
+                        pm_writable_paths.append(prepare_lock)
+                envs_dir = inst_dir / "environments"
+                if envs_dir.is_dir():
+                    for env_dir in sorted(envs_dir.iterdir()):
+                        if not env_dir.is_dir():
+                            continue
+                        leases_dir = env_dir / ".leases"
+                        try:
+                            leases_dir.mkdir(exist_ok=True)
+                        except OSError:
+                            pass
+                        if leases_dir.is_dir():
+                            pm_writable_paths.append(leases_dir)
+
+        managed_state_paths: list[Path] = []
+        candidate_state_roots: list[Path] = []
+        if attempt_dir is not None and attempt_dir.parent.name == "attempts":
+            candidate_state_roots.append(attempt_dir.parent.parent.parent)
+        super_agent_base = Path.home() / "super_agent"
+        if super_agent_base.is_dir():
+            candidate_state_roots.extend(sorted(super_agent_base.glob("*/state")))
+        candidate_state_roots.append(Path.home() / ".local" / "state" / "agentcore")
+        seen_state_roots: set[str] = set()
+        for st_root in candidate_state_roots:
+            try:
+                if not st_root.is_dir():
+                    continue
+                st_key = str(st_root.resolve(strict=True))
+            except OSError:
+                continue
+            if st_key in seen_state_roots:
+                continue
+            seen_state_roots.add(st_key)
+            for sub_name in ("memory-spool", "recall-diagnostics", "personal-memory-candidate"):
+                sub_dir = st_root / sub_name
+                try:
+                    sub_dir.mkdir(exist_ok=True)
+                except OSError:
+                    pass
+                if sub_dir.is_dir():
+                    managed_state_paths.append(sub_dir)
 
         wrapped_cmd = adapter.build_worker_bwrap_argv(
             cmd,
             wdir,
             attempt_dir=attempt_dir,
             writable_paths=writable_paths,
+            hermes_runtime_home=runtime_home,
+            hermes_pm_writable_paths=pm_writable_paths,
+            managed_state_paths=managed_state_paths,
         )
         containment_meta = {
             "backend": "bwrap",
@@ -692,6 +787,14 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
     cleaned = _clean_hermes_output(full_stdout) if isinstance(full_stdout, str) else ""
     summary = cleaned[:MAX_OUTPUT] if len(cleaned) > MAX_OUTPUT else cleaned
     err = (done.stderr or "")[-MAX_STDERR:]
+    if _SHUTDOWN_SIGNAL != 0 or done.returncode in (-15, 143, -2, 130):
+        return {
+            "ok": False,
+            "interrupted": True,
+            "error": "interrupted_by_shutdown",
+            "returncode": done.returncode,
+            "stderr": err,
+        }
     ok = done.returncode == 0 and bool((summary or out).strip())
 
     checkpoint_data = _find_and_load_checkpoint()
@@ -971,6 +1074,14 @@ def _call_engine(fn, goal: str, route: dict | None = None, on_event: Any | None 
 
 
 def main() -> int:
+    global _SHUTDOWN_SIGNAL
+    _SHUTDOWN_SIGNAL = 0
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(_sig, _handle_shutdown_signal)
+        except (ValueError, OSError):
+            pass
+
     try:
         raw_goal, job_payload = _read_job_envelope(sys.stdin)
     except Exception as exc:
@@ -981,15 +1092,14 @@ def main() -> int:
     if str(engine) not in sys.path:
         sys.path.insert(0, str(engine))
 
-    from agentcore.state_graph import END, MemoryCheckpointer, SqliteCheckpointer, StateGraph
-
-    attempt_env = (os.environ.get("SUPERAGENT_ATTEMPT_DIR") or "").strip()
-    attempt_dir = Path(attempt_env) if attempt_env and Path(attempt_env).is_dir() else None
-    active_ckpt = (
-        SqliteCheckpointer(attempt_dir / "state_checkpoints.db")
-        if attempt_dir is not None
-        else MemoryCheckpointer()
+    from agentcore.state_graph import (
+        END,
+        MemoryCheckpointer,
+        NodeExecutionError,
+        SqliteCheckpointer,
+        StateGraph,
     )
+
     task_id = str(
         os.environ.get("SUPERAGENT_JOB_ID")
         or job_payload.get("_job_id")
@@ -997,6 +1107,38 @@ def main() -> int:
         or job_payload.get("task_id")
         or f"exec_{os.getpid()}_{int(time.time())}"
     )
+    attempt_env = (os.environ.get("SUPERAGENT_ATTEMPT_DIR") or "").strip()
+    attempt_dir = Path(attempt_env) if attempt_env and Path(attempt_env).is_dir() else None
+    attempt_ckpt_file = attempt_dir / "state_checkpoints.db" if attempt_dir is not None else None
+    job_ckpt_file: Path | None = None
+    if attempt_dir is not None:
+        if attempt_dir.parent.name == "attempts":
+            safe_task_key = re.sub(r"[^A-Za-z0-9_.-]", "_", task_id)[:96] or "job"
+            job_ckpt_file = attempt_dir.parent.parent / "checkpoints" / f"{safe_task_key}.db"
+        else:
+            job_ckpt_file = attempt_ckpt_file
+        active_ckpt: MemoryCheckpointer | SqliteCheckpointer = SqliteCheckpointer(job_ckpt_file)
+    else:
+        active_ckpt = MemoryCheckpointer()
+
+    def _sync_attempt_ckpt_snapshot() -> None:
+        if (
+            job_ckpt_file is None
+            or attempt_ckpt_file is None
+            or job_ckpt_file == attempt_ckpt_file
+            or not job_ckpt_file.is_file()
+        ):
+            return
+        try:
+            with sqlite3.connect(job_ckpt_file, timeout=10.0) as src_conn:
+                with sqlite3.connect(attempt_ckpt_file, timeout=10.0) as dst_conn:
+                    src_conn.backup(dst_conn)
+        except Exception:
+            try:
+                shutil.copy2(job_ckpt_file, attempt_ckpt_file)
+            except Exception:
+                pass
+
     explicit_resume = bool(job_payload.get("resume") or os.environ.get("SUPERAGENT_RESUME_CHECKPOINT") == "1")
     existing_ckpt = active_ckpt.get(task_id)
     if existing_ckpt is not None and existing_ckpt.node == "harvest_and_distill" and not explicit_resume:
@@ -1020,7 +1162,13 @@ def main() -> int:
         r_degraded = bool(state.get("route_degraded"))
         r_reason = str(state.get("route_reason") or "")
 
+        if _SHUTDOWN_SIGNAL != 0:
+            raise _InterruptedShutdownError("interrupted_by_shutdown")
+
         primary = _call_engine(run_hermes, composed, route=route)
+        if primary.get("interrupted") or _SHUTDOWN_SIGNAL != 0:
+            raise _InterruptedShutdownError(str(primary.get("error") or "interrupted_by_shutdown"))
+
         if primary.get("ok"):
             return {
                 "ok": True,
@@ -1039,23 +1187,30 @@ def main() -> int:
 
         fallback = _call_engine(run_pi, composed, route=route, on_event=monitor.handle_pi_event)
         primary_err = primary.get("error", "turn_failed")
+        primary_stderr = str(primary.get("stderr") or "").strip()[-MAX_STDERR:]
+        primary_rc = primary.get("returncode")
         fallback_reason = f"primary_engine_fallback:hermes->{primary_err}"
         combined_reason = "; ".join(r for r in (r_reason, fallback_reason) if r)
         if fallback.get("ok"):
+            fb_env: dict[str, Any] = {
+                "ok": True,
+                "engine": "pi",
+                "model_tier": m_tier,
+                "degraded": True,
+                "engine_degraded": True,
+                "degradation_reason": combined_reason,
+                "result": fallback,
+                "primary_error": primary_err,
+            }
+            if primary_stderr:
+                fb_env["primary_stderr"] = primary_stderr
+            if primary_rc is not None:
+                fb_env["primary_returncode"] = primary_rc
             return {
                 "ok": True,
                 "engine": "pi",
                 "result": fallback,
-                "envelope": {
-                    "ok": True,
-                    "engine": "pi",
-                    "model_tier": m_tier,
-                    "degraded": True,
-                    "engine_degraded": True,
-                    "degradation_reason": combined_reason,
-                    "result": fallback,
-                    "primary_error": primary_err,
-                },
+                "envelope": fb_env,
             }
 
         salvaged_checkpoint = _find_and_load_checkpoint()
@@ -1084,21 +1239,26 @@ def main() -> int:
                 },
             }
 
+        fail_env: dict[str, Any] = {
+            "ok": False,
+            "engine": "none",
+            "model_tier": m_tier,
+            "degraded": True,
+            "engine_degraded": True,
+            "degradation_reason": combined_reason,
+            "result": fallback,
+            "primary_error": primary_err,
+            "error": "both_engines_failed",
+        }
+        if primary_stderr:
+            fail_env["primary_stderr"] = primary_stderr
+        if primary_rc is not None:
+            fail_env["primary_returncode"] = primary_rc
         return {
             "ok": False,
             "engine": "none",
             "result": fallback,
-            "envelope": {
-                "ok": False,
-                "engine": "none",
-                "model_tier": m_tier,
-                "degraded": True,
-                "engine_degraded": True,
-                "degradation_reason": combined_reason,
-                "result": fallback,
-                "primary_error": primary_err,
-                "error": "both_engines_failed",
-            },
+            "envelope": fail_env,
         }
 
     def _node_harvest_and_distill(state: dict) -> dict:
@@ -1142,22 +1302,50 @@ def main() -> int:
         harvest_callback=_harvest_cb,
     )
 
+    monitor_stopped = False
     try:
-        final_state = compiled_graph.invoke(
-            {
-                "task_id": task_id,
-                "raw_goal": raw_goal,
-                "worktree": str(_workdir()),
-            },
-            config={"task_id": task_id},
-        )
+        try:
+            final_state = compiled_graph.invoke(
+                {
+                    "task_id": task_id,
+                    "raw_goal": raw_goal,
+                    "worktree": str(_workdir()),
+                },
+                config={"task_id": task_id},
+            )
+        except (_InterruptedShutdownError, NodeExecutionError) as exc:
+            is_shutdown = (
+                isinstance(exc, _InterruptedShutdownError)
+                or isinstance(getattr(exc, "__cause__", None), _InterruptedShutdownError)
+                or _SHUTDOWN_SIGNAL != 0
+            )
+            if not is_shutdown:
+                raise
+            _sync_attempt_ckpt_snapshot()
+            monitor.stop(ok=False)
+            monitor_stopped = True
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "interrupted": True,
+                        "error": "interrupted_by_shutdown",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return EX_TEMPFAIL
+
+        _sync_attempt_ckpt_snapshot()
         envelope = dict(final_state.get("envelope") or {"ok": False, "error": "both_engines_failed"})
         is_ok = bool(envelope.get("ok"))
         monitor.stop(ok=is_ok)
+        monitor_stopped = True
         print(json.dumps(envelope, ensure_ascii=False))
         return 0
     finally:
-        monitor.stop(ok=False)
+        if not monitor_stopped:
+            monitor.stop(ok=False)
 
 
 if __name__ == "__main__":
