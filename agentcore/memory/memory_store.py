@@ -148,7 +148,7 @@ def _connect() -> sqlite3.Connection:
         " ON working_fact(user_id, workspace_id, subject, statement)")
     # 按来源批量作废/统计（nightly 重灌的阶段 1）走这条
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_source ON working_fact(source, status)")
-    # 动态检查并补齐 TMS 认知真值维护字段（零停机无损迁移）
+    # 动态检查并补齐认知真值维护字段（零停机无损迁移）
     cols = {r[1] for r in conn.execute("PRAGMA table_info(working_fact)").fetchall()}
     if "validity_state" not in cols:
         conn.execute("ALTER TABLE working_fact ADD COLUMN validity_state TEXT NOT NULL DEFAULT 'ACTIVE'")

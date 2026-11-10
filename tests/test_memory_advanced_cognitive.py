@@ -3,7 +3,7 @@
 """记忆系统前沿认知架构集成测试集（三大差距突破专项用例）。
 
 全面覆盖：
-1. TMS 认知真值维护（Truth Maintenance System）与证据等级对决
+1. 认知真值维护（Truth Maintenance System）与证据等级对决
 2. 级联失效对账（Cascade Invalidation & Blast Radius）
 3. 时空拓扑轻量图（Lite GraphRAG & Multi-hop Recursive CTE）与环路保护
 4. 离线梦境反思与公理蒸馏（Dream-Phase Reflection & Synthesis）
@@ -67,7 +67,7 @@ def isolated_memory_env(tmp_path: Path):
 
 
 # ==============================================================================
-# 第一部分：TMS 认知真值维护与证据等级对决测试 (8 个用例)
+# 第一部分：认知真值维护与证据等级对决测试 (8 个用例)
 # ==============================================================================
 
 class TestTruthMaintenanceSystem:
@@ -77,22 +77,22 @@ class TestTruthMaintenanceSystem:
         test_pass_fact = {
             "source": "ci_pipeline",
             "statement": "HNP-48 大灯测试全绿通过，实测已绿",
-            "evidence_refs": ["test_pass:hnp_light_on_allowed_r7"],
+            "evidence_refs": ["test_pass:hnp_light_on_allowed"],
         }
         assert get_evidence_tier(test_pass_fact) == 4
 
         # 源码契约事实
         code_fact = {
             "source": "ast_extractor",
-            "statement": "MFF 状态机中 StateDDLDUNPActive 包含大灯信号枚举",
-            "evidence_refs": ["code_contract:mff_state.proto"],
+            "statement": "状态机核心层 StateActive 包含大灯信号枚举",
+            "evidence_refs": ["code_contract:state_interface.proto"],
         }
         assert get_evidence_tier(code_fact) == 3
 
         # 人工输入事实
         user_fact = {
             "source": "manual",
-            "statement": "龙飞指定当前环境占位图 mock 节点无真实总线",
+            "statement": "人工指定当前环境占位图 mock 节点无真实总线",
             "evidence_refs": [],
         }
         assert get_evidence_tier(user_fact) == 2
@@ -100,14 +100,14 @@ class TestTruthMaintenanceSystem:
         # 概率性推论
         hypo_fact = {
             "source": "auto_infer",
-            "statement": "推测大灯信号可能未在 TMAS 域暴露",
+            "statement": "推测大灯信号可能未在通信域暴露",
             "evidence_refs": [],
         }
         assert get_evidence_tier(hypo_fact) == 1
 
     def test_semantic_polarity_conflict_detection(self):
         """测试正反互斥命题的快速极性冲突识别。"""
-        assert has_semantic_polarity_conflict("大灯在 R7 环境下不可测", "大灯在 R7 环境下实测已绿，完全可测")
+        assert has_semantic_polarity_conflict("大灯在仿真环境下不可测", "大灯在仿真环境下实测已绿，完全可测")
         assert has_semantic_polarity_conflict("当前开关不支持超速变道", "确认支持超速变道功能")
         assert has_semantic_polarity_conflict("enable wiper high debounce", "disable wiper debounce")
         # 非冲突命题
@@ -120,7 +120,7 @@ class TestTruthMaintenanceSystem:
         res1 = write_fact(
             statement="HNP-48 大灯属于占位图环境不可测缺口",
             subject="HNP大灯信号",
-            workspace_id="R7.0",
+            workspace_id="G7.0",
             source="hypothesis",
             confidence_level=0.6,
         )
@@ -131,9 +131,9 @@ class TestTruthMaintenanceSystem:
         res2 = write_fact(
             statement="HNP-48 大灯用例实测已绿，已覆盖且完全可测",
             subject="HNP大灯信号",
-            workspace_id="R7.0",
+            workspace_id="G7.0",
             source="test_verification",
-            evidence_refs=["test_pass:hnp_light_on_allowed_r7"],
+            evidence_refs=["test_pass:hnp_light_on_allowed"],
             confidence_level=1.0,
             resolve_conflict=True,
         )
@@ -305,7 +305,7 @@ class TestCascadeInvalidationRealStore:
         res_root = write_fact(
             statement="原方案：所有降级均通过 ACC 缓冲 300ms",
             subject="降级策略",
-            workspace_id="R7",
+            workspace_id="G7",
             confidence_level=0.8,
         )
         root_id = res_root["fact_id"]
@@ -314,13 +314,13 @@ class TestCascadeInvalidationRealStore:
         res_sub1 = write_fact(
             statement="衍生策略 1：脱手报警遵循 ACC 300ms 缓冲",
             subject="脱手缓冲",
-            workspace_id="R7",
+            workspace_id="G7",
             derived_from_ids=[root_id],
         )
         res_sub2 = write_fact(
             statement="衍生策略 2：越界报警遵循 ACC 300ms 缓冲",
             subject="越界缓冲",
-            workspace_id="R7",
+            workspace_id="G7",
             derived_from_ids=[root_id],
         )
         sub1_id = res_sub1["fact_id"]
@@ -333,7 +333,7 @@ class TestCascadeInvalidationRealStore:
         res_new_root = write_fact(
             statement="新方案：脱手降级直接进入 MRC，禁止插 300ms ACC 缓冲脱窗",
             subject="降级策略",
-            workspace_id="R7",
+            workspace_id="G7",
             source="test_verification",
             evidence_refs=["test_pass:no_acc_buffer"],
             confidence_level=1.0,
@@ -362,11 +362,11 @@ class TestMemoryDreamConsolidation:
         """测试梦境引擎能够把多条碎片自动聚拢为同主题簇。"""
         engine = MemoryDreamEngine(similarity_threshold=0.35, min_cluster_size=2)
 
-        # 构造三条关于 WSL 权限报错的碎片
+        # 构造三条关于环境权限报错的碎片
         facts = [
-            {"fact_id": "f1", "subject": "WSL2权限", "statement": "docker 挂载 workspace 出现 permission denied", "workspace_id": "sil"},
-            {"fact_id": "f2", "subject": "WSL2权限", "statement": "run.sh 提示 uid 1000 缺少 write 权限", "workspace_id": "sil"},
-            {"fact_id": "f3", "subject": "WSL2权限", "statement": "imfl 编译临时目录权限不可写", "workspace_id": "sil"},
+            {"fact_id": "f1", "subject": "环境权限", "statement": "docker 挂载 workspace 出现 permission denied", "workspace_id": "sil"},
+            {"fact_id": "f2", "subject": "环境权限", "statement": "run.sh 提示 uid 1000 缺少 write 权限", "workspace_id": "sil"},
+            {"fact_id": "f3", "subject": "环境权限", "statement": "测试编译临时目录权限不可写", "workspace_id": "sil"},
             {"fact_id": "f4", "subject": "完全无关主题", "statement": "今天天气晴朗适合部署", "workspace_id": "sil"},
         ]
         clusters = engine.cluster_facts(facts)
@@ -439,18 +439,18 @@ class TestGraphAugmentedRecall:
     def test_hybrid_recall_filters_superseded_facts(self):
         """测试混合召回 (recall_hybrid) 彻底过滤 superseded 事实，杜绝过期垃圾被召回。"""
         res1 = write_fact(
-            statement="旧规则：所有用例必须引用 commMffR6.extend",
+            statement="旧规则：所有用例必须引用 legacy_base.extend",
             subject="Extend引用",
-            workspace_id="r7_test",
+            workspace_id="test_env",
         )
         old_fid = res1["fact_id"]
 
         res2 = write_fact(
-            statement="新规则：R7 代际用例必须且仅能引用 commMffTmas.extend",
+            statement="新规则：升级代际用例必须且仅能引用 modern_base.extend",
             subject="Extend引用",
-            workspace_id="r7_test",
+            workspace_id="test_env",
             source="test_verification",
-            evidence_refs=["test_pass:r7_extend"],
+            evidence_refs=["test_pass:modern_extend"],
             resolve_conflict=True,
         )
         new_fid = res2["fact_id"]
@@ -646,9 +646,9 @@ class TestDreamEngineHighDensityStress:
         # 写入主题 2: Gnutls 网络握手 (3 条)
         for i in range(3):
             write_fact(statement=f"Gnutls 握手失败且代理端口阻断 fragment_{i}", subject="网络握手", workspace_id="infra")
-        # 写入主题 3: IMFL 语法反模式 (3 条)
+        # 写入主题 3: DSL 语法反模式 (3 条)
         for i in range(3):
-            write_fact(statement=f"IMFL 短脉冲严禁插入 sleep 脱窗保护 fragment_{i}", subject="DSL反模式", workspace_id="infra")
+            write_fact(statement=f"短脉冲严禁插入 sleep 脱窗保护 fragment_{i}", subject="DSL反模式", workspace_id="infra")
 
         engine = MemoryDreamEngine(workspace_id="infra", min_cluster_size=2)
         report = engine.run_cycle()
@@ -697,17 +697,17 @@ class TestDreamEngineHighDensityStress:
 # ==============================================================================
 
 class TestAutonomousDrivingCognitiveLifecycleE2E:
-    def test_full_cognitive_lifecycle_tmas_r7_e2e(self):
-        """【终极闭环测试】自动驾驶真实场景下的全生命周期认知演进：
+    def test_full_cognitive_lifecycle_advanced_e2e(self):
+        """【终极闭环测试】真实场景下的全生命周期认知演进：
         
-        假说阶段 -> 衍生用例 -> 实车跑通全绿 -> 证据对账推翻 -> 衍生事实级联置疑
+        假说阶段 -> 衍生用例 -> 仿真跑通全绿 -> 证据对账推翻 -> 衍生事实级联置疑
         -> 夜间梦境反思聚类蒸馏公理 -> 图增强检索精准召回 + 过期知识 100% 隔离。
         """
         # Step 1: 早期假说录入 (Tier 1)
         hypo = write_fact(
-            statement="早期推论：TMAS 域目前无法支持向实线打灯变道，压线会直接报错退出",
+            statement="早期推论：通信域目前无法支持向实线打灯变道，压线会直接报错退出",
             subject="压线变道策略",
-            workspace_id="R7",
+            workspace_id="G7",
             source="hypothesis",
             confidence_level=0.5,
         )
@@ -717,25 +717,25 @@ class TestAutonomousDrivingCognitiveLifecycleE2E:
         c1 = write_fact(
             statement="用例 cp_active_turn_left_right: 预期压实线打灯直接降级退出",
             subject="压线变道用例A",
-            workspace_id="R7",
+            workspace_id="G7",
             derived_from_ids=[hypo_id],
         )
         c2 = write_fact(
             statement="用例 cp_active_uturn: 预期掉头压线直接报错退出",
             subject="压线变道用例B",
-            workspace_id="R7",
+            workspace_id="G7",
             derived_from_ids=[hypo_id],
         )
         c1_id, c2_id = c1["fact_id"], c2["fact_id"]
         assert query_fact_lineage(c1_id)["lineage"]["validity_state"] == "ACTIVE"
 
-        # Step 3: 实车回灌测试跑通，产生权威实测全绿报告 (Tier 4)
+        # Step 3: 回灌仿真测试跑通，产生权威实测全绿报告 (Tier 4)
         verified = write_fact(
-            statement="最新实测：TMAS 域底层已修复压线注入器，实测已绿，支持向实线打灯变道保持 Active",
+            statement="最新实测：通信域底层已修复压线注入器，实测已绿，支持向实线打灯变道保持 Active",
             subject="压线变道策略",
-            workspace_id="R7",
+            workspace_id="G7",
             source="test_verification",
-            evidence_refs=["test_pass:hnp_turn_light_r7"],
+            evidence_refs=["test_pass:turn_light_active"],
             confidence_level=1.0,
             resolve_conflict=True,
         )
@@ -759,9 +759,9 @@ class TestAutonomousDrivingCognitiveLifecycleE2E:
         write_fact(
             statement="实测附注：压线打灯变道时必须检查 combined light sts 信号状态",
             subject="压线变道策略",
-            workspace_id="R7",
+            workspace_id="G7",
         )
-        engine = MemoryDreamEngine(workspace_id="R7", min_cluster_size=2)
+        engine = MemoryDreamEngine(workspace_id="G7", min_cluster_size=2)
         dream_rep = engine.run_cycle()
         assert dream_rep["ok"]
         assert dream_rep["axioms_synthesized"] >= 1

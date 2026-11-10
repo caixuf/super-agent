@@ -293,7 +293,7 @@ def recall_hybrid(
         interleave=(fusion == "interleave"),
     )
 
-    # TMS 真值过滤：杜绝返回 superseded 淘汰知识
+    # 真值系统过滤：杜绝返回 superseded 淘汰知识
     fused = [
         item for item in fused
         if str(item.get("validity_state") or item.get("status") or "").upper() != "SUPERSEDED"

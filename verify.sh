@@ -71,6 +71,8 @@ if "$PY" -m pytest tests -q -rs >/tmp/verify_unit.log 2>&1; then
   # 计数本身不能替代原因。
   grep -E "^SKIPPED" /tmp/verify_unit.log | sed 's/^SKIPPED \[\([0-9]*\)\] /  [跳过 \1] /' | head -n 20
 else
+  # 打印失败用例信息（不要被 SKIPPED 冲掉）
+  grep -A 25 -E "^FAILURES|^FAILED" /tmp/verify_unit.log | head -n 50 | sed 's/^/    /' || true
   tail -n 20 /tmp/verify_unit.log | sed 's/^/    /'
   fail "单元测试未全过（完整输出：/tmp/verify_unit.log）"
 fi
