@@ -1,7 +1,7 @@
 # 01. 5分钟快速上手与单根部署 (Quickstart & Single-Root Deployment)
 
-> 📚 **导航 / Wiki Navigation**
-> [🏠 Wiki 首页 (Home)](Home.md) │ [🚀 01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [🧩 02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [🤖 03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [📨 04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [🛠️ 05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
+> **导航 / Wiki Navigation**
+> [Wiki 首页 (Home)](Home.md) │ [01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
 
 ---
 
@@ -205,6 +205,6 @@ python3 tools/superagent.py uninstall --profile dev --apply
 
 ---
 
-> ➡️ **下一步**：单根环境就绪后，请阅读 [02. 业务知识挂载指南](02-Business-Overlay-Guide.md) 了解如何零污染接入业务 MCP、Skills 与领域专家角色。
+> **下一步**：单根环境就绪后，请阅读 [02. 业务知识挂载指南](02-Business-Overlay-Guide.md) 了解如何零污染接入业务 MCP、Skills 与领域专家角色。
 >
-> 🧭 [🏠 返回 Wiki 首页 (Home)](Home.md) │ [➡️ 下一篇：02. 业务知识挂载指南](02-Business-Overlay-Guide.md)
+>  [返回 Wiki 首页 (Home)](Home.md) │ [下一篇：02. 业务知识挂载指南](02-Business-Overlay-Guide.md)

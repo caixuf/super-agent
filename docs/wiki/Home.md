@@ -1,7 +1,7 @@
 # Super Agent 用户与架构 Wiki (User & Architecture Wiki)
 
-> 📚 **知识库导览 / Wiki Navigation**
-> [🏠 Wiki 首页 (Home)](Home.md) │ [🚀 01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [🧩 02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [🤖 03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [📨 04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [🛠️ 05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
+> **知识库导览 / Wiki Navigation**
+> [Wiki 首页 (Home)](Home.md) │ [01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
 
 ---
 
@@ -80,11 +80,11 @@ flowchart TD
 
 | 章节编号 | 文档主题 | 核心内容提要 |
 | :--- | :--- | :--- |
-| **01** | [🚀 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) | 环境先决条件、单根受管拓扑（`~/super_agent/<profile>`）、`superagent.sh` 一键安装、版本原子升级与秒级回滚。 |
-| **02** | [🧩 业务知识挂载指南](02-Business-Overlay-Guide.md) | 中性核心与业务解耦规范、`SOUL.generic.md` 身份注入、MCP 服务的规范挂载、外部 Skills 引入、9 角色业务团队与 `sync_roles.py` 配置深度合并。 |
-| **03** | [🤖 前后台多智能体与 StateGraph](03-Multi-Agent-and-StateGraph.md) | 前台接待员与后台执行者职责边界、8 大官方研发岗位契约（`DEV_ROLES`）、Raven 路径所有权矩阵、LangGraph 纯 Python 状态图、EverOS 技能锻造器。 |
-| **04** | [📨 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) | CardKit 2.0 状态机生命周期、单在途去抖合并、`drain()` 屏障、实时动态进度流、Markdown 与 Chromium 图文/云文档高清交付规范。 |
-| **05** | [🛠️ 运维排障与 FAQ](05-Operations-and-Troubleshooting.md) | 布局感知运维脚本（`_layout.sh`）、`doctor` 全局体检、脱敏长期记忆召回诊断（`inspect_recall_diagnostics.py`）、历史版本清理（`prune-releases`）与生产常见问题速查处置表。 |
+| **01** | [5分钟快速上手与单根部署](01-Quickstart-and-Install.md) | 环境先决条件、单根受管拓扑（`~/super_agent/<profile>`）、`superagent.sh` 一键安装、版本原子升级与秒级回滚。 |
+| **02** | [业务知识挂载指南](02-Business-Overlay-Guide.md) | 中性核心与业务解耦规范、`SOUL.generic.md` 身份注入、MCP 服务的规范挂载、外部 Skills 引入、9 角色业务团队与 `sync_roles.py` 配置深度合并。 |
+| **03** | [前后台多智能体与 StateGraph](03-Multi-Agent-and-StateGraph.md) | 前台接待员与后台执行者职责边界、8 大官方研发岗位契约（`DEV_ROLES`）、Raven 路径所有权矩阵、LangGraph 纯 Python 状态图、EverOS 技能锻造器。 |
+| **04** | [交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) | CardKit 2.0 状态机生命周期、单在途去抖合并、`drain()` 屏障、实时动态进度流、Markdown 与 Chromium 图文/云文档高清交付规范。 |
+| **05** | [运维排障与 FAQ](05-Operations-and-Troubleshooting.md) | 布局感知运维脚本（`_layout.sh`）、`doctor` 全局体检、脱敏长期记忆召回诊断（`inspect_recall_diagnostics.py`）、历史版本清理（`prune-releases`）与生产常见问题速查处置表。 |
 
 ---
 
@@ -118,6 +118,6 @@ flowchart TD
 
 ---
 
-> 💡 **小贴士**：开始使用请继续阅读：[01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md)
+> **小贴士**：开始使用请继续阅读：[01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md)
 >
-> ➡️ [下一篇：01. 5分钟快速上手与单根部署 (01-Quickstart-and-Install.md)](01-Quickstart-and-Install.md)
+>  [下一篇：01. 5分钟快速上手与单根部署 (01-Quickstart-and-Install.md)](01-Quickstart-and-Install.md)

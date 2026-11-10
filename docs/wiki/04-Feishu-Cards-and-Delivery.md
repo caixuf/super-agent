@@ -1,7 +1,7 @@
 # 04. 企业协作平台卡片生命周期与交付机制 (Feishu/Lark Cards & Progressive Delivery)
 
-> 📚 **导航 / Wiki Navigation**
-> [🏠 Wiki 首页 (Home)](Home.md) │ [🚀 01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [🧩 02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [🤖 03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [📨 04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [🛠️ 05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
+> **导航 / Wiki Navigation**
+> [Wiki 首页 (Home)](Home.md) │ [01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
 
 ---
 
@@ -118,6 +118,6 @@ graph LR
 
 ---
 
-> ➡️ **下一步**：掌握系统的日常监控、诊断工具与应急故障处置，请阅读 [05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)。
+> **下一步**：掌握系统的日常监控、诊断工具与应急故障处置，请阅读 [05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)。
 >
-> 🧭 [⬅️ 上一篇：03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [🏠 返回 Wiki 首页 (Home)](Home.md) │ [➡️ 下一篇：05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
+>  [上一篇：03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [返回 Wiki 首页 (Home)](Home.md) │ [下一篇：05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)

@@ -1,7 +1,7 @@
 # 03. 前后台协同与 StateGraph 状态图 (Multi-Agent, StateGraph & Raven)
 
-> 📚 **导航 / Wiki Navigation**
-> [🏠 Wiki 首页 (Home)](Home.md) │ [🚀 01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [🧩 02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [🤖 03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [📨 04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [🛠️ 05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
+> **导航 / Wiki Navigation**
+> [Wiki 首页 (Home)](Home.md) │ [01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
 
 ---
 
@@ -187,6 +187,6 @@ graph TD
 
 ---
 
-> ➡️ **下一步**：了解如何将长任务进度与高质量图表交付给用户，请阅读 [04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md)。
+> **下一步**：了解如何将长任务进度与高质量图表交付给用户，请阅读 [04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md)。
 >
-> 🧭 [⬅️ 上一篇：02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [🏠 返回 Wiki 首页 (Home)](Home.md) │ [➡️ 下一篇：04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md)
+>  [上一篇：02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [返回 Wiki 首页 (Home)](Home.md) │ [下一篇：04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md)

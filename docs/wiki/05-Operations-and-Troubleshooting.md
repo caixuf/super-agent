@@ -1,7 +1,7 @@
 # 05. 日常运维、排障诊断与常见问题 (Operations, Diagnostics & Troubleshooting)
 
-> 📚 **导航 / Wiki Navigation**
-> [🏠 Wiki 首页 (Home)](Home.md) │ [🚀 01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [🧩 02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [🤖 03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [📨 04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [🛠️ 05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
+> **导航 / Wiki Navigation**
+> [Wiki 首页 (Home)](Home.md) │ [01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
 
 ---
 
@@ -225,6 +225,6 @@ python3 tools/superagent.py rollback --profile <profile>
 
 ---
 
-> 💡 **至此已通读 Super Agent User Wiki 全部章节！**
+> **至此已通读 Super Agent User Wiki 全部章节！**
 >
-> 🧭 [⬅️ 上一篇：04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [🏠 返回 Wiki 首页 (Home)](Home.md)
+>  [上一篇：04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [返回 Wiki 首页 (Home)](Home.md)

@@ -1,7 +1,7 @@
 # 02. 业务知识挂载指南 (Business Overlay & Domain Knowledge Guide)
 
-> 📚 **导航 / Wiki Navigation**
-> [🏠 Wiki 首页 (Home)](Home.md) │ [🚀 01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [🧩 02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [🤖 03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [📨 04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [🛠️ 05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
+> **导航 / Wiki Navigation**
+> [Wiki 首页 (Home)](Home.md) │ [01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
 
 ---
 
@@ -230,6 +230,6 @@ pytest tests/test_repo_neutrality.py
 
 ---
 
-> ➡️ **下一步**：了解多智能体协同与底层状态机原理，请阅读 [03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md)。
+> **下一步**：了解多智能体协同与底层状态机原理，请阅读 [03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md)。
 >
-> 🧭 [⬅️ 上一篇：01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [🏠 返回 Wiki 首页 (Home)](Home.md) │ [➡️ 下一篇：03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md)
+>  [上一篇：01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [返回 Wiki 首页 (Home)](Home.md) │ [下一篇：03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md)
