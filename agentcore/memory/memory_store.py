@@ -2143,15 +2143,48 @@ def _embed_with_cache(texts: Sequence[str]) -> Optional[List[List[float]]]:
     return _unpack_cached(cached)  # type: ignore[arg-type]
 
 
+_BGE_EMBEDDER_FN = None
+_BGE_EMBEDDER_LOCK = threading.Lock()
+
+
+def _resolve_bge_sidecar_embedder() -> Optional[Callable]:
+    """探测本地 BGE-M3 sidecar 端点（环境变量或 8910 端口）。"""
+    global _BGE_EMBEDDER_FN
+    with _BGE_EMBEDDER_LOCK:
+        if _BGE_EMBEDDER_FN is not None:
+            return _BGE_EMBEDDER_FN if callable(_BGE_EMBEDDER_FN) else None
+        url = os.environ.get("SUPERAGENT_MEMORY_EMBED_URL", "").strip()
+        if not url:
+            try:
+                import socket
+                with socket.create_connection(("127.0.0.1", 8910), timeout=0.05):
+                    url = "http://127.0.0.1:8910"
+            except Exception:
+                pass
+        if url:
+            try:
+                from agentcore.memory.bge_sidecar import make_embedder
+                _BGE_EMBEDDER_FN = make_embedder(url, dimension=1024)
+            except Exception:
+                _BGE_EMBEDDER_FN = False
+        else:
+            _BGE_EMBEDDER_FN = False
+        return _BGE_EMBEDDER_FN if callable(_BGE_EMBEDDER_FN) else None
+
+
 def _embed_texts(texts: Sequence[str]) -> Optional[List[List[float]]]:
     """使用主嵌入后端；仅在宿主明确声明同模型空间时启用兜底。
 
-    未配置注入函数时，内置 Ollama 使用当前配置的模型标识。
+    未配置注入函数时，优先使用本地 BGE-M3 sidecar，其次回退 Ollama。
     """
     if not texts:
         return []
     cfg = get_config()
     injected = cfg.embed_fn
+    if injected is None:
+        sidecar_fn = _resolve_bge_sidecar_embedder()
+        if sidecar_fn is not None:
+            injected = sidecar_fn
     if injected is not None:
         try:
             out = injected(list(texts))

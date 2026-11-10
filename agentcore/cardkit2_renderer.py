@@ -72,6 +72,31 @@ def extract_stages_and_clean_text(text: str) -> Tuple[str, str]:
     return "\n\n".join(s for s in stages if s).strip(), clean
 
 
+def normalize_feishu_markdown_text(text: str) -> str:
+    """Normalize Markdown formatting for Feishu's CardKit 2.0 / Lark-MD renderer.
+
+    Feishu Markdown parser has a well-known delimiter issue where **bold** or *italic*
+    markers directly glued to CJK characters or Chinese punctuation (e.g. `但**“文字”**属于`)
+    fail to trigger emphasis and render as literal asterisks.
+    Padding boundaries with CJK-safe spaces ensures 100% reliable rich text rendering.
+    """
+    if not text or "**" not in text:
+        return text or ""
+    # 规整 **“xxx”** 嵌套
+    text = re.sub(r'\*\*\s*“([^”]+)”\s*\*\*', r'“**\1**”', text)
+
+    def _pad_bold(m: re.Match) -> str:
+        prefix = m.group(1) or ""
+        inner = m.group(2)
+        suffix = m.group(3) or ""
+        p_space = " " if prefix and not prefix.isspace() else ""
+        s_space = " " if suffix and not suffix.isspace() else ""
+        return f"{prefix}{p_space}**{inner}**{s_space}{suffix}"
+
+    pattern = re.compile(r'([^\s*`])?\*\*([^*\n]+?)\*\*([^\s*`])?')
+    return pattern.sub(_pad_bold, text)
+
+
 def build_cardkit2_payload(
     text: str,
     *,
@@ -101,6 +126,9 @@ def build_cardkit2_payload(
     combined_stage = "\n\n".join(
         s for s in [explicit_stages, explicit_stage_text, extracted_stage] if s
     ).strip()
+
+    clean_text = normalize_feishu_markdown_text(clean_text)
+    combined_stage = normalize_feishu_markdown_text(combined_stage)
 
     if is_failed:
         header_template = color_template or "carmine"
