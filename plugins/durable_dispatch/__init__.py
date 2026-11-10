@@ -1344,6 +1344,7 @@ Writing the goal (the colleague cannot see this chat; the user's latest message 
 - Resolve references like "这个/上面那个/刚才的/继续" into the concrete object before submitting.
 - If something essential is missing and cannot be found from the conversation (e.g. which case, which version, which environment), ask the user one short question instead of submitting a task that cannot be completed. Do not ask for details a colleague can look up itself.
 - Do not narrow, soften or reinterpret the user's request; keep their constraints and acceptance criteria.
+- Mandatory verbatim user request: Always prepend the user's verbatim request at the start of the goal: begin with "【用户原话】：<copy user message verbatim>" followed by "【终态目标】：<end-to-end goal>". Never paraphrase away or strip the user's direct words or questions.
 - Pick the right domain role: For requirements analysis, table/spec suitability evaluation, or case derivation, dispatch to domain experts (architect or cases), NOT a general dev scraper."""
 
 
@@ -1463,7 +1464,8 @@ def register(ctx):
                      'description': 'Optional 1-based last line. Omit to analyze the whole file. When set, end_line >= start_line and the inclusive span (end_line - start_line + 1) must not exceed ' + str(max_source_lines) + ' lines; a larger or reversed range is rejected.'}},
         'required': ['path']}
     submit_properties = {
-        'goal': {'type': 'string', 'minLength': 1, 'maxLength': 4000},
+        'goal': {'type': 'string', 'minLength': 1, 'maxLength': 4000,
+                 'description': 'The work order. MUST start with "【用户原话】：<verbatim user message>" to preserve the exact user request, followed by the end-to-end objective and execution details. Never instruct the colleague to skip analysis or claim judgment belongs to the upper layer.'},
         'request_key': {'type': 'string', 'minLength': 1, 'maxLength': 128,
                         'description': 'Stable key for retries of the same request; use a new key for an intentional rerun.'},
         'sources': {'type': 'array', 'items': source_schema, 'maxItems': 8,
