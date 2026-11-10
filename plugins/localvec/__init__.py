@@ -288,7 +288,7 @@ class LocalVecProvider(MemoryProvider):
                         return None
                     # A partial SQLite fallback would hide missing entity rules.
                     child._cfg.pop('sqlite_db', None)
-                    child._cmd = [python, str(script), '--query={query}', '--entity-db', str(entity_path)]
+                    child._cmd = [python, str(script), '--query={query}', '--entity-db', str(entity_path), '--in-process']
                 else:
                     child._cmd = [python, str(self._route_engine / 'tools/recall_memory.py'), '--query-text={query}']
                 child._cmd += ['--data-dir', route['data_dir'], '--user', route['user_id'],

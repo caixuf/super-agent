@@ -131,7 +131,14 @@ class TurnSpool:
                             counts['unconfirmed'] += 1
                         elif state == 'discarded':
                             counts['discarded'] += 1
-                        elif state != 'enqueued':
+                            if time.time() - path.stat().st_mtime > 7 * 86400:
+                                path.unlink(missing_ok=True)
+                                path.with_suffix('.lock').unlink(missing_ok=True)
+                        elif state == 'enqueued':
+                            if time.time() - path.stat().st_mtime > 7 * 86400:
+                                path.unlink(missing_ok=True)
+                                path.with_suffix('.lock').unlink(missing_ok=True)
+                        else:
                             raise ValueError('spool_state_invalid')
                         continue
                     result = enqueue(**{k: v for k, v in record.items() if k != 'state'},

@@ -593,3 +593,32 @@ print("actual host scoped tool/capture/delegation/multiplex checks passed")
     assert result.returncode == 0, result.stdout + result.stderr
     record = json.loads(next((tmp_path / 'alice/spool').glob('*.json')).read_text())
     assert record['state'] == 'completed' and record['user_id'] == 'alice'
+
+
+def test_explicit_allow_group_and_wildcard_chat_authenticates_only_matching_user(tmp_path, host_context):
+    ctx, policy, ids = prepare(tmp_path, host_context)
+    data = json.loads(policy.read_text())
+    data["bindings"][0]["chat_id"] = "*"
+    data["bindings"][0]["allow_group"] = True
+    policy.write_text(json.dumps(data))
+
+    plugin = load_file("identity_bridge_wildcard", REPO / "plugins/memory_bridge/__init__.py")
+    plugin.register(ctx)
+    handler = ctx.tools["memory_get_observations_l3"]["handler"]
+
+    # Alice can access her own store in any group chat when allow_group=True and chat_id="*"
+    with host_context.bind(user="alice-im", chat="group-chat-999", chat_type="group"):
+        res_alice = json.loads(handler({"ids": [ids["alice"], ids["bob"]]}, session_id="s1"))
+        assert res_alice["ok"] is True
+        assert [r["fact_id"] for r in res_alice["results"]] == [ids["alice"]]
+
+    # Bob has allow_group omitted (False), so group chat is still refused for Bob
+    with host_context.bind(user="bob-im", chat="bob-chat", chat_type="group"):
+        res_bob = json.loads(handler({"ids": [ids["bob"]]}, session_id="s1"))
+        assert res_bob == {"ok": False, "error": "memory_identity_required"}
+
+    # Unknown user in that same group chat is strictly refused
+    with host_context.bind(user="mallory", chat="group-chat-999", chat_type="group"):
+        res_mal = json.loads(handler({"ids": [ids["alice"]]}, session_id="s1"))
+        assert res_mal == {"ok": False, "error": "memory_identity_required"}
+

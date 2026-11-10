@@ -76,9 +76,14 @@ class IdentityRouter:
         if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_BINDINGS:
             raise ValueError("invalid identity bindings")
         routes, selectors, principals, roots = [], set(), {}, {}
+        required_keys = {"platform", "scope_id", "user_id", "chat_id", "principal", "agent_id", "state_dir"}
         for row in rows:
-            if (not isinstance(row, dict) or set(row) != {
-                    "platform", "scope_id", "user_id", "chat_id", "principal", "agent_id", "state_dir"}):
+            if (not isinstance(row, dict)
+                    or not required_keys.issubset(row)
+                    or not (set(row) - required_keys <= {"allow_group"})):
+                raise ValueError("invalid identity binding")
+            allow_group = row.get("allow_group", False)
+            if type(allow_group) is not bool:
                 raise ValueError("invalid identity binding")
             selector = tuple(_text(row[k], empty=k == "scope_id")
                              for k in ("platform", "scope_id", "user_id", "chat_id"))
@@ -98,9 +103,9 @@ class IdentityRouter:
                 if (root == other or root in other.parents or other in root.parents) and owner != principal:
                     raise ValueError("memory runtime shared across principals")
             principals[principal], roots[root] = root, principal
-            routes.append((selector, {"profile": profile, "user_id": principal[0],
-                                     "agent_id": principal[1], "data_dir": str(data),
-                                     "spool_dir": str(spool)}))
+            routes.append((selector, allow_group, {"profile": profile, "user_id": principal[0],
+                                                   "agent_id": principal[1], "data_dir": str(data),
+                                                   "spool_dir": str(spool)}))
         return home.resolve(), routes, hashlib.sha256(raw).hexdigest()
 
     def resolve(self, session_id):
@@ -129,19 +134,22 @@ class IdentityRouter:
                 raise ValueError("authenticated memory context missing")
             return _text(value, empty=True)
 
+        chat_type = bound("HERMES_SESSION_CHAT_TYPE")
         if (not isinstance(session_id, str) or not session_id.strip()
                 or bound("HERMES_SESSION_ID") != session_id
                 or not bound("HERMES_SESSION_KEY") or not bound("HERMES_SESSION_CHAT_ID")
-                or bound("HERMES_SESSION_CHAT_TYPE") != "dm"
+                or chat_type not in ("dm", "group")
                 or bound("HERMES_CRON_SESSION") != ""):
             return None
-        selector = tuple(bound("HERMES_SESSION_" + key)
-                         for key in ("PLATFORM", "SCOPE_ID", "USER_ID", "CHAT_ID"))
-        for expected, route in routes:
-            if selector == expected:
+        actual = tuple(bound("HERMES_SESSION_" + key)
+                       for key in ("PLATFORM", "SCOPE_ID", "USER_ID", "CHAT_ID"))
+        for expected, allow_group, route in routes:
+            if chat_type == "group" and not allow_group:
+                continue
+            if actual[:3] == expected[:3] and (expected[3] == "*" or actual[3] == expected[3]):
                 # Includes the policy revision so revocation/remapping cannot
                 # reuse an old background result or a captured turn verdict.
-                scope = hashlib.sha256(json.dumps([revision, selector, route],
+                scope = hashlib.sha256(json.dumps([revision, actual, allow_group, route],
                                                   sort_keys=True).encode()).hexdigest()
                 return dict(route, cache_scope=scope)
         return None
@@ -151,7 +159,7 @@ class IdentityRouter:
         expected_home, routes, _ = self._read()
         if Path(home).resolve() != expected_home:
             raise ValueError("memory profile home mismatch")
-        unique = {(r['user_id'], r['agent_id']): r for _, r in routes}
+        unique = {(r['user_id'], r['agent_id']): r for _, _, r in routes}
         return [dict(route) for route in unique.values()]
 
     def runtime(self, *, home, user_id, agent_id):

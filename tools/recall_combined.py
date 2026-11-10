@@ -38,6 +38,7 @@ def main():
     parser.add_argument("--fusion", choices=("interleave", "rrf"), default="interleave")
     parser.add_argument("--in-process", action="store_true", help="Run both stores in-process without subprocesses")
     parser.add_argument("--include-reference", action="store_true", help="Include reference scope book/doc chunks")
+    parser.add_argument("--diagnostic-file", default="", help="Optional atomic JSON diagnostic output path")
     args = parser.parse_args()
     if not 1 <= args.limit <= 20:
         parser.error("invalid limit")
@@ -71,11 +72,15 @@ def main():
             include_reference=args.include_reference,
             fusion=args.fusion,
         )
-        rows = [
-            {"fact_id": r.get("fact_id", ""), "statement": r["statement"]}
-            if "fact_id" in r else {"statement": r["statement"], **{k: v for k, v in r.items() if k != "statement"}}
-            for r in hybrid.get("results", [])
-        ]
+        rows = []
+        for r in hybrid.get("results", []):
+            entry = {"statement": r["statement"]}
+            if r.get("fact_id"):
+                entry["fact_id"] = r["fact_id"]
+            for extra_key in ("polarity", "freshness_warning", "stale_file", "coactivated_from", "source_store"):
+                if extra_key in r and r[extra_key] not in (None, ""):
+                    entry[extra_key] = r[extra_key]
+            rows.append(entry)
     else:
         entity = run([sys.executable, str(ROOT / "recall_entity.py"), "--query=" + args.query,
                       "--limit", str(args.limit), "--db", args.entity_db])
@@ -92,6 +97,20 @@ def main():
             limit=args.limit,
             interleave=(args.fusion == "interleave"),
         )
+    if args.diagnostic_file:
+        try:
+            import os
+            import time
+            diag_path = Path(args.diagnostic_file)
+            if diag_path.is_absolute():
+                diag_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = diag_path.with_suffix(f".tmp.{os.getpid()}")
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    json.dump({"at": time.time(), "code": "hit" if rows else "no_match", "count": len(rows)}, stream)
+                os.replace(tmp, diag_path)
+        except Exception:
+            pass
     payload = {"ok": True, "results": rows}
     if not rows:
         payload["empty_reason"] = "no_match"
