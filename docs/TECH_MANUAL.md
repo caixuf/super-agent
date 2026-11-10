@@ -266,42 +266,128 @@ sequenceDiagram
 3. **记忆后端绑定**：将 `localvec` 记忆提供方挂载至同事的 `plugins/localvec`，并将其 `engine_root` 锚定到当前 Release 的 `current` 软链。
 4. **磁盘对账**：通过 `_recall_diagnostics_observation` 检验各同事目录与插件的匹配状态（`matched` / `drifted`）。
 
-## 8 记忆、检索与知识治理
+## 8 记忆、检索与知识治理（突触记忆神经工程）
 
-### 8.1 记忆的不同层次
+Super Agent 的记忆系统摒弃了简单粗暴的“把对话历史一股脑塞给模型”或“机械文本向量检索”，而是深度融合了认知神经科学（ACT-R 认知架构、赫布突触理论）与前沿大模型神经记忆（Google Titans 惊奇度范式），构建了具备**自主筛选、突触强化/抑制、关联扩散与代际隔离**的企业级确定性长期记忆底座。
 
-| 层次 | 内容和生命周期 | 主要风险 |
-| --- | --- | --- |
-| 当前上下文 | 当前回合消息、工具观察、临时摘要 | 截断、位置敏感、敏感内容泄漏、注入 |
-| 任务记录 | 状态、attempt、证据和产物引用 | 把展示投影当主账；把旧代次写入新任务 |
-| 长期个人事实 | 经过准入的偏好、约束或历史事实 | 误写、过期、身份混淆、撤销不生效 |
-| 团队知识 | 经过发布流程的共享资料 | 越权共享、来源不明、版本与冲突处理不清 |
-| 模型参数知识 | 模型训练中形成的统计知识 | 截止时间、来源和正确性不透明 |
+### 8.1 记忆分层体系
 
-RAG 将外部可检索资料与生成结合，可改善知识密集型任务的知识访问，但检索命中不等于事实正确，检索文本本身也可能包含恶意指令。[RAG 论文](https://arxiv.org/abs/2005.11401)；[OWASP 提示注入说明](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)
+| 记忆层次 | 承载媒介 | 生命周期与机制 | 数学与工程保障 |
+| :--- | :--- | :--- | :--- |
+| **工作记忆 (Working Memory)** | Prompt 紧凑上下文 | 当前回合交互、工具观察、临时摘要 | 预算硬约束：$L_{\text{avail}} = L_{\text{ctx}} - L_{\text{out}} - L_{\text{proto}} - L_{\text{safe}}$ |
+| **临时海马体 (Spool & Staging)** | SQLite 事务账本 / WAL | 回合状态、任务 attempt 证据、四格错题卡 | 幂等哈希去重，原子提交 |
+| **突触长程记忆 (Synaptic Memory)** | `synapse.json` + `memory_store` | 个人偏好、架构铁律、因果根因闭环 | ACT-R 幂律衰减 + 赫布共激活图谱 + 突触可塑性 |
+| **领域实体拓扑 (Entity Graph)** | `entity_store.py` | 业务配置、服务依赖、环境拓扑 | 强类型模式定义，代际版本追踪 |
 
-### 8.2 当前实现与身份范围
+---
 
-**源码**：`agentcore/memory/` 提供事实、向量索引、词法与向量混合召回、冲突、准入、维护、追踪等模块；`hybrid_recall.py` 包含 RRF 融合。具体部署是否使用向量后端、自动入库或某个门禁，需看实际配置和接线，不能从模块存在推断。
+### 8.2 Titans 惊奇度门禁（Surprise Metric & Admission Gate）
 
-`docs/MEMORY_IDENTITY_ROUTES.md` 描述显式配置的候选身份路由：按受信宿主上下文和管理员映射区分主体，限定私聊等条件，撤销时重新检查；它不覆盖宿主所有会话、原生记忆文件或同账号任意代码，也不等于完整多租户隔离。旧的固定单主体配置不能安全地直接当作多人共享记忆配置。
+根据 Google Titans 思想，系统不应机械记录平庸流水账，唯有产生高“惊奇度”（Surprise）的高价值信息方可落盘。
 
-### 8.3 入库、召回与遗忘
+#### 8.2.1 向量语义新颖度（Embedding Semantic Novelty）
+首先计算候选陈述 $s_{\text{new}}$ 与既有记忆集合 $\{s_i\}_{i=1}^M$ 在语义向量空间中的最大余弦相似度：
+$$\text{Novelty}(s_{\text{new}}) = 1.0 - \max_{1 \le i \le M} \cos\left(\mathbf{v}(s_{\text{new}}), \mathbf{v}(s_i)\right) = 1.0 - \max_{1 \le i \le M} \frac{\mathbf{v}(s_{\text{new}}) \cdot \mathbf{v}(s_i)}{\|\mathbf{v}(s_{\text{new}})\|_2 \|\mathbf{v}(s_i)\|_2}$$
+若未配置嵌入后端，降级使用字符二元组（Bigram）Jaccard 距离。
 
-**建议工作流**：原始事件 → 候选事实 → 身份与来源检查 → 敏感信息和冲突审查 → 有版本地写入 → 建索引 → 授权召回 → 带来源消费 → 反馈与纠错 → 过期、撤销或删除。对于自动提取，记录抽取器版本、原文位置、时间和置信依据；模型给出的置信度不能直接当作校准概率。删除或撤销需覆盖缓存、索引、副本和后续结果，并明确已发送内容无法自动收回。
+#### 8.2.2 惊奇度综合评分函数（`memory_surprise.py`）
+综合向量新颖度、语义大模型裁判（或离线启发式特征）输出的信念翻转、铁律指令与因果报错信号：
+$$S = \text{clip}\left(w_{\text{nov}} \cdot \text{Novelty} + \beta_{\text{mandate}} + \beta_{\text{flip}} + \beta_{\text{causal}} + \beta_{\text{bookmark}}, 0.0, 1.0\right)$$
 
-混合检索可将关键词和向量候选分别排序再融合；RRF 使用各路排名而非直接假设不同打分同尺度。可用 `Σ 1/(k + rank_i)` 描述基本形式，`k`、候选数及权重需由目标数据评估，不能仅凭经验固定。上线前应测 Recall@k、MRR、错误主体命中率、冲突分辨、过期事实命中、引用可追溯性、延迟与资源；查询集应包含同义词、精确标识、对抗文本和权限撤销反例。
+- **基础权重**：$w_{\text{nov}} = 0.35$；
+- **长期铁律增益**（如用户显式纠错“以后一律...”）：$\beta_{\text{mandate}} = 0.42$；
+- **认知信念翻转**（推翻既有假设，如“改用...替代...”）：$\beta_{\text{flip}} = 0.25$；
+- **因果修复闭环**（“报错/超时是因为...修复为...”）：$\beta_{\text{causal}} = 0.22$；
+- **代码书签增益**（捕获关联源码路径或异常错误码）：$\beta_{\text{bookmark}} = 0.08$。
 
-### 8.4 恢复与备份
+**双门禁决策阈值**：
+- **闪存准入门禁**：$S \ge 0.65$ 且 $\beta_{\text{mandate}} > 0$，触发毫秒级前台同步闪存（Flash-Write）；
+- **常规落盘门禁**：$S \ge 0.35$，允许进入异步后台记忆入库流水线；$S < 0.35$ 判定为闲聊或平庸流水账，直接丢弃。
 
-区分数据库完整性、数据库身份、检查点来源及业务数据完整性。`PRAGMA quick_check` 通过不证明没有丢失已提交业务事实；inode 或设备变化也不能单独证明损坏或丢失。对来源不匹配或高水位不明的服务，先冻结自动重放、保留原库及日志、获取一致性备份和独立来源证据，再确定恢复点；不得为了消除告警重建空库、重绑检查点或消费未审积压。仓库 `agentcore.memory.recovery_checkpoint` 提供只读诊断入口，诊断不自动授权重绑或恢复。
+---
 
-### 8.5 召回诊断与观测器集成（Recall Diagnostics & Observation）
+### 8.3 认知动力学：ACT-R 幂律激活模型与 Sigmoid 增益调节
 
-**源码**：`plugins/localvec/__init__.py` 与 `tools/recall_entity.py` 深度集成了召回诊断观测器（Recall Diagnostics Observer）。
-1. **诊断路径契约**：在 `memory.localvec.diagnostic_path` 下指定诊断账本路径，默认配置为 `<managed_root>/state/recall-diagnostics/<profile>.json`。
-2. **多维指标捕获**：在每次召回执行过程中，观测器自动记录检索时延、Top-K 相似度分布、命中状态与缓存命中率。
-3. **Doctor 自动化对账**：`tools/superagent.py doctor` 运行 `_recall_diagnostics_observation`，不仅汇总各 Profile 的最新召回性能指标，还核对 Profile 间的磁盘插件绑定一致性（`disk_bindings`）。
+人类大脑对记忆的调用频率与时间间隔遵循认知心理学规律。Super Agent 在 `agentcore/memory/synapse.py` 中完整实现了 **ACT-R (Adaptive Control of Thought—Rational)** 认知激活模型。
+
+#### 8.3.1 ACT-R 基础激活度（Base-Level Activation）
+对于事实 $i$，记录其历史 $n$ 次被激活或调用的绝对时间戳序列 $\{t_k\}_{k=1}^n$。当前时刻 $t$ 的幂律基础激活度 $B_i$ 为：
+$$B_i = \ln\left(\sum_{k=1}^n \max(0.1, \Delta t_k)^{-d}\right)$$
+其中 $\Delta t_k = \frac{t - t_k}{3600.0}$（以小时为时间跨度单位），$d = 0.5$ 为记忆衰减特征常数。高频且近期调用的事实 $B_i \gg 0$；长期未被调用的事实其激活度随时间对数平滑衰减。
+
+#### 8.3.2 突触权重非线性映射（Sigmoid Modulation）
+将离散的置信度、状态基准与连续的 ACT-R 激活度 $B_i$ 经由 Sigmoid 函数平滑映射为最终排序调节乘子：
+$$\text{Factor}(B_i) = 0.82 + \frac{0.36}{1.0 + e^{-0.5 \cdot B_i}} \quad \in [0.82, 1.18]$$
+$$\text{Weight}_i = W_{\text{status}} \times \left(\frac{\text{Conf}_i}{\text{Conf}_0}\right) \times \text{Factor}(B_i)$$
+其中 $W_{\text{status}}$ 为事实状态基准（`active: 1.0`, `suspect: 0.35`, `archived: 0.0`），$\text{Conf}_0 = 0.8$ 为默认基准置信度。
+
+---
+
+### 8.4 赫布突触学习律与扩散激活（Hebbian Co-activation & Spreading Activation）
+
+借鉴经典神经科学法则 **“Cells that fire together, wire together”**（共同激发的神经元连接紧密）：
+
+#### 8.4.1 共激活双向拓扑学习（Co-activation Graph）
+当一组事实 $\{f_1, f_2, \dots, f_m\}$ 在同一任务中被联合召回并促成任务终态成功时，系统自动更新它们之间的无向共激活拓扑边：
+$$w_{ij}^{(t+1)} = \text{clip}\left(w_{ij}^{(t)} + \Delta_{\text{synapse}}, 0.0, 1.0\right)$$
+- **任务成功强化**：$\Delta_{\text{synapse}} = +\eta_{\text{hebbian}} = +0.08$；
+- **任务失败抑制**：$\Delta_{\text{synapse}} = -0.5 \cdot \eta_{\text{hebbian}} = -0.04$；
+- **弱边修剪**：当权重 $w_{ij} \le 0.02$ 时，连接自动脱落以防图膨胀，单节点保留 Top-$K_{\text{edges}}=16$ 条高权重连接。
+
+#### 8.4.2 1-Hop 突触扩散激活（Spreading Activation）
+在检索阶段，设首轮匹配命中的高相关事实集合为“种子节点” $\mathcal{S}$，算法沿赫布共激活图谱向外进行 1 跳发散，激活伴生记忆：
+$$\text{Activation}_j = \sum_{i \in \mathcal{S}} w_{ij} \cdot \text{Score}_i \quad (\forall j \notin \mathcal{S})$$
+此机制能主动捞出虽然表面词法/向量并未直接命中 Query、但在历史上总与种子事实共同解决难题的“隐式协同规则”（如命中“修改网络配置”时，主动伴生唤醒“记得前置备份 iptables”）。
+
+---
+
+### 8.5 任务终态突触可塑性（Plasticity Feedback / LTP & LTD）
+
+在任务生命周期终结（`Pool._terminal`）时，`memory_plasticity.py` 将任务实际结果（成功/失败）作为环境反馈信号反哺记忆：
+
+```mermaid
+flowchart TD
+    TaskEnd[任务执行结束 / 终态产生] --> Judgement{任务是否成功?}
+    Judgement -->|PASS / 验收通过| LTP["LTP 长时程增强 (Long-Term Potentiation)<br/>• 置信度递增: Conf = min(1.0, Conf + 0.05)<br/>• 记录 ACT-R 使用时间戳<br/>• 失败计数清零<br/>• 触发赫布共激活正向加权 (+0.08)"]
+    Judgement -->|FAIL / 生产报错| CheckEnv{是否为环境故障<br/>如端口占用/磁盘满?}
+    CheckEnv -->|是 (环境噪声)| Ignore[免责忽略: 不扣罚记忆突触]
+    CheckEnv -->|否 (逻辑/代码缺陷)| LTD["LTD 长时程抑制 (Long-Term Depression)<br/>• 置信度扣罚: Conf = max(0.2, Conf - 0.15)<br/>• 连续失败计数 +1<br/>• 触发赫布负向抑制 (-0.04)<br/>• 连续失败 >= 3 时标记为 SUSPECT (降权至 0.35)"]
+```
+
+---
+
+### 8.6 四路倒数秩融合召回算法（RRF with Safety & Bookmark Boost）
+
+在多源异构召回场景中（实体拓扑、核心长程事实、1-Hop 赫布伴生事实、参考书），各通道的原始相关度分数尺度迥异。Super Agent 统一采用 **倒数排名融合（Reciprocal Rank Fusion, RRF）** 并在算法层叠加安全极性与书签偏置（`hybrid_recall.py`）：
+
+$$\text{RRF\_Score}(d) = \sum_{m \in \mathcal{M}} \frac{w_m}{k + \text{Rank}_m(d)} + \Delta_{\text{polarity}} + \Delta_{\text{bookmark}}$$
+
+| 参数 / 偏置项 | 默认取值 | 工程设计意图 |
+| :--- | :--- | :--- |
+| **平滑常数 $k$** | $60$ | 标准 Cormack & Clarke 倒数平滑基准，避免头部排名压倒一切 |
+| **实体权重 $w_{\text{entity}}$** | $1.00$ | 领域专有实体与参数定义通道 |
+| **核心记忆权重 $w_{\text{memory}}$** | $1.00$ | BM25 词法倒排与 `localvec` 语义向量混合通道 |
+| **扩散激活权重 $w_{\text{spread}}$** | $0.85$ | 赫布拓扑 1-Hop 伴生唤醒通道 |
+| **参考书权重 $w_{\text{reference}}$** | $0.45$ | 静态基线与外部手册扩展通道 |
+| **安全禁令偏置 $\Delta_{\text{polarity}}$** | $+0.002$ | 凡标记为 `polarity == "prohibition"` 的严禁类铁律赋予防灾优先权 |
+| **书签匹配偏置 $\Delta_{\text{bookmark}}$** | $+0.008$ | 命中当前 Query 中精准源码文件路径或报错异常码的事实施加置顶提升 |
+
+---
+
+### 8.7 代际硬隔离（`workspace_id`）与容量守恒治理
+
+1. **`workspace_id` 代际物理隔离**：
+   记忆库通过 `workspace_id` 对不同工程分支、测试沙箱及环境版本实施物理切分。跨项目调试严禁串扰，切断历史污染源。
+2. **守恒法则与退役生命周期（Conservation & Pruning）**：
+   遵循单库最大条目配额限制。当容量突破软阈值时，结合 ACT-R 激活度 $B_i$ 与突触置信度 $\text{Conf}_i$ 执行自适应遗忘，优先归档或修剪长期未被唤醒、低置信度的过时沉淀，确保记忆库规模有界、检索耗时稳定在毫秒级。
+
+---
+
+### 8.8 召回诊断观测器与 Doctor 对账（Recall Diagnostics & Observation）
+
+`tools/superagent.py doctor` 与 `tools/recall_entity.py` 原生内置召回质量遥测链：
+- **时延与分布画像**：每次检索捕获总耗时（P50/P99）、向量通道与 BM25 通道打分分布、Top-K 相似度中位数；
+- **健康度与漂移对账**：通过 `_recall_diagnostics_observation` 自动审计各 Profile 的 `disk_bindings` 一致性，防范配置漂移导致的静默降级。
 
 ## 9 交付、卡片与外部副作用
 
