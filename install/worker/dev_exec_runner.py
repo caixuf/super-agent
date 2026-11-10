@@ -245,8 +245,9 @@ def _workdir() -> Path:
 
 
 _DELIVERABLE_EXTS = {
-    ".html", ".htm", ".pdf", ".zip", ".csv", ".xlsx", ".docx",
+    ".html", ".htm", ".pdf", ".zip", ".tar.gz", ".csv", ".xlsx", ".docx",
     ".png", ".jpg", ".jpeg", ".webp", ".svg",
+    ".md", ".markdown", ".txt", ".json", ".log",
 }
 _INTERNAL_ATTEMPT_FILES = {
     "binding.json", "input.json", "progress.json", "progress.json.tmp",
@@ -335,6 +336,19 @@ def _harvest_attempt_artifacts(summary: str, checkpoint_data: dict | None = None
                 seen_names.add(dest.name)
         except Exception:
             continue
+
+    # 3. Auto-materialize long text reports as artifact files if no markdown artifact exists
+    if isinstance(summary, str) and len(summary.strip()) > 1500 and len(staged) < 8:
+        has_doc = any(p.lower().endswith((".md", ".markdown", ".html", ".pdf", ".docx")) for p in staged)
+        if not has_doc:
+            report_file = resolved_attempt / "任务执行报告.md"
+            if not report_file.exists():
+                try:
+                    report_file.write_text(summary.strip(), encoding="utf-8")
+                    staged.append(str(report_file))
+                    seen_names.add(report_file.name)
+                except Exception:
+                    pass
 
     return staged[:8]
 

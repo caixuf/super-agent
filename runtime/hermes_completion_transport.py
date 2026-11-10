@@ -344,8 +344,6 @@ def create_transport(ctx, service):
 
             if isinstance(files, list):
                 excluded = {'manifest.json', 'report.json'}
-                if self.card and not message.get('truncated'):
-                    excluded.add('report.md')
                 filtered = [p for p in files if Path(str(p)).name not in excluded]
                 if filtered != files:
                     message = dict(message, artifacts=filtered)

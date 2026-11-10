@@ -302,6 +302,30 @@ def test_harvest_attempt_artifacts_stages_report_files_into_attempt_dir(monkeypa
     assert (attempt_dir / "agent_arch.png").read_bytes() == b"\x89PNG\r\n\x1a\n"
 
 
+def test_harvest_attempt_artifacts_includes_markdown_and_auto_materializes_long_text(monkeypatch, tmp_path):
+    module = _module()
+    attempt_dir = tmp_path / "attempts" / ("b" * 32)
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SUPERAGENT_ATTEMPT_DIR", str(attempt_dir))
+
+    # 1. Existing .md file directly in attempt_dir is harvested
+    md_file = attempt_dir / "audit_report.md"
+    md_file.write_text("# Audit\nDetailed text", encoding="utf-8")
+    harvested = module._harvest_attempt_artifacts("Short summary")
+    assert str(md_file.resolve()) in harvested
+
+    # 2. Long summary auto-materializes if no markdown artifact exists
+    attempt_dir_2 = tmp_path / "attempts" / ("c" * 32)
+    attempt_dir_2.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SUPERAGENT_ATTEMPT_DIR", str(attempt_dir_2))
+    long_summary = "A" * 2000
+    harvested_2 = module._harvest_attempt_artifacts(long_summary)
+    assert len(harvested_2) == 1
+    assert Path(harvested_2[0]).name == "任务执行报告.md"
+    assert Path(harvested_2[0]).read_text(encoding="utf-8") == long_summary
+
+
+
 
 
 

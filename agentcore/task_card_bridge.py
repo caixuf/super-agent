@@ -299,6 +299,12 @@ class TaskCardBridge:
                 body_lines.append(f"**执行耗时**：{elapsed:.1f} 秒")
             if summary:
                 clean_sum = _sanitize_card_text(summary)
+                if len(clean_sum) > 1500:
+                    truncated_sum = clean_sum[:1200].rstrip()
+                    last_nl = truncated_sum.rfind("\n")
+                    if last_nl > 800:
+                        truncated_sum = truncated_sum[:last_nl]
+                    clean_sum = f"{truncated_sum}\n\n*(长文本详细内容已作为附件发送至群聊)*"
                 body_lines.append(f"**核心结论（Phase 1 直达）**：\n{clean_sum}")
             if artifacts:
                 body_lines.append("**产出制品（Phase 2）**：")
