@@ -37,6 +37,7 @@
 | `platform_toolsets.*` / 各平台段 | 随平台 | 现场重配 | 渠道能力缺失 |
 | `streaming.*` / `display.*` | 通用基座 | **有的改动要重启网关才生效**；`streaming.enabled` 之外，`cursor` 留着会在回合被打断时留下一个半格方块（`▉`）在最后一句后面 | 消息形态静默退化（最难查） |
 | `agent.restart_drain_timeout` | 通用基座 | ≥ 300 秒（默认 45） | 重启方等满预算就强杀正在跑的活；一次全量测试实测约 260 秒，45 秒必杀，**用户看到的是半句话** |
+| `gateway.message_timestamps` / `timezone` | 通用基座 | **时钟锚点必配**：`timezone: Asia/Shanghai`，`gateway.message_timestamps.enabled: true`。在用户消息侧注入宿主机时钟 `[Tue 2026-11-10 23:20:00 CST]`，**不破坏系统提示词前缀缓存**（Prompt Prefix Cache） | 模型缺乏现实时钟感知（“无钟感”），面对跨时区/当前时间询问时脑补瞎猜（如“按晚上八点算”），或反向大炮打蚊子派发后台重型工单只为查 `date` |
 | `cron`（作业定义在 `profiles/<p>/cron/jobs.json`） | 业务叠加层的部署清单 | 清单化 | 巡检 / 告警静音，故障无人知 |
 | MCP / 插件 | **业务工具面** | 见 `docs/PLUGINS.md` | 工具面缺失（机器人"变哑"） |
 
