@@ -121,3 +121,44 @@ def test_independent_processes_claim_only_one_attempt(tmp_path):
             if child.poll() is None:
                 child.kill()
                 child.wait()
+
+
+def test_worker_shutdown_requeues_replay_safe_job_without_burning_tries(tmp_path):
+    import time
+
+    pool = Pool(tmp_path / 'state')
+    started = tmp_path / 'started'
+    slow = tmp_path / 'slow_runner.py'
+    slow.write_text(
+        f'''import json, pathlib, sys, time
+job = json.load(sys.stdin)
+pathlib.Path({str(started)!r}).write_text("1")
+time.sleep(10)
+print(json.dumps({{"ok": True, "result": job["payload"]}}))
+'''
+    )
+    job = pool.submit('restart-safe', {'goal': 'long'}, replay_safe=True, max_tries=2)
+
+    # Simulate two consecutive worker service restarts while the job is in flight:
+    for _ in range(2):
+        started.unlink(missing_ok=True)
+        stop = threading.Event()
+        t = threading.Thread(target=lambda: Worker(pool, [sys.executable, str(slow)]).run(stop))
+        t.start()
+        deadline = time.monotonic() + 5
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert started.exists()
+        stop.set()
+        t.join(timeout=10)
+        assert not t.is_alive()
+        st = pool.status(job)
+        assert st['status'] == 'queued'
+        assert st['tries'] == 0
+
+    # After restarts, a normal worker drains and completes the job on try 1:
+    stats = Worker(pool, runner(tmp_path)).run(drain=True)
+    assert stats['attempts_finished'] == 1
+    final = pool.status(job)
+    assert final['status'] == 'completed'
+    assert final['tries'] == 1

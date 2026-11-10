@@ -798,7 +798,7 @@ class Pool:
             )
             return changed.rowcount == 1
 
-    def finish(self, job, attempt, ok, result):
+    def finish(self, job, attempt, ok, result, *, worker_stopping=False):
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute("SELECT * FROM jobs WHERE id=? AND attempt=? "
@@ -830,6 +830,8 @@ class Pool:
                 # gate parked, but let a later resume verify this attempt stopped.
                 db.execute("UPDATE jobs SET result=? WHERE id=? AND attempt=?",
                            (json.dumps(result, ensure_ascii=False), job, attempt))
+            elif not ok and worker_stopping and row['replay_safe']:
+                db.execute("UPDATE jobs SET status='queued',heartbeat=NULL,tries=MAX(0, tries-1) WHERE id=?", (job,))
             elif not ok and row['replay_safe'] and row['tries'] < row['max_tries']:
                 db.execute("UPDATE jobs SET status='queued',heartbeat=NULL WHERE id=?", (job,))
             else:
@@ -1732,7 +1734,8 @@ class Pool:
             return False
         return self.run_claimed(claimed, command, timeout, lease, max_output, max_file)
 
-    def run_claimed(self, claimed, command, timeout=300, lease=60, max_output=1048576, max_file=536870912):
+    def run_claimed(self, claimed, command, timeout=300, lease=60, max_output=1048576, max_file=536870912,
+                    stop_event=None):
         """Execute a claim owned by this process; caller transfers lock ownership here."""
         row, fd = claimed
         job, attempt = row['id'], row['attempt']
@@ -1816,6 +1819,8 @@ class Pool:
                         current = self.is_current(job, attempt)
                     if not current:
                         reason = 'cancelled or lease revoked'
+                    elif stop_event is not None and stop_event.is_set() and reason is None:
+                        reason = 'worker_shutdown'
                     elif time.monotonic() > deadline:
                         reason = 'timeout'
                     elif os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size > max_output:
@@ -1837,6 +1842,8 @@ class Pool:
                         reason = 'timeout'
                     elif os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size > max_output:
                         reason = 'output budget exceeded'
+                    elif stop_event is not None and stop_event.is_set():
+                        reason = 'worker_shutdown'
                 with self.db() as db:
                     latest = db.execute('SELECT * FROM jobs WHERE id=? AND attempt=?', (job, attempt)).fetchone()
                 stopped = latest is not None and self._attempt_stopped(latest)
@@ -1868,7 +1875,7 @@ class Pool:
                 if not stopped:
                     ok = False
                     result['reason'] = 'attempt_stop_unproven'
-                self.finish(job, attempt, ok, result)
+                self.finish(job, attempt, ok, result, worker_stopping=(reason == 'worker_shutdown'))
         except Exception as exc:
             if proc is None and admitted:
                 # This executor has not created any child. Close the admission

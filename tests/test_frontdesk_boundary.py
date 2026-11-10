@@ -53,6 +53,7 @@ def test_frontdesk_exposes_task_apis_without_creating_extra_capabilities(policy,
     names = {"durable_submit", "durable_status", "durable_cancel", "durable_roster",
              "task_status", "colleague_list", "colleague_assign", "colleague_task_status",
              "lan_node_list", "lan_node_probe", "skills_list", "skill_view",
+             "feishu_doc_read", "web_extract",
              "terminal", "memory_search_l1", "not_registered"}
     definitions = [{"type": "function", "function": {"name": name}} for name in names]
     filtered = policy.filter_tool_definitions(definitions, home=tmp_path)

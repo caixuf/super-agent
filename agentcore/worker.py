@@ -40,7 +40,7 @@ class Worker:
                     try:
                         handle = scheduler.submit(row['attempt'], self.pool.run_claimed, claim, self.command,
                                                   timeout=self.timeout, lease=self.lease, max_output=self.max_output,
-                                                  max_file=self.max_file)
+                                                  max_file=self.max_file, stop_event=stop)
                     except BaseException:
                         # No execution was admitted. Keep the attempt for normal
                         # lease recovery rather than silently losing ownership.
