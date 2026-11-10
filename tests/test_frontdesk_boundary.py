@@ -39,7 +39,7 @@ def _enable(home, *, memory=False):
 
 @pytest.mark.parametrize("name", [
     "terminal", "execute_code", "delegate_task", "colleague_assign",
-    "colleague_task_status", "colleague_catalog", "write_file", "read_file",
+    "colleague_task_status", "colleague_catalog", "skill_manage", "write_file", "read_file",
     "patch", "process", "tool_call", "tool_search", "manage_connections",
     "connectors__service__run", "unknown_plugin_tool", "memory", "cronjob",
 ])
@@ -52,7 +52,7 @@ def test_frontdesk_exposes_task_apis_without_creating_extra_capabilities(policy,
     _enable(tmp_path)
     names = {"durable_submit", "durable_status", "durable_cancel", "durable_roster",
              "task_status", "colleague_list", "colleague_assign", "colleague_task_status",
-             "lan_node_list", "lan_node_probe",
+             "lan_node_list", "lan_node_probe", "skills_list", "skill_view",
              "terminal", "memory_search_l1", "not_registered"}
     definitions = [{"type": "function", "function": {"name": name}} for name in names]
     filtered = policy.filter_tool_definitions(definitions, home=tmp_path)

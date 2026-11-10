@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 TASK_TOOLS = frozenset({
     "durable_submit", "durable_status", "durable_cancel", "durable_roster", "task_status",
     "colleague_list", "lan_node_list", "lan_node_probe",
+    "skills_list", "skill_view",
     "kanban_create", "kanban_show", "kanban_list", "kanban_claim", "kanban_complete",
 })
 
