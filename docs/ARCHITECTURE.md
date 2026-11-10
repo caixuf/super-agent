@@ -150,6 +150,16 @@ Super Agent 生产部署统一收敛至 `<managed_root>/<profile>`（默认 `~/s
 - 观测器持续统计召回时延、Top-K 相似度分布、命中率及缓存有效性。
 - `tools/superagent.py doctor` 自动化巡检各 Profile 的磁盘绑定（`disk_bindings`）与最新观测报告。
 
+### 5.3 神经长程记忆哲学：Google Titans 架构的工程映射
+针对大模型上下文窗口“中间迷失”与海量历史交互下注意力二次方计算开销的根本瓶颈，系统设计全面借鉴了 Google Titans（*Titans: Learning to Memorize at Test Time*, 2025）前沿记忆范式：
+1. **短程注意力与神经记忆双轨解耦**：
+   - 保持 Prompt 上下文高频敏捷，只容纳当前轮次与 RRF 精炼结果；
+   - 将长程经验剥离至持久化状态账本中，实现无界跨会话沉淀。
+2. **惊奇度准入门禁（Surprise-Driven Gating）**：
+   对应 Titans 以损失梯度作为惊奇度度量的思想，`memory_gate.py` 执行信息增量（Novelty）、实体锚定与一致性校验三道门禁，拒绝平庸流水账污染记忆库。
+3. **测试期动态突触可塑性（Synaptic Plasticity）**：
+   对应 Titans 在测试期依据反馈信号动态调整记忆权重，`memory_plasticity.py` 在任务终态自动对所引用事实施行正向强化（Potentiation）或负向抑制（Depression），实现自适应的知识进化。
+
 ---
 
 ## 6. 宿主解释器推断与布局感知运维

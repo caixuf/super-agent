@@ -119,6 +119,58 @@ Transformer 的一个常见缩放点积注意力形式是 `Attention(Q,K,V) = so
 
 针对一次分析任务，可以要求最终结论分别指向：输入文档的版本和位置、实际运行的检查与退出码、生成产物的摘要，以及无法验证的假设。对于必须改变外部状态的任务，还需提供目标、授权依据、执行回执与可查询状态；不存在回执时，结论应保留未知，而非由模型补全。
 
+### 4.7 长程记忆新范式：从 Transformer 上下文到 Google Titans 神经记忆架构
+
+传统 Transformer 依靠固定权重与注意力窗口处理序列。随着长任务的展开，标准注意力不仅面临算力与 KV Cache 内存的二次方/线性暴涨，更在长程跨度中深陷“注意力稀释”与“中间迷失”（Lost in the Middle）困境。更本质的是：静态权重的预训练大模型在推理测试期（Test-Time）是天然“无状态”的，会话一旦重置，上下文即刻归零。
+
+#### 4.7.1 Google Titans 架构核心原理
+
+Google 提出的 Titans 架构（*Titans: Learning to Memorize at Test Time*, 2025）为打破这一物理天花板指明了神经记忆方向：
+1. **短程注意力与神经记忆双轨解耦**：
+   - **工作记忆（Short-Term Attention）**：高精细度处理当前的局部上下文；
+   - **神经长程记忆（Neural Memory Module）**：将长程记忆内化为一个动态参数化前馈网络（Fast Weights / MLP），在推理测试期（Test Time）实时更新记忆权重。
+2. **惊奇度度量驱动记忆（Surprise Metric & Gradient as Surprise）**：
+   Titans 提出模型不应机械盲目地把所有 token 写入记忆，而是以当前预测误差的损失梯度作为“惊奇度”（Surprise）。只有遇到高信息增量、反直觉模式或重大意外事实时，系统才产生强烈的惊奇度信号并驱动记忆参数更新。
+3. **自适应动量与遗忘门控（Momentum & Adaptive Forgetting Gate）**：
+   引入类似短期记忆向长期记忆迁移的遗忘机制：
+   $$M_t = (1 - \alpha_t) M_{t-1} + \eta_t S_t$$
+   通过遗忘率 $\alpha_t$ 与学习率 $\eta_t$ 平衡新知识的吸收与陈旧知识的衰减，彻底避免了长程运行时的记忆饱和与容量爆炸。
+
+#### 4.7.2 Super Agent 对 Titans 架构的工程降维映射
+
+在真实的生产部署环境中，直接在客户端/端侧对数百亿参数大模型执行在线反向传播梯度更新存在显著的硬件开销、推理延迟与权重漂移（Catastrophic Forgetting）风险。Super Agent 创新性地将 Titans 的学术哲学在系统工程层进行解耦降维：
+
+```mermaid
+flowchart LR
+    subgraph Titans["Google Titans 学术架构"]
+        direction TB
+        T1["短程 Attention 窗口"]
+        T2["惊奇度度量 (Surprise / Gradient)"]
+        T3["测试期动态更新 (Test-Time Training)"]
+        T4["动量衰减与遗忘门 (Momentum / Forgetting)"]
+    end
+
+    subgraph SuperAgent["Super Agent 工程化实现"]
+        direction TB
+        S1["Prompt 紧凑窗口 + 双路精炼召回 (BM25 + 向量)"]
+        S2["三道准入门禁 (Memory Gate: 增量/实体/无冲突)"]
+        S3["突触可塑性 (Synaptic Plasticity: 终态成功强化/失败抑制)"]
+        S4["代际硬隔离 (workspace_id) + 半衰期衰减与容量治理"]
+    end
+
+    T1 -.->|工程映射| S1
+    T2 -.->|工程映射| S2
+    T3 -.->|工程映射| S3
+    T4 -.->|工程映射| S4
+```
+
+1. **惊奇度门禁（`memory_gate.py`）**：
+   在事实入库前执行严格的准入门禁校验：只有经判定具备“全新信息增量（Novelty）、高置信度实体绑定与逻辑一致性”的内容，才会被提炼落盘。杜绝闲聊噪音与平庸流水账污染记忆库。
+2. **突触可塑性反馈（`memory_plasticity.py`）**：
+   在任务终态闭环（`Pool._terminal`）时，依据任务真实执行成败（成功/失败/撤回）自动对该轮次所引用的记忆事实发射突触强化或惩罚信号，动态调整可信权重分值。
+3. **分层代际隔离与按需召回**：
+   Prompt 上下文始终维持轻量与敏捷，长程跨代际事实严格以 `workspace_id` 分桶存储于持久化账本中，借助倒数排名融合（RRF）按需召回，从工程层面完美复现了“局部精细注意力 + 超长稳健记忆”的双轨优势。
+
 ## 5 请求生命周期与时序
 
 以下为具备相应接线的**参考路径**，不是对所有现网 profile 的保证。
@@ -477,6 +529,24 @@ python3 -m agentcore.pool --root /absolute/private/test-queue worker --help
 
 路线是工程建议，不隐含具体人员、日期或生产变更已获批准。完成定义应由验收证据逐项支撑。
 
+### 16.3 未来技术展望与前沿架构探索（Future Technological Horizons）
+
+面向下一代高阶自主智能体演进，本项目在巩固确定性工程底座的同时，确立了三大核心前沿演进方向：
+
+#### 16.3.1 端侧 Titans 神经记忆与测试期微调演进（Test-Time Memorization & Native Titans Head）
+- **学术前沿**：Google Titans 等前沿架构证明，将记忆内化为推理期的动态神经权重参数，是彻底跨越当前 Transformer 注意力窗口瓶颈与 KV Cache 内存墙的根本路径。
+- **演进路线**：探索在本地紧凑模型（SLM / 8B 级边缘模型）前置微型线性神经记忆头（Linear RNN / Associative Memory 模块）或端侧 Streaming Attention Sink；结合受控的动态 LoRA-on-the-fly，尝试在不依赖外置庞大向量数据库的前提下，由模型权重在交互过程中直接完成低延迟参数化记忆更新与内化。
+
+#### 16.3.2 海马体-大脑皮层双轨认知巩固（Sleep-Time Memory Consolidation）
+- **生物认知机制借鉴**：模拟哺乳动物在睡眠期由海马体快速暂存经验向大脑皮层长期稳定知识转移的生物学认知过程。
+- **架构设计**：
+  - **白昼/会话期（Working State）**：利用轻量持久池（Pool）、突触账本与快速分桶写入机制暂存高频交互碎片；
+  - **夜间/闲时（Sleep-Cycle Engine）**：后台自适应触发常驻「认知蒸馏循环」，对跨会话碎片事实执行消歧、去冗余融合、图谱对齐与概念层级提炼，将高置信度知识固化为全局认知基线，实现免人工干预的经验自愈与知识库进化。
+
+#### 16.3.3 反事实因果推演与红队对抗沙箱（Counterfactual Simulation & Red-Teaming Sandbox）
+- **因果推演突破**：超越传统的“事后对账”与简单的测试断言，构建基于 DAG 状态图的因果反事实推演能力（Counterfactual Reasoning）。
+- **实战形态**：当智能体面临高风险、高代价或破坏性外部操作时，调度引擎自动在隔离的 Git Worktree 虚拟沙箱中拉起预演环境，并由内置红队审查员（Role 4）注入反向扰动与故障突变，进行攻击性挑刺与推演证伪；仅当推演证实满足全局因果安全约束后，才获准签发生产执行许可。
+
 ## 17 源码、文档与外部参考
 
 ### 17.1 仓库索引
@@ -486,22 +556,21 @@ python3 -m agentcore.pool --root /absolute/private/test-queue worker --help
 | 主题 | 源码或文档 | 核对重点 |
 | --- | --- | --- |
 | 权威技术总览 | `docs/README.md`、`docs/TECH_MANUAL.md` | 技术文档权威主导航与全局索引 |
-| 系统全景架构 | `docs/ARCHITECTURE.md`、`docs/SUPERAGENT_ARCHITECTURE_DEEP_DIVE.md` | 十二层架构、单根拓扑与状态机确定性保证 |
-| 生产部署指南 | `docs/DEPLOY.md`、`docs/ONE_COMMAND_INSTALL.md`、`docs/REDEPLOY.md` | 单根安装器、身份暂存叠加、hermes-current 自动推断 |
+| 系统全景架构 | `docs/ARCHITECTURE.md` | 十二层架构、单根拓扑与状态机确定性保证 |
+| 生产部署指南 | `docs/DEPLOY.md` | 单根安装器、身份暂存叠加、hermes-current 自动推断与秒级回滚 |
 | 插件与工具面 | `docs/PLUGINS.md` | 16 款插件 + localvec 记忆提供方、两道启用门禁 |
 | 布局感知运维 | `docs/OPERATIONS.md`、`scripts/ops/_layout.sh` | 运维脚本多布局感知、模板单元对账纠偏与自愈 |
 | 任务账本与执行 | `agentcore/pool.py`、`worker.py`、`scheduler.py`、`attempt_supervisor.py` | 去重、锁、attempt、停止、outbox |
-| 运行契约 | `docs/POOL_RUNTIME.md`、`docs/ATTEMPT_STOP_CONTRACT.md` | 本机边界、停止证明、重放和部署兼容 |
 | 角色和工具 | `agentcore/colleague_dev.py`、`colleague_pool.py` | 角色职责与工具授权的区别 |
 | 模型和上下文 | `agentcore/model_routing.py`、`model_context.py` | 策略不变量、模型目录与实际路由 |
-| 记忆与诊断 | `agentcore/memory/`、`docs/MEMORY_IDENTITY_ROUTES.md` | 准入、身份路由、混合召回、召回诊断观测器 |
-| 消息与卡片 | `agentcore/direct_completion.py`、`completion_delivery.py`、`task_card_bridge.py`、`feishu_transport.py` | 归属、幂等、未知态及消息回读 |
-| 宿主策略 | `docs/FRONTDESK_BOUNDARY.md`、`runtime/hermes_frontdesk_policy.py` | 候选前台策略及非沙箱边界 |
-| 发布和能力 | `docs/REDEPLOY.md`、`docs/RELEASE_CAPABILITIES.md`、`tools/package_superagent.py` | 配置、安装、可选能力和证据层级 |
-| 测试与门禁 | `tests/test_repo_neutrality.py`、`test_ops_scripts.py`、`test_superagent_installer.py` | 仓级业务中立性、安装器幂等、运维脚本对账 |
+| 记忆与突触治理 | `agentcore/memory/` | 准入门禁、突触可塑性、混合召回、召回诊断观测器 |
+| 交付与卡片状态机 | `agentcore/direct_completion.py`、`completion_delivery.py`、`task_card_bridge.py` | 归属、幂等、未知态及消息回读 |
+| 宿主策略 | `runtime/hermes_frontdesk_policy.py` | 前台策略及非沙箱边界 |
+| 测试与门禁 | `tests/test_repo_neutrality.py`、`test_ops_scripts.py` | 仓级业务中立性、安装器幂等、运维脚本对账 |
 
 ### 17.2 外部一手资料
 
+- [Titans: Learning to Memorize at Test Time](https://arxiv.org/abs/2501.00663)：Google 提出的短程注意力与测试期神经长程记忆（Neural Long-Term Memory）解耦架构。
 - [Attention Is All You Need](https://arxiv.org/abs/1706.03762)：Transformer 注意力架构。
 - [ReAct](https://arxiv.org/abs/2210.03629)：推理与行动交替的研究方法。
 - [Retrieval-Augmented Generation](https://arxiv.org/abs/2005.11401)：参数与外部检索记忆结合。
