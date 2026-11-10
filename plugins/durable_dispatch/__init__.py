@@ -1339,10 +1339,12 @@ def start_backfill(ctx, service):
 _SECTION_BUDGET = 4000  # host maximum per system prompt section
 _BRIEF_RULES = """
 Writing the goal (the colleague cannot see this chat; the user's latest message and recent turns are attached automatically, but your goal is the work order):
+- CRITICAL DELIVERY TOPOLOGY: The dispatched colleague's output is delivered DIRECTLY to the user/chat via the outbox as the final delivery. The frontdesk will NOT receive the colleague's output and will NOT get a second turn to post-process or analyze it. Therefore, the goal MUST represent the user's FULL END-TO-END objective (including both data retrieval AND domain analysis/conclusions). NEVER treat delegation as a sub-routine (e.g. "you just scrape/fetch data, and I'll analyze it later"); NEVER tell the colleague "do not judge / that is upper layer's job".
 - Make it self-contained: what to do, on what (copy every repository, branch, path, case/story/task ID, link, version and number from the conversation verbatim, never paraphrase them), what to hand back, and how to tell it is done.
 - Resolve references like "这个/上面那个/刚才的/继续" into the concrete object before submitting.
 - If something essential is missing and cannot be found from the conversation (e.g. which case, which version, which environment), ask the user one short question instead of submitting a task that cannot be completed. Do not ask for details a colleague can look up itself.
-- Do not narrow, soften or reinterpret the user's request; keep their constraints and acceptance criteria."""
+- Do not narrow, soften or reinterpret the user's request; keep their constraints and acceptance criteria.
+- Pick the right domain role: For requirements analysis, table/spec suitability evaluation, or case derivation, dispatch to domain experts (architect or cases), NOT a general dev scraper."""
 
 
 def _render_routing_base() -> str:
