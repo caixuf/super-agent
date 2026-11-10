@@ -255,3 +255,44 @@ def test_readiness_detects_memory_identity_drift(tmp_path, monkeypatch):
     unit.write_text(unit.read_text().replace("SUPERAGENT_MEMORY_AGENT=a1", "SUPERAGENT_MEMORY_AGENT=other"))
     rows = {row[0]: row[1] for row in module.inspect(home, "p1")}
     assert rows["memory-store-alignment"] is False
+
+
+def test_setup_memory_with_entity_db_generates_combined_in_process_recall_and_passes_readiness(tmp_path, monkeypatch):
+    import importlib.util
+    from types import SimpleNamespace
+    userhome = tmp_path / "user"
+    units = userhome / ".config/systemd/user"
+    home = tmp_path / "profile"
+    home.mkdir()
+    (home / "config.yaml").write_text("plugins:\n  enabled: [memory-bridge]\n")
+    entity_db = tmp_path / "entity_rules.db"
+    entity_db.write_bytes(b"")
+    diag_file = tmp_path / "diag.json"
+
+    res1 = setup(home, units, "--entity-db", str(entity_db), "--diagnostic-file", str(diag_file), "--apply")
+    assert res1.returncode == 0, res1.stderr
+    cfg = yaml.safe_load((home / "config.yaml").read_text())
+    lv = cfg["memory"]["localvec"]
+    assert lv["combined_entity_db"] == str(entity_db)
+    assert lv["diagnostic_path"] == str(diag_file)
+    assert lv["recall_cmd"][1] == str(REPO / "tools/recall_combined.py")
+    assert "--in-process" in lv["recall_cmd"]
+    assert lv["recall_cmd"][lv["recall_cmd"].index("--entity-db") + 1] == str(entity_db)
+    assert lv["recall_cmd"][lv["recall_cmd"].index("--diagnostic-file") + 1] == str(diag_file)
+
+    # Idempotent re-run even when --entity-db is omitted on subsequent invocation
+    saved_text = (home / "config.yaml").read_text()
+    res2 = setup(home, units, "--apply")
+    assert res2.returncode == 0, res2.stderr
+    assert (home / "config.yaml").read_text() == saved_text
+
+    # Deployment readiness check verifies store alignment with recall_combined.py
+    spec = importlib.util.spec_from_file_location("readiness_combined_test", REPO / "tools/deployment_readiness.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("HOME", str(userhome))
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0))
+    rows = {row[0]: row[1] for row in module.inspect(home, "p1")}
+    assert rows["memory-recall"] is True
+    assert rows["memory-store-alignment"] is True
+

@@ -2025,7 +2025,7 @@ def _recall_diagnostics_observation(profile_home: Path, managed_current: Path | 
                     localvec_cfg = data.get("memory", {}).get("localvec", {})
                     if isinstance(command, list):
                         roots = [x.split("=", 1)[1] for x in command if isinstance(x, str) and x.startswith("AGENTCORE_ROOT=")]
-                        direct = [x for x in command if isinstance(x, str) and x.endswith("/tools/recall_entity.py")]
+                        direct = [x for x in command if isinstance(x, str) and x.endswith(("/tools/recall_entity.py", "/tools/recall_combined.py", "/tools/recall_memory.py"))]
                         candidates = roots + direct
                         if not candidates and isinstance(localvec_cfg, dict) and isinstance(localvec_cfg.get("engine_root"), str):
                             candidates = [localvec_cfg["engine_root"]]

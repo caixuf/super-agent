@@ -18,7 +18,8 @@ from configure_defaults import add_missing, ensure_toolset, load
 from setup_worker import quote_systemd, preflight_model
 
 
-def make_plan(home, engine, profile, user, agent, embed_url, python, unit_dir, *, identity_routes_file=None):
+def make_plan(home, engine, profile, user, agent, embed_url, python, unit_dir, *,
+              identity_routes_file=None, entity_db=None, diagnostic_file=None):
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", profile):
         raise ValueError("invalid profile")
     for value in (user, agent):
@@ -29,6 +30,16 @@ def make_plan(home, engine, profile, user, agent, embed_url, python, unit_dir, *
     for relative in ("runtime/memory_bootstrap.py", "tools/recall_memory.py", "agentcore/memory/bge_sidecar.py"):
         if not (engine / relative).is_file():
             raise ValueError("memory runtime asset missing: " + relative)
+    if entity_db is not None:
+        entity_db = Path(entity_db)
+        if not entity_db.is_absolute() or entity_db.is_symlink():
+            raise ValueError("absolute non-symlink entity_db required")
+        if not (engine / "tools/recall_combined.py").is_file():
+            raise ValueError("memory runtime asset missing: tools/recall_combined.py")
+    if diagnostic_file is not None:
+        diagnostic_file = Path(diagnostic_file)
+        if not diagnostic_file.is_absolute() or diagnostic_file.is_symlink():
+            raise ValueError("absolute non-symlink diagnostic_file required")
     # Validate the URL without contacting it or importing an untrusted path.
     sys.path.insert(0, str(engine))
     from agentcore.memory.bge_sidecar import checked_url
@@ -63,9 +74,25 @@ def make_plan(home, engine, profile, user, agent, embed_url, python, unit_dir, *
     localvec = memory.get("localvec") or {}
     if not isinstance(localvec, dict):
         raise ValueError("invalid localvec configuration")
-    recall = [str(python), str(engine / "tools/recall_memory.py"), "--query-text={query}",
-              "--data-dir", str(data), "--user", user, "--agent", agent,
-              "--profile", profile, "--embed-url", embed_url, "--limit", "{limit}"]
+    if entity_db is None and isinstance(localvec.get("combined_entity_db"), str) and localvec["combined_entity_db"]:
+        entity_db = Path(localvec["combined_entity_db"])
+        if not entity_db.is_absolute() or entity_db.is_symlink():
+            raise ValueError("invalid existing combined_entity_db")
+    if diagnostic_file is None and isinstance(localvec.get("diagnostic_path"), str) and localvec["diagnostic_path"]:
+        diagnostic_file = Path(localvec["diagnostic_path"])
+        if not diagnostic_file.is_absolute() or diagnostic_file.is_symlink():
+            raise ValueError("invalid existing diagnostic_path")
+    if entity_db is not None:
+        recall = [str(python), str(engine / "tools/recall_combined.py"), "--query={query}",
+                  "--limit", "{limit}", "--entity-db", str(entity_db),
+                  "--data-dir", str(data), "--user", user, "--agent", agent,
+                  "--profile", profile, "--embed-url", embed_url, "--in-process"]
+        if diagnostic_file is not None:
+            recall += ["--diagnostic-file", str(diagnostic_file)]
+    else:
+        recall = [str(python), str(engine / "tools/recall_memory.py"), "--query-text={query}",
+                  "--data-dir", str(data), "--user", user, "--agent", agent,
+                  "--profile", profile, "--embed-url", embed_url, "--limit", "{limit}"]
     routed = identity_routes_file is not None
     if not routed and ('identity_routes_file' in localvec):
         raise ValueError("routed memory requires an explicit identity policy")
@@ -95,9 +122,18 @@ def make_plan(home, engine, profile, user, agent, embed_url, python, unit_dir, *
     fallback = {"recall_cmd": recall, "limit": 5, "timeout_s": 15,
                 "sqlite_db": str(data / "coding_memory_cv.db"),
                 "user_id": user, "agent_id": agent, "profile": profile}
+    if entity_db is not None and not routed:
+        fallback["combined_entity_db"] = str(entity_db)
+        fallback["engine_root"] = str(engine)
+    if diagnostic_file is not None and not routed:
+        fallback["diagnostic_path"] = str(diagnostic_file)
     if routed:
         fallback = {"identity_routes_file": str(identity_routes_file), "engine_root": str(engine),
                     "embed_url": embed_url, "limit": 5, "timeout_s": 15}
+        if entity_db is not None:
+            fallback["combined_entity_db"] = str(entity_db)
+        if diagnostic_file is not None:
+            fallback["diagnostic_path"] = str(diagnostic_file)
     for key, value in fallback.items():
         if key in localvec and localvec[key] != value:
             raise ValueError("existing localvec setting conflicts: " + key)
@@ -132,6 +168,10 @@ def main():
     p.add_argument("--embed-url", required=True)
     p.add_argument("--identity-routes-file", type=Path,
                    help="Explicit admin-owned IM identity policy; creates one worker for this principal")
+    p.add_argument("--entity-db", type=Path,
+                   help="Optional EntityStore SQLite path to configure dual-path recall_combined.py --in-process")
+    p.add_argument("--diagnostic-file", type=Path,
+                   help="Optional recall diagnostic JSON file path")
     p.add_argument("--python", type=Path, default=Path(sys.executable))
     p.add_argument("--unit-dir", type=Path, default=Path.home() / ".config/systemd/user")
     p.add_argument("--apply", action="store_true")
@@ -147,7 +187,9 @@ def main():
     engine = args.engine_root.absolute()
     plan = make_plan(args.profile_home.resolve(), engine, args.profile,
                      args.user, args.agent, args.embed_url, python, args.unit_dir.resolve(),
-                     identity_routes_file=args.identity_routes_file)
+                     identity_routes_file=args.identity_routes_file,
+                     entity_db=args.entity_db,
+                     diagnostic_file=args.diagnostic_file)
     unit = plan["unit_path"]
     if unit.is_symlink() or (unit.exists() and (not unit.is_file() or unit.read_text(encoding="utf-8") != plan["unit"])):
         raise ValueError("existing memory unit differs")
