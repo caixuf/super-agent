@@ -832,6 +832,12 @@ class Pool:
                            (json.dumps(result, ensure_ascii=False), job, attempt))
             elif not ok and worker_stopping and row['replay_safe']:
                 db.execute("UPDATE jobs SET status='queued',heartbeat=NULL,tries=MAX(0, tries-1) WHERE id=?", (job,))
+            elif not ok and isinstance(result, dict) and result.get('exit_code') == 78:
+                # EX_CONFIG (78): fatal auth/config failure; fail immediately without burning retry quota
+                self._terminal(db, job, 'failed', result)
+            elif not ok and isinstance(result, dict) and result.get('exit_code') == 75 and row['replay_safe']:
+                # EX_TEMPFAIL (75): temporary provider/rate-limit failure; requeue without consuming business retry quota
+                db.execute("UPDATE jobs SET status='queued',heartbeat=NULL,tries=MAX(0, tries-1) WHERE id=?", (job,))
             elif not ok and row['replay_safe'] and row['tries'] < row['max_tries']:
                 db.execute("UPDATE jobs SET status='queued',heartbeat=NULL WHERE id=?", (job,))
             else:

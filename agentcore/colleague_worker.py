@@ -201,8 +201,15 @@ def main():
                           "quiescence_evidence_id": containment.evidence_id(evidence)},
                          ensure_ascii=False))
         return 0
-    except Exception:
+    except Exception as exc:
         _discard_attempt()
+        exit_code = getattr(exc, "exit_code", None)
+        if exit_code is None:
+            exit_code = getattr(exc, "returncode", None)
+        if exit_code in (75, 78):
+            code = "provider_tempfail" if exit_code == 75 else "fatal_config_or_auth_failure"
+            print(json.dumps({"ok": False, "error": code, "exit_code": int(exit_code)}))
+            return int(exit_code)
         # Provider failures or user input may contain secrets. Do not copy them
         # into the public receipt or claim that an uncertain task was undone.
         print(json.dumps({"ok": False, "error": "colleague_execution_failed_or_unknown"}))
