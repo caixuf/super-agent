@@ -270,33 +270,41 @@ class TaskCardBridge:
         if len(clean_goal) > 280:
             clean_goal = clean_goal[:277] + "..."
 
-        body_lines = [
+        # Metadata section with strict paragraph breaks for Feishu Lark-MD rendering
+        meta_lines = [
             f"**任务编号**：`{_sanitize_card_text(task_id)}`",
             f"**指派角色**：{clean_role}",
-            f"**任务目标**：{clean_goal}",
         ]
+        if clean_goal:
+            goal_quoted = "\n> ".join(clean_goal.splitlines())
+            meta_lines.append(f"**任务目标**：\n> {goal_quoted}")
+        else:
+            meta_lines.append("**任务目标**：*未提供*")
+
+        sections = ["\n\n".join(meta_lines)]
 
         is_terminal = status in ("completed", "failed", "cancelled")
         is_failed = status in ("failed", "cancelled")
 
         if status in ("queued", "running", "progressive"):
-            body_lines.append("────────────────")
+            progress_lines = []
             if phase:
-                body_lines.append(f"**当前阶段**：{_sanitize_card_text(phase)}")
+                progress_lines.append(f"**当前阶段**：{_sanitize_card_text(phase)}")
             if progress > 0.0:
                 bar = _render_progress_bar(progress)
-                body_lines.append(f"**阶段进度**：{bar} {int(progress * 100)}%")
+                progress_lines.append(f"**阶段进度**：`{bar}` **{int(progress * 100)}%**")
             if elapsed > 0.0:
-                body_lines.append(f"**执行耗时**：{elapsed:.1f} 秒")
+                progress_lines.append(f"**执行耗时**：{elapsed:.1f} 秒")
             if status == "queued":
-                body_lines.append("ℹ️ 等待后台 Worker 队列空闲调度...")
+                progress_lines.append("ℹ️ 等待后台 Worker 队列空闲调度...")
             else:
-                body_lines.append("后台任务已进入执行阶段，文字结论将优先直达。")
+                progress_lines.append("📢 *后台任务已进入执行阶段，文字结论将优先直达。*")
+            sections.append("\n\n".join(progress_lines))
 
         elif status == "completed":
-            body_lines.append("────────────────")
+            comp_lines = []
             if elapsed > 0.0:
-                body_lines.append(f"**执行耗时**：{elapsed:.1f} 秒")
+                comp_lines.append(f"**执行耗时**：{elapsed:.1f} 秒")
             if summary:
                 clean_sum = _sanitize_card_text(summary)
                 if len(clean_sum) > 1500:
@@ -305,18 +313,21 @@ class TaskCardBridge:
                     if last_nl > 800:
                         truncated_sum = truncated_sum[:last_nl]
                     clean_sum = f"{truncated_sum}\n\n*(长文本详细内容已作为附件发送至群聊)*"
-                body_lines.append(f"**核心结论（Phase 1 直达）**：\n{clean_sum}")
+                comp_lines.append(f"**核心结论（Phase 1 直达）**：\n\n{clean_sum}")
             if artifacts:
-                body_lines.append("**产出制品（Phase 2）**：")
+                art_items = ["**产出制品（Phase 2）**："]
                 for art in artifacts:
-                    body_lines.append(f"- `{Path(art).name}`")
+                    art_items.append(f"- `{Path(art).name}`")
+                comp_lines.append("\n".join(art_items))
+            sections.append("\n\n".join(comp_lines))
 
         elif status in ("failed", "cancelled"):
-            body_lines.append("────────────────")
+            fail_lines = []
             if elapsed > 0.0:
-                body_lines.append(f"**执行耗时**：{elapsed:.1f} 秒")
+                fail_lines.append(f"**执行耗时**：{elapsed:.1f} 秒")
             fail_desc = _sanitize_card_text(error_msg or summary or "任务未达到预期终态或已取消")
-            body_lines.append(f"**未完成说明**：\n{fail_desc}")
+            fail_lines.append(f"**未完成说明**：\n\n{fail_desc}")
+            sections.append("\n\n".join(fail_lines))
 
         footer_notes = [
             f"状态: {'PASS' if status == 'completed' else (status_suffix if is_failed else status_suffix)}",
@@ -324,8 +335,10 @@ class TaskCardBridge:
             f"更新于 {now_str} · 卡片与任务严格解耦绑定",
         ]
 
+        card_text = "\n\n────────────────\n\n".join(sections)
+
         return build_cardkit2_payload(
-            "\n".join(body_lines),
+            card_text,
             is_terminal=is_terminal,
             is_failed=is_failed,
             title=clean_role,
