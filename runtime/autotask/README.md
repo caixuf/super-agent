@@ -1,8 +1,8 @@
 
 ## 在活的 Hermes 上启用（重要）
 
-宿主 cron 的合并路径对「直接写进 `jobs.json` 的作业」**不会重算 `next_run_at`**
-（`cron/job_definition.py`：只有本地记录与导入记录合并时才计算落点）。因此正确做法是：
+宿主 cron 的合并路径对「直接写进 `<profile>/cron/jobs.json` 的作业」**不会重算 `next_run_at`**
+（`<hermes_root>/cron/job_definition.py`：只有本地记录与导入记录合并时才计算落点）。因此正确做法是：
 
 ```bash
 # 1) 用官方入口逐条创建。`cron create` 按名称**不幂等**——重复创建会得到重复作业

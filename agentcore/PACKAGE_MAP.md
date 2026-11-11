@@ -102,6 +102,7 @@ agentcore/
 | `markdown_delivery.py` | Delivery | 纯文本与 Markdown 结果消息投递 |
 | `artifact_retention.py` | Delivery | 交付工件留存生命周期与滚动清理策略 |
 | `kanban_contract.py` | Delivery | 看板任务追踪契约与状态同步协议 |
+| `colleague_delivery_cli.py` | Delivery | 终态任务交付与结果回投 CLI 运维工具 |
 
 ---
 
@@ -129,7 +130,7 @@ agentcore/
 
 | 模块文件 / 目录 | 领域归属 | 核心职责 |
 | :--- | :--- | :--- |
-| `memory/` | Memory | 核心记忆子包（`engine.py`, `recall.py`, `quality.py`, `localvec.py`, `graph.py` 等） |
+| `memory/` | Memory | 核心记忆子包（含 `memory/memory_store.py`, `memory/hybrid_recall.py`, `memory/recall_service.py`, `memory/memory_gate.py`, `memory/memory_surprise.py`, `memory/memory_plasticity.py`, `memory/memory_consolidate.py`, `memory/memory_graph.py`, `memory/synapse.py`, `memory/vec_index.py` 等；`localvec` 位于 `plugins/localvec/`） |
 | `colleague_memory_cli.py`| Memory | 记忆库操作 CLI 与运维探针 |
 | `memory_evaluation.py` | Memory | 记忆召回准确率与相关性基准评估 |
 | `memory_footprint.py` | Memory | 记忆库存储体积与索引膨胀监控 |
@@ -154,6 +155,8 @@ agentcore/
 | `proactive_watch.py` | Liveness | 主动探针与外部资源哨兵监控 |
 | `proactive_hooks.py` | Liveness | 主动事件触发挂钩与回调链 |
 | `process_pressure.py` | Liveness | 宿主 CPU / 内存系统负载压力感知 |
+| `capability_guard.py` | Liveness | 能力基线底线巡检与漂移告警守卫 |
+| `capability_guard_cli.py` | Liveness | 能力基线巡检与漂移告警运维 CLI |
 
 ---
 
@@ -162,6 +165,7 @@ agentcore/
 
 | 模块文件 | 领域归属 | 核心职责 |
 | :--- | :--- | :--- |
+| `__init__.py` | Governance | agentcore 核心包入口，统一导出业务中立性与核心引擎接口 |
 | `baseline_config.py` | Governance | 通用基础配置加载器与环境变量合并 |
 | `profile_spec.py` | Governance | 受管 Profile 规范、单根目录推断与布局自适应 |
 | `profile_overlay.py` | Governance | 业务叠加层注入与安全只读合并机制 |

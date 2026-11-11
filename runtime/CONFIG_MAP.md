@@ -79,7 +79,7 @@
 | :--- | :--- |
 | **同一会话严格串行**：按 `session_id` 抢回合租约，「载历史 → 跑 → 落盘」必须独占 | `_hmwa_acquire_turn_lease`（`run_turn_prepare.py`） |
 | 抢不到是 **fail-closed**：超时直接向外返回**「请重发」**类提示，**不是排队等**（超时可调 `HERMES_TURN_LEASE_TIMEOUT`） | 同上（`TurnLeaseTimeoutError`） |
-| **`display.busy_input_mode` 只有 TUI 网关消费**；消息平台**不吃这个键** | 全仓只有 `tui_gateway/server.py` 读它 |
+| **`display.busy_input_mode` 只有 TUI 网关消费**；消息平台**不吃这个键** | 宿主侧全仓只有 `<hermes_root>/tui_gateway/server.py` 读它 |
 | 跨会话并发默认**不限**（顶层 `max_concurrent_sessions` 省略 = 不限；到顶是干净报错、不排队） | 配置契约 |
 | 群聊默认**每人一会话**（`group_sessions_per_user` 默认 true） | 配置契约 |
 

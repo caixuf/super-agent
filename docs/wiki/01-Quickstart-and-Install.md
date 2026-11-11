@@ -1,210 +1,151 @@
-# 01. 5分钟快速上手与单根部署 (Quickstart & Single-Root Deployment)
+# 01. 单根受管部署与极速上手 (Quickstart & Single-Root Deployment)
 
-> **导航 / Wiki Navigation**
-> [Wiki 首页 (Home)](Home.md) │ [01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
+> **文档导航**：[Wiki 首页 (Home)](Home.md) │ [01. 单根受管部署与极速上手](01-Quickstart-and-Install.md) │ [02. 业务知识叠加与服务编排](02-Business-Overlay-Guide.md) │ [03. 研发专家协同与状态图引擎](03-Multi-Agent-and-StateGraph.md) │ [04. IM 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [05. 运维体检与排障对账](05-Operations-and-Troubleshooting.md)
 
 ---
 
-## 1. 为什么采用单根部署架构 (Single-Root Architecture)？
+## 1. 单根受管拓扑与状态持久化架构
 
-在传统智能体部署方案中，代码、配置、运行时状态、任务队列与 systemd 服务往往散落在系统的各个角落（如 `~/.local/`, `~/.config/`, `/etc/`, `~/.cache/` 等）。这种分散拓扑会引发一系列严重维护难题：
-1. **升级状态踩踏**：升级新版本代码时，正在运行的长任务被直接覆写，导致状态破坏；
-2. **回滚极其困难**：无法精确获知上次稳定版本的完整目录镜像，出现故障只能人工盲目修补；
-3. **残留难以清除**：卸载或重置时遗漏孤儿软链接或废弃配置，持续干扰后续实例；
-4. **多实例隔离脆弱**：多套环境（如开发态、仿真态、生产态）互相读取彼此状态数据库。
+### 1.1 传统部署故障场景
+在多实例智能体部署中，若代码、配置、状态和 systemd 服务散落在 `~/.local/`、`/etc/` 等不同系统目录中，会引发以下严重故障：
+1. **升级状态踩踏**：拉取新代码时覆盖正在执行长任务的工作区，破坏运行时上下文；
+2. **回滚不可逆**：新版本报错时，旧版本镜像已被覆盖，无法原子回退；
+3. **数据相互踩踏**：多个 Profile 共用顶层数据库，导致任务队列与活体心跳混杂。
 
-为了彻底根除上述隐患，Super Agent 确立了**单根受管目录铁律**：每一个智能体实例（Profile）的全部生命周期资产，严格封装在独立唯一的受管根目录下：
+### 1.2 单根目录拓扑与代码机制
+Super Agent 严格将单个实例的所有资产封装在 `<root>/<profile>` 目录下（默认 `~/super_agent/<profile>`，由 `tools/superagent.py` 统一定义）：
 
 ```text
 ~/super_agent/<profile>/
-├── current -> releases/20261109_140000/    # 原子软链接：指向当前生效的不可变版本
-├── releases/                               # 版本仓库：历史版本物理隔离存放
-│   ├── 20261108_100000/                    # 旧版本镜像（可用于秒级回滚）
-│   └── 20261109_140000/                    # 当前激活版本代码、工具与通用技能
-├── state/                                  # 运行时持久状态（跨版本继承）
-│   ├── durable_pool.sqlite                 # SQLite 持久任务池数据库（WAL 模式）
-│   ├── liveness_ledgers/                   # 任务活体心跳账本与 PID 证据
-│   └── memory_spool/                       # 长期记忆事件池与向量索引
-├── config/                                 # 受管配置快照
-│   └── config.yaml                         # 当前实例生效配置
-├── backups/                                # 自动备份仓（每次升级/变更前自动快照）
-└── install-manifest.json                   # 安装清单：记录当前 release、插件链接与受管服务
+├── current -> releases/<git-describe-or-sha>/  # 原子软链：指向当前生效的不可变发布镜像
+├── releases/                                   # 不可变历史版本库（按 tag/commit 命名，非时间戳）
+│   ├── v2.2.1/                                 # 历史稳定版本（秒级回滚锚点）
+│   └── v2.2.2-single-root-20261111-dirty/      # 当前激活版本代码、内置插件与核心工具
+├── state/                                      # 运行时持久状态（跨版本升级完整继承）
+│   ├── analysis-queue/pool.db                  # 调度分析任务池 SQLite WAL 库与文件锁
+│   ├── dev-queue/pool.db                       # 研发专家任务池 SQLite WAL 库与文件锁
+│   ├── liveness.db                             # 活体心跳数据库（维护 task_liveness 表）
+│   ├── memory-spool/                           # 长期记忆事件池（注意连字符）
+│   ├── cards/                                  # 交互卡片状态与事件存储根目录
+│   ├── markdown-outbox/                        # 离线 Markdown 消息与卡片发件箱
+│   ├── colleague-team/registry.sqlite          # 团队成员注册表
+│   └── recall-diagnostics/                     # 记忆召回指标 JSON 存放目录
+├── config/                                     # 实例配置快照（config.yaml 等）
+├── backups/                                    # 自动快照备份仓（升级前自动归档）
+└── install-manifest.json                       # 安装清单：记录 commit、插件软链与托管服务
+```
+
+### 1.3 代价与边界
+`state/` 跨版本保留保证任务连续性，但要求数据库 schema 保持向前兼容；不可变 release 随升级累积占用磁盘，需定期通过 `prune-releases` 安全回收。
+
+---
+
+## 2. 从零部署真机实测（沙箱零副作用演练）
+
+以下演练基于 `/tmp/sa_walkthrough_probe` 临时沙箱，全程零外部依赖，不改动宿主真实配置。
+
+### 步骤 0：准备临时沙箱骨架
+```bash
+rm -rf /tmp/sa_walkthrough_probe
+mkdir -p /tmp/sa_walkthrough_probe/profile_home /tmp/sa_walkthrough_probe/hermes/plugins/platforms/feishu
+printf 'platforms: {}\n' > /tmp/sa_walkthrough_probe/profile_home/config.yaml
+printf '# probe dummy adapter\n' > /tmp/sa_walkthrough_probe/hermes/plugins/platforms/feishu/adapter.py
+```
+
+### 步骤 1：安装前诊断未就绪状态
+```bash
+python3 tools/superagent.py \
+  --root /tmp/sa_walkthrough_probe/super_agent \
+  --profile probe \
+  --profile-home /tmp/sa_walkthrough_probe/profile_home \
+  --hermes-root /tmp/sa_walkthrough_probe/hermes \
+  doctor
+```
+- **退出码**：`1`
+- **真实 JSON 输出**：`{"status": "not-installed", "root": "/tmp/sa_walkthrough_probe/super_agent/probe"}`
+
+### 步骤 2：预览部署计划 (Dry-run Plan)
+```bash
+python3 tools/superagent.py \
+  --root /tmp/sa_walkthrough_probe/super_agent \
+  --profile probe \
+  --profile-home /tmp/sa_walkthrough_probe/profile_home \
+  --hermes-root /tmp/sa_walkthrough_probe/hermes \
+  plan
+```
+输出结构化 JSON：包含 `layout`、`managed_paths`、13 款内建插件与 `localvec` 记忆提供方的软链规划，退出码 `0`。
+
+### 步骤 3：执行正式安装
+```bash
+python3 tools/superagent.py \
+  --root /tmp/sa_walkthrough_probe/super_agent \
+  --profile probe \
+  --profile-home /tmp/sa_walkthrough_probe/profile_home \
+  --hermes-root /tmp/sa_walkthrough_probe/hermes \
+  --allow-dirty \
+  install
+```
+- **退出码**：`0`
+- **执行动作**：创建 `releases/<version>` 不可变目录、原子链接 `current`、初始化 `state/` 队列与数据库、建立插件软链并生成 `install-manifest.json`。
+
+### 步骤 4：安装后健康体检
+```bash
+python3 tools/superagent.py \
+  --root /tmp/sa_walkthrough_probe/super_agent \
+  --profile probe \
+  --profile-home /tmp/sa_walkthrough_probe/profile_home \
+  --hermes-root /tmp/sa_walkthrough_probe/hermes \
+  doctor
+```
+输出包含 17 项观测键的 JSON 字典。在开发脏工作区安装时，`release_valid: true`, `plugin_links_valid: true`, `release_hash_valid: true` 均为 `true`，因检测到脏提交返回 `"status": "drift"` 与 `"reasons": ["installed_dirty"]`（退出码 1）。
+
+---
+
+## 3. systemd 服务单元管理
+
+### 3.1 真实服务单元命名规范
+每个受管 Profile 拥有独立命名的 systemd 用户服务单元，避免命名冲突：
+- **前台网关服务**：`hermes-gateway-<profile>.service`（由 `tools/superagent.py` 与网关安装器管理）；
+- **通用任务 Worker**：`superagent-worker-<profile>.service`（`setup_worker.py` 生成）；
+- **角色专用 Worker**：`superagent-worker-{profile_id}-{role}.service`（按岗位规格由 `profile_spec.py` 编排）；
+- **长期记忆运行时**：`superagent-memory-<profile>.service`（`setup_memory.py` 生成）。
+
+### 3.2 服务管理命令
+宿主开启常驻守护（用户注销后后台服务不终止）：
+```bash
+loginctl enable-linger $USER
+```
+管理实例服务：
+```bash
+# 查看网关与 Worker 状态
+systemctl --user status hermes-gateway-<profile>.service superagent-worker-<profile>.service
+
+# 启动与跟踪日志
+systemctl --user start hermes-gateway-<profile>.service
+journalctl --user -u superagent-worker-<profile>.service -f
 ```
 
 ---
 
-## 2. 环境先决条件 (Prerequisites)
+## 4. 版本升级、回滚与清理操作
 
-在开始部署前，请确保宿主环境满足以下条件：
-
-- **操作系统**：Linux x86_64 或 aarch64（支持 Ubuntu 20.04+、Debian 11+、WSL2）；
-- **Python 版本**：Python 3.10+（强烈推荐 Python 3.11 或 3.12）；
-- **基础依赖**：Git、curl 或 wget、build-essential；
-- **用户级服务管理 (systemd user session)**：
-  确保当前用户已启用进程常驻（用户注销后后台服务不被系统收回）：
-  ```bash
-  loginctl enable-linger $USER
-  ```
-  通过以下命令检查 user session 是否正常：
-  ```bash
-  systemctl --user status
-  ```
-
----
-
-## 3. 5 分钟极速安装实战 (Step-by-Step)
-
-### 第一步：获取代码与本地快速自检
-
-首先克隆代码仓库，并执行轻量级静态门禁自检：
+所有维护命令均通过统一入口执行，严格遵循参数规范：
 
 ```bash
-git clone <repo_url> super-agent
-cd super-agent
+# 1. 平滑升级：构建新 release、原子切换 current 软链接、平滑重启服务
+python3 tools/superagent.py update --profile <profile>
+# 或通过 Shell 包装器（外层必须带 --apply）
+./install/superagent.sh update --profile <profile> --apply
 
-# 执行全套静态门禁与核心单测（耗时约 30 秒，零外部网络依赖）
-bash verify.sh
+# 2. 秒级回滚：将 current 切换回 manifest 历史中的上一个 release（无 --apply）
+python3 tools/superagent.py rollback --profile <profile>
+
+# 3. 历史版本清理：保留最近 3 个 release，安全删除陈旧目录（无 --apply）
+python3 tools/superagent.py prune-releases --profile <profile> --keep 3
+
+# 4. 安全卸载：注销服务、清理软链接并归档配置
+./install/superagent.sh uninstall --profile <profile> --apply
 ```
 
-若输出提示 `ALL GATES PASSED`，则表明当前代码与环境满足安全基线。
-
----
-
-### 第二步：预览安装计划 (Dry-run Plan)
-
-Super Agent 遵循**“先看计划、再行修改”**的确定性安全哲学。执行 `plan` 命令仅计算预期的目录变更与服务注册，不会对操作系统产生任何副作用：
-
-```bash
-# 规划名为 dev 的 profile 安装
-./install/superagent.sh plan --profile dev
-```
-
-终端将打印结构化的安装执行计划：
-- 目标单根路径：`~/super_agent/dev`
-- 准备创建的目录拓扑与版本归档名
-- 拟安装的通用插件列表与软链接映射
-- 拟生成的 systemd user 单元
-
----
-
-### 第三步：正式应用安装 (Apply Installation)
-
-确认计划无误后，添加 `--apply` 开关执行原子安装：
-
-```bash
-./install/superagent.sh install --profile dev --apply
-```
-
-安装器将自动化执行：
-1. 编译并打包不可变 release 归档，存放于 `~/super_agent/dev/releases/<timestamp>/`；
-2. 原子建立 `current` 软链接指向该 release；
-3. 初始化 `state/` 下的持久任务池与账本数据库；
-4. 配置并链接受管插件；
-5. 生成 `super-agent@dev.service` 用户单元，并执行 `daemon-reload`。
-
----
-
-### 第四步：全局健康体检 (Doctor Diagnostics)
-
-安装完成后，运行 `doctor` 命令对新建实例进行全面的端到端健康体检：
-
-```bash
-python3 tools/superagent.py doctor --profile dev
-```
-
-`doctor` 工具将逐项检查：
-- [x] 受管根目录与原子链接完整性（`current` 是否有效链接）；
-- [x] 持久任务池数据库（SQLite WAL 完整性检查与读写测试）；
-- [x] systemd 用户服务状态与存活心跳；
-- [x] 插件软链接与依赖项完备性；
-- [x] 权限边界与隔离策略。
-
-体检结果若全部显示 `[PASS]`，则代表系统已处于就绪状态。
-
----
-
-### 第五步：启动服务与查看日志
-
-通过标准 systemctl 命令管理当前实例：
-
-```bash
-# 启动常驻服务
-systemctl --user start super-agent@dev.service
-
-# 查看服务运行状态
-systemctl --user status super-agent@dev.service
-
-# 跟踪查看实时运行日志
-journalctl --user -u super-agent@dev.service -f
-```
-
----
-
-## 4. 日常生命周期管理 (Lifecycle Operations)
-
-### 1. 无缝平滑升级 (Update)
-
-当代码仓库有新版本发布时，使用 `update` 命令执行平滑升级：
-
-```bash
-python3 tools/superagent.py update --profile dev --apply
-```
-
-升级机制采用**无损接管**：
-- 新代码打包部署至新的 `releases/<new_timestamp>` 目录；
-- 旧的持久任务池与未完成任务完整保留在 `state/`；
-- 原子切换 `current` 软链接；
-- 平滑重启后台 Worker 服务，未完成任务由新的 Worker 自动恢复执行。
-
-### 2. 秒级紧急回滚 (Rollback)
-
-若新版本在运行时出现非预期异常，可通过 `rollback` 命令实现秒级一键回退：
-
-```bash
-python3 tools/superagent.py rollback --profile dev
-```
-
-回滚机制会将 `current` 软链接立刻指向前一个稳定的 release 目录，并重启服务，无需重新编译或从云端拉取。
-
-### 3. 历史版本清理 (Prune Releases)
-
-随着持续迭代，`releases/` 目录下会沉淀多个历史版本。使用 `prune-releases` 命令可安全回收磁盘空间：
-
-```bash
-# 保留最近 3 个 release，清理更早的历史版本
-python3 tools/superagent.py prune-releases --profile dev --keep 3 --apply
-```
-
-`prune-releases` 会主动保护当前激活的 `current` 版本以及上一次稳定备份，绝不误删在用资源。
-
-### 4. 彻底干净卸载 (Uninstall)
-
-若需要完全销毁实例：
-
-```bash
-python3 tools/superagent.py uninstall --profile dev --apply
-```
-
-卸载工具会停止并注销关联的 systemd 用户服务，安全清理插件软链接，并移除 `~/super_agent/dev` 受管目录。
-
----
-
-## 5. 自动化冒烟与容器验证 (Verification & Cleanroom)
-
-- **本地轻量级冒烟探针**：
-  ```bash
-  python3 checks/prefer_d7_smoke.py
-  ```
-  在本地环境对任务提交、卡片排队与状态流转进行轻量级闭环冒烟。
-
-- **Docker 纯净环境验证 (Cleanroom Test)**：
-  ```bash
-  bash scripts/ops/docker_cleanroom_test.sh
-  ```
-  该脚本会在全新的轻量 Linux 容器环境中从零模拟全新主机的完整安装、服务启动、健康检查与卸载流程，执行 20 项断言，确保代码在任何未被污染的宿主机上均可稳定复现。
-
----
-
-> **下一步**：单根环境就绪后，请阅读 [02. 业务知识挂载指南](02-Business-Overlay-Guide.md) 了解如何零污染接入业务 MCP、Skills 与领域专家角色。
->
->  [返回 Wiki 首页 (Home)](Home.md) │ [下一篇：02. 业务知识挂载指南](02-Business-Overlay-Guide.md)
+> [!NOTE]
+> `rollback` 与 `prune-releases` 属于原生 CLI 子命令，参数解析中不包含 `--apply`；追加 `--apply` 会报错。`prune-releases` 始终自动保护当前激活的 `current` 版本与最近备份。

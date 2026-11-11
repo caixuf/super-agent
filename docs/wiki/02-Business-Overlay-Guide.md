@@ -1,235 +1,116 @@
-# 02. 业务知识挂载指南 (Business Overlay & Domain Knowledge Guide)
+# 02. 业务知识叠加与服务编排 (Business Overlay & Profile Services)
 
-> **导航 / Wiki Navigation**
-> [Wiki 首页 (Home)](Home.md) │ [01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
-
----
-
-## 1. 中性引擎与业务叠加层解耦原则
-
-在通用智能体落地工程中，最容易犯的架构错误就是**将具体业务私有代码、特定企业内部系统名称、专有术语硬编码到通用引擎仓库中**。这种污染会导致：
-- 代码无法开源或跨组织交付复用；
-- 业务逻辑演进与底座引擎升级互相缠绕，版本升级寸步难行；
-- 敏感业务信息泄露至公共版本库。
-
-为此，Super Agent 设立了最高设计原则：**“本体纯粹中立，业务通过叠加层注入”**。
-
-```mermaid
-graph TD
-    classDef neutral fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#1A73E8;
-    classDef overlay fill:#FEF7E0,stroke:#FBBC04,stroke-width:2px,color:#B06000;
-    classDef target fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#137333;
-
-    subgraph Sources ["输入层：中性本体仓库与业务扩展仓库"]
-        SoulSkeleton["通用纪律骨架 (SOUL.generic.md)"]:::neutral
-        CoreRoles["8 大官方研发岗位契约 (DEV_ROLES)"]:::neutral
-        DomainSoul["领域提示词与业务规程 (<domain>.overlay.md)"]:::overlay
-        BusinessMCP["业务 MCP 服务与私有 Skills"]:::overlay
-        SyncScript["业务团队装配脚本 (sync_roles.py)"]:::overlay
-    end
-
-    subgraph RuntimeProfile ["受管单根运行环境 (~/super_agent/<profile>)"]
-        ActiveConfig["生效配置 (config/config.yaml - 深度合并)"]:::target
-        ActiveSoul["完整身份提示词 (SOUL.md - 占位符替换)"]:::target
-        ActiveServices["9 角色协作集群 (1 网关 + 8 研发专家 Worker)"]:::target
-    end
-
-    SoulSkeleton -->|注入业务叠加层| ActiveSoul
-    DomainSoul -->|覆盖注入| ActiveSoul
-    CoreRoles -->|深层合并| ActiveConfig
-    BusinessMCP -->|扩展挂载| ActiveConfig
-    SyncScript -->|执行深合并与服务装配| RuntimeProfile
-```
+> **文档导航**：[Wiki 首页 (Home)](Home.md) │ [01. 单根受管部署与极速上手](01-Quickstart-and-Install.md) │ [02. 业务知识叠加与服务编排](02-Business-Overlay-Guide.md) │ [03. 研发专家协同与状态图引擎](03-Multi-Agent-and-StateGraph.md) │ [04. IM 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [05. 运维体检与排障对账](05-Operations-and-Troubleshooting.md)
 
 ---
 
-## 2. `SOUL.generic.md` 身份叠加层挂载
+## 1. 身份骨架合成机制 (Soul Skeleton Composition)
 
-### 2.1 身份骨架结构
+### 1.1 故障场景：业务规则硬编码与占位符污染
+若将特定业务领域的专用状态枚举、系统接口或判定基准直接硬编码在通用智能体骨架内，底座代码将无法通用复用；而若使用松散的占位符（如包裹在 HTML 注释内），某些解析器或预处理器在清洗格式时会误删注释，导致业务提示词从未生效或引起格式错乱。
 
-在 `identity/SOUL.generic.md` 中，Super Agent 定义了通用的高阶智能体行为规范与执行铁律：
-- 严格遵循证据闭环，严禁无依据凭空假设；
-- 耗时超过 5 秒的操作一律转交后台持久队列；
-- 前台界面保持精简优雅，以流式卡片与图文交付长篇成果；
-- 尊重角色职责分工与权限边界。
-
-在该文件的核心业务约束章节，预留了标准化占位符：
+### 1.2 真实代码机制与注入命令
+Super Agent 在 `identity/SOUL.generic.md` 第 9 节（第 254 行）保留了全仓唯一的**裸双花括号标记**：
 ```markdown
-<!-- {{BUSINESS_OVERLAY}} -->
+{{BUSINESS_OVERLAY}}
 ```
+> [!IMPORTANT]
+> 该标记严禁被 `<!-- ... -->` 等 HTML 注释包裹。安装器 `install/install.sh:662` 包含硬断言校验：
+> `test "$(grep -cF '{{BUSINESS_OVERLAY}}' "$skeleton")" -eq 1`
+> 必须恰好匹配 1 次，否则立即阻断退出。
 
-### 2.2 领域叠加层的挂载方式
-
-业务团队在独立的业务仓中维护 `<domain>.overlay.md`，其内容专注于领域专有规则，例如：
-```markdown
-# 领域业务专家操作准则与规程
-
-## 1. 领域专有名词与判定基准
-- 定义系统状态枚举、各档位含义与核心业务指标阈值；
-- 规定异常报警的定性标准与升级链路。
-
-## 2. 仿真与测试执行规程
-- 针对领域核心业务，必须优先编写确定性回归验证用例；
-- 执行用例前必须先校验环境基线与输入数据完备性。
-
-## 3. 结果交付与归档规程
-- 验收结论必须关联具体的自动化测试报告与执行日志凭据；
-- 测试总结须回写至企业云文档团队看板。
+业务团队可基于模板 `identity/overlays/domain_expert_overlay.template.md` 编写业务规则，并执行以下命令完成身份合成：
+```bash
+bash install/install.sh --profile <profile> --compose-soul /path/to/domain_overlay.md
 ```
+底层脚本通过 `awk` 将 `{{BUSINESS_OVERLAY}}` 替换为业务规程内容，并直接落盘至 `<profile_home>/SOUL.md`。若原文件已存在，会自动备份为 `SOUL.md.bak-<timestamp>`。
 
-当执行部署或运行业务同步时，安装器或配置脚本会自动将 `{{BUSINESS_OVERLAY}}` 替换为业务规程，生成实例专用的 `SOUL.md`，实现通用纪律与业务规则的无缝融合。
+### 1.3 代价与边界
+身份合成是在部署期完成的静态落盘，业务规程更新需重新执行 `--compose-soul`；若通用骨架有多个标记或标记缺失，合成命令会强制拒绝以防止静默截断。
 
 ---
 
-## 3. MCP (Model Context Protocol) 服务的规范挂载
+## 2. Profile Overlay 资产包机制 (`agentcore/profile_overlay.py`)
 
-Super Agent 原生兼容标准 Model Context Protocol (MCP)。业务团队可以通过配置挂载各类业务 MCP 服务，使智能体安全调用企业内部私有系统：
+### 2.1 故障场景：多环境私有配置漂移与凭证泄露
+企业各 Profile（如开发、预发、生产）常带有独立的 MCP 拓扑、私有记忆事实和访问凭证。若靠运维手工拷贝，容易遗漏敏感文件或出现路径硬编码导致迁移失败。
 
-### 3.1 配置示例
+### 2.2 真实代码机制：打包与幂等合并
+`agentcore/profile_overlay.py` 提供了资产打包（`collect_profile_overlay`）与幂等部署（`apply_profile_overlay`）：
+1. **资产包结构与收集流程**：
+   ```text
+   overlay/
+   ├── SOUL.md / AGENTS.md        # 角色与系统身份定义
+   ├── memories/*.md              # 业务记忆片段（注入时追加 <!-- overlay import: <name> --> 标识）
+   ├── skills/<skill_name>/       # 专有业务技能目录（包含 SKILL.md）
+   ├── envs/*                     # 环境变量凭据（复制后强制设为 0600 权限）
+   ├── config_snippet.json        # MCP 服务扩展配置
+   └── metadata.json              # 资产包校验哈希与版本元数据
+   ```
+2. **MCP 配置自动展开合并**：
+   `merge_mcp_into_profile_config()` 自动扫描 `config_snippet.json`，将配置中的 `{{PROFILE_HOME}}` 占位符动态替换为当前 Profile 的实际绝对路径，并安全合并至 `<profile_home>/config.yaml` 的 `mcp_servers` 节点。应用过程会自动备份原有 `config.yaml`（`.bak.<timestamp>`），支持多次幂等重入。
 
-在 `config/config.yaml` 或业务叠加配置中，通过 `mcp_servers` 声明服务：
-
-```yaml
-mcp_servers:
-  # 内部代码仓语义检索服务
-  codebase-indexer:
-    command: "python3"
-    args:
-      - "-m"
-      - "mcp_codebase_service"
-      - "--repo-root"
-      - "/home/user/work/my-project"
-    env:
-      INDEX_CACHE_DIR: "/home/user/.cache/mcp-indexer"
-
-  # 内部数据库只读查询服务
-  database-reader:
-    command: "node"
-    args:
-      - "/opt/mcp-database/dist/index.js"
-    env:
-      DB_HOST: "127.0.0.1"
-      DB_PORT: "5432"
-      DB_NAME: "read_replica"
-```
-
-### 3.2 敏感凭证的安全隔离
-
-- **严禁明文凭证**：不得在 `config.yaml` 中硬编码数据库密码、API Token 等机密信息；
-- **环境变量注入**：所有凭证统一通过宿主用户的环境变量（如 `~/.config/environment.d/*.conf`）或受保护的凭证文件注入。
+### 2.3 代价与边界
+MCP 服务如依赖动态环境变量，建议通过独立的 `env_file` 注入并设置 `0600` 权限，避免敏感 Token 直接固化在 `config.yaml`。
 
 ---
 
-## 4. Skills 技能库挂载机制
+## 3. 声明式多角色服务编排 (`agentcore/profile_spec.py`)
 
-### 4.1 技能标准目录规范
+### 3.1 故障场景：多角色脚本各自启动导致生命周期失控
+多智能体研发协作中，若前台网关与后台 8 大专家岗位由散落的终端命令分别启动，当主机重启或遭遇 OOM 时，缺乏依赖拓扑与自愈机制。
 
-每一个可被智能体调用的技能，均应遵循标准格式存放在一个独立目录下：
-
-```text
-skills/<skill-name>/
-├── SKILL.md            # 必选：技能核心描述文件（含 YAML frontmatter）
-├── scripts/            # 可选：辅助脚本与执行工具
-├── examples/           # 可选：标准参考示例与调用样例
-└── references/         # 可选：详细规范、参考手册与 API 文档
-```
-
-`SKILL.md` 包含结构化头部与详细执行指引：
-```markdown
----
-name: domain-case-runner
-description: 执行领域自动化测试用例并产出结构化测试报告。当用户要求运行测试或排查用例失败时触发。
----
-
-# 执行规程
-1. 检查测试用例语法规范；
-2. 启动仿真环境并注入信号；
-3. 断言最终状态并归档日志。
-```
-
-### 4.2 外部技能目录挂载
-
-通过设置环境变量 `SKILLS_PATH` 或在 `config/config.yaml` 中声明，支持挂载多个外部技能源：
-
-```yaml
-skills:
-  paths:
-    - "/home/user/super-agent/skills"              # 通用核心技能库
-    - "/home/user/code/domain-skills/skills"        # 业务私有扩展技能库
-```
-
-系统启动时将自动合并两个来源的技能清单，在保持核心干净的同时支持业务技能的灵活热加载。
-
----
-
-## 5. 9 角色业务团队与 `sync_roles.py` 同步机制
-
-### 5.1 9 角色完备团队架构
-
-在实际生产场景中，一个完整的智能体工程团队通常由 **1 个前台网关分诊员** 与 **8 大后台研发专家角色** 组成，协同完成端到端任务：
-
-1. **前台网关分诊员 (Frontdesk Gateway)**：负责接收协同平台消息、鉴权防刷、意图解析与任务拆分派工；
-2. **需求边界架构师 (architect)**：专职梳理需求契约、输入输出规格、编写 `docs/specs/`；
-3. **核心用例开发专家 (cases)**：专职实现核心业务逻辑、编写测试用例与业务代码；
-4. **代码审查与红队质检员 (reviewer)**：专职对 PR 进行安全性、边界覆盖与红队挑刺审计；
-5. **自动化测试与仿真验证专家 (test)**：专职在容器与隔离环境中批量执行测试集并统计覆盖率；
-6. **缺陷定性与根因诊断专家 (triage)**：专职收集失败日志、分析状态机轨迹并定位根本归因；
-7. **服务端与底层工程师 (backend)**：专职底层系统服务、性能调优与通信协议开发；
-8. **表现层与交互排版工程师 (frontend)**：专职流式卡片渲染排版与图文可视化呈现；
-9. **平台运维与稳定性专家 (ops)**：专职环境编排、配置对账、巡检监控与应急自愈。
-
----
-
-### 5.2 业务同步工具 `sync_roles.py` 的工作流程
-
-在外部业务仓中，通常提供专用的 `sync_roles.py` 自动化工具，将业务配置与 Super Agent 核心进行深度合并（Deep Merge）：
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Op as 运维工程师 / CI 流水线
-    participant Sync as sync_roles.py (业务仓)
-    participant Core as Super Agent 核心发布产物
-    participant Profile as ~/super_agent/<profile>
-
-    Op->>Sync: 执行 python3 sync_roles.py deploy --profile <profile>
-    Sync->>Core: 读取基准配置与 8 大角色契约
-    Sync->>Sync: 读取 roles_spec.json 与 overlay_config.yaml
-    Sync->>Sync: 按照 Business Overlay Precedence 执行 deep_merge
-    Sync->>Profile: 注入业务 MCP、私有 Skills 与角色环境变量
-    Sync->>Profile: 生成 9 大角色的独立工作区与 systemd 单元
-    Sync->>Profile: systemctl --user daemon-reload && restart
-    Sync-->>Op: 返回同步完成回执与各角色体检状态
-```
-
-#### 核心合并准则 (Architecture Rules)：
-1. **Base Clean Replace（基准干净替换）**：
-   Super Agent 的核心调度逻辑与通用插件从不可变的 `releases/<version>` 中干净引入，确保核心版本一致性；
-2. **Business Overlay Precedence（业务叠加绝对优先）**：
-   在执行字典深度合并时，业务配置（业务 MCP、专用 Prompt、领域环境变量）拥有最高优先级，精准覆盖对应角色的配置段；
-3. **Colleague Tailoring（专家角色定向裁剪）**：
-   前台网关配置（如网关分发规则）不反向渗透入后台 Worker；后台 Worker 仅加载各自岗位所需的工作树白名单、专属技能与 MCP。
-
----
-
-## 6. 仓级业务中立性门禁 (Neutrality Gate)
-
-为了杜绝业务私有字面量不慎流入 `super-agent` 核心代码仓，仓库设置了严格的棘轮门禁 `tests/test_repo_neutrality.py`：
+### 3.2 真实代码机制：规约解析与 systemd 单元渲染
+通过 `agentcore/profile_spec.py` 中的 `BusinessProfileSpec`，管理员可声明完整的服务规约（包含 `profile_id`, `workers`, `proactive_hooks`, `memory`, `gateway`, `env`）：
 
 ```bash
-# 执行中立性门禁扫描
-pytest tests/test_repo_neutrality.py
+# 1. 检查并验证 Profile 规约合法性
+python3 -m install.setup_profile inspect /path/to/profile_spec.yaml
+
+# 2. 渲染对应的 systemd user 服务单元文本
+python3 -m install.setup_profile render /path/to/profile_spec.yaml --out-dir /tmp/rendered_units
+
+# 3. 正式安装并激活受管服务单元
+python3 -m install.setup_profile install /path/to/profile_spec.yaml --activate
+
+# 4. 打包为便携式分发归档
+python3 -m install.setup_profile pack /path/to/profile_spec.yaml --out /tmp/profile_bundle.tar.gz
 ```
 
-### 门禁扫描范围与规则：
-- **扫描全量文件**：代码（`.py`）、文档（`.md`）、配置（`.yaml`）、Shell 脚本（`.sh`）等所有纳入版本管理的文件；
-- **禁止业务专有名词**：严禁出现特定公司或业务领域的专有代号与缩写；
-- **禁止内网指纹**：严禁提交内网 IP 地址（如 `10.x.x.x`, `192.168.x.x`, `172.16~31.x.x`）或特定主机名。
+**系统架构真实关系**：
+- **1 个前台网关**：`hermes-gateway-<profile>.service`，负责对外连接协作平台并快速分诊；
+- **8 个后台研发专家**：`superagent-worker-{profile_id}-{role}.service`，由 `DEV_ROLES` 派生，独立认领队列任务并在各自的 Git Worktree 中执行；
+- **1 个长期记忆服务**：`superagent-memory-<profile>.service`。
 
-任何贡献者在向 `super-agent` 提交代码或文档前，必须确保中立性门禁 100% 绿色通过。
+### 3.3 代价与边界
+为全部 8 个岗位分别拉起独立的后台 Worker 服务会占用系统进程与内存；资源受限时，可在规约中仅启用通用 Worker（`superagent-worker-<profile>.service`）串行承载所有角色。
 
 ---
 
-> **下一步**：了解多智能体协同与底层状态机原理，请阅读 [03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md)。
->
->  [上一篇：01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [返回 Wiki 首页 (Home)](Home.md) │ [下一篇：03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md)
+## 4. 业务技能物理落盘机制 (Physical Skill Placement)
+
+### 4.1 故障场景：虚拟环境变量断链
+某些框架试图通过环境变量指向外部目录。一旦智能体切入沙箱环境、换用不同执行用户或被 systemd 重新拉起，环境变量丢失将导致技能静默失效。
+
+### 4.2 真实代码机制：物理安装落盘
+Super Agent 原生**不支持**任何虚拟路径映射表或外部环境变量，所有技能必须物理安装落盘于 `<profile_home>/skills/<skill>/`：
+
+```bash
+# 途径 1：通过专用工具批量物理安装
+python3 tools/install_skills.py --profile <profile>
+
+# 途径 2：通过受管安装脚本集成安装
+INSTALL_BUSINESS_SKILLS=1 BUSINESS_SKILLS_SRC=/path/to/custom_skills bash install/install.sh --profile <profile>
+```
+
+每个技能目录内必须包含 `SKILL.md`，安装工具直接将技能复制到 `<profile_home>/skills/<skill_name>/SKILL.md`，并在部署体检时由 `plugin_links_valid` 校验。
+
+### 4.3 代价与边界
+物理复制意味着业务仓修改技能后，需重新执行安装命令更新；但彻底隔绝了宿主机路径变动与权限穿透引发的断链事故。
+
+---
+
+## 5. 延伸参考
+- 角色权限矩阵与状态图引擎：[03. 研发专家协同与状态图引擎](03-Multi-Agent-and-StateGraph.md)
+- 生产环境配置与单根安装全流程：[`docs/DEPLOY.md`](../DEPLOY.md)
+- 插件生命周期与挂载规范：[`docs/PLUGINS.md`](../PLUGINS.md)

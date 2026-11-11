@@ -1,123 +1,119 @@
-# 04. 企业协作平台卡片生命周期与交付机制 (Feishu/Lark Cards & Progressive Delivery)
+# 04. IM 平台交互卡片与交付机制 (CardKit 2.0 & Delivery Pipeline)
 
-> **导航 / Wiki Navigation**
-> [Wiki 首页 (Home)](Home.md) │ [01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
-
----
-
-## 1. 即时协作交付的现实挑战与 CardKit 2.0 哲学
-
-在通过 Feishu / Lark 等企业即时通讯平台与用户交互时，长任务常常面临以下严峻挑战：
-- **消息风暴与频控限流 (Rate Limit)**：若任务每执行一步（如下载依赖、编译、跑测）都向会话发送一条新消息，不仅造成严重刷屏，还会迅速触发开放平台的 API 调用频控，导致后续消息丢弃；
-- **网络乱序与状态踩踏**：在异步高并发网络环境下，如果连续发送多条更新请求，由于传输延迟差异，较早发出的“执行中”消息可能在“已完成”之后到达，导致卡片状态回退；
-- **版式折叠与信息降级**：平台普通消息对长篇 Markdown 表格和图表支持有限，代码和复杂关系图在移动端往往被折叠或无法渲染。
-
-为了给用户提供媲美专业 Web 应用的平滑体验，Super Agent 构建了 **CardKit 2.0 交互卡片引擎**：
-
-```mermaid
-graph TD
-    classDef step fill:#E8F0FE,stroke:#4285F4,stroke-width:1px;
-    classDef core fill:#E6F4EA,stroke:#34A853,stroke-width:2px;
-    classDef client fill:#FEF7E0,stroke:#FBBC04,stroke-width:2px;
-
-    Task["后台长任务持续产生进度与日志"] --> CardStream["进度流收集器 (card_stream.py)"]:::step
-    CardStream --> InFlightCheck{"当前是否有在途更新请求？"}:::step
-    InFlightCheck -- 是 --> CollapseBuffer["内存去抖折叠合并 (Collapse & Debounce)"]:::step
-    InFlightCheck -- 否 --> SendPatch["发送卡片更新 PATCH 请求"]:::core
-    CollapseBuffer --> WaitAck["等待在途请求 ACK 返回"]:::step
-    WaitAck --> FlushLatest["一次性推送最新折叠状态"]:::core
-    SendPatch --> ClientPlatform["企业协作客户端 (Feishu/Lark 单卡原地刷新)"]:::client
-    FlushLatest --> ClientPlatform
-```
-
-### CardKit 2.0 三大设计铁律：
-1. **单卡就地流式更新 (In-Place Streaming)**：全生命周期仅使用一条消息卡片，通过局部更新（Patch）就地刷新进度与阶段，绝不重复刷屏建新卡；
-2. **单在途合并去抖 (In-flight Debounce & Collapse)**：同一张卡片在任何时刻严格保持**最多仅有一个在途网络请求**。在高频产生日志时，在途请求返回前所有新状态自动在客户端内存中折叠合并，避免频控限流与乱序到达；
-3. **排空屏障 (`drain()` Barrier)**：任务结束或需要等待用户点击确认前，必须显式调用 `drain()` 屏障，确保所有在途的进度更新全部被对端平台确认接收后，再写入终态卡片，杜绝终态被旧进度覆盖。
+> **文档导航**：[Wiki 首页 (Home)](Home.md) │ [01. 单根受管部署与极速上手](01-Quickstart-and-Install.md) │ [02. 业务知识叠加与服务编排](02-Business-Overlay-Guide.md) │ [03. 研发专家协同与状态图引擎](03-Multi-Agent-and-StateGraph.md) │ [04. IM 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [05. 运维体检与排障对账](05-Operations-and-Troubleshooting.md)
 
 ---
 
-## 2. 交互卡片全生命周期状态机
+## 1. CardKit 2.0 真实 6 态与标准色标契约
 
-CardKit 2.0 将长任务划分为清晰受控的状态机跃迁：
+### 1.1 故障场景：高频刷屏限流与网络乱序踩踏
+在长任务执行过程中（如代码编译、环境拉起、集成测试），若每产生一行日志就向协同会话发送一条新消息，会迅速触发 IM 平台的 API 频控限流（HTTP 429 Too Many Requests）；此外，在异步并发网络下，连续发送的独立请求易因网络抖动发生乱序到达，导致较早发出的“执行中”覆盖掉较晚发出的“已完成”。
+
+### 1.2 真实代码机制：`agentcore/task_card_bridge.py` 6 态契约
+Super Agent 严格采用单卡就地局部更新（In-Place Patch），在 `task_card_bridge.py`（`STATUS_LABELS` 与 `STATUS_HEADERS`）中定义了 6 种标准状态与 Feishu/Lark 官方色标：
 
 ```mermaid
 stateDiagram-v2
-    [*] --> PENDING: 任务提交入队 (Task Created)
-    PENDING --> RUNNING: Worker 认领并启动 (Dispatched)
-    RUNNING --> RUNNING: 阶段进度与日志流式刷新 (Progress Patch)
-    RUNNING --> AWAITING_INPUT: 关键节点请求确认 (HITL Button / Form)
-    AWAITING_INPUT --> RUNNING: 用户点击确认或补充输入 (Action Triggered)
-    RUNNING --> COMPLETED: 任务成功且验证通过 (Terminal Success)
-    RUNNING --> FAILED: 任务异常或门禁失败 (Terminal Failure)
-    RUNNING --> CANCELLED: 用户主动插话取消 (Preempted / Cancelled)
-    COMPLETED --> [*]
-    FAILED --> [*]
-    CANCELLED --> [*]
+    [*] --> queued: 任务提交入队 (wathet 浅蓝)
+    queued --> running: Worker 认领并启动 (wathet 浅蓝)
+    running --> progressive: 中间阶段交付 (wathet 浅蓝)
+    progressive --> running: 继续下一阶段执行
+    running --> completed: 任务通过验证 (indigo 靛蓝)
+    running --> failed: 任务异常或门禁失败 (carmine 绯红)
+    running --> cancelled: 用户主动插话取消 (carmine 绯红)
+    completed --> [*]
+    failed --> [*]
+    cancelled --> [*]
 ```
 
-### 状态定义与展示规范：
-
-| 卡片状态 | 界面主题色 | 核心展示内容 | 交互动作 |
+| 卡片状态 (`status`) | 界面主题色 | 标题文本 | 业务触发时序与展示内容 |
 | :--- | :--- | :--- | :--- |
-| `PENDING` | 蓝色 (Info) | 任务标题、调度队列名、当前排队位次、预计耗时 | 支持用户点击“取消排队” |
-| `RUNNING` | 绿色 (Running) | 当前执行阶段进度条、已耗时、最近 3~5 行有界日志视窗 | 支持用户发送插话或中止任务 |
-| `AWAITING_INPUT` | 橙色 (Warning) | 风险阻断原因、方案对比、审批选项 | 提供“批准执行”、“拒绝回滚”交互按钮 |
-| `COMPLETED` | 绿青色 (Success) | 交付物结构化摘要、执行耗时、验收报告链接、生成文件统计 | 提供“查看完整报告”、“回滚本次变更”快捷按钮 |
-| `FAILED` | 红色 (Danger) | 失败阶段定性、根本归因摘要、排障日志下载链接 | 提供“一键重试”、“派单给归因专家”按钮 |
-| `CANCELLED` | 灰色 (Neutral) | 任务取消原因、取消操作人、已清理的工作树状态 | 静态展示 |
+| `queued` | `wathet` (浅蓝) | 排队中 | 任务入队等待 Worker 认领，展示队列名与预估等待位次 |
+| `running` | `wathet` (浅蓝) | 执行中 | Worker 成功认领并启动，展示当前物理执行阶段与已耗时 |
+| `progressive` | `wathet` (浅蓝) | 渐进交付中 | 执行周期较长时，流式展示中间分段成果或阶段性总结 |
+| `completed` | `indigo` (靛蓝) | 处理完成 | 任务执行成功并通过终验，展示交付物摘要与归档链接 |
+| `failed` | `carmine` (绯红) | 执行未通过 | 任务执行异常或门禁被阻断，展示定性归因与排障日志 |
+| `cancelled` | `carmine` (绯红) | 已取消 | 任务被用户主动插话取消或抢占，展示清理工作区凭据 |
 
-### 终态写一次铁律 (Terminal Write-Once)
-当卡片写入终态（`COMPLETED`, `FAILED`, `CANCELLED`）后：
-- 底层卡片存储器（`card_store.py`）将卡片标记为只读并持久化写入 SQLite；
-- 丢弃后续所有延迟到达的非终态心跳上报；
-- 交互按钮进入禁用或终态归档状态，防止用户重复提交导致二次执行。
-
----
-
-## 3. 实时进度流与视窗机制 (`card_stream.py` & `task_progress`)
-
-为了让用户在长任务执行期间保持掌控感，系统提供了细粒度的进度反馈机制：
-
-### 3.1 多阶段动态进度计算
-任务由调度器拆解为若干物理阶段（例如：① 代码拉取与工作区隔离 -> ② 方案设计与规格校验 -> ③ 代码编写与单元测试 -> ④ 仿真验证与验收审查）。进度计算引擎依据预估权重和已完成阶段动态推进进度条百分比，杜绝“进度长时间卡在 99%”的糟糕体验。
-
-### 3.2 有界日志尾部视窗 (Bounded Log Tail)
-由于移动端与桌面端卡片对内容体积有硬性限制（通常不超过 30KB），系统设计了**滑动日志视窗**：
-- 实时截取终端最近 3~5 行关键执行输出（如当前正在执行的具体测试用例名）；
-- 自动过滤高频无意义的 ANSI 终端转义字符与空白行；
-- 全量详细日志实时定向落盘至 `state/logs/<task_id>.log`，卡片仅提供实时视窗与完整日志下载链接。
-
----
-
-## 4. 图文与云文档交付机制
-
-针对复杂工程成果（如系统架构图、详细测试覆盖矩阵、根因排查复盘），纯卡片文本无法承载全部深度信息。Super Agent 提供了立体交付矩阵：
-
-```mermaid
-graph LR
-    classDef out fill:#E8F0FE,stroke:#4285F4,stroke-width:1px;
-    classDef tool fill:#E6F4EA,stroke:#34A853,stroke-width:2px;
-
-    Artifact["长任务终态产物 (Markdown / 数据 / 报告)"] --> Router["交付路由器 (completion_delivery.py)"]:::tool
-    Router --> Mode1["IM 交互卡片摘要"]:::out
-    Router --> Mode2["高清图文渲染 (arch_doc.py / Chromium)"]:::out
-    Router --> Mode3["企业云文档 / 多维表格回写"]:::out
+**核心调用接口与单在途去抖机制**：
+```python
+bridge = TaskCardBridge(managed_root, profile="dev", card_style="cardkit2")
+bridge.bind_task("task-101", role="backend", display_name="后端同事", goal="重构任务", origin=origin)
+bridge.create_initial("task-101", creator=send_card_fn)
+bridge.update_progress("task-101", status="running", phase="编译依赖", progress=0.35, elapsed=12.4)
+bridge.finalize("task-101", status="completed", summary="全部门禁通过", elapsed=28.1)
 ```
+- **单在途合并去抖 (In-flight Debounce & Collapse)**：同一卡片在任何时刻严格保持至多 1 个在途 PATCH 网络请求。在高频产生日志时，在途请求返回前所有新状态自动在内存折叠合并，请求 ACK 后一次性推送最新折叠快照。
 
-### 4.1 高清图文与架构图渲染管道 (`arch_doc.py`)
-当智能体需要向用户交付带 Mermaid 架构图或时序图的详细方案时，系统自动调用 `tools/arch_doc.py`：
-1. **本地 Chromium 驱动**：利用宿主机预取的无头 Chromium，完全在本地完成渲染，无需外部依赖或将代码上传至第三方云端；
-2. **自包含 HTML**：内联 CSS 样式、语法高亮与本地 Mermaid 引擎，生成开箱即用的 `.html` 文档；
-3. **高清分页 PNG 截图**：通过 CDP 协议精准测量正文高度与图表就绪状态，输出多页高清 PNG。在消息会话中直接以大图形式呈现，让用户在移动设备上一目了然。
-
-### 4.2 企业云文档与多维表格自动回写
-通过受管交付接口，智能体支持：
-- **云文档知识库沉淀**：自动将设计决策、红队质检报告发布到指定的企业团队知识库目录下，并生成版本追溯链接；
-- **多维表格看板同步**：将本次任务对应的需求 ID、责任专家角色、测试通过率与完成耗时，增量写入团队的多维表格（Bitable）研发看板，实现敏捷研发数据的自动化流转。
+### 1.3 代价与边界
+高频日志在网络抖动时会被合并跳帧，卡片仅作为有界视窗（展示最近 3~5 行关键输出）；全量详细日志定向落盘至 `state/logs/`，避免突破 30KB 单卡体积限制。
 
 ---
 
-> **下一步**：掌握系统的日常监控、诊断工具与应急故障处置，请阅读 [05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)。
->
->  [上一篇：03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [返回 Wiki 首页 (Home)](Home.md) │ [下一篇：05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
+## 2. 心跳解耦与终态降级机制
+
+### 2.1 故障场景：过程心跳阻塞终态交付
+过程心跳用于刷新进度条百分比与当前动作。若过程心跳超时与终态交付混用相同重试队列，当网络出现瞬间波动时，心跳重试将锁死调度线程，导致关键终态卡片迟迟无法送达。
+
+### 2.2 真实代码机制：双通道拆分与纯文本兜底
+`agentcore/task_card_bridge.py` 在方法层面对心跳与终态进行了物理拆分：
+1. **过程心跳 (`progress_patch_state`)**：
+   设置极短的超时时间，若遇网络抖动或平台限流直接丢弃该次心跳，绝不阻塞主执行线程，杜绝心跳阻碍终态更新；
+2. **终态保障与降级 (`patch_state`)**：
+   仅对终态（`completed`, `failed`, `cancelled`）执行最多 3 次带退避的强保障重试；若 3 次均因网络或平台故障失败，自动触发 `degraded=True` 降级逻辑，回退为通过基础消息接口发送**纯文本兜底消息**，确保用户百分之百获知任务终结。
+
+### 2.3 代价与边界
+心跳丢弃保证了主链路绝对通畅，但极端网络抖动下卡片进度条可能出现跳变；终态降级为纯文本后，卡片内交互按钮将不可用。
+
+---
+
+## 3. 终态写一次铁律与职责边界对账
+
+### 3.1 故障场景：迟到进程逆向篡改终态
+当任务已标记完成并进入归档状态，若原 Worker 因租约过期被替代后又苏醒并尝试上报旧状态，可能将卡片从 `completed` 逆向覆写回 `running`。
+
+### 3.2 真实代码机制：排他文件锁与 SQLite 终态账本
+1. **排他文件锁**：`_serialize_task` 装饰器通过 `fcntl.flock` 对 `<root>/state/task_cards/locks/<task_id>.lock` 加排他锁，杜绝多进程并发写入踩踏；
+2. **SQLite 终态写一次 (`finalized=1`)**：
+   `update_progress()` 在 `BEGIN IMMEDIATE` 事务中先检查 `task_cards.finalized` 字段（若已为 `1` 直接返回 `already_finalized` 拒绝覆盖）；`finalize()` 在平台确认送达终态补丁后将 `finalized=1` 落盘，后续任何延迟到达的非终态进度写入均被底层直接拦截；
+3. **架构职责澄清**：
+   - `agentcore/task_card_bridge.py`：负责任务卡状态账本、排他锁控制与终态写一次拦截；
+   - `agentcore/card_store.py`：仅负责客户端流式 sequence 序列在本地的持久化存储，供重连回放，并不控制 TaskCardBridge 的只读标记。
+
+### 3.3 代价与边界
+文件锁与 SQLite 事务带来微秒级开销；一旦任务置为终态，后续任何追加信息必须新建卡片或以新回复发出。
+
+---
+
+## 4. 排空屏障与 LLM 截断防护 (`plugins/write_guard`)
+
+### 4.1 故障场景：未排空退出与 Token 截断覆写 0 字节
+1. 智能体主进程直接退出导致传输队列中尚未 ACK 的卡片更新丢失；
+2. 大模型生成长文本时触碰输出 Token 限制，JSON 被硬截断，工具执行框架降级为空字典 `{}`，导致将目标文件覆写为 0 字节。
+
+### 4.2 真实代码机制
+1. **`close()` + `await drain()` 排空屏障**：
+   在任务结束前显式调用屏障，阻塞等待本地待发队列全部完成传输并收到平台 ACK。**注意**：该语义仅代表传输层已确认接收，不代表远端人类用户已读。
+2. **`plugins/write_guard` 截断防护**：
+   - `pre_tool_call` 门禁：检测到单次写入超过 8000 字符（`WRITE_GUARD_MAX_CHARS`）强制阻断分块；检测到 `content` 缺失（空字典 `{}` 截断签名）直接抛错阻断，提示模型“输出已被截断，严禁原样重试”；
+   - `transform_tool_result` 回读验真：主动读取目标路径的文件大小与类型，确认磁盘写入字节与预期吻合后才向模型返回成功回执。
+
+### 4.3 代价与边界
+8000 字符阈值要求大文件必须分段写入；回读验真增加了文件系统 I/O 检查开销。
+
+---
+
+## 5. 高清图文与架构图交付管道 (`tools/arch_doc.py`)
+
+针对系统架构图、覆盖率分析矩阵等复杂产物，纯卡片文字无法承载全部深度，系统通过 `tools/arch_doc.py` 驱动本地无头 Chromium 离线交付：
+1. **本地 Chromium 驱动**：使用本地无头浏览器加载渲染，零外网数据传输；
+2. **自包含 HTML**：将 CSS 样式与 Mermaid 渲染引擎全量内联，产出可直接离线打开的单文件报告；
+3. **高清分页 PNG 截图**：通过 CDP 协议精准测量页面尺寸，产出多页高清 PNG，直推 IM 平台会话；
+4. **云文档看板联动**：将任务验收报告链接自动同步回写至团队知识库与多维看板。
+
+---
+
+## 6. 延伸参考
+- 架构设计原则与卡片互斥：[`docs/ARCHITECTURE.md`](../ARCHITECTURE.md)
+- 插件生命周期与 write_guard 机制：[`docs/PLUGINS.md`](../PLUGINS.md)
+- 运维健康体检与故障对账：[05. 运维体检与排障对账](05-Operations-and-Troubleshooting.md)

@@ -29,7 +29,7 @@
 
 ### 2.1 适用场景
 - 检查系统是否存在历史孤儿服务单元（如废弃的网关、旧版 sidecar 单元）。
-- 探测 systemd 模板单元（`agentcore-worker@.service`、`agentcore-memory@.service`）的 `PYTHONPATH` 是否漂移至非发布目录。
+- 探测 systemd 模板单元（`runtime/agentcore-worker@.service`）及实例单元（`superagent-memory-<profile>.service`、`superagent-worker-<profile>.service`）的 `PYTHONPATH` 是否漂移至非发布目录。
 - 探测 Profile 配置是否存在多写者二义性。
 
 ### 2.2 操作步骤
@@ -44,7 +44,7 @@ bash scripts/ops/uninstall-legacy.sh --apply
 
 ### 2.3 安全回退保障
 在纠偏任何 systemd 单元文件或配置文件前，脚本自动将原始文件复制至：
-`${HERMES_HOME}/drift-backups/unit-drift-<timestamp>/`
+`${MANAGED_ROOT}/state/drift-backups/backup_<timestamp>/`（默认在 `~/super_agent/<profile>/state/drift-backups/`）。
 若需要回退，只需原样拷回并执行 `systemctl --user daemon-reload`。
 
 ---
@@ -135,48 +135,44 @@ journalctl --user -u superagent-worker-<profile>.service -n 100 -f
 
 ---
 
-## 6. 部署源锁定与防降级
+## 6. 部署源锁定与防降级（摘要）
 
-为避免生产运维过程中的多仓并发更新、历史版本意外覆盖与未重启进程残留，运维体系引入部署源锁定与防降级门禁机制。
+受管部署体系内置单一发布源绑定、Git 祖先防降级（`git merge-base --is-ancestor`）、工作区干净度校验（`--allow-dirty`）与版本滚动保留机制。命中拦截时返回 `{"status": "blocked", "blockers": [...]}`。
 
-### 6.1 核心防护原则
-1. **单一发布源绑定（One Deploy Source per Host）**：每个受管主机 Profile 绑定首次部署的源码真实路径（`source_repo`），避免多目录交叉部署导致状态紊乱。
-2. **提交祖先防降级（Downgrade Prevention）**：升级时新提交必须是当前生效版本的 Git 祖先派生（`git merge-base --is-ancestor <prev> <new>`），防止旧代码静默覆盖生产环境。
-3. **工作区干净度校验（Clean Tree Assertion）**：禁止直接将带有未提交修改的脏工作区打包发布为正式版本。
-4. **多版本滚动保留（Release Retention）**：发布后保留当前激活版本及最近 N 个历史版本（默认 N=3），绝不清空历史记录，保障随时可秒级回滚。
+完整拦截标识列表、绕过参数契约与预期提交锁定（`--expect-commit`）详见 [DEPLOY.md §7 部署源锁定与防降级](DEPLOY.md#7-部署源锁定与防降级)。
 
-### 6.2 拦截检查项（Blockers）与绕过参数
-当命中国防门禁条件时，`install` 或 `update` 操作将直接阻断并输出 `{"status": "blocked", "blockers": [...]}`，系统状态零改动：
-
-| 拦截标识 (Blocker) | 触发条件 | 绕过/覆盖参数 | 说明 |
-| :--- | :--- | :--- | :--- |
-| `source_dirty` | 当前发布源码树包含未提交的修改 | `--allow-dirty` | 允许发布包含未提交改动的临时版本 |
-| `source_repo_mismatch` | 当前执行安装的源码仓库路径与历史清单不一致 | `--adopt-source` | 显式将发布源变更为当前仓库路径 |
-| `downgrade_or_divergent` | 新提交不是已安装提交的 Git 后代分支（分支分叉或落后） | `--allow-downgrade` | 允许显式降级或强制覆盖 |
-| `previous_commit_unknown_to_source` | 历史安装提交在当前仓库 Git 数据库中不存在 | `--allow-downgrade` | 允许跨非共享历史仓库部署 |
-| `unexpected_commit` | 指定了 `--expect-commit <sha>` 但当前仓库 HEAD 提交不符 | 核对后重新指定匹配的 commit SHA | 防止运维操作发错提交 |
-
-### 6.3 自动化运维与精准发布（`--expect-commit`）
-运维发布脚本或流水线可通过 `--expect-commit` 显式锁死预期发版提交，防止分支切错：
+日常发布维护命令（直接调用底层受管引擎，无 `--apply` 参数）：
 ```bash
-./install/superagent.sh update --profile <profile> --expect-commit 4b825dc --apply
+# 保留最近 3 个历史版本（不带 --apply）
+python3 tools/superagent.py prune-releases --profile <profile> --keep 3
+
+# 回滚至上一个版本（不带 --apply）
+python3 tools/superagent.py rollback --profile <profile>
 ```
 
-### 6.4 历史版本保留与清理策略
-- 默认在 `install` / `update` 时自动保留激活版本及最近 3 个历史 Release。
-- 历史清理命令：
+---
+
+## 7. 常见故障判定与代码边界
+
+### 7.1 任务租赁看门狗（`reconcile_watchdog`）接管与防裂脑防线
+- **源码依据**：`agentcore/pool.py:635-715`
+- **接管判据**：当任务租约超时 `(now - heartbeat) > lease` 时，看门狗开启 `BEGIN IMMEDIATE` 独占事务，但**严禁盲目收割**。看门狗必须物理验证旧执行者已消亡：
+  1. 通过读取 `/proc/{pid}/stat` 的 `starttime` 与 `/proc/sys/kernel/random/boot_id` 确认进程指纹不复存在（防 PID 复用误判）；
+  2. 尝试获取该任务工作区的文件级排他锁（`flock`）。若进程陷入内核 D 状态或网络存储挂起仍持有锁，看门狗出于安全策略**拒绝强行抢占**，杜绝双写裂脑；
+  3. 执行状态变更时强制附带 Attempt 乐观锁围栏：`UPDATE ... WHERE id=? AND attempt=? AND status='running'`。如果任务已被新实例 claim，旧看门狗写入立即作废。
+
+### 7.2 临时故障重排（`EX_TEMPFAIL=75`）
+- **源码依据**：`agentcore/worker.py`、`agentcore/pool.py`
+- **重试机制**：当子进程退出码为 `75`（`os.EX_TEMPFAIL`，如依赖服务瞬时超时、外部网络抖动）时，调度器将其识别为瞬态可自愈故障。
+- **调度行为**：系统会自动回退任务的 `tries` 计数（不消耗正式重试次数配额），重置任务状态为 `queued`（清空 `heartbeat`）等待重新消费，避免瞬时网络抖动导致任务快速耗尽 `max_tries`。
+
+### 7.3 Doctor 报告中 `stale_processes` 触发 `drift`
+- **源码依据**：`tools/superagent.py:2370-2395`
+- **触发根因**：升级执行后，新不可变 Release 软链 `current` 已切换，但后台常驻进程（网关 `hermes-gateway-<profile>`、Worker `superagent-worker-<profile>` 或 Memory 服务）仍持有旧 Release 的加载内存与文件句柄。`doctor` 检测到常驻进程的 `starttime` 早于当前版本的 `installed_at`，因此判定系统处于配置漂移态（`status: "drift"`，退出码 1）。
+- **重启排障方法**：
   ```bash
-  # 保留最近 3 个历史版本
-  python3 tools/superagent.py prune-releases --profile <profile> --keep 3 --apply
-
-  # 仅保留当前活跃版本，清理全部历史 Release
-  python3 tools/superagent.py prune-releases --profile <profile> --keep 0 --apply
+  systemctl --user restart hermes-gateway-<profile>.service superagent-worker-<profile>.service superagent-memory-<profile>.service
+  # 重启后复查 doctor
+  ./install/superagent.sh doctor --profile <profile>
   ```
-- 回滚命令（`superagent rollback --apply`）不受降级拦截限制，作为受控的标准回滚途径。
-
-### 6.5 版本漂移对账（Doctor Drift）
-`superagent doctor` 的 `deploy_version_observation` 节点对账当前运行态与源码态：
-- 字段覆盖：`installed_commit`、`installed_dirty`、`source_repo`、`source_head`、`source_dirty`。
-- `stale_processes`：检查已启动常驻进程的启动时间是否早于当前 Release 安装时间 `installed_at`。
-- 若存在版本落后（`installed_behind_source`）、脏版本安装（`installed_dirty`）或未随新版本重启的常驻进程（`stale_processes`），`doctor` 状态判定为 `drift`（非 ready，退出码 1）。
 

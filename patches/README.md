@@ -3,7 +3,7 @@
 ## 为什么要有这一层
 
 `feishu_card_replies.patch` 改的是**宿主 Hermes 安装树**里的
-`plugins/platforms/feishu/adapter.py` —— 不是我们的仓。`hermes update` 会覆盖它，
+`<hermes_root>/plugins/platforms/feishu/adapter.py` —— 不是我们的仓。`hermes update` 会覆盖它，
 所以补丁必须能**幂等重放**，并且要有一个**廉价的在位校验**：
 哪天它悄悄丢了不会报错，只是「卡片的流式更新没了、回复退回纯文字」，
 属于最难查的那种静默退化。
@@ -110,5 +110,5 @@ cd "${HERMES_AGENT_DIR:-$HOME/.hermes/hermes-agent}" && git apply -R <patch>
 ## 合规
 
 本目录两个文件都在仓级门禁的**射程内**（见 `docs/DEPLOY.md` 与 `docs/TECH_MANUAL.md`）。补丁里除
-`plugins/platforms/feishu/adapter.py` 这个第三方适配器路径外，不得出现任何业务专名；
+`<hermes_root>/plugins/platforms/feishu/adapter.py` 这个第三方适配器路径外，不得出现任何业务专名；
 新增注释也走同一口径。

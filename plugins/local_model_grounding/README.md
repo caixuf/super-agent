@@ -7,7 +7,7 @@
 | decider-4b | 把最近一次失败日志归到固定候选集，给出校准过的置信度 | `POST /decide` |
 | bge-m3 | 召回 `docs/handover` 里的带日期先例 | `POST /encode` |
 
-模型由另一台机器（直连网线）上的 `scripts/ops/local_model_gateway.py` 提供；本插件只做 HTTP 客户端与注入。
+模型由远端宿主机服务（如独立推理机网关）提供，接口通过 `gateway_url` 配置；本插件只做 HTTP 客户端与注入。
 
 ## 行为（每个回合 `pre_llm_call`）
 

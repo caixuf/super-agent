@@ -1,192 +1,116 @@
-# 03. 前后台协同与 StateGraph 状态图 (Multi-Agent, StateGraph & Raven)
+# 03. 研发专家协同与状态图引擎 (Multi-Agent, StateGraph & Supervisor)
 
-> **导航 / Wiki Navigation**
-> [Wiki 首页 (Home)](Home.md) │ [01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
-
----
-
-## 1. 同事制协作范式 (Colleague Paradigm)
-
-在多智能体系统演进史上，常见的架构模式主要有两种极化形式：
-- **流水线编排制 (Strict Pipeline)**：过度僵化，上游一个微小变动导致整条流水线崩溃重试，无法应对敏捷研发变化；
-- **自由对等制 (Unconstrained Swarm)**：智能体之间无序通信、互相下发指令，极易产生无限递归、状态踩踏与严重幻觉。
-
-Super Agent 提出了**“同事制多智能体（Colleague Multi-Agent Team）”**组织学模型：
-
-```mermaid
-graph TD
-    classDef front fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#137333;
-    classDef pool fill:#FCE8E6,stroke:#EA4335,stroke-width:2px,color:#C5221F;
-    classDef dev fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#1A73E8;
-    classDef guard fill:#FEF7E0,stroke:#FBBC04,stroke-width:2px,color:#B06000;
-
-    User["用户 / 协同平台消息"] <--> Frontdesk["前台接待员 (Frontdesk Receptionist)"]:::front
-    Frontdesk -->|持久投递| Queue["SQLite 持久任务池 (Durable Pool)"]:::pool
-
-    subgraph Workers ["8 大研发专家同事 (Background Workers)"]
-        direction LR
-        Worker1["架构师 (architect)"]:::dev
-        Worker2["研发专家 (cases)"]:::dev
-        Worker3["红队质检 (reviewer)"]:::dev
-        Worker4["仿真测试 (test)"]:::dev
-    end
-
-    Queue --> Workers
-    Workers --> Raven["Raven 路径所有权矩阵 (RolePathOwnership)"]:::guard
-    Raven --> CodeRepo["代码版本库 (Git Worktree 独立隔离)"]
-```
-
-### 1.1 前台接待员（Frontdesk Receptionist）
-- **核心定位**：面对企业用户的唯一接待窗口，专职意图解析与快速响应；
-- **防御红线 (`FRONTDESK_BOUNDARY`)**：前台严禁直接调用耗时外部命令、严禁在主进程直接执行大段代码编译或长任务排障；
-- **操作原则**：任何预计执行耗时超过 5 秒的操作，必须通过 `durable_submit` 封装为持久任务投递至后台持久池，并即刻向前台用户交付交互进度卡片。
-
-### 1.2 后台研发同事（Background Dev Workers）
-- **核心定位**：由独立 Worker 进程承载的专业工程师；
-- **执行环境**：每个任务由独立的 Git Worktree 提供物理目录隔离，并通过跨进程文件锁（`fcntl.flock`）保证单一写者；
-- **工具授权**：具备完整的系统操作工具面（`read_file`, `write_file`, `edit_file`, `run_command`），但其文件操作受到严格的路径访问矩阵审查。
+> **文档导航**：[Wiki 首页 (Home)](Home.md) │ [01. 单根受管部署与极速上手](01-Quickstart-and-Install.md) │ [02. 业务知识叠加与服务编排](02-Business-Overlay-Guide.md) │ [03. 研发专家协同与状态图引擎](03-Multi-Agent-and-StateGraph.md) │ [04. IM 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [05. 运维体检与排障对账](05-Operations-and-Troubleshooting.md)
 
 ---
 
-## 2. 8 大官方研发角色契约 (`DEV_ROLES`)
+## 1. 8 大官方研发角色契约与路径所有权矩阵
 
-Super Agent 内核原生提供 8 个官方研发岗位契约（定义于 `agentcore.colleague_dev.DEV_ROLES`），覆盖软件工程端到端研发全流程：
+### 1.1 故障场景：角色越界与代码践踏
+在多智能体自主研发环境中，若缺乏明确的权限边界，测试专家为了让测试通过可能会直接修改门禁断言，或者前端角色误删核心协议代码，导致系统协同崩溃。
 
-| 角色标识 (`role`) | 岗位名称 (`display_name`) | 核心职责 (`duties`) | 默认推理模型层级 |
-| :--- | :--- | :--- | :--- |
-| `architect` | 需求边界与系统架构师 | 梳理需求契约、明确输入输出规格、拆解技术方案并编写规格文档 | `pro`（深度思考与结构化设计） |
-| `cases` | 核心研发与用例开发专家 | 编写核心业务代码与对应确定性验证用例，修复已知缺陷 | `main`（高质量标准编码） |
-| `reviewer` | 代码审查与红队质检员 | 以反向挑刺视角审查代码改动、核验边界保护与反向抑制断言 | `pro`（严格逻辑漏洞挑刺） |
-| `test` | 自动化测试与仿真验证专家 | 批量执行测试套件、复现异常时序、统计测试通过率并生成报告 | `main`（自动化测试执行） |
-| `triage` | 缺陷定性与根因诊断专家 | 抓取运行时日志、状态跳变轨迹对账、提取证据链并分析失败根因 | `pro`（时序对账与证据链推理） |
-| `backend` | 服务端与底层系统工程师 | 负责底座基础设施、并发通信、协议适配与系统级性能调优 | `main`（系统级后端工程） |
-| `frontend` | 表现层与交互排版工程师 | 专职设计流式交互卡片、Markdown 高清图表与终端渲染效果 | `main`（交互与数据可视化） |
-| `ops` | 平台运维与稳定性专家 | 负责集群配置对账、systemd 服务编排、巡检诊断与应急恢复 | `main`（基础设施运维管理） |
+### 1.2 真实代码机制：`DEV_ROLES` 与 `RolePathOwnership`
+`agentcore/colleague_dev.py` 统一定义了 8 大官方研发专家岗位契约（外层网关负责对外接待分诊，不属于 `DEV_ROLES` 内部成员）：
 
-### 确定性三级模型路由与 ADR-S1~S6 护栏
-系统采用纯函数模型路由器 `agentcore.model_routing` 进行严格的资源分配：
-- **`pro` 白名单保护 (`ADR-S1`)**：仅架构设计、红队挑刺与根因诊断等少数需要极高推理能力的岗位可占用高算力模型配额；
-- **防降级底线保护 (`ADR-S2`)**：严禁将长上下文压缩（Compression）或长期记忆提炼（Memory Extraction）降级至低算力轻量模型，防止核心事实被摘要过程吞噬；
-- **显式降级回执 (`ADR-S4`)**：若发生配额超限或模型故障，路由层必须在任务回执中明确标注实际执行档位，杜绝无感知静默降级。
+| 角色标识 (`role`) | 岗位名称 (`display_name`) | 核心职责与操作边界 (`duty` & `boundaries`) |
+| :--- | :--- | :--- |
+| `architect` | 需求边界与系统架构师 | 梳理需求契约与输入输出规格；负责 `SPEC.md` 与 `architecture/**`，禁止触碰 `case_set/**` |
+| `cases` | 核心研发与用例开发专家 | 专职编写确定性验证用例与业务代码；管辖 `case_set/**` 与 `lib/**`，禁止触碰 `.git/**` |
+| `reviewer` | 代码审查与红队质检员 | 专职执行安全审计与红队挑刺；管辖 `red_team_review.yaml`，禁止修改 `src/**` 或 `agentcore/**` |
+| `test` | 自动化测试与仿真验证专家 | 批量执行测试套件并统计覆盖率；管辖 `test_run.log`，禁止直接篡改业务源码或 `.git/**` |
+| `triage` | 缺陷定性与根因诊断专家 | 抓取日志并对账状态轨迹；负责输出 `ROOT_CAUSE.md`，禁止直接合入未验证的代码修复 |
+| `backend` | 服务端与底层系统工程师 | 负责底座基础设施与通信协议；管辖 `runtime/**`，变更记录追加至 `CHANGELOG.md` |
+| `frontend` | 表现层与交互排版工程师 | 专职设计流式交互卡片与图文交付；管辖 `static/**` 与 `templates/**` |
+| `ops` | 平台稳定性与运维专家 | 负责集群配置对账、巡检诊断与应急恢复；管辖 `docker/**` 与 `configs/**` |
 
----
-
-## 3. Raven 路径所有权矩阵 (`RolePathOwnership`)
-
-多智能体并发协作最大的风险是**“权限越界与状态践踏”**：例如测试角色为了让测试通过，私自篡改测试框架门禁；或者前端角色误删了底层核心通信代码。
-
-Super Agent 吸收 Raven 权限管理思想，建立了强类型的 **`RolePathOwnership` 路径所有权契约**：
-
+权限受控通过不可变数据结构 `RolePathOwnership` 进行硬拦截：
 ```python
 @dataclass(frozen=True)
 class RolePathOwnership:
     role: str
-    owns: Tuple[str, ...] = ()       # 完全控制：允许创建、修改、重命名、删除
-    appends: Tuple[str, ...] = ()    # 仅允许追加：严禁删除或覆写旧内容
-    never: Tuple[str, ...] = ()      # 严禁触碰：任何读写均立即抛出权限异常
-    artifacts: Tuple[str, ...] = ()  # 允许产出的制品模式
-    enforce_write: str = "hard"      # 写权限硬强制拦截（抛出 PermissionError）
+    owns: Tuple[str, ...] = ()       # 完全控制：允许创建、修改、重命名与删除
+    appends: Tuple[str, ...] = ()    # 仅允许追加日志或事实，严禁删除已有内容
+    never: Tuple[str, ...] = ()      # 严禁触碰：任何写操作立即抛出 PermissionError
+    artifacts: Tuple[str, ...] = ()  # 允许产出的交付物模式
+    enforce_write: str = HARD        # "hard" 硬强制写拦截
+    enforce_read: str = SOFT         # "soft" 软提示，不阻断只读探针
 ```
 
-### 8 大角色的典型权限边界
+### 1.3 代价与边界
+`enforce_write="hard"` 确保非责任角色绝不污染关键源码，但若任务拆解不当将导致合理修改被拦截；此时须按职责流转给对应责任角色。
 
-```mermaid
-graph TD
-    classDef arch fill:#FEF7E0,stroke:#FBBC04,stroke-width:1px;
-    classDef dev fill:#E8F0FE,stroke:#4285F4,stroke-width:1px;
-    classDef rev fill:#FCE8E6,stroke:#EA4335,stroke-width:1px;
+---
 
-    subgraph ArchitectZone ["架构师管辖区 (architect)"]
-        A_Owns["owns: docs/**, specs/**, README.md"]:::arch
-        A_Never["never: tests/**, src/**, *.py"]:::arch
-    end
+## 2. 模型路由与架构决策记录 (ADR-S1 ~ ADR-S6)
 
-    subgraph DevZone ["研发工程师管辖区 (cases / backend)"]
-        D_Owns["owns: src/**, agentcore/**, lib/**, *.py"]:::dev
-        D_Never["never: specs/**, SPEC.md, .git/**"]:::dev
-    end
+`agentcore/model_routing.py` 严格定义了模型档位分配与降级铁律：
 
-    subgraph ReviewZone ["红队质检员管辖区 (reviewer)"]
-        R_Owns["owns: reviews/**, reports/**, RED_TEAM.md"]:::rev
-        R_Never["never: src/**, agentcore/**, tests/**"]:::rev
-    end
-```
-
-| 角色 (`role`) | 核心拥有路径 (`owns`) | 仅追加路径 (`appends`) | 严格禁止触碰 (`never`) |
+| 决策编号 | 架构决策名称与代码真相源 | 具体防护机制 | 代价与系统边界 |
 | :--- | :--- | :--- | :--- |
-| `architect` | `docs/**`, `specs/**`, `README.md` | `DECISIONS.md`, `CHANGELOG.md` | `tests/**`, `src/**`, `*.py`, `.git/**` |
-| `cases` | `src/**`, `agentcore/**`, `*.py` | `FIXLOG.md`, `CHANGELOG.md` | `docs/specs/**`, `SPEC.md`, `.git/**` |
-| `reviewer` | `reviews/**`, `reports/**`, `RED_TEAM.md` | `review_log.txt` | `src/**`, `agentcore/**`, `tests/**`, `.git/**` |
-| `test` | `tests/**`, `test_reports/**`, `evals/**` | `test_run.log` | `src/**`, `agentcore/**`, `docs/specs/**` |
-| `triage` | `diagnostics/**`, `reproduce/**`, `triage/**` | `ROOT_CAUSE.md` | `docs/specs/**`, `SPEC.md`, `.git/**` |
-| `backend` | `backend/**`, `api/**`, `server/**` | `FIXLOG.md` | `frontend/**`, `ui/**`, `.git/**` |
-| `frontend` | `frontend/**`, `ui/**`, `cards/**` | `FIXLOG.md` | `backend/**`, `agentcore/**`, `.git/**` |
-| `ops` | `deploy/**`, `install/**`, `scripts/**` | `OPS_JOURNAL.md` | `case_set/**`, `tests/evals/**`, `.git/**` |
-
-当任何 Worker 试图调用文件编辑工具时，底层运行器将自动执行 `assert_role_path_access(role, path, action)`。一旦违规，立即阻断并记录审计日志：
-```text
-PermissionError: role_ownership_violation: role 'reviewer' cannot write 'src/core.py': path is under forbidden pattern 'src/**'
-```
+| **`ADR-S1`** | **唯一路由源** (`model_routing`) | 所有 Runner 必须通过本模块统一解析模型，严禁私自硬编码 | 失去局部自由覆盖灵活性 |
+| **`ADR-S2`** | **显式降级标记** (`degraded=True`) | 发生算力降级时必须记录 `degradation_reason` 并透传至终验卡片 | 调用方需处理降级元数据 |
+| **`ADR-S3`** | **记忆提炼防降级保护** | `compression`、`memory` 角色**严禁降级至 `flash`**，否则抛出 `ValueError` | **宁可报错中断也绝不静默污染长期记忆** |
+| **`ADR-S4`** | **单向无环包边界** | `agentcore` 与 `toolsets.pi_executor` 严格保持单向依赖，禁止反向导入 | 依赖解耦需要定义共享接口 |
+| **`ADR-S5`** | **Pro 白名单与配额守卫** | 仅 `PRO_ALLOWED_ROLES` 允许使用最高算力，单任务默认上限 2 次 (`DEFAULT_MAX_PRO_CALLS_PER_TASK = 2`) | 限制深度思考模型的调用次数 |
+| **`ADR-S6`** | **终态卡片互斥守卫** | `durable-dispatch` 与 `task-progress` 产出终态卡片时排他互斥 | 杜绝单任务多卡冲突 |
 
 ---
 
-## 4. LangGraph 状态图引擎 (`agentcore.state_graph.StateGraph`)
+## 3. 确定性状态图引擎 (`agentcore/state_graph.py`)
 
-针对复杂多步骤任务，Super Agent 内置了纯 Python 实现的确定性状态图引擎 `StateGraph`，具备工业级可靠性保障：
+### 3.1 故障场景：死循环空转与临时分支残留
+智能体在自主循环探索（如 `Execute <-> Evaluate`）中易陷入局部死循环白白消耗 Token；或在终态退出时残留未提交代码，造成成果丢弃。
 
-```mermaid
-stateDiagram-v2
-    [*] --> Analyze: 任务接入
-    Analyze --> Plan: 规格分析通过
-    Plan --> Execute: 生成执行方案
-    Execute --> Evaluate: 工具执行结束
-    Evaluate --> Execute: 验证未通过 (带剩余重试预算)
-    Evaluate --> Review: 验证通过
-    Review --> Completed: 审查通过
-    Review --> Execute: 审查指出严重缺陷 (重试回路)
-    Completed --> [*]
+### 3.2 真实代码机制与使用模式
+`StateGraph` 采用构建器模式，支持编译期校验与执行期断点接管：
+```python
+builder = StateGraph()
+builder.add_node("plan", plan_func)
+builder.add_node("exec", exec_func)
+builder.set_entry_point("plan")
+builder.add_edge("plan", "exec")
+builder.add_edge("exec", END)
+
+# 编译参数支持持久化与安全检查
+graph = builder.compile(
+    checkpointer=SqliteCheckpointer(db_path),  # SQLite WAL 模式断点恢复
+    stagnation_limit=5,                        # 连续 5 步无状态跃迁熔断
+    worktree_harvest_check=True                # 终态检查 Git Worktree 是否干净
+)
 ```
 
-### 核心特性矩阵：
-1. **类型化状态与 Reducer**：
-   支持基于 `TypedDict` 或 `dataclass` 定义不可变状态结构，状态更新必须通过显式声明的 Reducer 函数合并；
-2. **SQLite WAL 持久化检查点 (Durable Checkpoints)**：
-   在每一个 Node 执行完毕后，工作流引擎将整树状态快照写入持久化数据库。即使服务器断电或进程遭遇 OOM，重启后也能精准从最后一个合规节点恢复，绝不从头盲目重新计算；
-3. **停滞守卫 (Stagnation Guard)**：
-   实时计算状态机指纹与工具调用输出。若检测到工作流连续多次循环且未产生任何有效状态跃迁，停滞守卫将主动熔断退出，避免无意义的 Token 燃烧；
-4. **终态工作树收割验证 (Terminal Worktree Harvest)**：
-   工作流进入终态节点前，强制比对 Git Worktree 状态，确保工作区内的所有改动均已完成暂存、提交或归档，杜绝未提交代码遗留在临时分支。
+1. **三类检查点持久化实现**：
+   - `SqliteCheckpointer`：开启 WAL 模式，断电重启后自动根据 `task_id` 跳过已完成 step 恢复；
+   - `MemoryCheckpointer`：内存测试检查点；
+   - `JsonCheckpointer`：本地轻量 JSON 检查点。
+2. **停滞守卫 (`stagnation_limit`)**：
+   在节点跳变时计算状态的规范化 JSON MD5 哈希。若连续 `stagnation_limit` 步（默认 5 步）状态指纹无进展，立即抛出 `StagnationDetectedError` 熔断退出。
+3. **终态 Worktree 物理收割检查 (`worktree_harvest_check=True`)**：
+   流转至终点前，执行 `git status --porcelain` 检查工作区。若发现存在未提交或未跟踪的脏改动，抛出 `WorktreeStrandedError` 阻断退出。
+
+### 3.3 代价与边界
+状态哈希要求所有业务 State 值必须支持规范化 JSON 序列化；终态 Worktree 检查增加了子进程执行 Git 命令的文件 I/O 开销。
 
 ---
 
-## 5. EverOS 技能锻造器 (`agentcore.skill_forge.SkillForge`)
+## 4. 进程监管器防逃逸与 PID 复用防御 (`attempt_supervisor.py`)
 
-为了使智能体在日常解决问题的过程中不断自我进化，Super Agent 吸收了 EverOS 双轨记忆（Dual-Track Memory）的设计精髓，构建了 `SkillForge` 程序化技能锻造系统：
+### 4.1 故障场景：孤儿子进程逃逸与 PID 复用误杀
+长任务子进程可能通过 `double fork()` 脱离父进程组变成孤儿进程；而在超时强杀时，若子进程退出后其 PID 被操作系统迅速分配给系统服务，盲目 `kill` 会误杀关键进程。
 
-- **用户轨迹 (User Track)**：聚焦用户个人偏好、上下文交互历史与会话轮次；
-- **智能体经验轨迹 (Agent Track)**：专职记录任务处置案例（`AgentCase`）与提炼高质量可复用程序化技能（`ProceduralSkill`）。
+### 4.2 真实代码机制
+`agentcore/attempt_supervisor.py` 作为独立的单线程管理主程序运行：
+1. **Linux Subreaper 接管**：调用 `ctypes.CDLL(None).prctl(36, 1, 0, 0, 0)`（`PR_SET_CHILD_SUBREAPER`），强制让所有脱离的孤儿子孙进程重新挂载到 supervisor 下；
+2. **控制通道握手协议**：接管 control socket (`sys.argv[1]`)，就绪后向父进程发送 `b"ready"`，接收 `b"go"` 确认后才拉起目标子进程；
+3. **PID 复用指纹比对**：组合读取 `/proc/{pid}/stat` 第 20 字段（`starttime` 时钟节拍）与 `/proc/sys/kernel/random/boot_id`。指纹不匹配时坚决拒杀；
+4. **不可变证据链**：若子进程因提权导致 `PermissionError` 无法清理，将其记录至 `unquiesced_pids`，生成不可变 `evidence.json` 并以退出码 125 退出。
 
-```mermaid
-graph TD
-    classDef step fill:#E8F0FE,stroke:#4285F4,stroke-width:1px;
-    classDef skill fill:#E6F4EA,stroke:#34A853,stroke-width:2px;
-
-    Task["长任务执行完成"] --> Case["记录 AgentCase (意图/方案/证据/验收分)"]:::step
-    Case --> Evaluate["成熟度评估 (质量评分 >= 0.85)"]:::step
-    Evaluate --> Distill["技能蒸馏器 (Skill Distillation)"]:::step
-    Distill --> MarkdownSkill["生成 Markdown 技能文件 (SKILL.md)"]:::skill
-    MarkdownSkill --> Recall["混合意图召回 (Hybrid Intent Recall)"]:::step
-    Recall --> NextTask["后续同类任务动态注入最佳实践 Prompt"]
-```
-
-### 技能成熟度管理 (`maturity_score`)
-每个锻造出的技能具备 0.0 至 1.0 的成熟度评分：
-- 初始提炼技能赋予初级分（如 0.6）；
-- 每次在新的真实任务中被成功引用并通过终验门禁，成熟度自动增加；
-- 在上下文检索时，系统综合意图关键词、领域匹配度与成熟度打分进行重排序，确保最权威、最稳定的工程经验被优先注入模型上下文。
+### 4.3 代价与边界
+仅支持 Linux 平台；非 root 权限无法杀死其他 UID 提权进程；强杀超时等待（`REAPING_DEADLINE_SECONDS = 5.0`）会增加同步退出耗时。
 
 ---
 
-> **下一步**：了解如何将长任务进度与高质量图表交付给用户，请阅读 [04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md)。
->
->  [上一篇：02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [返回 Wiki 首页 (Home)](Home.md) │ [下一篇：04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md)
+## 5. 延伸参考
+- 交互卡片与终态交付：[04. IM 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md)
+- 运维健康体检与故障对账：[05. 运维体检与排障对账](05-Operations-and-Troubleshooting.md)
+- 架构设计原则与 ADR 汇总：[`docs/ARCHITECTURE.md`](../ARCHITECTURE.md)

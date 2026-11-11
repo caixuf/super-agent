@@ -2,7 +2,7 @@
 
 适用：上游发布了针对投递缺陷的候选修复（源码补丁集 + 回归测试 + 评审报告），要把它装到
 本机正在跑的集成上。前提是诊断已完成、且已确认缺陷在**代码**而不是配置（诊断见
-`references/streaming-card-sidecar.md`）。
+`streaming-card-sidecar.md`）。
 
 ## 先读仓库自述，再动手
 

@@ -25,9 +25,12 @@ Super Agent 绝非另起炉灶的封闭系统，而是深深植根于 **Hermes A
 
 欢迎查阅全新上线的 **[Super Agent 用户与架构 Wiki](docs/wiki/Home.md)**，为初学者与系统架构师提供结构化、模块化、带导航图谱的沉浸式查阅体验：
 
+> [!TIP]
+> 想要立即验证系统运行？请查阅 [**Wiki 首页 (docs/wiki/Home.md)**](docs/wiki/Home.md) 中的「**60 秒真机可复现任务闭环**」，通过一条真实指令体验从接单、排队、Worker 认领到终态交付的完整闭环！
+
 - [**Wiki 首页与全局导览** (Home.md)](docs/wiki/Home.md) — 架构全景、核心概念与章节知识图谱
 - [**01. 5分钟快速上手与单根部署** (01-Quickstart-and-Install.md)](docs/wiki/01-Quickstart-and-Install.md) — 单根受管拓扑（`~/super_agent/<profile>`）、`superagent.sh` 一键安装、升级与秒级回滚
-- [**02. 业务知识挂载指南** (02-Business-Overlay-Guide.md)](docs/wiki/02-Business-Overlay-Guide.md) — 中性底座与业务叠加解耦、`SOUL.generic.md`、MCP 挂载、外部 Skills 与 9 角色团队装配
+- [**02. 业务知识挂载指南** (02-Business-Overlay-Guide.md)](docs/wiki/02-Business-Overlay-Guide.md) — 中性底座与业务叠加解耦、`SOUL.generic.md`、MCP 挂载、外部 Skills 与 1 前台网关 + 8 研发角色 (DEV_ROLES) 团队装配
 - [**03. 前后台协同与 StateGraph** (03-Multi-Agent-and-StateGraph.md)](docs/wiki/03-Multi-Agent-and-StateGraph.md) — 前后台权责边界、8 大官方研发角色（`DEV_ROLES`）、Raven 路径所有权矩阵与 LangGraph 状态图
 - [**04. 交互卡片与交付机制** (04-Feishu-Cards-and-Delivery.md)](docs/wiki/04-Feishu-Cards-and-Delivery.md) — CardKit 2.0 状态机、单在途合并去抖、`drain()` 屏障、实时动态进度流与 Chromium 图文交付
 - [**05. 运维排障与 FAQ** (05-Operations-and-Troubleshooting.md)](docs/wiki/05-Operations-and-Troubleshooting.md) — 布局感知运维、`doctor` 体检、脱敏长期记忆召回诊断与常见故障处置矩阵
@@ -87,7 +90,7 @@ Super Agent 绝非另起炉灶的封闭系统，而是深深植根于 **Hermes A
 | 平台适配补丁 | `patches/` | `<HERMES_HOME>/agentcore/patches/` | 消息平台适配：Card 2.4 流式卡片 + 纯文字审批；幂等重放与内容探针校验 |
 | 插件集与记忆 | `plugins/` | `<HERMES_HOME>/plugins/<name>` + profile `config.yaml` 的 `plugins.enabled` | 16 款受管插件（13 款通用内建 + 3 款受管外部）与 `localvec` 记忆提供方：`longtask_guard`、`task_status`、`durable_dispatch`、`colleague_team`、`colleague_catalog`、`markdown_delivery`、`lan_cluster`、`write_guard` 等 |
 | 安装与运维 | `install/superagent.sh` + `tools/superagent.py` + `scripts/ops/` | —— | v2.0 单根受管安装（`~/super_agent/<profile>`）、身份暂存挂载、`hermes-current` 自动推断、多布局感知运维对账（`scripts/ops/_layout.sh`）与原子回滚 |
-| 干净室验证 | `docker/` | —— | 容器里从一个空 HOME 装一遍，20 项断言 |
+| 干净室验证 | `docker/` | —— | 容器里从一个空 HOME 装一遍，8 阶段干净室断言 |
 | 迁移与部署口径 | `docs/DEPLOY.md` | —— | 单根受管拓扑 + 零业务词迁移与可量化验收 |
 
 ---
@@ -190,7 +193,7 @@ Python、Git、Hermes、可选工具和凭据的独立运行镜像；仍须准�
 ## 干净室部署验证（Docker）
 
 ```bash
-bash docker/verify.sh              # 默认 HEAD：导出干净检出 → 建镜像 → 跑 20 项断言
+bash docker/verify.sh              # 默认 HEAD：导出干净检出 → 建镜像 → 跑 8 阶段干净室断言（docker/clean_room_check.sh）
 bash docker/verify.sh <commit>     # 验证某个已发布提交（发布前跑这个）
 ```
 
@@ -209,7 +212,7 @@ bash docker/verify.sh <commit>     # 验证某个已发布提交（发布前跑�
 换机器上线只认一条路径：[`docs/DEPLOY.md`](docs/DEPLOY.md)（`tools/redeploy_check.py` 一条命令复验干净 clone，
 `tools/t6_gap_audit.py` 逐条报 T6 缺口；插件「装了」不等于「工具面里看得见」，清单与重启步骤都写在里面）。
 
-**自动化干净室验证**：运行 `bash verify.sh --with-docker`，在无网络干扰容器中从空 HOME 装一遍并执行 20 项断言。
+**自动化干净室验证**：运行 `bash verify.sh --with-docker`，在无网络干扰容器中从空 HOME 装一遍并执行 8 阶段干净室断言（含 32 处 pass() 与 22 处 Python assert）。
 
 **它已经抓到过什么**：`install/install.sh` ⑩ 段 heredoc 里的 `$HERMES_HOME` 没做兜底，
 在 `set -u` 下**空机器上会以 `unbound variable` 非 0 退出**（活全干完了却报失败）。
@@ -410,7 +413,7 @@ super-agent/
 │   ├── capability_alert_outbox/ # 能力异常与漂移告警发件箱
 │   └── illustrated_delivery/  # 图文排版与渲染交付
 ├── skills/                    # 通用技能库
-├── install/                   # 引导器与外层 Shell 包装器 (superagent.sh, install.sh, templates/)
+├── install/                   # 引导器与外层 Shell 包装器 (superagent.sh, install.sh, setup_profile.py)
 ├── tools/                     # 操作员 CLI 与开发者工具集 (superagent.py, redeploy_check.py)
 ├── checks/                    # 就地环境验收探针与轻量冒烟 (prefer_d7_smoke.py, feature_check.sh, deployment_layered_audit.py)
 ├── scripts/ops/               # 宿主生命周期与集群运维脚本 (_layout.sh, deploy_production.sh, backup_and_rollback.py)
@@ -430,7 +433,7 @@ super-agent/
 
 | 目录 | 职责定义 | 代表文件与作用 |
 | :--- | :--- | :--- |
-| `install/` | **引导器与外层 Shell 包装器 (Bootstrap & Shell Wrappers)** | `superagent.sh`（一键安装入口）、`install.sh`（底层幂等安装器）、`bootstrap_dependencies.py`（依赖预取器）、`templates/`（systemd 模板与 `SOUL.generic.md`）。专职新机器从零拉起底座。 |
-| `tools/` | **操作员 CLI 与开发者工具集 (Operator CLIs & Tools)** | `superagent.py`（统一生命周期工具：plan/install/update/rollback/doctor/pack）、`redeploy_check.py` 等。专职运维日常交互与发版管理。 |
+| `install/` | **引导器与外层 Shell 包装器 (Bootstrap & Shell Wrappers)** | `superagent.sh`（一键安装入口）、`install.sh`（底层幂等安装器）、`bootstrap_dependencies.py`（依赖预取器）、`setup_profile.py` / `setup_worker.py` / `setup_memory.py`、`runtime/*.service` 与 `identity/SOUL.generic.md`。专职新机器从零拉起底座。 |
+| `tools/` | **操作员 CLI 与开发者工具集 (Operator CLIs & Tools)** | `superagent.py`（统一受管生命周期 CLI：支持 plan/install/update/rollback/doctor 等；发布打包由 `package_superagent.py` 完成）、`redeploy_check.py` 等。专职运维日常交互与发版管理。 |
 | `checks/` | **就地环境验收探针与轻量冒烟 (Verification Probes & Smoke Tests)** | `prefer_d7_smoke.py`、`feature_check.sh`、`deployment_layered_audit.py`、`model_context_check.sh`、`systemd_containment_probe.py`。专职就地环境验收与只读体检。 |
 | `scripts/ops/` | **宿主生命周期与集群运维脚本 (Host Lifecycle Shell Scripts)** | `_layout.sh`（多拓扑感知推断器）、`deploy_production.sh`（发布构建与分发）、`backup_and_rollback.py`（物理备份与回滚）、`uninstall-legacy.sh`（遗留服务清理）。专职集群 SRE 运维。 |

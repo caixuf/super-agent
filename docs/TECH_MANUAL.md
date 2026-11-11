@@ -1,6 +1,6 @@
 # Super Agent 技术手册：架构、原理与生产实践
 
-**基线**：`super-agent` 仓库 v2.0 单根架构收敛版本（含 `98354f0` 及其关联演进）；核对日期：2026-11-08（Asia/Shanghai）。**适用读者**：架构、研发、测试、安全与运维人员。本文阐明核心机制、16 款插件与 `localvec` 记忆提供方、AI Agent 通用原理、v2.0 单根拓扑架构（`~/super_agent/<profile>`）、身份暂存与业务叠加层挂载工作流、召回诊断观测器（`recall_diagnostics_observation`）、宿主解释器自动推断及布局感知运维对账。
+**基线**：`super-agent` 仓库 v2.0 单根架构收敛版本（含 `98354f0` 及其关联演进）；核对日期：2026-11-08（Asia/Shanghai）。**适用读者**：架构、研发、测试、安全与运维人员。本文阐明核心机制、16 款插件与 `localvec` 记忆提供方、AI Agent 通用原理、v2.0 单根拓扑架构（`~/super_agent/<profile>`）、身份暂存与业务叠加层挂载工作流、召回诊断观测器（`doctor` 观测字段 `recall_diagnostics_observation` 及配套 CLI `tools/inspect_recall_diagnostics.py`）、宿主解释器自动推断及布局感知运维对账。
 
 Super Agent 是一个以持久任务、受控执行、记忆与结果回投为核心的生产级 Agent 工程底座。它与宿主系统解耦，通过声明式业务规格（`BusinessProfileSpec`）与业务叠加层挂载实现全仓中立性；在实践中把模型视为概率推理组件，把权限、状态机跳转、文件写入与证据交付牢固锚定在确定性工程系统之中。
 
@@ -495,7 +495,7 @@ OpenTelemetry 已提供生成式 AI 语义约定入口，规范在演进，接�
    - `<managed_root>/releases/<v>/`：不可变发布树，封装 `agentcore/`、16 款插件与 `localvec`、`identity/` 骨架、`patches/`、`tools/` 等全部机制代码。
    - `<managed_root>/identity/`：受管身份暂存目录。在打包部署时预置 `identity/SOUL.generic.md`（含 `{{BUSINESS_OVERLAY}}` 占位符），业务侧通过 `--compose-soul` 挂载业务叠加层生成最终生效的 `SOUL.md`。
    - `<managed_root>/workspaces/`：主智能体及各同事成员的严格隔离工作区目录。
-   - `<managed_root>/state/`：持久化任务池数据库（`pool.db`）、心跳账本（`liveness.db`）与召回诊断目录（`recall-diagnostics/`）。
+   - `<managed_root>/state/`：各队列持久任务池数据库（`<queue_root>/pool.db`，如 `analysis-queue/pool.db` 与 `dev-queue/pool.db`）、心跳账本（`liveness.db`）与召回诊断目录（`recall-diagnostics/`）。
 2. **宿主解释器自动推断（hermes_root Inference）**：
    受管安装器在解析目标宿主解释器与源码树时，遵循明确优先级：显式命令行参数 > 活跃软链 `<managed_root>/hermes-current` > 历史 `install-manifest.json` 记录 > 默认回退路径。确保在升级与环境迁移过程中，宿主运行时无缝接续。
 3. **布局感知运维对账（Layout-Aware Ops）**：

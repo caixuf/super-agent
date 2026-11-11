@@ -189,7 +189,7 @@ curl -sS ".../im/v1/messages?container_id_type=chat&container_id=<chat>&page_siz
 这类集成的代码通常装在**两处**，只换一处等于没修：
 
 1. sidecar 自己的 venv（配置里的 `service.python_executable`）——跑 HTTP 服务，负责发卡；
-2. **宿主网关的环境 venv**——`gateway/run_turn.py` 里有 `from <pkg>.hook_runtime import should_suppress_native_response`
+2. **宿主网关的环境 venv**——`<hermes_root>/gateway/run_turn.py` 里有 `from <pkg>.hook_runtime import should_suppress_native_response`
    这类**进程内导入**，宿主自己也会加载同一个包。
 
 判据：把两边的同名模块哈希对一下，不同就是两套代码。

@@ -1,122 +1,166 @@
-# Super Agent 用户与架构 Wiki (User & Architecture Wiki)
+# Super Agent 架构与使用 Wiki
 
-> **知识库导览 / Wiki Navigation**
-> [Wiki 首页 (Home)](Home.md) │ [01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md) │ [02. 业务知识挂载指南](02-Business-Overlay-Guide.md) │ [03. 前后台协同与 StateGraph](03-Multi-Agent-and-StateGraph.md) │ [04. 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [05. 运维排障与 FAQ](05-Operations-and-Troubleshooting.md)
-
----
-
-## 1. 欢迎来到 Super Agent Wiki
-
-**Super Agent** 是一个专为生产环境设计的**通用常驻智能体本体（Always-on Production Agent Core）**。
-
-在传统的智能体落地探索中，开发者往往遭遇大量“玩具级 Demo 能跑通，生产环境处处暴雷”的现实死穴：
-- **进程虚假存活**：LLM 思考或工具调用耗时较长时，前台界面超时报错，后台任务被无端杀掉或成为孤儿僵尸进程；
-- **状态不确定性**：依赖大模型做不可靠的上下文自由调度，状态机跳转脱窗、循环死锁、多次重试导致状态踩踏；
-- **长期记忆污染**：黑盒 LLM 覆写记忆导致关键历史丢失，向量召回缺乏分桶与标签隔离，跨代任务记忆混杂；
-- **交付排版劣化**：长篇 Markdown 和图表在即时消息平台被暴力截断、折叠或限流，关键产物无法送达用户；
-- **业务耦合严重**：业务私有逻辑直接侵入智能体引擎，导致框架无法跨环境迁移与通用复用。
-
-Super Agent 采用**中立引擎（Neutral Engine）**与**业务叠加层（Business Overlay）**彻底解耦的架构，通过确定性持久任务池（SQLite Durable Pool）、LangGraph 状态图引擎（StateGraph）、Raven 岗位路径所有权隔离（RolePathOwnership）、CardKit 2.0 流式卡片与单根受管部署（Single-Root Architecture），为企业级生产场景提供因果确定、安全高可用、开箱即用的常驻多智能体底座。
+> **文档导航**：[Wiki 首页 (Home)](Home.md) │ [01. 单根受管部署与极速上手](01-Quickstart-and-Install.md) │ [02. 业务知识叠加与服务编排](02-Business-Overlay-Guide.md) │ [03. 研发专家协同与状态图引擎](03-Multi-Agent-and-StateGraph.md) │ [04. IM 交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) │ [05. 运维体检与排障对账](05-Operations-and-Troubleshooting.md)
 
 ---
 
-## 2. 系统全景架构导览
+## 1. 按问题查（我想……）
 
-Super Agent 采用清晰的分层架构设计，各层间严格遵循单向依赖与状态栅栏约束：
+读者可按实际工程场景快速直达对应章节：
 
-```mermaid
-flowchart TD
-    classDef client fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#1A73E8;
-    classDef front fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#137333;
-    classDef pool fill:#FCE8E6,stroke:#EA4335,stroke-width:2px,color:#C5221F;
-    classDef stgraph fill:#FEF7E0,stroke:#FBBC04,stroke-width:2px,color:#B06000;
-    classDef storage fill:#F3E8FD,stroke:#A142F4,stroke-width:2px,color:#7627BB;
+| 实际工程诉求 | 推荐阅读章节 | 核心机制与证据源 |
+| :--- | :--- | :--- |
+| **我想亲眼看任务如何防丢单、防重复执行与防裂脑接管** | [§2 核心闭环实测](#2-60-秒亲手跑通核心闭环零依赖真机实测) 与 [01 部署指南](01-Quickstart-and-Install.md) | `Pool` 幂等去重、租约过期接管、迟到 attempt 围栏拦截与 `EX_TEMPFAIL` 临时重排 |
+| **我想在空目录试装一套环境并观察单根目录变化** | [01. 单根受管部署与极速上手](01-Quickstart-and-Install.md) | `releases/` 不可变版本、`state/` 跨版本持久态、`install-manifest.json` |
+| **我想把业务私有规则、MCP 工具与技能无污染挂载到本体** | [02. 业务知识叠加与服务编排](02-Business-Overlay-Guide.md) | `SOUL.generic.md` 裸标记 `{{BUSINESS_OVERLAY}}`、`profile_overlay.py`、物理技能落盘 |
+| **我想了解后台研发专家岗位如何分工与通过路径所有权隔离** | [03. 研发专家协同与状态图引擎](03-Multi-Agent-and-StateGraph.md) | 8 大 `DEV_ROLES`、`RolePathOwnership` 强校验、`StateGraph` 检查点恢复与停滞熔断 |
+| **我想排查卡片卡住或了解 `doctor` 报 `drift` 的根本归因** | [04. 交互卡片机制](04-Feishu-Cards-and-Delivery.md) 与 [05. 运维排障](05-Operations-and-Troubleshooting.md) | 卡片 6 态流转、单在途合并、`liveness.db` 活体对账、`stale_processes` 进程陈旧判定 |
+| **我想掌握版本平滑升级、秒级回滚与历史版本安全清理** | [01. 部署指南](01-Quickstart-and-Install.md) 与 [05. 运维排障](05-Operations-and-Troubleshooting.md) | `superagent.py` 原生子命令（`update` / `rollback` / `prune-releases`）与原子软链切换 |
 
-    Client["企业协同终端 / IM 客户端 / CLI 交互"]:::client
+---
 
-    subgraph L1 ["一、前台交互与网关层 (Frontdesk Gateway)"]
-        direction LR
-        Gateway["前台接待员 (Frontdesk)"]:::front
-        Boundary["可信边界防御 (Boundary Gate)"]:::front
-        CardEngine["CardKit 2.0 流式卡片引擎"]:::front
-        Gateway --> Boundary --> CardEngine
-    end
+## 2. 60 秒亲手跑通核心闭环（零依赖真机实测）
 
-    subgraph L2 ["二、任务执行与持久运行时 (Durable Runtime)"]
-        direction LR
-        DPool["SQLite 持久任务池 (Durable Pool)"]:::pool
-        Supervisor["Subreaper 进程监管与租约隔离"]:::pool
-        DevRunner["Git Worktree + 三级模型路由"]:::pool
-        DPool --> Supervisor --> DevRunner
-    end
+以下实验脚本均基于仓库真实源码，无需拉取外部网络或启动后台服务，可在当前环境直接执行复现。
 
-    subgraph L3 ["三、多智能体协同与状态机层 (Multi-Agent StateGraph)"]
-        direction LR
-        SG["StateGraph 状态图引擎 (WAL 检查点)"]:::stgraph
-        Roles["8 大官方研发专家角色 (DEV_ROLES)"]:::stgraph
-        Raven["Raven 路径所有权矩阵 (RolePathOwnership)"]:::stgraph
-        SG --> Roles --> Raven
-    end
+### 实验 B：任务池生命周期与围栏防御实测 (33 行代码)
 
-    subgraph L4 ["四、单根受管与存储治理层 (Single-Root ~/super_agent)"]
-        direction LR
-        SRoot["单根目录拓扑 (releases/state/config)"]:::storage
-        Memory["双路召回记忆引擎 (LocalVec + FactTags)"]:::storage
-        Delivery["图文与云文档交付管道 (arch_doc)"]:::storage
-        SRoot --> Memory --> Delivery
-    end
+运行以下脚本，验证任务提交幂等去重、租约过期被 Worker 2 接管后 Worker 1 迟到写入被围栏拒绝、以及 SQLite `jobs` / `outbox` 真实状态持久化：
 
-    Client <--> Gateway
-    CardEngine <--> Client
-    Boundary -->|持久投递| DPool
-    DevRunner -->|驱动工作流| SG
-    Raven -->|写入产物| Delivery
-    Delivery -.->|卡片流式刷新| CardEngine
+```bash
+python3 - <<'EOF'
+import os, time, json
+from pathlib import Path
+from agentcore.pool import Pool
+
+pool = Pool(Path('/tmp/sa_walkthrough_probe/pool'))
+origin = {'profile': 'default', 'session': 's1', 'channel': 'feishu', 'chat': 'c1'}
+
+# 1. 提交任务与重复提交幂等拦截
+j1, dup1 = pool.submit('req-001', {'cmd': 'task'}, replay_safe=True, max_tries=2, origin=origin, return_meta=True)
+j2, dup2 = pool.submit('req-001', {'cmd': 'task'}, replay_safe=True, max_tries=2, origin=origin, return_meta=True)
+print(f'1. Submit: id={j1[:8]}... (dup1={dup1}, dup2={dup2})')
+
+# 2. Worker 1 领单 (attempt=1) 后模拟崩溃/租约过期
+c1, fd1 = pool.claim(lease=0.05)
+os.close(fd1)
+print(f'2. Attempt 1 claimed: token={c1["attempt"][:8]} tries={c1["tries"]}')
+time.sleep(0.06)
+
+# 3. Worker 2 (attempt=2) 接管；迟到的 attempt=1 写入被围栏拒绝
+c2, fd2 = pool.claim(lease=0.05)
+print(f'3. Attempt 2 claimed: token={c2["attempt"][:8]} tries={c2["tries"]}')
+fenced = pool.finish(j1, c1['attempt'], ok=True, result={'out': 'worker1'})
+print(f'   Attempt 1 finish result (fenced): {fenced}')
+
+# 4. Worker 2 正常完工并查看 SQLite jobs / outbox 真实行数据
+ok = pool.finish(j1, c2['attempt'], ok=True, result={'out': 'worker2_ok'})
+os.close(fd2)
+with pool.db() as db:
+    job = dict(db.execute('SELECT id, status, tries, attempt, result FROM jobs WHERE id=?', (j1,)).fetchone())
+    outbox = dict(db.execute('SELECT job, receipt FROM outbox WHERE job=?', (j1,)).fetchone())
+print(f'4. Attempt 2 finish result: {ok}')
+print(f'   SQLite jobs: {json.dumps(job, ensure_ascii=False)}')
+print(f'   SQLite outbox: {json.dumps(outbox, ensure_ascii=False)}')
+EOF
+```
+
+**真机捕获输出**：
+```text
+1. Submit: id=6c5f8b6b... (dup1=False, dup2=True)
+2. Attempt 1 claimed: token=b0fce034 tries=1
+3. Attempt 2 claimed: token=4f3e3998 tries=2
+   Attempt 1 finish result (fenced): False
+4. Attempt 2 finish result: True
+   SQLite jobs: {"id": "6c5f8b6b950c40bd8a919506383ca931", "status": "completed", "tries": 2, "attempt": "4f3e39986960430293fe29587eaf237f", "result": "{\"out\": \"worker2_ok\"}"}
+   SQLite outbox: {"job": "6c5f8b6b950c40bd8a919506383ca931", "receipt": "{\"job\": \"6c5f8b6b950c40bd8a919506383ca931\", \"status\": \"completed\", \"result\": {\"out\": \"worker2_ok\"}}"}
+```
+
+**临时失败重排补充机制**：当任务遭遇外部频控以 `exit_code=75` (`EX_TEMPFAIL`) 退出时，`finish(ok=False, result={'exit_code': 75})` 会触发 `tries` 从 1 自动回退至 0，状态置为 `queued`，心跳清空，不扣减业务重试配额：
+```text
+Claimed: tries=1, status=queued
+After EX_TEMPFAIL (exit 75): status=queued, tries=0, heartbeat=None
 ```
 
 ---
 
-## 3. Wiki 知识库章节索引
+### 实验 C：StateGraph 检查点恢复与停滞熔断实测 (25 行代码)
 
-| 章节编号 | 文档主题 | 核心内容提要 |
+运行以下脚本，验证 `SqliteCheckpointer` 记录断点后自动跳过已完成节点 `n1`，直接从检查点恢复并流转 `n2`：
+
+```bash
+python3 - <<'EOF'
+from pathlib import Path
+from agentcore.state_graph import StateGraph, SqliteCheckpointer, Checkpoint, END
+
+db = Path('/tmp/sa_walkthrough_probe/sg.db')
+cp = SqliteCheckpointer(db)
+task_id = 'task-probe-01'
+
+builder = StateGraph()
+exec_log = []
+builder.add_node('n1', lambda s: (exec_log.append('n1'), {'v': 1})[1])
+builder.add_node('n2', lambda s: (exec_log.append('n2'), {'v': s['v'] + 10})[1])
+builder.set_entry_point('n1')
+builder.add_edge('n1', 'n2')
+builder.add_edge('n2', END)
+
+# 模拟预置检查点：已在 n1 完成 checkpoint (v=100)
+cp.put(Checkpoint(task_id=task_id, step=1, node='n1', state={'v': 100}))
+
+graph = builder.compile(checkpointer=cp)
+final = graph.invoke({}, config={'task_id': task_id})
+latest = cp.get(task_id)
+
+print(f'Executed nodes (n1 skipped): {exec_log}')
+print(f'Final state: {final}')
+print(f'Latest checkpoint: step={latest.step}, node={latest.node}, state={latest.state}')
+EOF
+```
+
+**真机捕获输出**：
+```text
+Executed nodes (n1 skipped): ['n2']
+Final state: {'v': 110, '_resumed_from_node': 'n1', '_resumed_from_step': 1}
+Latest checkpoint: step=2, node=n2, state={'v': 110, '_resumed_from_node': 'n1', '_resumed_from_step': 1}
+```
+
+**停滞熔断守卫**：若智能体在循环节点中连续多次产生相同状态指纹，`stagnation_limit` 触发熔断：
+```text
+Caught StagnationDetectedError: StateGraph stagnation detected: node 'loop' repeated 3 times with zero state progress.
+```
+
+---
+
+## 3. CLI 双层操作面与真实命令速查
+
+Super Agent 区分 **Shell 包装器 (`superagent.sh`)** 与 **底层原生 CLI (`tools/superagent.py`)** 两层操作面：
+
+1. **`install/superagent.sh` 包装语义**：
+   - 支持子命令：`package`, `plan`, `install`, `update`, `doctor`, `uninstall`, `candidate-hermes`, `profile`；
+   - **安全保护开关**：`install` / `update` / `uninstall` 若未带 `--apply`，仅执行计划预览（退出码 0）；带 `--apply` 时由脚本**剥离 `--apply` 后**透传调用底层；
+   - 不支持 `rollback` 或 `prune-releases`（直接调用报 `unknown command`）。
+2. **`python3 tools/superagent.py` 原生语义**：
+   - 支持 12 个原生子命令：`plan`, `install`, `update`, `doctor`, `uninstall`, `activate-release`, `rollback`, `prune-releases`, `migrate-config`, `candidate-hermes`, `install-hermes-candidate`, `switch-gateway-source`；
+   - **底层无 `--apply` 参数**：所有修改命令直接生效，追加 `--apply` 会直接报 `unrecognized arguments: --apply` 错误并退出。
+
+| 运维场景 | 推荐命令 | 说明 |
 | :--- | :--- | :--- |
-| **01** | [5分钟快速上手与单根部署](01-Quickstart-and-Install.md) | 环境先决条件、单根受管拓扑（`~/super_agent/<profile>`）、`superagent.sh` 一键安装、版本原子升级与秒级回滚。 |
-| **02** | [业务知识挂载指南](02-Business-Overlay-Guide.md) | 中性核心与业务解耦规范、`SOUL.generic.md` 身份注入、MCP 服务的规范挂载、外部 Skills 引入、9 角色业务团队与 `sync_roles.py` 配置深度合并。 |
-| **03** | [前后台多智能体与 StateGraph](03-Multi-Agent-and-StateGraph.md) | 前台接待员与后台执行者职责边界、8 大官方研发岗位契约（`DEV_ROLES`）、Raven 路径所有权矩阵、LangGraph 纯 Python 状态图、EverOS 技能锻造器。 |
-| **04** | [交互卡片与交付机制](04-Feishu-Cards-and-Delivery.md) | CardKit 2.0 状态机生命周期、单在途去抖合并、`drain()` 屏障、实时动态进度流、Markdown 与 Chromium 图文/云文档高清交付规范。 |
-| **05** | [运维排障与 FAQ](05-Operations-and-Troubleshooting.md) | 布局感知运维脚本（`_layout.sh`）、`doctor` 全局体检、脱敏长期记忆召回诊断（`inspect_recall_diagnostics.py`）、历史版本清理（`prune-releases`）与生产常见问题速查处置表。 |
+| **安装计划预览** | `./install/superagent.sh plan --profile <p>` | 只读生成变更计划 JSON，零系统副作用 |
+| **执行正式安装** | `./install/superagent.sh install --profile <p> --apply` | 构建不可变 release、建立 `current` 软链、配置插件 |
+| **全局健康体检** | `python3 tools/superagent.py doctor --profile <p>` | 输出包含 17 项观测键的纯 JSON 诊断（退出码 0 为 ready） |
+| **平滑版本升级** | `python3 tools/superagent.py update --profile <p>` | 构建新 release 并原子切换软链接，平滑接管未完成任务 |
+| **秒级紧急回滚** | `python3 tools/superagent.py rollback --profile <p>` | 将 `current` 原子切回上一个稳定 release（无 `--apply`） |
+| **历史版本清理** | `python3 tools/superagent.py prune-releases --profile <p> --keep 3` | 保留最近 3 个 release，安全回收磁盘空间（无 `--apply`） |
+| **安全卸载清理** | `./install/superagent.sh uninstall --profile <p> --apply` | 停用受管服务并清理软链接，可选保留数据 |
 
 ---
 
-## 4. 常用核心命令速查表
+## 4. 文档导航与技术规范
 
-| 操作场景 | 推荐命令 | 说明 |
-| :--- | :--- | :--- |
-| **环境预检与单测** | `bash verify.sh` | 静态检查、全仓业务中立性门禁与核心单测（零外部依赖，约 30 秒） |
-| **单根安装计划** | `./install/superagent.sh plan --profile <profile>` | 查看安装受管根目录的规划变更，不改动系统 |
-| **执行正式安装** | `./install/superagent.sh install --profile <profile> --apply` | 部署新版本到 `releases/<version>` 并原子软链至 `current` |
-| **全局健康体检** | `python3 tools/superagent.py doctor --profile <profile>` | 检查 systemd 服务状态、队列积压、插件链接与配置完整性 |
-| **平滑版本升级** | `python3 tools/superagent.py update --profile <profile> --apply` | 构建新 release、无缝接管状态并重启关联服务 |
-| **秒级紧急回滚** | `python3 tools/superagent.py rollback --profile <profile>` | 切换 `current` 软链接至上一个 release 并恢复稳定状态 |
-| **历史版本清理** | `python3 tools/superagent.py prune-releases --profile <profile> --keep 3 --apply` | 保留最近 3 个历史 release，安全回收磁盘空间 |
-| **记忆召回诊断** | `python3 tools/inspect_recall_diagnostics.py --profile <profile>` | 脱敏审计召回延迟、命中率与各分桶健康状况 |
-| **架构文档渲染** | `python3 tools/arch_doc.py <doc.md> -o <out_dir>` | 生成内联 CSS 样式的自包含 HTML 与高清分页 PNG 预览 |
-
----
-
-## 5. 延伸权威技术文档
-
-若需深入理解特定子系统的底层源码与历史设计规范，可参考仓库中的权威活文档：
-
-- [`docs/README.md`](../README.md)：文档主索引与全景导览（Master Index）
-- [`docs/TECH_MANUAL.md`](../TECH_MANUAL.md)：Super Agent 系统技术手册（原理、边界、恢复语义与故障处置矩阵）
-- [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md)：v2.0 架构全景深潜与 ADR 决策记录
-- [`docs/DEPLOY.md`](../DEPLOY.md)：生产部署与生命周期指南
-- [`docs/PLUGINS.md`](../PLUGINS.md)：插件与工具面全景指南（16 款受管插件机制）
-- [`docs/OPERATIONS.md`](../OPERATIONS.md)：布局感知运维与对账指南
-
----
-
-> **小贴士**：开始使用请继续阅读：[01. 5分钟快速上手与单根部署](01-Quickstart-and-Install.md)
->
->  [下一篇：01. 5分钟快速上手与单根部署 (01-Quickstart-and-Install.md)](01-Quickstart-and-Install.md)
+关于架构不变量、插件机制与生产环境配置的深入细节，请参考以下权威技术文档：
+- [`docs/DEPLOY.md`](../DEPLOY.md)：单根拓扑规范、服务安装流程与发布锁定参数说明；
+- [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md)：v2.0 架构全景深潜与 ADR-S1~S6 决策记录；
+- [`docs/TECH_MANUAL.md`](../TECH_MANUAL.md)：系统技术手册与核心防御矩阵；
+- [`docs/PLUGINS.md`](../PLUGINS.md)：14 个插件目录、`enabled` 门禁与挂载规范；
+- [`docs/OPERATIONS.md`](../OPERATIONS.md)：布局感知运维指南与应急恢复流程。

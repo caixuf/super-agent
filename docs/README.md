@@ -39,6 +39,9 @@ flowchart TD
 
 面向初学者与业务开发者，提供端到端、低门槛、无冗余图文指导：
 
+> [!TIP]
+> 想要立即验证系统运行？请参阅 [**Wiki 首页 (docs/wiki/Home.md)**](wiki/Home.md) 中的「**60 秒真机可复现任务闭环**」，通过一条真实指令体验从接单、排队、Worker 认领到终态交付的完整全链路！
+
 - **[`wiki/Home.md`](wiki/Home.md)**：**Wiki 首页与全局导览** —— 架构全景、设计哲学与知识图谱。
 - **[`wiki/01-Quickstart-and-Install.md`](wiki/01-Quickstart-and-Install.md)**：**第 1 篇：5 分钟上手与单根部署** —— 安装、计划先行（Plan）、整包升级与秒级回滚。
 - **[`wiki/02-Business-Overlay-Guide.md`](wiki/02-Business-Overlay-Guide.md)**：**第 2 篇：业务知识挂载指南** —— 中性底座、业务叠加层、MCP 挂载与业务角色团队装配。

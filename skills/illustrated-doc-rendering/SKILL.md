@@ -58,7 +58,7 @@ metadata:
 python3 tools/arch_doc.py source.md -o output/ --width 1100
 ```
 
-在本体仓目录可用上面的命令；业务工作目录中使用 hook 提供的 renderer 绝对路径，或调用技能的 `scripts/render_doc.sh --engine-root <本体目录> source.md -o output/`。不要把渲染器复制进业务仓。依赖和实际产物格式以工具 `--help` 为准。
+在本体仓目录可用上面的命令；业务工作目录中使用 hook 提供的 renderer 绝对路径，或调用技能的 `skills/illustrated-doc-rendering/scripts/render_doc.sh --engine-root <本体目录> source.md -o output/`。不要把渲染器复制进业务仓。依赖和实际产物格式以工具 `--help` 为准。
 HTML 应完整、自包含。长内容可以拆成连续 PNG 页，聊天先给可读预览，再附完整文档；不要把整份长文压成一张无法阅读的小图。
 `--png-only` 也必须使用最新 Markdown；旧文件存在不代表本次生成成功。
 

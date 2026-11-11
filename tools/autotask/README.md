@@ -16,13 +16,13 @@
 ## 为什么值得抽象
 
 - **可测**：`collect`/`write`/`report` 都是纯函数，mock 输入即可断言；提示词只剩「判断」这一句；
-- **不重造**：调度仍用宿主自己的 cron（Hermes `cron/jobs.json`），本模块只定义作业内容与产物契约；
-- **可迁移**：换台机器照抄 `jobs/*.json`，路径与阈值从 `autotask.json` 读，不写死在提示词里。
+- **不重造**：调度仍用宿主自己的 cron（Hermes `<profile>/cron/jobs.json`），本模块只定义作业内容与产物契约；
+- **可迁移**：换台机器照抄 `runtime/autotask/jobs/*.json`，路径与阈值从 `autotask.json` 读，不写死在提示词里。
 
 ## 用法（概念）
 
 ```jsonc
-// jobs/memory-budget.json
+// runtime/autotask/jobs/memory-budget.json
 {
   "id": "memory-budget-guard",
   "schedule": "0 * * * *",
@@ -34,7 +34,7 @@
 }
 ```
 
-渲染器把上面的五段展开成宿主 cron 能执行的一条提示词（`python3 tools/autotask/render.py jobs/xxx.json`），
+渲染器把上面的五段展开成宿主 cron 能执行的一条提示词（`python3 tools/autotask/taskfile.py render runtime/autotask/jobs/<job>.json`），
 并把**判据与产物路径**写成模型必须遵守的格式，避免每份作业自由发挥。
 
 ## 边界
