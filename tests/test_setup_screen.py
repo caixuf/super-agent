@@ -435,6 +435,17 @@ class TestSetupScreenCLI:
         assert snap["viewer_holds_control"] is True
         assert snap["lease"]["is_human_takeover"] is True
 
+        # Verify "<pid> <timestamp>" format in launcher.pid is parsed accurately
+        import os as _os
+        bd = hermes_home / "bot-desktop"
+        (bd / "launcher.pid").write_text(f"{_os.getpid()} 1794386873.63\n", encoding="utf-8")
+        (bd / "display").write_text("20\n", encoding="utf-8")
+        (bd / "rfb.sock").write_text("", encoding="utf-8")
+        snap_live = inspect_profile_screen("alpha", hermes_home, viewer_id="viewer-123")
+        assert snap_live["running"] is True
+        assert snap_live["pid"] == _os.getpid()
+        assert snap_live["display"] == ":20"
+
         # Non-holder cannot release without force
         st_ignored = release_bot_desktop_lease(hermes_home, "viewer-other", force=False)
         assert st_ignored.holder == "human"

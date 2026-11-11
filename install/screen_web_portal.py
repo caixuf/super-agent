@@ -138,9 +138,11 @@ def inspect_profile_screen(profile_name: str, profile_home: Path, viewer_id: str
     pid_alive = False
     if pid_path.is_file():
         try:
-            pid = int(pid_path.read_text(encoding="utf-8").strip())
-            os.kill(pid, 0)
-            pid_alive = True
+            tokens = pid_path.read_text(encoding="utf-8").split()
+            if tokens:
+                pid = int(tokens[0])
+                os.kill(pid, 0)
+                pid_alive = True
         except (OSError, ValueError):
             pid_alive = False
 
@@ -1102,6 +1104,7 @@ def render_portal_service(
         "Type=simple\n"
         f'Environment="HERMES_HOME={hermes_home}"\n'
         f'ExecStart="{python_bin}" "{script}" --hermes-home "{hermes_home}" --host "{host}" --port "{port}"\n'
+        "KillMode=process\n"
         "Restart=always\n"
         "RestartSec=3\n\n"
         "[Install]\n"
