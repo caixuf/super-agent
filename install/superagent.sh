@@ -20,7 +20,7 @@ for arg in "$@"; do
   if [ -z "$cmd" ] && [[ "$arg" != --* ]]; then cmd="$arg"; else args+=("$arg"); fi
 done
 if [ -z "$cmd" ]; then
-  printf 'usage: %s {package|plan|install|update|doctor|uninstall|candidate-hermes|profile} [--profile NAME] [--apply]\n' "$0" >&2
+  printf 'usage: %s {package|plan|install|update|doctor|uninstall|candidate-hermes|profile|lobechat} [--profile NAME] [--apply]\n' "$0" >&2
   exit 2
 fi
 if [ "$cmd" = "package" ]; then
@@ -28,6 +28,9 @@ if [ "$cmd" = "package" ]; then
 fi
 if [ "$cmd" = "profile" ]; then
   exec "$PY" "$ROOT/install/setup_profile.py" "${args[@]}"
+fi
+if [ "$cmd" = "lobechat" ]; then
+  exec "$PY" "$ROOT/install/setup_lobechat.py" "${args[@]}"
 fi
 if [ "$cmd" = "check" ] || [ "$cmd" = "preflight" ]; then
   exec "$PY" -c "import sys; sys.path.insert(0, '$ROOT'); from agentcore.preflight import run_preflight_suite; r = run_preflight_suite(); print(r.summary()); sys.exit(0 if r.all_passed else 1)"

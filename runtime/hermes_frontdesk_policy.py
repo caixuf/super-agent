@@ -20,7 +20,7 @@ TASK_TOOLS = frozenset({
     "durable_roster", "task_status", "colleague_list",
     "lan_node_list", "lan_node_probe",
     "skills_list", "skill_view",
-    "feishu_doc_read", "web_extract",
+    "feishu_doc_read", "web_extract", "web_search", "vision_analyze",
 })
 MEMORY_READ_TOOLS = frozenset({
     "memory_search_l1", "memory_timeline_l2", "memory_get_observations_l3",
