@@ -1,6 +1,7 @@
 """Tests for LobeChat deployment setup and Bot presets exporter."""
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 import pytest
@@ -10,14 +11,20 @@ from install.setup_lobechat import (
     render_lobechat_service,
     main as setup_main,
 )
-from tools.export_lobechat_agents import (
-    ROLE_AVATARS,
-    ROLE_SYSTEM_PROMPTS,
-    build_lobechat_agent_config,
-    build_lobechat_master_agent,
-    export_all_agents,
-    main as export_main,
+
+_REPO = Path(__file__).resolve().parents[1]
+_spec = importlib.util.spec_from_file_location(
+    "superagent_export_lobechat_agents", _REPO / "tools" / "export_lobechat_agents.py"
 )
+_export_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_export_mod)
+
+ROLE_AVATARS = _export_mod.ROLE_AVATARS
+ROLE_SYSTEM_PROMPTS = _export_mod.ROLE_SYSTEM_PROMPTS
+build_lobechat_agent_config = _export_mod.build_lobechat_agent_config
+build_lobechat_master_agent = _export_mod.build_lobechat_master_agent
+export_all_agents = _export_mod.export_all_agents
+export_main = _export_mod.main
 from agentcore.colleague_dev import DEV_ROLES
 
 
