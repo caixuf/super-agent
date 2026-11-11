@@ -14,12 +14,19 @@ Security and determinism invariants:
 """
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+import time
+from typing import Any, Dict, Iterator, Mapping, Optional
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
 
 HUMAN_TAKEOVER_STAGE = "human_takeover_wait"
 _VALID_HOLDERS = frozenset({"agent", "human"})
@@ -146,6 +153,123 @@ def is_human_takeover(hermes_home: str | Path | None) -> bool:
     return read_bot_desktop_lease(hermes_home).is_human_takeover
 
 
+def _open_private(path: str | bytes | os.PathLike[str], flags: int) -> int:
+    return os.open(path, flags, 0o600)
+
+
+@contextlib.contextmanager
+def _lease_lock(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(path.parent, 0o700)
+    if fcntl is None:
+        yield
+        return
+    lock_file = path.with_suffix(".lock")
+    fh = open(lock_file, "a+", encoding="utf-8", opener=_open_private)
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fh.close()
+
+
+def _read_raw_lease(path: Path) -> Dict[str, Any]:
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        return {"holder": "agent", "viewer_id": None, "since": time.time(), "reason": "", "epoch": 0}
+    except OSError:
+        return {
+            "holder": "human",
+            "viewer_id": "unreadable-lease",
+            "since": time.time(),
+            "reason": "lease file unreadable",
+            "epoch": 0,
+        }
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or data.get("holder") not in _VALID_HOLDERS:
+        return {
+            "holder": "human",
+            "viewer_id": "unreadable-lease",
+            "since": time.time(),
+            "reason": "lease file corrupt",
+            "epoch": 0,
+        }
+    return {
+        "holder": data.get("holder", "agent"),
+        "viewer_id": data.get("viewer_id"),
+        "since": float(data.get("since") or 0.0),
+        "reason": str(data.get("reason") or ""),
+        "epoch": int(data.get("epoch") or 0),
+    }
+
+
+def _write_raw_lease(path: Path, payload: Dict[str, Any]) -> None:
+    tmp = path.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8", opener=_open_private) as fh:
+        fh.write(json.dumps(payload))
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def viewer_holds_lease(hermes_home: str | Path | None, viewer_id: str) -> bool:
+    """Return True only when *viewer_id* is non-empty and actively holds the human lease."""
+    if not viewer_id or hermes_home is None or not str(hermes_home).strip():
+        return False
+    raw = _read_raw_lease(lease_file_path(hermes_home))
+    return raw.get("holder") == "human" and raw.get("viewer_id") == viewer_id
+
+
+def acquire_bot_desktop_lease(
+    hermes_home: str | Path,
+    viewer_id: str,
+    *,
+    reason: str = "",
+) -> ScreenLeaseState:
+    """Atomically acquire human screen control under upstream-compatible ``lease.lock``."""
+    if not viewer_id or not viewer_id.strip():
+        raise ValueError("viewer_id must be a non-empty string")
+    path = lease_file_path(hermes_home)
+    with _lease_lock(path):
+        cur = _read_raw_lease(path)
+        if not (cur["holder"] == "human" and cur["viewer_id"] == viewer_id):
+            cur["holder"] = "human"
+            cur["viewer_id"] = viewer_id
+            cur["since"] = time.time()
+            cur["reason"] = reason or ""
+            cur["epoch"] = int(cur.get("epoch") or 0) + 1
+            _write_raw_lease(path, cur)
+    return read_bot_desktop_lease(hermes_home)
+
+
+def release_bot_desktop_lease(
+    hermes_home: str | Path,
+    viewer_id: Optional[str] = None,
+    *,
+    force: bool = False,
+) -> ScreenLeaseState:
+    """Return screen control to the agent (honoring *viewer_id* unless *force* is True)."""
+    path = lease_file_path(hermes_home)
+    with _lease_lock(path):
+        cur = _read_raw_lease(path)
+        if cur["holder"] != "agent":
+            if force or viewer_id is None or cur.get("viewer_id") == viewer_id:
+                cur["holder"] = "agent"
+                cur["viewer_id"] = None
+                cur["since"] = time.time()
+                cur["reason"] = ""
+                cur["epoch"] = int(cur.get("epoch") or 0) + 1
+                _write_raw_lease(path, cur)
+    return read_bot_desktop_lease(hermes_home)
+
+
 def resolve_job_hermes_home(
     payload: Optional[Mapping[str, Any]] = None,
     env: Optional[Mapping[str, str]] = None,
@@ -169,3 +293,4 @@ def resolve_job_hermes_home(
             return Path(val.strip()).expanduser()
 
     return None
+

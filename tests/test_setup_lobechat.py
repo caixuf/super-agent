@@ -11,6 +11,8 @@ from install.setup_lobechat import (
     main as setup_main,
 )
 from tools.export_lobechat_agents import (
+    ROLE_AVATARS,
+    ROLE_SYSTEM_PROMPTS,
     build_lobechat_agent_config,
     build_lobechat_master_agent,
     export_all_agents,
@@ -54,7 +56,7 @@ def test_export_single_agent_config():
     assert agent["schemaVersion"] == "v1"
     assert agent["identifier"] == "superagent-architect"
     assert agent["meta"]["title"] == f"SuperAgent: {role_data['display_name']}"
-    assert agent["meta"]["avatar"] == "📐"
+    assert agent["meta"]["avatar"] == "ARCH"
     assert "SuperAgent" in agent["meta"]["tags"]
     assert "architect" in agent["meta"]["tags"]
     assert agent["config"]["model"] == "hermes-agent"
@@ -65,11 +67,13 @@ def test_export_master_agent():
     master = build_lobechat_master_agent(default_model="hermes-agent")
     assert master["identifier"] == "superagent-master"
     assert master["meta"]["title"] == "Super Agent 主智能体"
-    assert master["meta"]["avatar"] == "🧠"
+    assert master["meta"]["avatar"] == "MASTER"
     assert "Super Agent" in master["config"]["systemRole"]
 
 
 def test_export_all_agents_structure():
+    assert set(ROLE_AVATARS.keys()) == set(DEV_ROLES.keys())
+    assert set(ROLE_SYSTEM_PROMPTS.keys()) == set(DEV_ROLES.keys())
     pack = export_all_agents(default_model="hermes-agent")
     assert pack["exportType"] == "sessions"
     assert pack["version"] == 3
@@ -81,6 +85,8 @@ def test_export_all_agents_structure():
     assert "superagent-master" in session_ids
     for r in DEV_ROLES:
         assert f"superagent-{r}" in session_ids
+    for s in sessions:
+        assert s["meta"]["avatar"].isascii()
 
 
 def test_setup_main_plan_and_apply(tmp_path, monkeypatch, capsys):

@@ -49,9 +49,19 @@ class RolePathOwnership:
     enforce_read: str = SOFT
 
 
+DEFAULT_SCREEN_POLICY: Dict[str, Any] = {
+    "geometry": "1440x900",
+    "auto_start": False,
+    "placement": "auto",
+    "idle_stop_minutes": 30,
+}
+
 # Standard roster of the Universal Engineering Colleague Team
 # Super Agent core provides these 8 canonical engineering roles out-of-the-box.
 # Business domains can customize, extend, or override duties via register_role_override().
+# Note: DEV_ROLES entries preserve exact 4-field parity with agentcore.colleague_catalog.FIELDS
+# so default_dev_catalog() remains backward compatible; screen and path ownership contracts live
+# in companion dicts DEV_ROLE_SCREEN and DEV_ROLE_OWNERSHIP.
 DEV_ROLES: Dict[str, Dict[str, Any]] = {
     "architect": {
         "display_name": "需求边界与系统架构师",
@@ -167,6 +177,18 @@ DEV_ROLES: Dict[str, Dict[str, Any]] = {
     },
 }
 
+#: Canonical Bot Desktop screen capability contract for the engineering colleague team
+DEV_ROLE_SCREEN: Dict[str, Dict[str, Any]] = {
+    "architect": {"has_screen": True, "screen_policy": dict(DEFAULT_SCREEN_POLICY)},
+    "cases": {"has_screen": False, "screen_policy": dict(DEFAULT_SCREEN_POLICY)},
+    "reviewer": {"has_screen": False, "screen_policy": dict(DEFAULT_SCREEN_POLICY)},
+    "test": {"has_screen": True, "screen_policy": dict(DEFAULT_SCREEN_POLICY)},
+    "triage": {"has_screen": False, "screen_policy": dict(DEFAULT_SCREEN_POLICY)},
+    "backend": {"has_screen": False, "screen_policy": dict(DEFAULT_SCREEN_POLICY)},
+    "frontend": {"has_screen": True, "screen_policy": dict(DEFAULT_SCREEN_POLICY)},
+    "ops": {"has_screen": True, "screen_policy": dict(DEFAULT_SCREEN_POLICY)},
+}
+
 #: Raven-inspired canonical path ownership matrix for the engineering colleague team
 DEV_ROLE_OWNERSHIP: Dict[str, Dict[str, Any]] = {
     "architect": {
@@ -242,14 +264,53 @@ def reset_role_overrides() -> None:
     _ROLE_OVERRIDES.clear()
 
 
-def get_dev_roles() -> Dict[str, Dict[str, Any]]:
-    """Return the official roster of development colleague roles with overrides merged."""
+def get_dev_roles(*, include_screen: bool = False) -> Dict[str, Dict[str, Any]]:
+    """Return the official roster of development colleague roles with overrides merged.
+
+    By default, returns the 4 canonical catalog fields per role (preserving strict
+    schema parity with ``agentcore.colleague_catalog.normalize_catalog``), plus any
+    explicitly registered runtime overrides. Pass ``include_screen=True`` to also
+    merge canonical ``has_screen`` and ``screen_policy`` entries from ``DEV_ROLE_SCREEN``.
+    """
     import copy
     merged = copy.deepcopy(DEV_ROLES)
+    if include_screen:
+        for role, screen_meta in DEV_ROLE_SCREEN.items():
+            if role in merged:
+                merged[role].update(copy.deepcopy(screen_meta))
     for role, custom in _ROLE_OVERRIDES.items():
         if role in merged:
+            base_policy = dict(
+                merged[role].get("screen_policy")
+                or DEV_ROLE_SCREEN.get(role, {}).get("screen_policy")
+                or DEFAULT_SCREEN_POLICY
+            )
             merged[role].update(custom)
+            if "screen_policy" in custom and isinstance(custom["screen_policy"], dict):
+                base_policy.update(custom["screen_policy"])
+                merged[role]["screen_policy"] = base_policy
     return merged
+
+
+def role_supports_screen(role: str) -> bool:
+    """Return True if the colleague role supports interactive Bot Desktop screen inspection."""
+    roles = get_dev_roles(include_screen=True)
+    meta = roles.get(role)
+    if not meta:
+        return False
+    return bool(meta.get("has_screen", False))
+
+
+def get_role_screen_policy(role: str) -> Dict[str, Any]:
+    """Return a copy of the Bot Desktop screen policy for a colleague role."""
+    roles = get_dev_roles(include_screen=True)
+    if role not in roles:
+        raise ValueError(f"unknown_role: {role}")
+    policy = dict(DEFAULT_SCREEN_POLICY)
+    raw = roles[role].get("screen_policy")
+    if isinstance(raw, dict):
+        policy.update(raw)
+    return policy
 
 
 def get_role_ownership(role: str) -> RolePathOwnership:

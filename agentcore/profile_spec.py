@@ -25,7 +25,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 _IDENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 _ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}\Z")
+_SCREEN_GEOMETRY_RE = re.compile(r"^\d{3,5}x\d{3,5}\Z")
 _VALID_MODEL_TIERS = frozenset({"pro", "flash", "main"})
+_VALID_SCREEN_PLACEMENTS = frozenset({"auto", "terminal", "gateway"})
 
 
 def quote_systemd(value: str) -> str:
@@ -50,6 +52,12 @@ class WorkerSpec:
     max_turns: int = 1000
     run_budget: int = 3600
     env: Dict[str, str] = field(default_factory=dict)
+    enable_screen: bool = False
+    screen_geometry: str = "1440x900"
+    screen_auto_start: bool = False
+    screen_idle_stop_minutes: int = 30
+    screen_min_free_memory_mb: int = 1536
+    screen_placement: str = "auto"
 
     def validate(self) -> List[str]:
         errors: List[str] = []
@@ -66,7 +74,44 @@ class WorkerSpec:
             errors.append(f"Timeout must be positive, got {self.timeout}")
         if self.max_file <= 0:
             errors.append(f"max_file must be positive, got {self.max_file}")
+        if not _SCREEN_GEOMETRY_RE.fullmatch(self.screen_geometry):
+            errors.append(
+                f"Invalid screen_geometry '{self.screen_geometry}': "
+                f"must match {_SCREEN_GEOMETRY_RE.pattern}"
+            )
+        if self.screen_placement not in _VALID_SCREEN_PLACEMENTS:
+            errors.append(
+                f"Invalid screen_placement '{self.screen_placement}': "
+                f"must be one of {sorted(_VALID_SCREEN_PLACEMENTS)}"
+            )
+        if self.screen_idle_stop_minutes < 0:
+            errors.append(
+                f"screen_idle_stop_minutes must be non-negative, got {self.screen_idle_stop_minutes}"
+            )
+        if self.screen_min_free_memory_mb < 0:
+            errors.append(
+                f"screen_min_free_memory_mb must be non-negative, got {self.screen_min_free_memory_mb}"
+            )
         return errors
+
+    def render_bot_desktop_config(self) -> Dict[str, Any]:
+        """Render Hermes Bot Desktop and computer_use configuration keys for this worker."""
+        return {
+            "platform_toolsets": ["computer_use"] if self.enable_screen else [],
+            "bot_desktop": {
+                "geometry": self.screen_geometry,
+                "auto_start": self.screen_auto_start,
+                "min_free_memory_mb": self.screen_min_free_memory_mb,
+                "idle_stop_minutes": self.screen_idle_stop_minutes,
+                "placement": self.screen_placement,
+            },
+            "computer_use": {
+                "cua_telemetry": False,
+                "autostart": self.screen_auto_start,
+                "max_image_dimension": 1456,
+                "capture_after_mode": "som",
+            },
+        }
 
 
 @dataclass
@@ -212,6 +257,11 @@ class BusinessProfileSpec:
             env_lines.append(f'Environment={quote_systemd(f"DEV_TARGET_HOST={worker.target_host}")}')
         if worker.duty:
             env_lines.append(f'Environment={quote_systemd(f"DEV_EXPERT_DUTY={worker.duty}")}')
+        if worker.enable_screen:
+            env_lines.append(f'Environment={quote_systemd("SUPERAGENT_ENABLE_SCREEN=1")}')
+            env_lines.append(
+                f'Environment={quote_systemd(f"SUPERAGENT_SCREEN_GEOMETRY={worker.screen_geometry}")}'
+            )
 
         # Profile level and worker level environment variables
         combined_env = dict(self.env)
@@ -346,6 +396,32 @@ class BusinessProfileSpec:
             f"WantedBy=default.target\n"
         )
 
+    def render_hermes_screen_overlay(self) -> Dict[str, Any]:
+        """Aggregate profile-level Hermes Bot Desktop configuration overlay."""
+        enabled = [w for w in self.workers if w.enable_screen]
+        if not enabled:
+            return WorkerSpec(role="default").render_bot_desktop_config()
+        primary = enabled[0]
+        auto_start = any(w.screen_auto_start for w in enabled)
+        min_free_mb = max(w.screen_min_free_memory_mb for w in enabled)
+        idle_stop = max(w.screen_idle_stop_minutes for w in enabled)
+        return {
+            "platform_toolsets": ["computer_use"],
+            "bot_desktop": {
+                "geometry": primary.screen_geometry,
+                "auto_start": auto_start,
+                "min_free_memory_mb": min_free_mb,
+                "idle_stop_minutes": idle_stop,
+                "placement": primary.screen_placement,
+            },
+            "computer_use": {
+                "cua_telemetry": False,
+                "autostart": auto_start,
+                "max_image_dimension": 1456,
+                "capture_after_mode": "som",
+            },
+        }
+
     def render_all_units(self) -> Dict[str, str]:
         """Generate all systemd unit definitions for this profile."""
         units: Dict[str, str] = {}
@@ -389,6 +465,12 @@ class BusinessProfileSpec:
                 "max_turns": w.max_turns,
                 "run_budget": w.run_budget,
                 "env": w.env,
+                "enable_screen": w.enable_screen,
+                "screen_geometry": w.screen_geometry,
+                "screen_auto_start": w.screen_auto_start,
+                "screen_idle_stop_minutes": w.screen_idle_stop_minutes,
+                "screen_min_free_memory_mb": w.screen_min_free_memory_mb,
+                "screen_placement": w.screen_placement,
             }
             for w in self.workers
         ]
@@ -440,6 +522,28 @@ def load_profile_spec(data: Dict[str, Any], base_dir: Optional[Path] = None) -> 
                     max_turns=int(w.get("max_turns", 40)),
                     run_budget=int(w.get("run_budget", 480)),
                     env=dict(w.get("env") or {}),
+                    enable_screen=bool(w.get("enable_screen", False)),
+                    screen_geometry=(
+                        str(w["screen_geometry"])
+                        if w.get("screen_geometry") is not None
+                        else "1440x900"
+                    ),
+                    screen_auto_start=bool(w.get("screen_auto_start", False)),
+                    screen_idle_stop_minutes=(
+                        int(w["screen_idle_stop_minutes"])
+                        if w.get("screen_idle_stop_minutes") is not None
+                        else 30
+                    ),
+                    screen_min_free_memory_mb=(
+                        int(w["screen_min_free_memory_mb"])
+                        if w.get("screen_min_free_memory_mb") is not None
+                        else 1536
+                    ),
+                    screen_placement=(
+                        str(w["screen_placement"])
+                        if w.get("screen_placement") is not None
+                        else "auto"
+                    ),
                 )
             )
 

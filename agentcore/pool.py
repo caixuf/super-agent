@@ -21,6 +21,11 @@ import time
 import uuid
 
 from agentcore import colleague_containment as containment
+from agentcore.screen_lease import (
+    HUMAN_TAKEOVER_STAGE,
+    is_human_takeover,
+    resolve_job_hermes_home,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +80,12 @@ def normalize_origin(origin):
 def display_stage(row):
     """Prefer-D2 CardView/status stage — never healthy Running for pid-null or cancel=1.
 
-    Returns one of: queued, starting, running, canceling, paused, waiting_user,
-    awaiting_plan_approval, completed, failed, cancelled, or the raw status.
+    Returns one of: queued, starting, running, human_takeover_wait, canceling,
+    paused, waiting_user, awaiting_plan_approval, completed, failed, cancelled,
+    or the raw status.
     ``paused`` is the CardView label when pool status is waiting_user after pause.
+    ``human_takeover_wait`` is reported when a running job pauses its execution
+    timeout budget while a human holds the Bot Desktop screen lease.
     """
     if row is None:
         return "unknown"
@@ -110,6 +118,8 @@ def display_stage(row):
         pid = row.get("pid")
         if pid is None:
             return "starting"
+        if bool(row.get("screen_takeover")):
+            return HUMAN_TAKEOVER_STAGE
         return "running"
     if status == "queued":
         return "queued"
@@ -159,7 +169,8 @@ class Pool:
             for name, kind in [('pid', 'INTEGER'), ('pid_start', 'TEXT'), ('deadline', 'REAL'),
                                ('origin', 'TEXT'), ('containment_token', 'TEXT'),
                                ('cancel_requested_at', 'REAL'),
-                               ('execution_state', 'TEXT'), ('supervisor_nonce', 'TEXT')]:
+                               ('execution_state', 'TEXT'), ('supervisor_nonce', 'TEXT'),
+                               ('screen_takeover', 'INTEGER NOT NULL DEFAULT 0')]:
                 if name not in columns:
                     db.execute('ALTER TABLE jobs ADD COLUMN ' + name + ' ' + kind)
             outbox_columns = {r[1] for r in db.execute('PRAGMA table_info(outbox)')}
@@ -336,13 +347,13 @@ class Pool:
         receipt = json.dumps({'job': job, 'status': status, 'result': result}, ensure_ascii=False)
         if attempt is None:
             updated = db.execute(
-                "UPDATE jobs SET status=?,result=?,heartbeat=NULL "
+                "UPDATE jobs SET status=?,result=?,heartbeat=NULL,screen_takeover=0 "
                 "WHERE id=? AND status NOT IN ('completed','failed','cancelled')",
                 (status, json.dumps(result, ensure_ascii=False), job),
             )
         else:
             updated = db.execute(
-                "UPDATE jobs SET status=?,result=?,heartbeat=NULL "
+                "UPDATE jobs SET status=?,result=?,heartbeat=NULL,screen_takeover=0 "
                 "WHERE id=? AND attempt=? AND status NOT IN ('completed','failed','cancelled')",
                 (status, json.dumps(result, ensure_ascii=False), job, attempt),
             )
@@ -399,12 +410,12 @@ class Pool:
                     # The token assists legacy cleanup; only the supervisor receipt
                     # proves that this trusted local process tree has stopped.
                     attempt_token = containment.new_token()
-                    db.execute("UPDATE jobs SET status='running',attempt=?,heartbeat=?,tries=tries+1,pid=NULL,pid_start=NULL,deadline=NULL,containment_token=?,execution_state='claimed',supervisor_nonce=NULL WHERE id=?",
+                    db.execute("UPDATE jobs SET status='running',attempt=?,heartbeat=?,tries=tries+1,pid=NULL,pid_start=NULL,deadline=NULL,containment_token=?,execution_state='claimed',supervisor_nonce=NULL,screen_takeover=0 WHERE id=?",
                                (token, time.time(), attempt_token, row['id']))
                     keep = True
                     return dict(row, attempt=token, containment_token=attempt_token,
                                 execution_state='claimed', supervisor_nonce=None,
-                                tries=row['tries'] + 1), fd
+                                screen_takeover=0, tries=row['tries'] + 1), fd
                 finally:
                     if not keep:
                         os.close(fd)
@@ -704,7 +715,7 @@ class Pool:
                         updated = db.execute(
                             "UPDATE jobs SET status='queued',heartbeat=NULL,attempt=NULL,"
                             "pid=NULL,pid_start=NULL,deadline=NULL,containment_token=NULL,"
-                            "execution_state='finished',supervisor_nonce=NULL "
+                            "execution_state='finished',supervisor_nonce=NULL,screen_takeover=0 "
                             "WHERE id=? AND attempt=? AND status='running'",
                             (job_id, attempt),
                         )
@@ -815,7 +826,7 @@ class Pool:
             if unquiesced or supervised_unknown:
                 # Persist uncertainty without a terminal outbox or retry. A
                 # request/finish callback cannot overrule known surviving work.
-                db.execute("UPDATE jobs SET result=?,execution_state=CASE "
+                db.execute("UPDATE jobs SET result=?,screen_takeover=0,execution_state=CASE "
                            "WHEN execution_state='supervised' THEN execution_state ELSE 'unconfirmed' END "
                            "WHERE id=? AND attempt=?",
                            (json.dumps({'reason': 'attempt_stop_unproven'}), job, attempt))
@@ -828,18 +839,18 @@ class Pool:
             elif row['status'] in ('waiting_user', 'awaiting_plan_approval'):
                 # Stop acknowledgement may arrive after a pause. Keep the human
                 # gate parked, but let a later resume verify this attempt stopped.
-                db.execute("UPDATE jobs SET result=? WHERE id=? AND attempt=?",
+                db.execute("UPDATE jobs SET result=?,screen_takeover=0 WHERE id=? AND attempt=?",
                            (json.dumps(result, ensure_ascii=False), job, attempt))
             elif not ok and worker_stopping and row['replay_safe']:
-                db.execute("UPDATE jobs SET status='queued',heartbeat=NULL,tries=MAX(0, tries-1) WHERE id=?", (job,))
+                db.execute("UPDATE jobs SET status='queued',heartbeat=NULL,screen_takeover=0,tries=MAX(0, tries-1) WHERE id=?", (job,))
             elif not ok and isinstance(result, dict) and result.get('exit_code') == 78:
                 # EX_CONFIG (78): fatal auth/config failure; fail immediately without burning retry quota
                 self._terminal(db, job, 'failed', result)
             elif not ok and isinstance(result, dict) and result.get('exit_code') == 75 and row['replay_safe']:
                 # EX_TEMPFAIL (75): temporary provider/rate-limit failure; requeue without consuming business retry quota
-                db.execute("UPDATE jobs SET status='queued',heartbeat=NULL,tries=MAX(0, tries-1) WHERE id=?", (job,))
+                db.execute("UPDATE jobs SET status='queued',heartbeat=NULL,screen_takeover=0,tries=MAX(0, tries-1) WHERE id=?", (job,))
             elif not ok and row['replay_safe'] and row['tries'] < row['max_tries']:
-                db.execute("UPDATE jobs SET status='queued',heartbeat=NULL WHERE id=?", (job,))
+                db.execute("UPDATE jobs SET status='queued',heartbeat=NULL,screen_takeover=0 WHERE id=?", (job,))
             else:
                 self._terminal(db, job, 'completed' if ok else 'failed', result)
             return True
@@ -936,7 +947,8 @@ class Pool:
                 return False
             db.execute(
                 "UPDATE jobs SET status='queued', attempt=NULL, heartbeat=NULL, "
-                "pid=NULL, pid_start=NULL, deadline=NULL, execution_state='finished',supervisor_nonce=NULL WHERE id=?",
+                "pid=NULL, pid_start=NULL, deadline=NULL, execution_state='finished',"
+                "supervisor_nonce=NULL, screen_takeover=0 WHERE id=?",
                 (job,),
             )
             return True
@@ -981,7 +993,7 @@ class Pool:
         with self.db() as db:
             row = db.execute(
                 "SELECT id,status,attempt,tries,cancel,result,heartbeat,created,deadline,"
-                "pid,pid_start,cancel_requested_at,execution_state FROM jobs WHERE id=?",
+                "pid,pid_start,cancel_requested_at,execution_state,screen_takeover FROM jobs WHERE id=?",
                 (job,),
             ).fetchone()
             if row is None:
@@ -996,7 +1008,8 @@ class Pool:
             raise ValueError('limit must be positive')
         with self.db() as db:
             rows = db.execute(
-                "SELECT id,status,tries,cancel,result,heartbeat,created,origin,payload "
+                "SELECT id,status,tries,cancel,result,heartbeat,created,origin,payload,"
+                "pid,execution_state,screen_takeover "
                 "FROM jobs ORDER BY CASE WHEN status IN ('running','queued') THEN 0 ELSE 1 END, "
                 "created DESC LIMIT ?",
                 (min(limit, 50),),
@@ -1801,6 +1814,38 @@ class Pool:
             return False
         return self.run_claimed(claimed, command, timeout, lease, max_output, max_file)
 
+    def _sync_screen_takeover(self, job, attempt, *, active, remaining_s=None):
+        with self.db() as db:
+            if remaining_s is None:
+                db.execute(
+                    'UPDATE jobs SET screen_takeover=? WHERE id=? AND attempt=?',
+                    (1 if active else 0, job, attempt),
+                )
+            else:
+                db.execute(
+                    'UPDATE jobs SET screen_takeover=?, deadline=? WHERE id=? AND attempt=?',
+                    (1 if active else 0, time.time() + max(0.0, float(remaining_s)), job, attempt),
+                )
+
+    @staticmethod
+    def _notify_liveness_takeover(liveness_candidate, job, *, active):
+        if not liveness_candidate or not liveness_candidate.exists():
+            return
+        try:
+            from agentcore.liveness import LivenessLedger
+            ledger = LivenessLedger(liveness_candidate)
+            existing = ledger.get(job)
+            if existing is None:
+                return
+            if active:
+                ledger.beat(job, phase=HUMAN_TAKEOVER_STAGE,
+                            detail='waiting for human screen takeover')
+            elif existing.get('phase') == HUMAN_TAKEOVER_STAGE:
+                ledger.beat(job, phase='running',
+                            detail='human screen takeover released')
+        except Exception:
+            pass
+
     def run_claimed(self, claimed, command, timeout=300, lease=60, max_output=1048576, max_file=536870912,
                     stop_event=None):
         """Execute a claim owned by this process; caller transfers lock ownership here."""
@@ -1814,12 +1859,15 @@ class Pool:
         evidence_fd = None
         stop_sent = False
         admitted = False
+        takeover_active = False
+        ever_takeover = False
         try:
             if timeout <= 0 or lease <= 0 or max_output <= 0 or max_file <= 0:
                 raise ValueError('budgets must be positive')
             directory.mkdir(mode=0o700)
+            payload_obj = json.loads(row['payload'])
             with (directory / 'input.json').open('w+') as inp, (directory / 'stdout').open('w+') as out, (directory / 'stderr').open('w+') as err:
-                json.dump({'job': job, 'attempt': attempt, 'payload': json.loads(row['payload'])}, inp)
+                json.dump({'job': job, 'attempt': attempt, 'payload': payload_obj}, inp)
                 inp.seek(0)
                 if not self.begin_execution(job, attempt, mode='launching'):
                     raise RuntimeError('claim cancelled before runner launch')
@@ -1841,6 +1889,10 @@ class Pool:
                 liveness_candidate = self.root.parent / 'liveness.db'
                 if liveness_candidate.exists():
                     env['SUPERAGENT_LIVENESS_DB'] = str(liveness_candidate)
+                job_hermes_home = resolve_job_hermes_home(
+                    payload_obj if isinstance(payload_obj, dict) else None,
+                    env,
+                )
                 # Slow interpreter startup must not hold the dispatch database
                 # lock. Until registration commits and go is sent, this process
                 # cannot start a runner; Worker EOF closes the no-launch gap.
@@ -1857,6 +1909,9 @@ class Pool:
                 pid_start = self._process_start(proc.pid)
                 if not pid_start:
                     raise RuntimeError('supervisor identity unavailable')
+                if job_hermes_home is not None:
+                    takeover_active = is_human_takeover(job_hermes_home)
+                    ever_takeover = takeover_active
                 with self.db() as db:
                     db.execute('BEGIN IMMEDIATE')
                     current = db.execute("SELECT status,cancel FROM jobs WHERE id=? AND attempt=? "
@@ -1869,30 +1924,66 @@ class Pool:
                     # Bind a revoked, never-launched supervisor too: its private
                     # no-child receipt must remain verifiable after cancel/pause.
                     db.execute("UPDATE jobs SET pid=?,pid_start=?,deadline=?,execution_state='supervised',"
-                               "supervisor_nonce=? WHERE id=? AND attempt=?",
-                               (proc.pid, pid_start, time.time() + timeout, nonce, job, attempt))
+                               "supervisor_nonce=?,screen_takeover=? WHERE id=? AND attempt=?",
+                               (proc.pid, pid_start, time.time() + timeout, nonce,
+                                1 if (authorized and takeover_active) else 0, job, attempt))
                 os.close(evidence_fd)
                 evidence_fd = None
                 control.sendall(b'go' if authorized else b'stop')
-                deadline = time.monotonic() + timeout
-                next_heartbeat = time.monotonic() + lease / 3
+                prev_mono = time.monotonic()
+                deadline = prev_mono + timeout
+                next_heartbeat = prev_mono + lease / 3
+                takeover_poll_interval = min(0.2, max(0.02, timeout / 10.0))
+                next_takeover_poll = prev_mono + takeover_poll_interval
+                paused_takeover_seconds = 0.0
+                if authorized and takeover_active:
+                    self._notify_liveness_takeover(liveness_candidate, job, active=True)
                 reason = None if authorized else 'cancelled or lease revoked'
                 stop_deadline = None
                 while proc.poll() is None:
-                    if time.monotonic() >= next_heartbeat:
+                    now_mono = time.monotonic()
+                    dt = max(0.0, now_mono - prev_mono)
+                    prev_mono = now_mono
+                    takeover_changed = False
+                    if job_hermes_home is not None and reason is None and now_mono >= next_takeover_poll:
+                        latest_takeover = is_human_takeover(job_hermes_home)
+                        next_takeover_poll = now_mono + takeover_poll_interval
+                        if latest_takeover != takeover_active:
+                            takeover_active = latest_takeover
+                            takeover_changed = True
+                            if takeover_active:
+                                ever_takeover = True
+                    if takeover_active and reason is None:
+                        deadline += dt
+                        paused_takeover_seconds += dt
+                    did_heartbeat = False
+                    if now_mono >= next_heartbeat:
                         current = self.heartbeat(job, attempt)
-                        next_heartbeat = time.monotonic() + lease / 3
+                        next_heartbeat = now_mono + lease / 3
+                        did_heartbeat = True
                     else:
                         current = self.is_current(job, attempt)
                     if not current:
                         reason = 'cancelled or lease revoked'
                     elif stop_event is not None and stop_event.is_set() and reason is None:
                         reason = 'worker_shutdown'
-                    elif time.monotonic() > deadline:
+                    elif not takeover_active and time.monotonic() > deadline:
                         reason = 'timeout'
                     elif os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size > max_output:
                         reason = 'output budget exceeded'
+                    if reason is None and (takeover_changed or (did_heartbeat and takeover_active)):
+                        remaining_s = max(0.0, deadline - time.monotonic())
+                        self._sync_screen_takeover(
+                            job, attempt, active=takeover_active, remaining_s=remaining_s
+                        )
+                        self._notify_liveness_takeover(
+                            liveness_candidate, job, active=takeover_active
+                        )
                     if reason:
+                        if takeover_active:
+                            takeover_active = False
+                            self._sync_screen_takeover(job, attempt, active=False)
+                            self._notify_liveness_takeover(liveness_candidate, job, active=False)
                         if not stop_sent:
                             try:
                                 control.sendall(b'stop')
@@ -1904,6 +1995,15 @@ class Pool:
                         raise TimeoutError('supervisor stop confirmation unavailable')
                     time.sleep(min(0.05, lease / 4))
                 proc.wait()
+                if takeover_active and reason is None:
+                    post_dt = max(0.0, time.monotonic() - prev_mono)
+                    deadline += post_dt
+                    paused_takeover_seconds += post_dt
+                if takeover_active or ever_takeover:
+                    if takeover_active:
+                        self._notify_liveness_takeover(liveness_candidate, job, active=False)
+                    takeover_active = False
+                    self._sync_screen_takeover(job, attempt, active=False)
                 if (proc.returncode in (-15, 143)
                         and stop_event is not None and not stop_event.is_set()):
                     stop_event.wait(0.05)
@@ -1941,17 +2041,24 @@ class Pool:
                             result['runner_error'] = code
                     except (ValueError, UnicodeError, AttributeError):
                         pass
+                if paused_takeover_seconds > 0.0 and isinstance(result, dict):
+                    result.setdefault('paused_takeover_seconds', round(paused_takeover_seconds, 3))
                 result['attempt_quiescent'] = stopped
                 if not stopped:
                     ok = False
                     result['reason'] = 'attempt_stop_unproven'
                 self.finish(job, attempt, ok, result, worker_stopping=(reason == 'worker_shutdown'))
         except Exception as exc:
+            if admitted and (takeover_active or ever_takeover):
+                try:
+                    self._sync_screen_takeover(job, attempt, active=False)
+                except Exception:
+                    pass
             if proc is None and admitted:
                 # This executor has not created any child. Close the admission
                 # gap using its own fenced no-launch observation, not a timer.
                 with self.db() as db:
-                    db.execute("UPDATE jobs SET execution_state='finished' WHERE id=? AND attempt=? "
+                    db.execute("UPDATE jobs SET execution_state='finished',screen_takeover=0 WHERE id=? AND attempt=? "
                                "AND execution_state='launching'", (job, attempt))
             self.finish(job, attempt, False, {'reason': 'execution error', 'type': type(exc).__name__,
                                              'attempt_quiescent': proc is None,

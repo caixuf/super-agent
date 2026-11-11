@@ -34,6 +34,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from agentcore.screen_lease import HUMAN_TAKEOVER_STAGE, is_human_takeover
+
 #: Terminal states are write-once. ``stalled`` / ``lost`` are observations that a
 #: later heartbeat may still clear (a runner can be restarted).
 TERMINAL_STATES = frozenset({"done", "failed", "cancelled"})
@@ -512,7 +514,8 @@ class LivenessLedger:
 
     def inspect(self, task_id: str, *, now: Optional[float] = None,
                 pid_alive: Optional[Callable[[Optional[int], Optional[str]], bool]] = None,
-                require_owner: Optional[str] = None) -> Dict[str, Any]:
+                require_owner: Optional[str] = None,
+                hermes_home: Optional[Any] = None) -> Dict[str, Any]:
         """Return one task with computed age/health fields. Never fabricates success."""
         row = self.get(task_id, require_owner=require_owner)
         if row is None:
@@ -530,6 +533,10 @@ class LivenessLedger:
             total = int(row.get("progress_total") or 0)
             progress = {"done": done, "total": total,
                         "percent": round(done * 100.0 / total, 1) if total > 0 else None}
+        in_takeover = (
+            row.get("phase") == HUMAN_TAKEOVER_STAGE
+            or (hermes_home is not None and is_human_takeover(hermes_home))
+        )
         state = row["state"]
         if state in TERMINAL_STATES:
             verdict = state
@@ -539,6 +546,8 @@ class LivenessLedger:
             verdict = "lost"
         elif alive is True:
             verdict = "running"
+        elif in_takeover:
+            verdict = "running"
         elif heartbeat_age > self.stall_seconds:
             verdict = "stalled"
         else:
@@ -547,6 +556,8 @@ class LivenessLedger:
         if verdict == "queued":
             note = ("任务正在队列中等待可用工作进程调度（已排队 %.0f 秒）。"
                     % elapsed)
+        elif verdict == "running" and in_takeover:
+            note = "任务已暂停执行超时计时，正在等待人工屏幕接管操作完成（human_takeover_wait）。"
         elif verdict == "running" and alive is True and heartbeat_age > self.stall_seconds:
             note = ("进程仍可见，但最后心跳已是 %.0f 秒前；仅凭进程存在不能确认任务仍有进展。"
                     % heartbeat_age)
@@ -564,7 +575,11 @@ class LivenessLedger:
             "progress": progress,
             "verdict": verdict,
             "stalled": verdict == "stalled",
-            "quiet": verdict == "running" and heartbeat_age > self.stall_seconds,
+            "quiet": (
+                verdict == "running"
+                and not in_takeover
+                and heartbeat_age > self.stall_seconds
+            ),
         })
         return row
 
@@ -590,11 +605,13 @@ class LivenessLedger:
     def sweep(self, *, now: Optional[float] = None,
               pid_alive: Optional[Callable[[Optional[int], Optional[str]], bool]] = None,
               stall_seconds: Optional[float] = None,
-              owner: Optional[str] = None) -> List[Dict[str, Any]]:
+              owner: Optional[str] = None,
+              hermes_home: Optional[Any] = None) -> List[Dict[str, Any]]:
         """Classify non-terminal tasks; return only rows whose state changed.
 
         * live pid → stays running (silence is reported, not treated as death);
         * recorded pid gone → ``lost``;
+        * no pid during active human screen takeover → preserved/restored as ``running``;
         * no pid and heartbeat older than the threshold → ``stalled``.
         """
         at = self._now() if now is None else float(now)
@@ -602,6 +619,7 @@ class LivenessLedger:
         checker = pid_alive or is_pid_alive
         if owner is not None and (not isinstance(owner, str) or not owner):
             raise ValueError('owner must be a nonempty string')
+        takeover_from_lease = is_human_takeover(hermes_home) if hermes_home is not None else False
         with self.db() as db:
             sql = ("SELECT * FROM task_liveness WHERE state NOT IN "
                    "('done','failed','cancelled','unverified')")
@@ -617,10 +635,16 @@ class LivenessLedger:
                     continue
                 new = old
                 detail = row["detail"]
+                in_takeover = (row["phase"] == HUMAN_TAKEOVER_STAGE) or takeover_from_lease
                 if row["pid"]:
                     if not checker(row["pid"], row["pid_start"]):
                         new = "lost"
                         detail = "process is gone"
+                elif in_takeover:
+                    if old == "stalled":
+                        new = "running"
+                        if not detail or detail.startswith("no heartbeat for "):
+                            detail = "waiting for human screen takeover"
                 elif at - float(row["heartbeat_at"]) > threshold:
                     new = "stalled"
                     detail = "no heartbeat for %ds" % int(at - float(row["heartbeat_at"]))
@@ -674,13 +698,16 @@ class LivenessLedger:
         return {row["state"]: int(row["n"]) for row in rows}
 
 
+TaskLiveness = LivenessLedger
+
+
 def open_ledger(path: Optional[Any] = None, **kwargs: Any) -> LivenessLedger:
     """Small factory used by plugins/tests; keeps construction in one place."""
     return LivenessLedger(path, **kwargs)
 
 
 __all__ = [
-    "LivenessLedger", "open_ledger", "default_db_path", "is_pid_alive",
+    "LivenessLedger", "TaskLiveness", "open_ledger", "default_db_path", "is_pid_alive",
     "pid_start_time", "TERMINAL_STATES", "KNOWN_STATES", "DEFAULT_STALL_SECONDS",
 ]
 

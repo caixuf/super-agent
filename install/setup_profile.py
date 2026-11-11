@@ -55,6 +55,11 @@ def cmd_inspect(spec_path: Path) -> int:
             print(f"    Workdir: {w.workdir}")
         if w.target_host:
             print(f"    Host   : {w.target_host}")
+        if w.enable_screen:
+            print(
+                f"    Screen : enabled ({w.screen_geometry}, "
+                f"placement={w.screen_placement}, auto_start={w.screen_auto_start})"
+            )
 
     if spec.proactive_hooks:
         print("\nProactive Hooks:")
