@@ -212,7 +212,7 @@ def _ws_encode_frame(payload: bytes, opcode: int = 0x02) -> bytes:
     return bytes(header) + payload
 
 
-_PORTAL_HTML = """<!DOCTYPE html>
+_PORTAL_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -639,8 +639,13 @@ _PORTAL_HTML = """<!DOCTYPE html>
             }
             const r = curRect;
             if (r.enc === -223) {
+              const changed = (canvas.width !== r.w || canvas.height !== r.h);
               fbW = r.w; fbH = r.h;
-              canvas.width = fbW; canvas.height = fbH;
+              if (changed) {
+                canvas.width = fbW;
+                canvas.height = fbH;
+                setTimeout(() => requestUpdate(false), 10);
+              }
               curRect = null; rectLeft--;
             } else if (r.w === 0 || r.h === 0) {
               curRect = null; rectLeft--;
