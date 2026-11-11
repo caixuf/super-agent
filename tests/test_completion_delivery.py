@@ -298,3 +298,29 @@ def test_build_message_extracts_runner_output_and_filters_internal_json_artifact
     assert msg.summary == '3 passed in 0.01s'
     assert msg.artifacts == ('/tmp/a/report.md',)
 
+
+def test_deferred_not_sent_releases_lease_while_uncertain_deferred_keeps_lease(tmp_path):
+    pool = Pool(tmp_path)
+    j1 = finished_job(pool, key='presend-refused')
+    out1 = deliver_once(
+        pool,
+        Transport(response={'accepted': False, 'event_id': j1, 'deferred': True, 'not_sent': True}),
+        lease=60,
+    )
+    assert out1 == {'status': 'delivery_deferred', 'task_id': j1, 'not_sent': True}
+    assert pool.outbox_record(j1)['lease_token'] is None
+    # Healthy consumer can claim and deliver j1 immediately without waiting 60s.
+    assert deliver_once(pool, Transport(), lease=60)['status'] == 'delivered'
+
+    j2 = finished_job(pool, key='uncertain-send')
+    out2 = deliver_once(
+        pool,
+        Transport(response={'accepted': False, 'event_id': j2, 'deferred': True}),
+        lease=60,
+    )
+    assert out2 == {'status': 'delivery_deferred', 'task_id': j2}
+    assert pool.outbox_record(j2)['lease_token'] is not None
+    # Still leased during uncertainty window.
+    assert deliver_once(pool, Transport(), lease=60)['status'] == 'empty'
+
+

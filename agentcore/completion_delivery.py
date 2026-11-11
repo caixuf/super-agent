@@ -367,6 +367,14 @@ def deliver_once(pool: Pool, transport: Optional[Transport], *, lease: float = 6
                 'error_type': type(exc).__name__}
     if (isinstance(response, dict) and response.get('accepted') is False
             and response.get('event_id') == job and response.get('deferred') is True):
+        if response.get('not_sent') is True:
+            try:
+                release = getattr(pool, 'release_receipt', None)
+                if callable(release):
+                    release(job, token, backoff=0.0)
+            except Exception:
+                pass
+            return {'status': 'delivery_deferred', 'task_id': job, 'not_sent': True}
         return {'status': 'delivery_deferred', 'task_id': job}
     outcome, receipt_id = _receipt_status(response, job)
     if outcome == 'rejected':

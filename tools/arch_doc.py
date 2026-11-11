@@ -65,7 +65,7 @@ VIRTUAL_TIME_BUDGET_MS = 15000
 CSS = """
 :root{
   --fg:#16191d; --body:#2b3138; --muted:#6b7280; --line:#e5e7eb; --bg:#fff; --soft:#f8fafc;
-  --accent:#0b5fff; --accent-soft:#eef4ff; --code-bg:#f3f5f8; --code-line:#dde2e8;
+  --accent:#0b5fff; --accent-soft:#eef4ff; --code-bg:#f6f8fa; --code-line:#d0d7de;
 }
 *{box-sizing:border-box}
 body{
@@ -95,7 +95,7 @@ a{color:var(--accent); text-decoration:none}
 strong{font-weight:650; color:var(--fg)}
 code{background:var(--code-bg); padding:.16em .42em; border-radius:6px; font-size:.89em;
   font-family:ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace}
-pre{background:var(--code-bg); border:1px solid var(--code-line); border-radius:12px;
+pre{background:var(--code-bg); border:1px solid var(--code-line); border-radius:10px;
   padding:15px 18px; overflow-wrap:anywhere; white-space:pre-wrap; margin:16px 0}
 pre code{background:none; padding:0; font-size:13.2px; line-height:1.62}
 table{border-collapse:separate; border-spacing:0; width:100%; margin:18px 0; font-size:14.6px;
@@ -106,6 +106,21 @@ tbody tr:last-child td{border-bottom:0}
 tbody tr:nth-child(even) td{background:#fcfdff}
 blockquote{margin:18px 0; padding:6px 18px; border-left:4px solid var(--accent-soft);
   color:#4b5563; background:var(--soft); border-radius:0 10px 10px 0}
+.callout{margin:18px 0; padding:14px 18px; border-radius:10px; border:1px solid var(--line); border-left-width:4px}
+.callout-title{font-size:14.5px; font-weight:650; margin:0 0 8px; letter-spacing:.02em}
+.callout p{margin:8px 0}
+.callout p:first-of-type{margin-top:4px}
+.callout p:last-child,.callout ul:last-child,.callout ol:last-child{margin-bottom:0}
+.callout-note{background:#f0f6ff; border-color:#c9dcff; border-left-color:#0b5fff}
+.callout-note .callout-title{color:#0b5fff}
+.callout-tip{background:#f0fdfa; border-color:#99f6e4; border-left-color:#0d9488}
+.callout-tip .callout-title{color:#0d9488}
+.callout-important{background:#f5f3ff; border-color:#ddd6fe; border-left-color:#6d28d9}
+.callout-important .callout-title{color:#6d28d9}
+.callout-warning{background:#fffbeb; border-color:#fde68a; border-left-color:#d97706}
+.callout-warning .callout-title{color:#d97706}
+.callout-caution{background:#fef2f2; border-color:#fecaca; border-left-color:#dc2626}
+.callout-caution .callout-title{color:#dc2626}
 .mermaid{margin:22px 0 28px; padding:22px 14px; text-align:center;
   background:#fbfcfe; border:1px solid var(--line); border-radius:12px}
 .mermaid svg{max-width:100%;height:auto}
@@ -113,7 +128,7 @@ blockquote{margin:18px 0; padding:6px 18px; border-left:4px solid var(--accent-s
 td,th{overflow-wrap:anywhere}
 .toc ul ul{display:none}
 @media(max-width:700px){body{padding:28px 24px 40px}.cover h1{font-size:29px}table{font-size:14px}}
-@media print{body{padding:20px}.cover,.mermaid,pre,table{break-inside:avoid}h2,h3{break-after:avoid}}
+@media print{body{padding:20px}.cover,.mermaid,.callout,pre,table{break-inside:avoid}h2,h3{break-after:avoid}}
 .toc{margin:20px 0 6px; padding:14px 20px; background:var(--soft); border:1px solid var(--line);
   border-radius:12px; font-size:14.5px}
 .toc b{display:block; margin:0 0 8px; font-size:12.5px; color:var(--muted); letter-spacing:.06em}
@@ -170,12 +185,30 @@ HTML_TPL = """<!doctype html>
 
 
 def _pygments_css() -> str:
-    """把 Pygments 的 token 样式内联进页面 —— 不给样式，codehilite 的 span 就是一群灰字。"""
+    """把 Pygments 的 token 样式内联进页面 —— 现代清晰的高对比冷调语法配色（对齐 GitHub Light / VitePress）。"""
+    base_css = ""
     try:
         from pygments.formatters import HtmlFormatter
-        return HtmlFormatter(style="friendly").get_style_defs(".codehilite")
+        base_css = HtmlFormatter(style="default").get_style_defs(".codehilite")
     except Exception:
-        return ""
+        pass
+
+    modern_overlay = """
+/* Modern High-Contrast Code Highlight (GitHub Light / VitePress) */
+.codehilite { background: var(--code-bg); border-radius: 10px; }
+.codehilite pre { background: var(--code-bg); color: #24292f; margin: 0; padding: 15px 18px; }
+.codehilite .c, .codehilite .ch, .codehilite .cm, .codehilite .c1, .codehilite .cs, .codehilite .cpf { color: #6e7781; font-style: italic; }
+.codehilite .k, .codehilite .kd, .codehilite .kn, .codehilite .kp, .codehilite .kr, .codehilite .ow { color: #cf222e; font-weight: 600; }
+.codehilite .kc, .codehilite .kt { color: #0550ae; font-weight: 600; }
+.codehilite .s, .codehilite .sa, .codehilite .sb, .codehilite .sc, .codehilite .dl, .codehilite .sd, .codehilite .s2, .codehilite .se, .codehilite .sh, .codehilite .si, .codehilite .sx, .codehilite .sr, .codehilite .s1, .codehilite .ss { color: #0a3069; }
+.codehilite .na, .codehilite .nc, .codehilite .nd, .codehilite .ne, .codehilite .nf, .codehilite .fm { color: #8250df; font-weight: 600; }
+.codehilite .nb, .codehilite .bp { color: #0550ae; }
+.codehilite .no, .codehilite .nv, .codehilite .vc, .codehilite .vg, .codehilite .vi, .codehilite .vm { color: #953800; }
+.codehilite .m, .codehilite .mb, .codehilite .mf, .codehilite .mh, .codehilite .mi, .codehilite .mo, .codehilite .il { color: #0550ae; }
+.codehilite .o { color: #24292f; }
+.codehilite .hll { background-color: #e8f0fe; }
+"""
+    return (base_css + "\n" + modern_overlay).strip()
 
 
 PYGMENTS_CSS = _pygments_css()
@@ -260,6 +293,109 @@ def inline_md(text: str) -> str:
     return t
 
 
+CALLOUT_HEADER_RE = re.compile(
+    r'^\s*>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](?:[ \t]+([^\r\n]*))?$',
+    re.IGNORECASE,
+)
+
+DEFAULT_CALLOUT_TITLES = {
+    "NOTE": "说明",
+    "TIP": "建议",
+    "IMPORTANT": "关键",
+    "WARNING": "注意",
+    "CAUTION": "风险",
+}
+
+
+def callouts_to_div(md_text: str) -> str:
+    """将 GFM 语义提示块（[!NOTE]/[!TIP]/[!IMPORTANT]/[!WARNING]/[!CAUTION]）转换为带独立样式的 div 结构。
+
+    围栏感知：代码块内部（``` / ~~~）的提示块语法严格保留源码，不作转换。
+    """
+    lines = md_text.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    list_marker = re.compile(r'^[ \t]*([-*+]|\d+\.)[ \t]+')
+
+    while i < n:
+        line = lines[i]
+        m_fence = re.match(r'^[ \t]*(`{3,}|~{3,})([^\r\n]*)', line)
+        if m_fence:
+            fence = m_fence.group(1)
+            out.append(line)
+            i += 1
+            closing = re.compile(r'^[ \t]*' + re.escape(fence[0]) + '{' + str(len(fence)) + r',}[ \t]*$')
+            while i < n:
+                cur = lines[i]
+                out.append(cur)
+                i += 1
+                if closing.match(cur.rstrip('\r\n')):
+                    break
+            continue
+
+        m_callout = CALLOUT_HEADER_RE.match(line.rstrip('\r\n'))
+        if m_callout:
+            kind_raw = m_callout.group(1)
+            kind_upper = kind_raw.upper()
+            kind_lower = kind_raw.lower()
+            custom_title = (m_callout.group(2) or "").strip()
+            if custom_title:
+                title_text = f"{kind_upper} · {custom_title}"
+            else:
+                title_text = f"{kind_upper} · {DEFAULT_CALLOUT_TITLES.get(kind_upper, kind_upper)}"
+
+            raw_body_lines: list[str] = []
+            i += 1
+            while i < n:
+                cand = lines[i]
+                if CALLOUT_HEADER_RE.match(cand.rstrip('\r\n')):
+                    break
+                m_quote = re.match(r'^[ \t]*>(?:[ \t]?(.*))?$', cand.rstrip('\r\n'))
+                if m_quote:
+                    raw_body_lines.append(m_quote.group(1) or "")
+                    i += 1
+                else:
+                    break
+
+            body_formatted: list[str] = []
+            in_body_fence = False
+            bf_char = ''
+            bf_len = 0
+            for bline in raw_body_lines:
+                bf_m = re.match(r'^[ \t]*(`{3,}|~{3,})', bline)
+                if bf_m:
+                    fc = bf_m.group(1)
+                    if not in_body_fence:
+                        in_body_fence = True
+                        bf_char = fc[0]
+                        bf_len = len(fc)
+                    elif fc[0] == bf_char and len(fc) >= bf_len:
+                        in_body_fence = False
+                if not in_body_fence and list_marker.match(bline):
+                    if body_formatted and body_formatted[-1].strip() and not list_marker.match(body_formatted[-1]):
+                        body_formatted.append('')
+                body_formatted.append(bline)
+
+            body_str = '\n'.join(body_formatted).strip('\n')
+            block_lines = [
+                f'<div class="callout callout-{kind_lower}" markdown="1">',
+                f'<div class="callout-title">{inline_md(title_text)}</div>',
+            ]
+            if body_str:
+                block_lines.append('')
+                block_lines.append(body_str)
+            block_lines.append('</div>\n')
+
+            out.append('\n'.join(block_lines))
+            continue
+
+        out.append(line)
+        i += 1
+
+    return ''.join(out)
+
+
 def md_to_html_with_toc(md_text: str) -> tuple[str, str]:
     """返回 (正文 HTML, 目录 HTML)。目录用 markdown 自己生成的 toc —— 锚点因此天然对得上。"""
     try:
@@ -271,8 +407,8 @@ def md_to_html_with_toc(md_text: str) -> tuple[str, str]:
         md = markdown.Markdown(extensions=exts,
                                extension_configs={"codehilite": {"noclasses": False, "guess_lang": False}})
     except Exception:
-        md = markdown.Markdown(extensions=["tables", "fenced_code"])
-    body = md.convert(mermaid_to_div(md_text))
+        md = markdown.Markdown(extensions=["tables", "fenced_code", "md_in_html"])
+    body = md.convert(mermaid_to_div(callouts_to_div(md_text)))
     toc = getattr(md, "toc", "") or ""
     if toc:
         toc = toc.replace('<div class="toc">', '<div class="toc"><b>目录</b>', 1)
@@ -298,9 +434,41 @@ def build_cover(title: str, lede: str, metas: list[str]) -> str:
 
 
 def guess_lede(md_text: str) -> str:
-    """默认摘要：取文档第一段引用（我们的文档习惯用 `> 一句话` 开头）。"""
-    m = re.search(r"^>\s*(.+?)\s*$", md_text, flags=re.M)
-    return m.group(1).strip() if m else ""
+    """默认摘要：取文档第一段普通引用（跳过代码围栏与五类语义提示块）。"""
+    lines = md_text.splitlines()
+    in_fence = False
+    fence_char = ""
+    fence_len = 0
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        m_fence = re.match(r'^[ \t]*(`{3,}|~{3,})', line)
+        if m_fence:
+            fc = m_fence.group(1)
+            if not in_fence:
+                in_fence = True
+                fence_char = fc[0]
+                fence_len = len(fc)
+            elif fc[0] == fence_char and len(fc) >= fence_len:
+                in_fence = False
+            i += 1
+            continue
+        if in_fence:
+            i += 1
+            continue
+
+        if CALLOUT_HEADER_RE.match(line):
+            i += 1
+            while i < n and re.match(r'^[ \t]*>', lines[i]):
+                i += 1
+            continue
+
+        m = re.match(r'^[ \t]*>[ \t]*(.+?)[ \t]*$', line)
+        if m:
+            return m.group(1).strip()
+        i += 1
+    return ""
 
 
 def strip_cover_consumed(md_text: str, h1: "re.Match[str] | None", lede: str, lede_was_auto: bool) -> str:

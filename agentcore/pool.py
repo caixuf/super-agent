@@ -1059,6 +1059,24 @@ class Pool:
             db.execute('UPDATE outbox SET lease_token=?,lease_until=? WHERE job=?', (token, time.time() + lease, row['job']))
             return {'token': token, 'receipt': json.loads(row['receipt'])}
 
+    def release_receipt(self, job, token, *, backoff=0.0):
+        """Yield a leased outbox receipt after a definite pre-send refusal.
+
+        Fenced by ``lease_token`` and ``acknowledged=0`` so a stale consumer can never
+        clear another consumer's active lease or touch an acknowledged receipt.
+        """
+        if not isinstance(token, str) or not token.strip():
+            raise ValueError('lease token required')
+        delay = max(0.0, float(backoff or 0.0))
+        until = (time.time() + delay) if delay > 0.0 else None
+        with self.db() as db:
+            updated = db.execute(
+                'UPDATE outbox SET lease_token=NULL, lease_until=? '
+                'WHERE job=? AND lease_token=? AND acknowledged=0',
+                (until, job, token),
+            )
+            return updated.rowcount == 1
+
     def acknowledge(self, job, token=None, *, receipt_id=None):
         """Mark a delivered receipt acknowledged, recording the transport's receipt id.
 

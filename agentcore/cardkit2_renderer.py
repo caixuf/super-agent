@@ -12,7 +12,10 @@ import logging
 import math
 import re
 import time
+import unicodedata
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
+
+from agentcore.card_markdown import _fenced_line_flags, build_card_elements
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +75,120 @@ def extract_stages_and_clean_text(text: str) -> Tuple[str, str]:
     return "\n\n".join(s for s in stages if s).strip(), clean
 
 
+NO_TRAILING_SPACE_CHARS = set("：，。；！？、）》】」』")
+NO_LEADING_SPACE_CHARS = set("（《【「『")
+_CARD_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _is_punctuation(ch: str) -> bool:
+    return unicodedata.category(ch).startswith("P")
+
+
+def _protect_code(text: str) -> Tuple[str, List[str]]:
+    if not text:
+        return text, []
+    code_store: List[str] = []
+    lines = text.split("\n")
+    out_lines: List[str] = []
+    in_fence = False
+    fence_marker = ""
+    fence_buf: List[str] = []
+
+    for line in lines:
+        stripped = line.rstrip("\r\n")
+        m = _CARD_FENCE_RE.match(stripped)
+        if in_fence:
+            fence_buf.append(line)
+            if m and m.group(1)[0] == fence_marker[0] and len(m.group(1)) >= len(fence_marker) and not m.group(2).strip():
+                idx = len(code_store)
+                code_store.append("\n".join(fence_buf))
+                out_lines.append(f"\x00__CODE_{idx}__\x00")
+                in_fence = False
+                fence_marker = ""
+                fence_buf = []
+        elif m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            in_fence = True
+            fence_marker = m.group(1)
+            fence_buf = [line]
+        else:
+            out_lines.append(line)
+
+    if in_fence:
+        idx = len(code_store)
+        code_store.append("\n".join(fence_buf))
+        out_lines.append(f"\x00__CODE_{idx}__\x00")
+
+    intermediate = "\n".join(out_lines)
+
+    def _mask_inline_code(match: re.Match) -> str:
+        idx = len(code_store)
+        code_store.append(match.group(0))
+        return f"\x00__CODE_{idx}__\x00"
+
+    intermediate = re.sub(r"(`+)(.+?)\1", _mask_inline_code, intermediate, flags=re.DOTALL)
+    return intermediate, code_store
+
+
+def _restore_code(text: str, code_store: List[str]) -> str:
+    for idx, code in enumerate(code_store):
+        text = text.replace(f"\x00__CODE_{idx}__\x00", code)
+    return text
+
+
+def seal_unclosed_markdown_fences(text: str) -> str:
+    """Seal any trailing unclosed Markdown code fences.
+
+    Scans lines for code fence delimiters (``` or ~~~ with 0-3 leading spaces).
+    If an unclosed code fence remains at EOF, appends a newline and matching closing fence.
+    """
+    if not text:
+        return text or ""
+    in_fence = False
+    fence_marker = ""
+    for line in text.splitlines():
+        stripped = line.rstrip("\r\n")
+        m = _CARD_FENCE_RE.match(stripped)
+        if in_fence:
+            if m and m.group(1)[0] == fence_marker[0] and len(m.group(1)) >= len(fence_marker) and not m.group(2).strip():
+                in_fence = False
+                fence_marker = ""
+        elif m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            in_fence = True
+            fence_marker = m.group(1)
+
+    if in_fence and fence_marker:
+        return (text if text.endswith("\n") else text + "\n") + fence_marker
+    return text
+
+
+def _is_standalone_divider(line: str) -> bool:
+    stripped = line.strip()
+    return stripped == DIVIDER or bool(re.match(r"^ {0,3}-{3,}\s*$", line.rstrip("\r\n")))
+
+
+def _split_markdown_by_dividers(content: str) -> List[Dict[str, Any]]:
+    """Split markdown content by unfenced standalone divider lines into markdown and hr tags."""
+    lines = content.splitlines()
+    fenced = _fenced_line_flags(lines)
+    elements: List[Dict[str, Any]] = []
+    chunk: List[str] = []
+    for line, is_fenced in zip(lines, fenced):
+        if not is_fenced and _is_standalone_divider(line):
+            if chunk:
+                text = "\n".join(chunk).strip()
+                if text:
+                    elements.append({"tag": "markdown", "content": text})
+                chunk = []
+            elements.append({"tag": "hr"})
+        else:
+            chunk.append(line)
+    if chunk:
+        text = "\n".join(chunk).strip()
+        if text:
+            elements.append({"tag": "markdown", "content": text})
+    return elements or [{"tag": "markdown", "content": " "}]
+
+
 def normalize_feishu_markdown_text(text: str) -> str:
     """Normalize Markdown formatting for Feishu's CardKit 2.0 / Lark-MD renderer.
 
@@ -79,22 +196,49 @@ def normalize_feishu_markdown_text(text: str) -> str:
     markers directly glued to CJK characters or Chinese punctuation (e.g. `但**“文字”**属于`)
     fail to trigger emphasis and render as literal asterisks.
     Padding boundaries with CJK-safe spaces ensures 100% reliable rich text rendering.
+    Protects fenced code blocks and inline code from delimiter mutation, and eliminates
+    unwanted padding gaps against Chinese closing/opening punctuation.
     """
     if not text or "**" not in text:
         return text or ""
+
+    intermediate, code_store = _protect_code(text)
+    if "**" not in intermediate:
+        return _restore_code(intermediate, code_store)
+
     # 规整 **“xxx”** 嵌套
-    text = re.sub(r'\*\*\s*“([^”]+)”\s*\*\*', r'“**\1**”', text)
+    intermediate = re.sub(r'\*\*\s*“([^”]+)”\s*\*\*', r'“**\1**”', intermediate)
+
+    pattern = re.compile(r'([^\s*`])?\*\*([^*\n]+?)\*\*([^\s*`])?')
 
     def _pad_bold(m: re.Match) -> str:
         prefix = m.group(1) or ""
         inner = m.group(2)
         suffix = m.group(3) or ""
-        p_space = " " if prefix and not prefix.isspace() else ""
-        s_space = " " if suffix and not suffix.isspace() else ""
+        p_space = ""
+        if prefix and not prefix.isspace():
+            if prefix in NO_LEADING_SPACE_CHARS:
+                inner_s = inner.lstrip()
+                if inner_s and not _is_punctuation(inner_s[0]):
+                    p_space = ""
+                else:
+                    p_space = " "
+            else:
+                p_space = " "
+        s_space = ""
+        if suffix and not suffix.isspace():
+            if suffix in NO_TRAILING_SPACE_CHARS:
+                inner_s = inner.rstrip()
+                if inner_s and not _is_punctuation(inner_s[-1]):
+                    s_space = ""
+                else:
+                    s_space = " "
+            else:
+                s_space = " "
         return f"{prefix}{p_space}**{inner}**{s_space}{suffix}"
 
-    pattern = re.compile(r'([^\s*`])?\*\*([^*\n]+?)\*\*([^\s*`])?')
-    return pattern.sub(_pad_bold, text)
+    res = pattern.sub(_pad_bold, intermediate)
+    return _restore_code(res, code_store)
 
 
 def build_cardkit2_payload(
@@ -111,6 +255,9 @@ def build_cardkit2_payload(
     status_suffix: Optional[str] = None,
     color_template: Optional[str] = None,
     footer_notes: Optional[Sequence[str]] = None,
+    metric_items: Optional[Sequence[Tuple[str, str]]] = None,
+    hero_img_key: Optional[str] = None,
+    hero_alt: str = "预览图",
 ) -> Dict[str, Any]:
     """Single source of truth for assembling canonical CardKit 2.0 industrial cards.
 
@@ -119,6 +266,8 @@ def build_cardkit2_payload(
         (``wathet`` in-progress / ``indigo`` completed / ``carmine`` failed).
       - Collapsible trace: native ``collapsible_panel`` with ``grey-50`` column_set when stages exist.
       - Main content: semantic ``column_set`` block (``turquoise-50`` / ``blue-50`` / ``red-50``).
+      - Table and long-form block-level whitespace layout orchestration.
+      - Optional horizontal metrics bar and hero image preview.
       - Footer: ``grey-50`` ``column_set`` for timing, node, and guardrail indicators.
     """
     extracted_stage, clean_text = extract_stages_and_clean_text(text)
@@ -126,6 +275,10 @@ def build_cardkit2_payload(
     combined_stage = "\n\n".join(
         s for s in [explicit_stages, explicit_stage_text, extracted_stage] if s
     ).strip()
+
+    if not is_terminal:
+        clean_text = seal_unclosed_markdown_fences(clean_text)
+        combined_stage = seal_unclosed_markdown_fences(combined_stage)
 
     clean_text = normalize_feishu_markdown_text(clean_text)
     combined_stage = normalize_feishu_markdown_text(combined_stage)
@@ -176,27 +329,118 @@ def build_cardkit2_payload(
             ],
         })
 
-    # 2. Main content block
-    elements.append({
-        "tag": "column_set",
-        "flex_mode": "none",
-        "background_style": main_bg,
-        "columns": [
+    # 2. Main content block(s)
+    card_blocks = build_card_elements(clean_text)
+    has_table = any(b.get("tag") == "table" for b in card_blocks)
+
+    def _make_main_box(content: str) -> Dict[str, Any]:
+        return {
+            "tag": "column_set",
+            "flex_mode": "none",
+            "background_style": main_bg,
+            "columns": [
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "top",
+                    "background_style": main_bg,
+                    "elements": [
+                        {
+                            "tag": "markdown",
+                            "content": content or " ",
+                        }
+                    ],
+                }
+            ],
+        }
+
+    def _first_unfenced_divider_index(lines: List[str]) -> int:
+        fenced = _fenced_line_flags(lines)
+        for idx, (line, is_fenced) in enumerate(zip(lines, fenced)):
+            if not is_fenced and _is_standalone_divider(line):
+                return idx
+        return -1
+
+    if has_table:
+        first_table_idx = next(i for i, b in enumerate(card_blocks) if b.get("tag") == "table")
+        if first_table_idx > 0:
+            first_text = card_blocks[0].get("content", "").strip()
+            if first_text:
+                elements.append(_make_main_box(first_text))
+            subsequent = card_blocks[1:]
+        else:
+            subsequent = card_blocks
+
+        for block in subsequent:
+            if block.get("tag") == "table":
+                elements.append(block)
+            elif block.get("tag") == "markdown":
+                elements.extend(_split_markdown_by_dividers(block.get("content", "")))
+            else:
+                elements.append(block)
+
+    elif len(clean_text) >= 600:
+        lines = clean_text.splitlines()
+        first_div_idx = _first_unfenced_divider_index(lines)
+        if first_div_idx != -1:
+            first_part = "\n".join(lines[:first_div_idx]).strip()
+            rest = "\n".join(lines[first_div_idx + 1:]).strip()
+            if first_part:
+                elements.append(_make_main_box(first_part))
+            elements.append({"tag": "hr"})
+            if rest:
+                elements.extend(_split_markdown_by_dividers(rest))
+        else:
+            elements.append(_make_main_box(clean_text))
+
+    else:
+        elements.append(_make_main_box(clean_text))
+
+    # Metric items horizontal column_set (rendered after main content blocks, before hero/footer)
+    if metric_items:
+        col_count = len(metric_items)
+        if col_count == 2:
+            flex_mode = "bisect"
+        elif col_count == 3:
+            flex_mode = "trisect"
+        else:
+            flex_mode = "stretch"
+
+        columns = [
             {
                 "tag": "column",
                 "width": "weighted",
                 "weight": 1,
                 "vertical_align": "top",
-                "background_style": main_bg,
+                "background_style": "grey-50",
                 "elements": [
                     {
                         "tag": "markdown",
-                        "content": clean_text or " ",
+                        "content": f"**{label}**\n{val}",
                     }
                 ],
             }
-        ],
-    })
+            for label, val in metric_items
+        ]
+        elements.append({
+            "tag": "column_set",
+            "flex_mode": flex_mode,
+            "background_style": "grey-50",
+            "columns": columns,
+        })
+
+    # Hero image preview component (rendered before footer)
+    if hero_img_key and hero_img_key.strip():
+        elements.append({
+            "tag": "img",
+            "img_key": hero_img_key.strip(),
+            "preview": True,
+            "alt": {
+                "tag": "plain_text",
+                "content": hero_alt or "预览图",
+            },
+        })
 
     # 3. Footer / Note indicators (grey-50 block)
     footer_items: List[str] = []

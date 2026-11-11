@@ -9,7 +9,7 @@ import threading
 import time
 import pytest
 
-from agentcore.task_card_bridge import TaskCardBridge, _render_progress_bar
+from agentcore.task_card_bridge import TaskCardBridge, _render_progress_bar, _truncate_summary_cleanly
 
 
 def test_progress_bar_rendering():
@@ -624,3 +624,115 @@ def test_single_source_of_truth_for_unicode_unescape():
                 if "0-9a-fA-F]{4}" in line:
                     offenders.append(f"{rel}:{idx}")
     assert offenders == [], f"Duplicated unicode unescape regex found outside delivery_sanitizer.py: {offenders}"
+
+
+def test_truncate_summary_cleanly_short_text():
+    short = "这是不超过1500字符的简短执行结论。"
+    assert _truncate_summary_cleanly(short) == short
+
+
+def test_truncate_summary_cleanly_paragraph_boundary():
+    p1 = "段落一内容。" * 70  # ~420 chars
+    p2 = "段落二内容。" * 70  # ~420 chars (total ~840 chars)
+    p3 = "段落三长文。" * 120  # ~720 chars (total > 1500 chars)
+    full = f"{p1}\n\n{p2}\n\n{p3}"
+    assert len(full) > 1500
+
+    res = _truncate_summary_cleanly(full)
+    assert res.endswith("*(长文本详细内容已作为附件发送至会话)*")
+    assert f"{p1}\n\n{p2}" in res
+    assert p3 not in res
+
+
+def test_truncate_summary_cleanly_newline_boundary():
+    line1 = "单行文本内容。" * 140  # ~980 chars
+    line2 = "后续换行内容。" * 100  # total > 1500 chars
+    full = f"{line1}\n{line2}"
+    assert len(full) > 1500
+
+    res = _truncate_summary_cleanly(full)
+    assert res.endswith("*(长文本详细内容已作为附件发送至会话)*")
+    assert line1 in res
+
+
+def test_truncate_summary_cleanly_chinese_punctuation_boundary():
+    # Long text on a single line without newlines
+    sentence1 = "甲" * 800 + "。"
+    sentence2 = "乙" * 800
+    full = sentence1 + sentence2
+    assert len(full) > 1500
+
+    res = _truncate_summary_cleanly(full)
+    assert res.endswith("*(长文本详细内容已作为附件发送至会话)*")
+    assert sentence1 in res
+    assert "乙" * 800 not in res
+
+
+def test_truncate_summary_cleanly_seals_unclosed_fence():
+    p1 = "前置文本。" * 60  # ~300 chars
+    code_start = "\n```python\ndef process_data():\n"
+    code_body = "    row = fetch_next_record()\n" * 30  # ~900 chars
+    rest = "结尾补充说明。" * 100
+    full = f"{p1}{code_start}{code_body}{rest}"
+    assert len(full) > 1500
+
+    res = _truncate_summary_cleanly(full)
+    assert res.endswith("*(长文本详细内容已作为附件发送至会话)*")
+    # Must have closing fence sealed cleanly before the overflow notice
+    body_without_note = res.split("\n\n*(长文本详细内容已作为附件发送至会话)*")[0]
+    assert body_without_note.rstrip().endswith("```")
+
+
+def test_build_card_payload_with_docx_url(tmp_path):
+    bridge = TaskCardBridge(tmp_path, profile="test")
+    payload = bridge.build_card_payload(
+        "task_docx_001",
+        "文档测试助手",
+        "验证云文档链接",
+        "completed",
+        summary="测试完成，详细文档已生成。",
+        docx_url="https://feishu.cn/docx/sample_doc_token",
+    )
+    elements = payload["body"]["elements"]
+    main_text = elements[0]["columns"][0]["elements"][0]["content"]
+    assert "**在线文档**：[点击打开完整云文档](https://feishu.cn/docx/sample_doc_token)" in main_text
+
+
+def test_build_card_payload_with_hero_img_key(tmp_path):
+    bridge = TaskCardBridge(tmp_path, profile="test")
+    payload = bridge.build_card_payload(
+        "task_hero_001",
+        "图像测试助手",
+        "验证封面预览图",
+        "completed",
+        summary="测试完成。",
+        hero_img_key="img_v2_sample_hero_token",
+    )
+    elements = payload["body"]["elements"]
+    img_element = next((el for el in elements if el.get("tag") == "img"), None)
+    assert img_element is not None
+    assert img_element["img_key"] == "img_v2_sample_hero_token"
+    assert img_element["preview"] is True
+    assert img_element["alt"]["content"] == "预览图"
+
+
+def test_finalize_passes_hero_img_and_docx_url(tmp_path):
+    bridge = TaskCardBridge(tmp_path, profile="test")
+    bridge.bind_task("task_fin_001", {"route": "r", "chat": "c"}, "完成测试", "dev", "开发")
+    res = bridge.finalize(
+        "task_fin_001",
+        summary="成功收敛全部边界条件。",
+        hero_img_key="img_hero_999",
+        docx_url="https://feishu.cn/docx/summary_token",
+    )
+    assert res["ok"] is True
+    card = res["card_payload"]
+    elements = card["body"]["elements"]
+
+    main_text = elements[0]["columns"][0]["elements"][0]["content"]
+    assert "[点击打开完整云文档](https://feishu.cn/docx/summary_token)" in main_text
+
+    img_element = next((el for el in elements if el.get("tag") == "img"), None)
+    assert img_element is not None
+    assert img_element["img_key"] == "img_hero_999"
+

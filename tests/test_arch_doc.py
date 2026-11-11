@@ -160,3 +160,112 @@ def test_render_end_to_end_produces_selfcontained_html_and_png(tmp_path, monkeyp
     assert html.stat().st_size > 1000
     assert png.exists() and png.stat().st_size > 5000, "PNG 太小 → 大概率是整页空白"
     assert 'class="footer"' in html.read_text(encoding="utf-8")
+
+
+def test_callouts_render_five_types_with_custom_title_and_inner_markdown():
+    md = """
+> [!NOTE]
+> 这是普通说明，包含 **加粗文字** 与 `行内代码`。
+> - 列表条目 1
+> - 列表条目 2
+
+> [!TIP]
+> 这是建议。
+
+> [!IMPORTANT]
+> 这是关键提醒。
+
+> [!WARNING] 并发死锁边界
+> 这是自定义标题的警告。
+
+> [!CAUTION] 风险操作
+> 这是风险提示。
+"""
+    html = arch_doc.md_to_html(md)
+    assert 'class="callout callout-note"' in html
+    assert 'class="callout callout-tip"' in html
+    assert 'class="callout callout-important"' in html
+    assert 'class="callout callout-warning"' in html
+    assert 'class="callout callout-caution"' in html
+
+    assert 'class="callout-title"' in html
+    assert 'NOTE · 说明' in html
+    assert 'TIP · 建议' in html
+    assert 'IMPORTANT · 关键' in html
+    assert 'WARNING · 并发死锁边界' in html
+    assert 'CAUTION · 风险操作' in html
+
+    assert '<strong>加粗文字</strong>' in html
+    assert '<code>行内代码</code>' in html
+    assert '<ul>' in html and '<li>列表条目 1</li>' in html and '<li>列表条目 2</li>' in html
+    assert '**加粗文字**' not in html
+
+
+def test_code_fences_protect_callouts_from_conversion():
+    md = """```markdown
+> [!WARNING] 代码块内的告警
+> 这里是示例代码，不应转成 callout
+```
+
+````markdown
+```markdown
+> [!NOTE] 嵌套围栏里的提示
+```
+````
+
+~~~bash
+> [!CAUTION] 波浪线围栏
+~~~
+"""
+    html = arch_doc.md_to_html(md)
+    assert 'class="callout' not in html
+    assert 'callout-warning' not in html
+    assert 'callout-note' not in html
+    assert 'callout-caution' not in html
+    assert '[!WARNING] 代码块内的告警' in html
+    assert '[!NOTE] 嵌套围栏里的提示' in html
+    assert '!CAUTION' in html and '波浪线围栏' in html
+
+
+def test_guess_lede_skips_callouts_and_preserves_regular_quote():
+    md1 = """# 架构方案
+
+> [!IMPORTANT] 核心警示
+> 这是正文告警，绝不是封面摘要！
+> 告警的第二行。
+
+> 这是文档真正的一句话摘要。
+
+正文内容。
+"""
+    assert arch_doc.guess_lede(md1) == "这是文档真正的一句话摘要。"
+
+    md2 = """# 架构方案
+
+> [!TIP] 实用建议
+> 仅此一个提示块。
+
+正文。
+"""
+    assert arch_doc.guess_lede(md2) == ""
+
+    md3 = "> 普通一句话总结\n\n正文"
+    assert arch_doc.guess_lede(md3) == "普通一句话总结"
+
+    md4 = "```markdown\n> [!NOTE]\n> 代码里的引用\n```\n\n> 真正的正文摘要"
+    assert arch_doc.guess_lede(md4) == "真正的正文摘要"
+
+
+def test_callout_css_and_print_styles():
+    assert ".callout{" in arch_doc.CSS
+    assert ".callout-title{" in arch_doc.CSS
+    assert ".callout-note{" in arch_doc.CSS and "#0b5fff" in arch_doc.CSS and "#f0f6ff" in arch_doc.CSS
+    assert ".callout-tip{" in arch_doc.CSS and "#0d9488" in arch_doc.CSS and "#f0fdfa" in arch_doc.CSS
+    assert ".callout-important{" in arch_doc.CSS and "#6d28d9" in arch_doc.CSS and "#f5f3ff" in arch_doc.CSS
+    assert ".callout-warning{" in arch_doc.CSS and "#d97706" in arch_doc.CSS and "#fffbeb" in arch_doc.CSS
+    assert ".callout-caution{" in arch_doc.CSS and "#dc2626" in arch_doc.CSS and "#fef2f2" in arch_doc.CSS
+    assert ".callout" in arch_doc.CSS.split("@media print")[1]
+    assert "break-inside:avoid" in arch_doc.CSS.split("@media print")[1]
+    assert "--code-bg:#f6f8fa" in arch_doc.CSS
+    assert ".codehilite" in arch_doc.PYGMENTS_CSS
+

@@ -22,7 +22,120 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import sys
+
+_MAX_BACKEND_CONTINUATIONS = 2
+_BACKEND_CONTINUATION_NUDGE = (
+    "请不要停留在过程播报；请立即执行上述下一步工具操作，"
+    "并在完成后直接输出面向用户的完整最终结论与结果报告。"
+)
+_SUMMED_USAGE_KEYS = (
+    "api_calls",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+)
+_BACKEND_NARRATION_ZH_RE = re.compile(
+    r"(?:^|[。！？.!?\n]\s*)"
+    r"(?P<sent>"
+    r"(?:[^。！？.!?\n]*[，；,;]\s*)?"
+    r"(?P<tail>(?:我)?(?:正在|现在|接下来|下面|随后|先|接着|马上|最后)(?:我)?(?:再|就|来|去)?"
+    r"(?:查清|检查|排查|核对|定位|读取|查看|复现|验证|"
+    r"解析|抓取|提取|汇总|整理|分析|统计|对比|筛选|拉取|补验|"
+    r"生成|输出|编写|构建|继续|"
+    r"做(?:一次|一遍|最后一次)?[^。！？.!?\n]{0,20}(?:验证|检查|核对|测试|排查|对比|分析|汇总)|"
+    r"运行|跑|执行)"
+    r"[^。！？.!?\n]{0,130})[。.…：:]?\s*)$"
+)
+_BACKEND_NARRATION_EN_RE = re.compile(
+    r"(?:^|[.!?\n]\s*)(?:let me now|i will now|now let me|next i(?:'ll| will))"
+    r"[^.!?\n]{0,120}[.:…]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_incomplete_backend_narration(text: str | None) -> bool:
+    """Return True when a short unattended worker turn stopped on a step announcement."""
+    t = (text or "").strip()
+    if not t or len(t) > 400 or "```" in t or "~~~" in t:
+        return False
+    if t.startswith("# ") or "\n#" in t or "\n|" in t:
+        return False
+    if sum(1 for line in t.splitlines() if re.match(r"^\s*(?:[-*+]|\d+\.)\s+", line)) >= 3:
+        return False
+    if _BACKEND_NARRATION_EN_RE.search(t):
+        return True
+    match = _BACKEND_NARRATION_ZH_RE.search(t)
+    if not match:
+        return False
+    sent = match.group("sent") or ""
+    tail = match.group("tail") or ""
+    if sent.lstrip().startswith(">"):
+        return False
+    if any(cue in sent for cue in (
+        "建议", "你", "您", "等待", "待确认", "确认后", "批准", "授权",
+        "如果", "暂不", "无需", "不必", "不要", "可以吗", "吗", "？", "?",
+        "“", "”", "‘", "’", '"', "'", "`",
+    )):
+        return False
+    return not any(cue in tail for cue in (
+        "完成", "已经", "已", "完毕", "通过了", "无异常", "结果正常", "没有异常",
+        "测试通过", "回归通过", "不能", "不用", "不需要", "结果是", "根因是", "原因是",
+    ))
+
+
+def _merge_continuation_result(base: dict, nxt: dict) -> dict:
+    """Combine usage counters across in-process continuation turns."""
+    merged = dict(base)
+    merged.update(nxt)
+    for key in _SUMMED_USAGE_KEYS:
+        if base.get(key) is not None or nxt.get(key) is not None:
+            merged[key] = (base.get(key) or 0) + (nxt.get(key) or 0)
+    if base.get("estimated_cost_usd") is not None and nxt.get("estimated_cost_usd") is not None:
+        merged["estimated_cost_usd"] = base["estimated_cost_usd"] + nxt["estimated_cost_usd"]
+    return merged
+
+
+def _continue_incomplete_backend_turn(
+    agent,
+    result: dict,
+    *,
+    max_continuations: int = _MAX_BACKEND_CONTINUATIONS,
+) -> dict:
+    """Nudge an unattended worker turn that stopped mid-step; mark partial if still narration."""
+    current = dict(result or {})
+    attempts = 0
+    while (
+        attempts < max_continuations
+        and current.get("completed") is True
+        and not current.get("failed")
+        and not current.get("partial")
+        and not current.get("interrupted")
+        and _is_incomplete_backend_narration(current.get("final_response"))
+    ):
+        attempts += 1
+        nxt = agent.run_conversation(
+            _BACKEND_CONTINUATION_NUDGE,
+            conversation_history=current.get("messages"),
+        )
+        if not isinstance(nxt, dict):
+            break
+        current = _merge_continuation_result(current, nxt)
+    if (
+        current.get("completed") is True
+        and not current.get("failed")
+        and not current.get("partial")
+        and not current.get("interrupted")
+        and _is_incomplete_backend_narration(current.get("final_response"))
+    ):
+        current["completed"] = False
+        current["partial"] = True
+        current["turn_exit_reason"] = "incomplete_narration"
+    return current
 
 
 def _configure_worker_logging() -> None:
@@ -181,7 +294,10 @@ def _run_inproc_turn(
 
             aux_before = _auxiliary_usage(session_db, None) if usage_file else {}
             relay_session_id = getattr(agent, "session_id", None)
-            result = agent.run_conversation(prompt)
+            result = _continue_incomplete_backend_turn(
+                agent,
+                agent.run_conversation(prompt),
+            )
             if usage_file:
                 _attach_auxiliary_usage(
                     result,

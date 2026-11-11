@@ -254,3 +254,62 @@ def test_delivery_plan_retry_normalizes_empty_vs_missing_artifacts(tmp_path):
     assert retry['accepted']
     assert retry == first
 
+
+def test_presend_not_sent_releases_outbox_lease_for_healthy_consumer(tmp_path):
+    from agentcore.pool import Pool
+    from agentcore.completion_backfill import drain
+
+    pool = Pool(tmp_path / 'queue')
+    job = pool.submit('job-yield', {'goal': 'summarize'}, origin=ADDRESS)
+    claimed, fd = pool.claim()
+    try:
+        assert pool.finish(job, claimed['attempt'], True, {'summary': 'full report'})
+    finally:
+        os.close(fd)
+
+    unhealthy_calls = []
+    healthy_calls = []
+
+    def unhealthy_sender(address, item, **kwargs):
+        unhealthy_calls.append(item['text'])
+        return dict(ok=False, not_sent=True, error='card_adapter_unavailable')
+
+    def healthy_sender(address, item, **kwargs):
+        healthy_calls.append(item['text'])
+        return dict(ok=True, message_id='msg-ok-1')
+
+    unhealthy = DirectCompletionTransport(
+        tmp_path / 'delivery',
+        profile='owner',
+        sender=unhealthy_sender,
+        render=lambda m: m['summary'],
+        attempt_root=pool.root / 'attempts',
+        attempt_provider=lambda j: pool.status(j)['attempt'],
+        card=True,
+    )
+    healthy = DirectCompletionTransport(
+        tmp_path / 'delivery',
+        profile='owner',
+        sender=healthy_sender,
+        render=lambda m: m['summary'],
+        attempt_root=pool.root / 'attempts',
+        attempt_provider=lambda j: pool.status(j)['attempt'],
+        card=True,
+    )
+
+    first = drain(pool, unhealthy, profile='owner', lease=60)
+    assert first['delivered'] == 0
+    assert first['outcomes'][0]['status'] == 'delivery_deferred'
+    assert first['outcomes'][0].get('not_sent') is True
+    # Lease must be released immediately so the healthy consumer does not wait 60s.
+    outbox = pool.outbox_record(job)
+    assert outbox['acknowledged'] == 0
+    assert outbox['lease_token'] is None
+    assert outbox['lease_until'] is None
+
+    second = drain(pool, healthy, profile='owner', lease=60)
+    assert second['delivered'] == 1
+    assert healthy_calls == ['full report']
+    assert pool.delivery_record(job)['acknowledged'] == 1
+
+

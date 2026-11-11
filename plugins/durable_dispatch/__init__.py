@@ -934,8 +934,12 @@ class DispatchService:
             counts['bridge_terminal_stale'] = terminal['stale_sending']
         return counts
 
-    def drain_delivery(self, transport, *, limit=50, lease=60, not_before=None):
+    def drain_delivery(self, transport, *, limit=50, lease=60, not_before=None, skip=()):
         """Deliver routable completions once; unaddressable receipts stay pending."""
+        if skip:
+            return self.delivery.drain(self.pool, transport, profile=self.profile,
+                                       limit=limit, lease=lease, not_before=not_before,
+                                       extra_skip=skip)
         return self.delivery.drain(self.pool, transport, profile=self.profile,
                                    limit=limit, lease=lease, not_before=not_before)
 
@@ -1393,9 +1397,34 @@ def start_backfill(ctx, service):
     def loop():
         last_error = None
         warning_limiter = _BacklogWarningLimiter()
+        local_defer_until = {}
+        local_defer_backoff = min(30.0, max(5.0, interval * 15.0))
         while not stop.is_set():
             try:
-                status = service.drain_delivery(transport, not_before=not_before)
+                now_mono = time.monotonic()
+                if local_defer_until:
+                    local_defer_until = {
+                        job_id: exp for job_id, exp in local_defer_until.items()
+                        if exp > now_mono
+                    }
+                extra_kwargs = {'skip': tuple(local_defer_until)} if local_defer_until else {}
+                status = service.drain_delivery(transport, not_before=not_before, **extra_kwargs)
+                if isinstance(status, dict):
+                    outcomes = status.get('outcomes')
+                    if isinstance(outcomes, list):
+                        for item in outcomes:
+                            if not isinstance(item, dict):
+                                continue
+                            tid = item.get('task_id')
+                            if not isinstance(tid, str) or not tid:
+                                continue
+                            if item.get('status') == 'delivery_deferred' and item.get('not_sent') is True:
+                                local_defer_until[tid] = now_mono + local_defer_backoff
+                                if len(local_defer_until) > 256:
+                                    oldest = min(local_defer_until, key=local_defer_until.get)
+                                    local_defer_until.pop(oldest, None)
+                            elif item.get('status') == 'delivered':
+                                local_defer_until.pop(tid, None)
                 last_error = None
             except Exception as exc:
                 # A broken pass must not kill the poller; the next pass retries from

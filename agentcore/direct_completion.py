@@ -135,9 +135,9 @@ class DirectCompletionTransport:
                 if row[0] != payload:
                     raise ValueError('delivery payload conflict')
                 if row[1] == 'sent':
-                    return row[2]
+                    return row[2], 'sent'
                 if row[1] in ('sending', 'unknown'):
-                    return None
+                    return None, row[1]
             if item['kind'] == 'file' and hashlib.sha256(Path(item['path']).read_bytes()).hexdigest() != item['sha256']:
                 raise ValueError('artifact snapshot changed')
             if row:
@@ -162,7 +162,7 @@ class DirectCompletionTransport:
         state = 'sent' if receipt else ('rejected' if unsent else 'unknown')
         with self.db() as db:
             db.execute('UPDATE operations SET state=?,receipt_id=? WHERE key=?', (state, receipt, key))
-        return receipt
+        return receipt, state
 
     def deliver(self, address, message, *, idempotency_key):
         if address.get('profile') != self.profile or not address.get('route'):
@@ -206,9 +206,12 @@ class DirectCompletionTransport:
         receipts = []
         for i, item in enumerate(plan):
             key = hashlib.sha256((identity+'\n'+str(i)).encode()).hexdigest()
-            receipt = self._operation(address, item, key)
+            receipt, state = self._operation(address, item, key)
             if receipt is None:
-                return dict(accepted=False, event_id=idempotency_key, deferred=True)
+                out = dict(accepted=False, event_id=idempotency_key, deferred=True)
+                if state == 'rejected':
+                    out['not_sent'] = True
+                return out
             receipts.append(receipt)
         return dict(accepted=True, event_id=idempotency_key,
                     receipt_id='direct:'+hashlib.sha256(json.dumps(receipts).encode()).hexdigest())

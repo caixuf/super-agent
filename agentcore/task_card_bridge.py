@@ -22,7 +22,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from agentcore.cardkit2_renderer import build_cardkit2_payload
+from agentcore.cardkit2_renderer import build_cardkit2_payload, seal_unclosed_markdown_fences
 from agentcore.delivery_sanitizer import sanitize_and_extract_artifacts, sanitize_card_text
 
 logger = logging.getLogger(__name__)
@@ -94,6 +94,45 @@ def _finite_number(value: Any) -> bool:
 
 
 _sanitize_card_text = sanitize_card_text
+
+
+def _truncate_summary_cleanly(text: str, limit: int = 1500, target: int = 1200) -> str:
+    """Truncate long summaries safely without leaving dangling code fences or cut sentences.
+
+    Prioritizes paragraph boundary (\\n\\n > 700), then single newline (\\n > 700),
+    then Chinese sentence punctuations (。！？； > 700), seals any unclosed code fences,
+    and attaches the overflow note.
+    """
+    clean_sum = _sanitize_card_text(text or "")
+    if len(clean_sum) <= limit:
+        return clean_sum
+
+    candidate = clean_sum[:target].rstrip()
+    cut_idx = -1
+
+    last_para = candidate.rfind("\n\n")
+    if last_para > 700:
+        cut_idx = last_para
+    else:
+        last_nl = candidate.rfind("\n")
+        if last_nl > 700:
+            cut_idx = last_nl
+        else:
+            last_punct = -1
+            for p in ("。", "！", "？", "；"):
+                pos = candidate.rfind(p)
+                if pos > last_punct:
+                    last_punct = pos
+            if last_punct > 700:
+                cut_idx = last_punct + 1
+
+    if cut_idx > 0:
+        truncated = clean_sum[:cut_idx].rstrip()
+    else:
+        truncated = candidate
+
+    truncated = seal_unclosed_markdown_fences(truncated)
+    return f"{truncated}\n\n*(长文本详细内容已作为附件发送至会话)*"
 
 
 class TaskCardBridge:
@@ -252,6 +291,8 @@ class TaskCardBridge:
         summary: str = "",
         artifacts: Optional[List[str]] = None,
         error_msg: str = "",
+        hero_img_key: Optional[str] = None,
+        docx_url: str = "",
     ) -> Dict[str, Any]:
         """Construct the canonical CardKit 2.0 industrial card payload bound to the task.
 
@@ -303,14 +344,12 @@ class TaskCardBridge:
         elif status == "completed":
             comp_lines = []
             if summary:
-                clean_sum = _sanitize_card_text(summary)
-                if len(clean_sum) > 1500:
-                    truncated_sum = clean_sum[:1200].rstrip()
-                    last_nl = truncated_sum.rfind("\n")
-                    if last_nl > 800:
-                        truncated_sum = truncated_sum[:last_nl]
-                    clean_sum = f"{truncated_sum}\n\n*(长文本详细内容已作为附件发送至会话)*"
+                clean_sum = _truncate_summary_cleanly(summary)
                 comp_lines.append(f"**执行结论**：\n\n{clean_sum}")
+            if docx_url:
+                safe_url = _sanitize_card_text(docx_url).strip()
+                if re.match(r"^https?://[^\s()<>]+$", safe_url):
+                    comp_lines.append(f"**在线文档**：[点击打开完整云文档]({safe_url})")
             if artifacts:
                 art_items = ["**交付制品**："]
                 for art in artifacts:
@@ -347,6 +386,7 @@ class TaskCardBridge:
             status_suffix=status_suffix,
             color_template=template,
             footer_notes=footer_notes,
+            hero_img_key=hero_img_key,
         )
 
     @_serialize_task
@@ -541,6 +581,8 @@ class TaskCardBridge:
         artifacts: Optional[List[str]] = None,
         elapsed: float = 0.0,
         error_msg: str = "",
+        hero_img_key: Optional[str] = None,
+        docx_url: str = "",
     ) -> Dict[str, Any]:
         """Finalize the card upon terminal outcome (turn-green contract)."""
         if status not in ('completed', 'failed', 'cancelled'):
@@ -580,7 +622,8 @@ class TaskCardBridge:
                             'patch_result': {'ok': False, 'error': 'previous_patch_unknown'}}
             card_payload = self.build_card_payload(
                 task_id, row[1], row[2], status, elapsed=elapsed,
-                summary=summary, artifacts=artifacts, error_msg=error_msg)
+                summary=summary, artifacts=artifacts, error_msg=error_msg,
+                hero_img_key=hero_img_key, docx_url=docx_url)
 
             will_patch = bool(row[3] and self.sender and callable(self.sender))
             blocked = will_patch and row[8] == 'sending' and not is_stale_sending

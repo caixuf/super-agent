@@ -64,7 +64,8 @@ def parked_jobs(pool: Pool, *, profile: Optional[str] = None,
 
 def drain(pool: Pool, transport: Any, *, profile: Optional[str] = None,
           limit: int = 100, lease: float = 60,
-          max_summary: int = MAX_SUMMARY_CHARS, not_before=None) -> dict[str, Any]:
+          max_summary: int = MAX_SUMMARY_CHARS, not_before=None,
+          extra_skip=()) -> dict[str, Any]:
     """Deliver routable completions once, stepping over unaddressable ones.
 
     Returns a bounded status record. A non-``delivered`` outcome stops the pass so a
@@ -77,8 +78,9 @@ def drain(pool: Pool, transport: Any, *, profile: Optional[str] = None,
         return {'status': 'unavailable', 'delivered': 0,
                 'reason': 'no transport configured', 'outcomes': []}
     addresses = pending_addresses(pool)
-    skip = tuple(job for job, address in addresses
-                 if not routable(address, profile=profile))
+    unroutable = tuple(job for job, address in addresses
+                       if not routable(address, profile=profile))
+    skip = tuple(dict.fromkeys(unroutable + tuple(extra_skip or ())))
     outcomes: list[dict[str, Any]] = []
     for _ in range(limit):
         outcome = deliver_once(pool, transport, lease=lease, limit=max_summary, skip=skip,
@@ -93,14 +95,19 @@ def drain(pool: Pool, transport: Any, *, profile: Optional[str] = None,
         if outcome['status'] in ('unowned', 'delivery_deferred') and isinstance(outcome.get('task_id'), str):
             # A changed origin or uncertain direct send stays pending, but must
             # not hold unrelated completions behind it for this pass.
-            skip = skip + (outcome['task_id'],)
+            skip = tuple(dict.fromkeys(skip + (outcome['task_id'],)))
             continue
         break
     delivered = [row for row in outcomes if row['status'] == 'delivered']
     notable = [row for row in outcomes if row['status'] not in ('delivered', 'empty')]
     status = notable[-1]['status'] if notable else ('delivered' if delivered else 'empty')
+    parked = tuple(dict.fromkeys(unroutable + tuple(
+        row['task_id'] for row in outcomes
+        if row.get('status') in ('unowned', 'delivery_deferred')
+        and isinstance(row.get('task_id'), str)
+    )))
     return {'status': status, 'delivered': len(delivered),
-            'parked': list(skip), 'outcomes': outcomes}
+            'parked': list(parked), 'outcomes': outcomes}
 
 
 def inspect(pool: Pool, *, profile: Optional[str] = None, limit: int = 20,

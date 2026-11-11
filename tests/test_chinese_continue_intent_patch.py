@@ -40,6 +40,11 @@ def detector(source=PRISTINE):
     '本机没有这个配置。看灌灌那段召回。',
     '查一下这次失败的原因。',
     '查看这段日志。',
+    'hnrss 与 HN 的 Algolia API 都能通；以 HN 官网域名访问会超时，但换用同源的两个接口就可用。现在解析国内源和 HN。',
+    '关键风险点已经抓到，最后做一次完整可行的验证',
+    '前置抓取已完成，现在提取并汇总各源标题。',
+    '现在抓取国内源，并补验 HN。',
+    '接口连通性已确认，接下来分析并对比两份结果。',
 ])
 def test_action_tails_reuse_existing_classifier(text):
     assert detector()(text)
@@ -47,6 +52,8 @@ def test_action_tails_reuse_existing_classifier(text):
 @pytest.mark.parametrize('text', [
     '全部检查通过。', '你好。', '42', '', None,
     '建议先查清是不是超时引发的。',
+    '建议先备份，接下来检查日志。',
+    '如果你批准，我现在检查日志。',
     '你可以先查清是不是超时引发的。',
     '请你先检查日志。',
     '“先查清是不是超时引发的。”',
@@ -318,3 +325,30 @@ def test_cli_legacy_upgrade_check_is_read_only_and_apply_is_idempotent(tmp_path)
     assert run('--check').returncode == 0
     assert run('--apply').returncode == 0
     assert target.read_bytes() == upgraded
+
+
+def test_exact_previous_helper_upgrades_cleanly(tmp_path):
+    previous = PRISTINE.replace(patcher.OLD, patcher.NEW).replace(
+        'def trailing_continue_intent',
+        patcher.PREVIOUS_HELPER + 'def trailing_continue_intent',
+    )
+    target = tmp_path / patcher.TARGET
+    target.parent.mkdir(parents=True)
+    target.write_text(previous)
+
+    def run(mode):
+        return subprocess.run(
+            [sys.executable, str(PATCH), mode, '--agent-dir', str(tmp_path)],
+            capture_output=True, text=True,
+        )
+
+    assert run('--check').returncode == 1
+    assert run('--apply').returncode == 0
+    assert run('--check').returncode == 0
+    upgraded = target.read_text()
+    assert patcher.PREVIOUS_HELPER not in upgraded
+    assert patcher.HELPER in upgraded
+    f = detector(upgraded)
+    assert f('hnrss 与 HN 的 Algolia API 都能通；以 HN 官网域名访问会超时，但换用同源的两个接口就可用。现在解析国内源和 HN。')
+    assert f('关键风险点已经抓到，最后做一次完整可行的验证')
+

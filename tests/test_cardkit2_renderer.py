@@ -11,6 +11,8 @@ from agentcore.cardkit2_renderer import (
     build_cardkit2_payload,
     build_streaming_progress_body,
     extract_stages_and_clean_text,
+    normalize_feishu_markdown_text,
+    seal_unclosed_markdown_fences,
 )
 
 
@@ -335,3 +337,192 @@ def test_stream_drain_rejects_invalid_budget(budget):
     renderer = CardStreamRenderer("card-budget", patch)
     with pytest.raises(ValueError, match="budget"):
         asyncio.run(renderer.drain(budget=budget))
+
+
+def test_normalize_feishu_markdown_text_protects_code_blocks():
+    text = (
+        "```python\n"
+        "def run_task(**kwargs):\n"
+        "    return '**not bold**'\n"
+        "```\n"
+        "行内代码 `**kwargs` 和 `` `**inner**` ``\n"
+        "~~~~bash\n"
+        "echo '**literal asterisks**'\n"
+        "~~~~\n"
+        "但**“文字”**属于测试。"
+    )
+    res = normalize_feishu_markdown_text(text)
+    assert "def run_task(**kwargs):" in res
+    assert "'**not bold**'" in res
+    assert "`**kwargs`" in res
+    assert "`` `**inner**` ``" in res
+    assert "echo '**literal asterisks**'" in res
+    assert "但“ **文字** ”属于测试。" in res
+
+
+def test_normalize_feishu_markdown_text_chinese_punctuation_no_white_gap():
+    cases = [
+        ("**阶段**：", "**阶段**："),
+        ("**结果**，", "**结果**，"),
+        ("**结论**。", "**结论**。"),
+        ("**注意**！", "**注意**！"),
+        ("**疑问**？", "**疑问**？"),
+        ("**说明**；", "**说明**；"),
+        ("**清单**、", "**清单**、"),
+        ("（**阶段**）", "（**阶段**）"),
+        ("《**指南**》", "《**指南**》"),
+        ("【**警告**】", "【**警告**】"),
+        ("「**声明**」", "「**声明**」"),
+        ("『**核心**』", "『**核心**』"),
+        ("但“**文字**”属于", "但“ **文字** ”属于"),
+        ("在**[OK]**后", "在 **[OK]** 后"),
+        ("**阶段**：下一阶段", "**阶段**：下一阶段"),
+    ]
+    for inp, expected in cases:
+        assert normalize_feishu_markdown_text(inp) == expected
+
+
+def test_seal_unclosed_markdown_fences():
+    unclosed_backtick = "```python\ndef test():\n    pass"
+    assert seal_unclosed_markdown_fences(unclosed_backtick) == (
+        "```python\ndef test():\n    pass\n```"
+    )
+
+    unclosed_tilde = "~~~~yaml\nkey: value"
+    assert seal_unclosed_markdown_fences(unclosed_tilde) == (
+        "~~~~yaml\nkey: value\n~~~~"
+    )
+
+    closed = "```python\nfoo()\n```"
+    assert seal_unclosed_markdown_fences(closed) == closed
+
+    plain = "简单纯文本没有任何围栏"
+    assert seal_unclosed_markdown_fences(plain) == plain
+
+
+def test_build_cardkit2_payload_streaming_seals_fences():
+    streaming_text = "分析中：\n```json\n{\"status\": 1}"
+    streaming_stage = "##STAGE: 检查配置\n```shell\ncat config.json"
+    payload = build_cardkit2_payload(
+        streaming_text,
+        is_terminal=False,
+        stage_text=streaming_stage,
+    )
+    elements = payload["body"]["elements"]
+    stage_content = elements[0]["elements"][0]["columns"][0]["elements"][0]["content"]
+    assert stage_content.rstrip().endswith("```")
+    main_content = elements[1]["columns"][0]["elements"][0]["content"]
+    assert main_content.rstrip().endswith("```")
+
+
+def test_build_cardkit2_payload_native_table_orchestration():
+    md_with_table = (
+        "**核心执行结论**：全部 3 个子任务顺利完成。\n\n"
+        "| 模块 | 状态 | 耗时 |\n"
+        "| :--- | :--- | :--- |\n"
+        "| 认证 | PASS | 1.2s |\n"
+        "| 编排 | PASS | 2.5s |\n\n"
+        "────────────────\n\n"
+        "后续详细追溯记录。"
+    )
+    payload = build_cardkit2_payload(
+        md_with_table,
+        is_terminal=True,
+    )
+    elements = payload["body"]["elements"]
+    # 1. First block is conclusion header in blue-50 column_set
+    assert elements[0]["tag"] == "column_set"
+    assert elements[0]["background_style"] == "blue-50"
+    assert "核心执行结论" in elements[0]["columns"][0]["elements"][0]["content"]
+
+    # 2. Table at root level
+    assert elements[1]["tag"] == "table"
+    assert len(elements[1]["rows"]) == 2
+
+    # 3. Divider converted to native hr
+    assert elements[2]["tag"] == "hr"
+
+    # 4. Subsequent markdown at root level
+    assert elements[3]["tag"] == "markdown"
+    assert "后续详细追溯记录" in elements[3]["content"]
+
+
+def test_build_cardkit2_payload_table_first_line():
+    md = (
+        "| 标题A | 标题B |\n"
+        "| --- | --- |\n"
+        "| 1 | 2 |\n\n"
+        "说明文本"
+    )
+    payload = build_cardkit2_payload(md, is_terminal=True)
+    elements = payload["body"]["elements"]
+    assert elements[0]["tag"] == "table"
+    assert elements[1]["tag"] == "markdown"
+
+
+def test_build_cardkit2_payload_long_text_block_whitespace_layout():
+    first_part = "**概要结论**：系统架构升级已全部完成，各项指标均已达到交付基准。"
+    long_body = "详细分析段落内容。\n" * 70  # Makes len > 600
+    combined = f"{first_part}\n\n────────────────\n\n{long_body}"
+    assert len(combined) >= 600
+
+    payload = build_cardkit2_payload(combined, is_terminal=True)
+    elements = payload["body"]["elements"]
+
+    # First section wrapped in blue-50 column_set
+    assert elements[0]["tag"] == "column_set"
+    assert elements[0]["background_style"] == "blue-50"
+    assert "概要结论" in elements[0]["columns"][0]["elements"][0]["content"]
+
+    # Native hr separator
+    assert elements[1]["tag"] == "hr"
+
+    # Long body at top level markdown
+    assert elements[2]["tag"] == "markdown"
+    assert "详细分析段落内容" in elements[2]["content"]
+
+
+def test_build_cardkit2_payload_metric_items_and_hero_image():
+    payload = build_cardkit2_payload(
+        "任务简报",
+        is_terminal=True,
+        metric_items=[
+            ("当前阶段", "单测"),
+            ("覆盖率", "98.5%"),
+            ("总耗时", "12.0s"),
+        ],
+        hero_img_key="img_v2_hero_sample_key",
+        hero_alt="架构执行全景图",
+    )
+    elements = payload["body"]["elements"]
+    # elements[0]: main box
+    assert elements[0]["tag"] == "column_set"
+    assert elements[0]["background_style"] == "blue-50"
+
+    # elements[1]: metric items
+    metric_set = elements[1]
+    assert metric_set["tag"] == "column_set"
+    assert metric_set["flex_mode"] == "trisect"
+    assert metric_set["background_style"] == "grey-50"
+    assert len(metric_set["columns"]) == 3
+    assert "**当前阶段**\n单测" in metric_set["columns"][0]["elements"][0]["content"]
+
+    # elements[2]: hero image
+    hero_img = elements[2]
+    assert hero_img["tag"] == "img"
+    assert hero_img["img_key"] == "img_v2_hero_sample_key"
+    assert hero_img["preview"] is True
+    assert hero_img["alt"]["content"] == "架构执行全景图"
+
+
+def test_build_cardkit2_payload_fenced_yaml_dashes_not_split_into_hr():
+    yaml_snippet = "```yaml\n---\nname: super-agent\nmode: production\n---\n```"
+    prose = "配置核验说明段落。\n" * 60
+    combined = f"**结论**：配置合法\n\n────────────────\n\n{yaml_snippet}\n\n{prose}"
+    assert len(combined) >= 600
+    payload = build_cardkit2_payload(combined, is_terminal=True)
+    elements = payload["body"]["elements"]
+    assert [e["tag"] for e in elements] == ["column_set", "hr", "markdown"]
+    assert "---\nname: super-agent" in elements[2]["content"]
+
+
