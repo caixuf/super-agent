@@ -16,6 +16,7 @@ import subprocess
 
 from agentcore.colleague_provisioner import InstanceSpec
 from agentcore.colleague_registry import Supervisor
+from agentcore.private_profile import require_private_directory
 
 _CREATE = r'''
 import json, os, sys
@@ -41,10 +42,7 @@ def _sync_dir(path):
 
 
 def _private_dir(path):
-    info = path.lstat()
-    if (not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077
-            or (hasattr(os, 'getuid') and info.st_uid != os.getuid())):
-        raise ValueError('private_staging_directory_required')
+    require_private_directory(path, 'private_staging_directory_required')
 
 
 def _read_private(path, maximum=65536):

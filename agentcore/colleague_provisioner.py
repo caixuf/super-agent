@@ -19,36 +19,10 @@ import os
 from pathlib import Path
 import stat
 import tempfile
-import threading
 import time
 
+from agentcore import fork_guard
 from agentcore.colleague_registry import Supervisor
-
-
-# A forked backend must not keep the parent's flock open. Synchronize fork
-# with FD registration, so a fork in another thread cannot miss a new FD.
-_guard_fds = set()
-_guard_fds_lock = threading.Lock()
-
-def _fork_prepare():
-    _guard_fds_lock.acquire()
-
-def _fork_parent():
-    _guard_fds_lock.release()
-
-def _fork_child():
-    try:
-        for fd in tuple(_guard_fds):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        _guard_fds.clear()
-    finally:
-        _guard_fds_lock.release()
-
-if hasattr(os, 'register_at_fork'):
-    os.register_at_fork(before=_fork_prepare, after_in_parent=_fork_parent, after_in_child=_fork_child)
 
 
 @dataclass(frozen=True)
@@ -106,10 +80,7 @@ class Provisioner:
     def _guard(self, spec):
         path = self.state_dir / (self._name(spec) + '.lock')
         flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
-        with _guard_fds_lock:
-            fd = os.open(path, flags, 0o600)
-            _guard_fds.add(fd)
-        owner_pid = os.getpid()
+        fd = fork_guard.open_tracked(path, flags, 0o600)
         try:
             info = os.fstat(fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_nlink != 1
@@ -128,10 +99,8 @@ class Provisioner:
             yield
         finally:
             # The child callback already closed this FD; it may have been reused.
-            if os.getpid() == owner_pid:
-                with _guard_fds_lock:
-                    _guard_fds.discard(fd)
-                    os.close(fd)
+            if fork_guard.untrack(fd):
+                os.close(fd)
 
     def _save(self, spec, phase):
         record = {'profile_id': spec.profile_id, 'member_id': spec.member_id,

@@ -6,10 +6,10 @@ whole-attempt termination remains a separate, explicitly unknown observation.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
-import stat
 from types import MappingProxyType
+
+from agentcore.private_profile import assert_no_messaging_channels, require_private_directory
 
 
 class ToolEnabledGatewayProfileBackend:
@@ -69,31 +69,11 @@ class ToolEnabledGatewayProfileBackend:
 
     @staticmethod
     def _private_dir(path):
-        info = path.stat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.getuid():
-            raise ValueError("private_directory_required")
+        require_private_directory(path, "private_directory_required", follow_symlinks=True)
 
     @staticmethod
     def _assert_no_channels(home):
-        try:
-            from ruamel.yaml import YAML
-            config = YAML(typ="safe").load((home / "config.yaml").read_text(encoding="utf-8")) or {}
-        except ModuleNotFoundError:
-            import yaml
-            config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")) or {}
-        if not isinstance(config, dict):
-            raise ValueError("profile_config_invalid")
-        channels = config.get("platforms") or {}
-        if not isinstance(channels, dict) or any(
-                not isinstance(v, dict) or v.get("enabled") is True for v in channels.values()):
-            raise ValueError("messaging_channels_not_disabled")
-        env = home / ".env"
-        if env.exists():
-            from dotenv import dotenv_values
-            names = dotenv_values(env)
-            prefixes = ("FEISHU_", "LARK_", "TELEGRAM_", "DISCORD_", "SLACK_", "WHATSAPP_")
-            if any(k.upper().startswith(prefixes) and v for k, v in names.items()):
-                raise ValueError("messaging_credentials_not_allowed")
+        assert_no_messaging_channels(home)
 
     def session_options(self, profile):
         return dict(self._options[profile])

@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -62,16 +63,52 @@ def _store_path() -> Path:
     return cfg.synapse_store_path()
 
 
-def _load() -> Dict[str, Dict[str, Any]]:
-    p = _store_path()
-    if not p.is_file():
+#: 读路径缓存。召回时每次都要读这份账本，5k 条 JSON 解析约 3.2ms；
+#: 账本只在写入时变化，按 (path, mtime_ns, size, inode) 失效即可。
+_LOAD_CACHE_KEY = None
+_LOAD_CACHE_DATA: Optional[Dict[str, Dict[str, Any]]] = None
+_LOAD_CACHE_LOCK = threading.Lock()
+
+
+def _cache_key(path: Path):
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (str(path), info.st_mtime_ns, info.st_size, info.st_ino)
+
+
+def _parse(path: Path) -> Dict[str, Dict[str, Any]]:
+    if not path.is_file():
         return {}
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except Exception as exc:  # noqa: BLE001 —— 账本坏了退默认权重，不阻断召回
         logger.debug("读取突触账本失败: %s", exc)
         return {}
+
+
+def _load() -> Dict[str, Dict[str, Any]]:
+    """只读快照：调用方不得修改返回值。"""
+    p = _store_path()
+    key = _cache_key(p)
+    if key is None:
+        return {}
+    global _LOAD_CACHE_KEY, _LOAD_CACHE_DATA
+    with _LOAD_CACHE_LOCK:
+        if _LOAD_CACHE_KEY == key and _LOAD_CACHE_DATA is not None:
+            return _LOAD_CACHE_DATA
+    data = _parse(p)
+    with _LOAD_CACHE_LOCK:
+        _LOAD_CACHE_KEY = key
+        _LOAD_CACHE_DATA = data
+    return data
+
+
+def _load_mutable() -> Dict[str, Dict[str, Any]]:
+    """写入路径必须拿独立副本：改完再 _save，不能污染只读缓存。"""
+    return _parse(_store_path())
 
 
 def _save(synapses: Dict[str, Dict[str, Any]]) -> bool:
@@ -81,6 +118,10 @@ def _save(synapses: Dict[str, Dict[str, Any]]) -> bool:
         tmp = p.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(synapses, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(p)  # 原子替换：崩在写一半也不会留下截断的账本
+        global _LOAD_CACHE_KEY, _LOAD_CACHE_DATA
+        with _LOAD_CACHE_LOCK:
+            _LOAD_CACHE_KEY = None
+            _LOAD_CACHE_DATA = None
         return True
     except Exception as exc:  # noqa: BLE001
         logger.debug("保存突触账本失败: %s", exc)
@@ -88,6 +129,12 @@ def _save(synapses: Dict[str, Dict[str, Any]]) -> bool:
 
 
 def load_synapses() -> Dict[str, Dict[str, Any]]:
+    """公共账本快照（可修改后保存）：语义与旧实现一致，始终返回新副本。"""
+    return _load_mutable()
+
+
+def load_synapses_cached() -> Dict[str, Dict[str, Any]]:
+    """热召回路径专用的只读快照；调用方不得修改返回值。"""
     return _load()
 
 
@@ -126,7 +173,7 @@ def reinforce(pattern_id: str, success: bool, target: str = "",
     if not key:
         return {"ok": False, "error": "pattern_id 不能为空"}
 
-    synapses = _load()
+    synapses = _load_mutable()
     entry = synapses.get(key) or {
         "id": key,
         "confidence": DEFAULT_CONFIDENCE,
@@ -253,7 +300,7 @@ def record_coactivation(
     unique_ids = [str(f).strip() for f in dict.fromkeys(fact_ids) if str(f or "").strip()]
     if len(unique_ids) < 2:
         return {"ok": True, "edges_updated": 0}
-    synapses = _load()
+    synapses = _load_mutable()
     delta = float(step) if success else -0.5 * float(step)
     updated_pairs = 0
     now_str = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -351,7 +398,7 @@ def merge_synapse(old_id: str, new_id: str) -> Dict[str, Any]:
     new_k = (new_id or "").strip()
     if not old_k or not new_k or old_k == new_k:
         return {"ok": False, "merged": False}
-    synapses = _load()
+    synapses = _load_mutable()
     old_entry = synapses.pop(old_k, None)
     if not old_entry:
         return {"ok": True, "merged": False}
@@ -398,7 +445,7 @@ def merge_synapse(old_id: str, new_id: str) -> Dict[str, Any]:
 
 def drop(pattern_id: str) -> Dict[str, Any]:
     """彻底移除一条账本记录（事实被删除时同步调用）。"""
-    synapses = _load()
+    synapses = _load_mutable()
     existed = synapses.pop((pattern_id or "").strip(), None) is not None
     if existed:
         _save(synapses)

@@ -303,6 +303,7 @@ def get_registered_superagent_py_subcommands() -> frozenset[str]:
 SUPPORTED_SUPERAGENT_SH_CMDS = frozenset({
     "package", "plan", "install", "update", "doctor", "uninstall",
     "candidate-hermes", "profile", "check", "preflight",
+    "lobechat", "screen",
 })
 
 KNOWN_HALLUCINATED_IDENTIFIERS = (

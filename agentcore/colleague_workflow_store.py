@@ -28,6 +28,7 @@ import sqlite3
 import time
 import uuid
 
+from agentcore import fork_guard
 from agentcore.pool import normalize_origin
 
 _HEX32 = re.compile(r'^[0-9a-f]{32}$')
@@ -35,23 +36,6 @@ _HEX64 = re.compile(r'^[0-9a-f]{64}$')
 _ROLE = re.compile(r'^[a-z][a-z0-9_]{0,31}$')
 _REASON = re.compile(r'^[a-z][a-z0-9_]{0,63}$')
 _TERMINAL = frozenset(('completed', 'failed', 'cancelled'))
-_guard_fds = set()
-
-
-def _close_forked_guards():
-    # flock is associated with the inherited open file description. A child
-    # holding the parent's descriptor would otherwise keep the parent lock
-    # alive after the parent exits the context, and can deadlock its own lock.
-    for fd in tuple(_guard_fds):
-        try:
-            os.close(fd)
-        except OSError:
-            pass  # The child has no usable inherited guard in either case.
-    _guard_fds.clear()
-
-
-if hasattr(os, 'register_at_fork'):
-    os.register_at_fork(after_in_child=_close_forked_guards)
 
 
 class WorkflowConflict(ValueError):
@@ -290,8 +274,7 @@ class WorkflowStore:
         directory = self.root / 'submission-locks'
         directory.mkdir(mode=0o700, exist_ok=True)
         path = directory / (workflow + '.lock')
-        fd = os.open(str(path), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        _guard_fds.add(fd)
+        fd = fork_guard.open_tracked(str(path), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
             if timeout is None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
@@ -310,8 +293,7 @@ class WorkflowStore:
                 self._owned(db, owner, workflow)
             yield
         finally:
-            if fd in _guard_fds:
-                _guard_fds.remove(fd)
+            if fork_guard.untrack(fd):
                 os.close(fd)
 
     def prepare_next(self, owner, workflow):

@@ -30,10 +30,12 @@ fact_tags 用 (fact_id, key) 复合主键 + (key, value) 索引：同一 fact �
 from __future__ import annotations
 
 import atexit
+import functools
 import hashlib
 import json
 import logging
 import math
+import operator
 import os
 import re
 import sqlite3
@@ -47,7 +49,6 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from .config import get_config, logger_name
 from .vector_codec import (
-    cosine_similarity as _cosine,
     delete_vectors_for_facts as _delete_vectors_for_facts,
     pack_vector as _pack_vector,
     text_hash as _text_hash,
@@ -78,6 +79,39 @@ def _db_path() -> Path:
 _BULK_INGEST = os.getenv("MEMORY_BULK_INGEST", "").strip() == "1"
 
 
+#: 已确认过 schema 的库文件（path, st_dev, st_ino）。建表 DDL 与迁移检查
+#: 只需在每个库文件上成功执行一次，之后每个连接都跑一遍是纯粹的固定开销。
+_SCHEMA_READY: set = set()
+_SCHEMA_READY_MAX = 64
+_SCHEMA_LOCK = threading.Lock()
+
+
+def _schema_identity(path: Path):
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (str(path), info.st_dev, info.st_ino)
+
+
+def _load_vec_extension(conn: sqlite3.Connection, *, ensure: bool = False) -> bool:
+    """加载连接级 sqlite-vec 扩展；失败静默降级（向量索引是可选加速层）。
+
+    建表只做一次（``ensure=True``）：调用方不能指望记得先调 ensure_table，
+    新建库第一次 recall 时表不存在 → KNN 抛 "no such table" → 回退 LIKE，
+    而 LIKE 对上中文长句基本是空集，最终表现为「写入成功但永远召回 0 命中」。
+    """
+    try:
+        from . import vec_index
+        vec_index.load_into(conn)
+        if ensure:
+            vec_index.ensure_table(conn, dim=get_config().embed_dim)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(logger_name("store")).debug("vec 扩展未加载: %s", exc)
+        return False
+
+
 def _connect() -> sqlite3.Connection:
     path = _db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,19 +122,27 @@ def _connect() -> sqlite3.Connection:
         conn.execute("PRAGMA synchronous = NORMAL;")
         # 灌入时不频繁 checkpoint，减少 fsync 次数
         conn.execute("PRAGMA wal_autocheckpoint = 20000;")
-    # sqlite-vec 是**连接级**扩展：每个新连接都要单独加载，
-    # 否则只有加载过的那次能用，换个连接就报 no such module: vec0
-    # （实测：reindex 成功了，但下一次 recall 新建连接读不到索引）。
-    # 加载失败静默降级 —— 向量索引是可选加速层。
-    try:
-        from . import vec_index
-        vec_index.load_into(conn)
-        # 建表必须在连接工厂里做，不能指望调用方记得先调 ensure_table：
-        # 新建库第一次 recall 时表不存在 → KNN 抛 "no such table" → 回退 LIKE，
-        # 而 LIKE 对上中文长句基本是空集，最终表现为「写入成功但永远召回 0 命中」。
-        vec_index.ensure_table(conn, dim=get_config().embed_dim)
-    except Exception as exc:  # noqa: BLE001
-        logging.getLogger(logger_name("store")).debug("vec 扩展未加载: %s", exc)
+    identity = _schema_identity(path)
+    if identity is not None and identity in _SCHEMA_READY:
+        # DDL 已在这个库文件上确认过，只需重新加载连接级扩展。
+        _load_vec_extension(conn)
+        conn.execute("PRAGMA journal_mode = WAL;")
+        return conn
+    with _SCHEMA_LOCK:
+        if identity is not None and identity in _SCHEMA_READY:
+            _load_vec_extension(conn)
+            conn.execute("PRAGMA journal_mode = WAL;")
+            return conn
+        _load_vec_extension(conn, ensure=True)
+        _ensure_schema(conn)
+        if identity is not None:
+            if len(_SCHEMA_READY) >= _SCHEMA_READY_MAX:
+                _SCHEMA_READY.clear()
+            _SCHEMA_READY.add(identity)
+    return conn
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute(
         """
@@ -186,7 +228,6 @@ def _connect() -> sqlite3.Connection:
         memory_scale.ensure_fts(conn)
     except Exception as exc:  # noqa: BLE001
         logging.getLogger(logger_name("store")).debug("FTS5 初始化跳过: %s", exc)
-    return conn
 
 
 
@@ -643,7 +684,7 @@ def _confidence_weights(fact_ids: Sequence[Optional[str]]) -> Dict[str, float]:
         return out
     # 读取也要走宿主提供的账本：写入端已切到宿主的实现，
     # 读取端若还读引擎自带路径，就会出现「强化写进去了、排序却读不到」。
-    loader = get_config().synapse_loader or synapse.load_synapses
+    loader = get_config().synapse_loader or synapse.load_synapses_cached
     try:
         syn = loader() or {}
     except Exception as exc:  # noqa: BLE001
@@ -807,22 +848,14 @@ def _knn_rowids(conn: sqlite3.Connection, query: str, *,
     if not qvec:
         return None
 
-    hits = vec_index.knn(conn, qvec[0], limit=limit)
+    # 桶稀释问题（2026-10-23 灌入 3000 条后暴露）：
+    # KNN 是全局取的，_unknown 桶条目一多就会把目标桶的精确结果挤出 top-N。
+    # 实测 ebm=G2 查询时，真正讲门限的那条排到了第 4。
+    # 修法：指定了代际桶时直接放大 KNN 取数窗口（limit*3），一次调用同时
+    # 覆盖主结果与补捞；原先分两次调用拿的是同一批向量的前缀，纯属重复计算。
+    hits = vec_index.knn(conn, qvec[0], limit=limit * 3 if buckets else limit)
     if not hits:
         return None   # 索引空或加载失败 —— 交给 LIKE 兜底
-
-    # 桶稀释问题（2026-10-23 灌入 3000 条后暴露）：
-    # KNN 是全局取的，_unknown 桶条目一多就会把 G2 桶的精确结果挤出 top-N。
-    # 实测 ebm=G2 查询时，真正讲门限的那条排到了第 4。
-    # 修法：指定了代际桶时，额外**按桶补捞**一份，保证小桶不被大桶淹没。
-    if buckets:
-        try:
-            from . import vec_index as _vi
-            extra = _vi.knn(conn, qvec[0], limit=limit * 3)
-            have = {fid for fid, _ in hits}
-            hits = list(hits) + [(fid, d) for fid, d in extra if fid not in have]
-        except Exception as exc:  # noqa: BLE001 —— 补捞失败不影响主结果
-            logging.getLogger(logger_name("store")).debug("KNN 补捞失败: %s", exc)
 
     fids = list(dict.fromkeys(fid for fid, _dist in hits))
     # IN(200 ids) + user/status can make SQLite prefer a low-cardinality
@@ -897,6 +930,20 @@ def _is_noise_term(t: str) -> bool:
     return any(ch in _STOP_CHARS for ch in t)
 
 
+@functools.lru_cache(maxsize=128)
+def _reference_terms(query: str) -> tuple:
+    """请求词元按判定方式分组并缓存：ASCII 词按整词比，中文二元组按子串比。
+
+    同一条查询会对很多候选重复判定，切词与过滤的结果却完全一样。返回值还
+    带上未过滤词元数：查询本身没有任何词元时直接放行，而「词元全被过滤掉」
+    仍要按高相似度门槛判定，两者不能混为一谈。
+    """
+    raw = _query_terms(query)
+    terms = {t for t in raw if t not in _GENERIC_TERMS and not _is_noise_term(t)}
+    ascii_terms = frozenset(t for t in terms if re.fullmatch(r"[a-z0-9_]+", t))
+    return len(raw), ascii_terms, frozenset(terms - ascii_terms)
+
+
 def _passes_floor(it: Dict[str, Any], floor: float, query: str = "") -> bool:
     """一条候选能否进结果集。
 
@@ -917,25 +964,24 @@ def _passes_floor(it: Dict[str, Any], floor: float, query: str = "") -> bool:
         return False
     if (it.get("tags") or {}).get("scope") != "reference":
         return True
-    terms = _query_terms(query)
-    if not terms:
-        return True
-    text = ((it.get("subject") or "") + " " + (it.get("statement") or "")).lower()
     # 只看**区分度高的词元**：像「今天」「天气」「不错」这种任意两句寒暄都会
     # 出现的词，命中再多也说明不了领域相关。实测「今天天气不错」的二元组
     # {今天,天天,天气,气不,不错} 里有 3 个能命中讲天气预报的教材段落，
     # 光靠比例判据挡不住。所以先剔除高频泛用词，再要求命中比例。
-    terms = {t for t in terms if t not in _GENERIC_TERMS and not _is_noise_term(t)}
-    if len(terms) < _REFERENCE_MIN_TERMS:
+    raw_count, ascii_terms, other_terms = _reference_terms(query)
+    total = len(ascii_terms) + len(other_terms)
+    if not raw_count:
+        return True
+    if total < _REFERENCE_MIN_TERMS:
         # 去掉泛用词后剩不下什么，说明这句问话本身没有技术信息量
         # （「今天天气不错」只剩 {天气, 气不}）。此时只认很高的相似度。
         return sc >= max(floor, _REFERENCE_SCOPE_FLOOR)
+    text = ((it.get("subject") or "") + " " + (it.get("statement") or "")).lower()
     # ASCII identifiers are whole tokens: Pi is not MPI, TCP is not TCPIP.
     # Chinese bigrams still use substring overlap because they have no spaces.
-    hit = sum(1 for t in terms if (
-        bool(re.search(r'(?<![a-z0-9_])' + re.escape(t) + r'(?![a-z0-9_])', text))
-        if re.fullmatch(r'[a-z0-9_]+', t) else t in text))
-    if hit / len(terms) >= _REFERENCE_TERM_RATIO:
+    tokens = frozenset(re.findall(r"[a-z0-9_]+", text))
+    hit = sum(1 for t in ascii_terms if t in tokens) + sum(1 for t in other_terms if t in text)
+    if hit / total >= _REFERENCE_TERM_RATIO:
         return True
     return sc >= max(floor, _REFERENCE_SCOPE_FLOOR)
 
@@ -1265,31 +1311,6 @@ def _conflict_candidates(conn: sqlite3.Connection, statement: str,
         " ORDER BY created_at DESC LIMIT ?",
         [user_id, *buckets, limit]).fetchall()
     return [dict(r) for r in rows]
-
-
-def _kw_alias_hits(conn: sqlite3.Connection, fact_ids: List[str], query: str) -> Dict[str, int]:
-    """统计每条事实命中了多少个 keyword 标签（key 形如 kw:<触发词>）。
-
-    为什么需要它：embedding 模型对中文短问句区分力有限，实测「为什么不能把空结果
-    说成没有」会被「能力需端到端验证」抢走。标签是人给的确定性信号，用它做精确
-    命中比调权重可靠。
-    """
-    if not fact_ids or not (query or "").strip():
-        return {}
-    q = (query or "").lower()
-    hits: Dict[str, int] = {}
-    marks = ",".join("?" * len(fact_ids))
-    try:
-        rows = conn.execute(
-            "SELECT fact_id, key FROM fact_tags WHERE fact_id IN (" + marks + ") AND key LIKE 'kw:%'",
-            fact_ids).fetchall()
-    except sqlite3.Error:
-        return {}
-    for r in rows:
-        word = r["key"][3:].lower()
-        if word and word in q:
-            hits[r["fact_id"]] = hits.get(r["fact_id"], 0) + 1
-    return hits
 
 
 
@@ -2228,14 +2249,12 @@ def _embed_via_host_fallbacks(texts: Sequence[str]) -> Optional[List[List[float]
     return None
 
 
-def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
-    try:
-        dot = sum(x * y for x, y in zip(a, b))
-        na = sum(x * x for x in a) ** 0.5
-        nb = sum(y * y for y in b) ** 0.5
-        return dot / (na * nb) if na and nb else 0.0
-    except Exception:
-        return 0.0
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(map(operator.mul, a, b))
+
+
+def _norm(a: Sequence[float]) -> float:
+    return math.sqrt(_dot(a, a))
 
 
 def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True,
@@ -2249,6 +2268,16 @@ def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True,
     q = set(w.lower() for w in (query or "").replace("/", " ").split() if len(w) > 1)
     bm25_ranks = bm25_ranks or {}
     bm25_scores = bm25_scores or {}
+    # 排序过程中同一条目会被比较多次，书签加分对同一条目是常量。
+    boost_cache: Dict[int, float] = {}
+
+    def _boost(it):
+        key = id(it)
+        val = boost_cache.get(key)
+        if val is None:
+            val = _bookmark_boost(it, query)
+            boost_cache[key] = val
+        return val
 
     def kw_score(it):
         fid = str(it.get("fact_id") or "")
@@ -2259,7 +2288,7 @@ def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True,
         if fid in bm25_ranks:
             # FTS5 bm25_score 为负数（越小越相关），将其纳入词法打分
             hit += max(1, 20 - int(bm25_ranks[fid]))
-        if _bookmark_boost(it, query) > 0:
+        if _boost(it) > 0:
             hit += 5
         return (hit, -float(bm25_scores.get(fid, 0.0)), it.get("created_at") or "")
 
@@ -2300,20 +2329,30 @@ def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True,
                 if fid:
                     _persist_fact_embedding(fid, cand[idx], fvec)
 
+            try:
+                qv_norm = _norm(qv)
+            except Exception:  # noqa: BLE001 —— 坏向量退化为全部 0 分
+                qv_norm = 0.0
             scored = []
             for it, cv in zip(items, cvs):
                 if cv is None:
                     continue
                 it = dict(it)
                 it["rank_mode"] = "vector"
-                scored.append((_cosine(qv, cv), it))
+                try:
+                    cv_norm = _norm(cv)
+                    score = (_dot(qv, cv) / (qv_norm * cv_norm)
+                             if qv_norm and cv_norm else 0.0)
+                except Exception:  # noqa: BLE001
+                    score = 0.0
+                scored.append((score, it))
 
             weights = _confidence_weights([it.get("fact_id") for _, it in scored])
             # 先计算向量通道名次 vec_rank，再与 FTS5 BM25 通道名次执行 RRF (k=60) 倒数秩融合
             scored.sort(
                 key=lambda x: (
                     0 if (prefer_ebm and x[1].get("apply_match") == "exact_ebm") else 1,
-                    -((x[0] + _bookmark_boost(x[1], query)) * weights.get(x[1].get("fact_id"), 1.0)),
+                    -((x[0] + _boost(x[1])) * weights.get(x[1].get("fact_id"), 1.0)),
                 ))
             k = max(1, int(rrf_k))
             vec_rank_by_id: Dict[str, int] = {}
@@ -2326,7 +2365,7 @@ def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True,
                 sc_val, it_obj = pair
                 fid_key = str(it_obj.get("fact_id") or "")
                 w_val = weights.get(fid_key, 1.0)
-                bm_val = _bookmark_boost(it_obj, query)
+                bm_val = _boost(it_obj)
                 vec_rk = vec_rank_by_id.get(fid_key, len(scored) + 1)
                 rrf_val = 1.0 / float(k + vec_rk)
                 bm25_rk = bm25_ranks.get(fid_key)
@@ -2345,7 +2384,7 @@ def _rank(items: Sequence[Dict[str, Any]], query: str, prefer_ebm: bool = True,
 
             for sc, it in scored:
                 it["rank_mode"] = "vector"
-                bm = _bookmark_boost(it, query)
+                bm = _boost(it)
                 it["_score"] = round(sc + bm, 4)
                 if bm > 0:
                     it["bookmark_pinned"] = True

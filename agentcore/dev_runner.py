@@ -42,12 +42,6 @@ def resolve_platform_repo() -> Optional[Path]:
     return None
 
 
-def _ensure_platform_importable() -> None:
-    repo = resolve_platform_repo()
-    if repo and str(repo) not in sys.path:
-        sys.path.insert(0, str(repo))
-
-
 def _atomic(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")

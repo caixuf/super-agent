@@ -1545,11 +1545,6 @@ def _render_briefing_prompt(services) -> str:
     return text
 
 
-def _render_routing_prompt(services) -> str:
-    """Both frontdesk sections; kept for callers that want the full rule set."""
-    return _render_routing_base() + '\n' + _render_briefing_prompt(services)
-
-
 def format_boost_status(services=None, ctx=None) -> str:
     """Describe configured dispatch capabilities without inventing runtime metrics."""
     lines = ["**Super Agent 调度配置**"]
@@ -1589,8 +1584,8 @@ def _frontdesk_hands_on() -> bool:
 
 
 def _render_hands_on_routing() -> str:
-    return """Capability routing (hands-on frontdesk). You have your own evidence tools: read_file, search_files, session_search, the read-only IMFL MCP tools (mcp__imfl__*: health, tasks, reports, logs, cases, matchers, knowledge, memory) and, when listed, terminal. Facts beat guesses: never answer a factual question about current state from memory or imagination.
-- Look it up yourself, in this turn, when the answer is a quick read: service/login/auth state, config values, versions, git log/status, recent logs, disk/process status, IMFL task progress and reports, case/matcher lookup, knowledge queries, Meego/Feishu project queries (meegle CLI), multi-agent room discussion (room_query recent --limit 5). Run the command, read the output, then answer with the key evidence in plain language.
+    return """Capability routing (hands-on frontdesk). You have your own evidence tools: read_file, search_files, session_search, the read-only host MCP tools (mcp__<server>__*: health, tasks, reports, logs, cases, matchers, knowledge, memory) and, when listed, terminal. Facts beat guesses: never answer a factual question about current state from memory or imagination.
+- Look it up yourself, in this turn, when the answer is a quick read: service/login/auth state, config values, versions, git log/status, recent logs, disk/process status, task progress and reports, case/matcher lookup, knowledge queries, project-tracker queries, multi-agent room discussion (room_query recent --limit 5). Run the command, read the output, then answer with the key evidence in plain language.
 - Terminal discipline: read-only commands by default, each finishing within about 30 seconds. Do NOT write files, edit configs, restart/stop services, kill processes, delete anything, install packages, git commit/push, or submit/cancel test tasks unless the user explicitly asks for that action in this conversation; when the user says "只看看/先别操作", stay strictly read-only. Never start long-running or blocking commands in the foreground.
 - Turn tool budget & auto-handoff: in a single conversational turn, the frontdesk must never exceed 20 tool rounds or 120 seconds of total foreground investigation. If an inquiry requires deeper investigation beyond 20 steps or 120 seconds, do NOT continue polling tools in the foreground! Immediately hand off the deep analysis to a background colleague (e.g. maintainer for system/platform diagnostics, triage for defects/failures, or architect for structural analysis) via durable_submit, inform the user with the task ID, and finish the turn promptly.
 - If a command fails or a tool is missing, say exactly what failed (command + error) and what is still unknown. Never say "没有" when you merely could not find it, and never invent output.

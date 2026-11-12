@@ -24,38 +24,11 @@ import json
 import os
 from pathlib import Path
 import stat
-import threading
 
+from agentcore import fork_guard
 from agentcore.colleague_readonly_runtime import ReadOnlyColleagueRuntime
 from agentcore.colleague_readonly_dialogue import ReadOnlyDialogue
 from agentcore.pool import Pool, normalize_origin
-
-_fds = set()
-_fds_lock = threading.Lock()
-
-
-def _fork_prepare():
-    _fds_lock.acquire()
-
-
-def _fork_parent():
-    _fds_lock.release()
-
-
-def _fork_child():
-    try:
-        for fd in tuple(_fds):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        _fds.clear()
-    finally:
-        _fds_lock.release()
-
-
-if hasattr(os, 'register_at_fork'):
-    os.register_at_fork(before=_fork_prepare, after_in_parent=_fork_parent, after_in_child=_fork_child)
 
 
 class ReadOnlyQueue:
@@ -85,10 +58,9 @@ class ReadOnlyQueue:
         # Serialize each request's reserve/enqueue/rollback across processes.
         # It is separate from the execution lock, so a worker can run after
         # enqueue without waiting for a submitting chat turn to unwind.
-        with _fds_lock:
-            fd = os.open(self.pool.root / 'locks' / ('readonly-submit-' + task),
-                         os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-            _fds.add(fd)
+        fd = fork_guard.open_tracked(
+            self.pool.root / 'locks' / ('readonly-submit-' + task),
+            os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         try:
             info = os.fstat(fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_nlink != 1
@@ -100,10 +72,8 @@ class ReadOnlyQueue:
                 raise RuntimeError('submission_busy') from None
             yield
         finally:
-            with _fds_lock:
-                if fd in _fds:
-                    _fds.remove(fd)
-                    os.close(fd)
+            if fork_guard.untrack(fd):
+                os.close(fd)
 
     def _binding(self, owner, origin, member_id, generation):
         owner = self.runtime._owner(owner)
@@ -211,12 +181,12 @@ class ReadOnlyQueue:
 
     def run_once(self, *, lease=120):
         """Run one queued task in a separate host worker, not in the caller turn."""
-        with _fds_lock:
+        with fork_guard.hold():
             claim = self.pool.claim(lease=lease)
             if claim is None:
                 return {'state': 'empty'}
             row, fd = claim
-            _fds.add(fd)
+            fork_guard.track(fd)
         worker_pid = os.getpid()
         try:
             if not self.pool.begin_execution(row['id'], row['attempt']):
@@ -248,10 +218,8 @@ class ReadOnlyQueue:
             return {'state': 'attempt_finished' if committed else 'stale_attempt', 'job_id': row['id'],
                     'job_state': self.pool.status(row['id'])['status']}
         finally:
-            with _fds_lock:
-                if fd in _fds:
-                    _fds.remove(fd)
-                    os.close(fd)
+            if fork_guard.untrack(fd):
+                os.close(fd)
 
     def inspect_completion(self, *, owner, job_id):
         """Owner-bound presentation from the still-unacknowledged Pool outbox.

@@ -39,6 +39,11 @@ EX_TEMPFAIL = 75
 _SSH_HOST_RE = re.compile(r"^[A-Za-z0-9._@-]{1,128}\Z")
 _SHUTDOWN_SIGNAL = 0
 
+SANITISED_EMPTY_RESPONSES: frozenset[str] = frozenset({
+    "(empty)",
+    "[System: Empty message content sanitised to satisfy protocol]",
+})
+
 
 class _InterruptedShutdownError(RuntimeError):
     """Raised when SIGTERM/SIGINT interrupts worker execution so fallback engines do not spawn."""
@@ -309,11 +314,6 @@ def _read_job_envelope(stream) -> tuple[str, dict]:
         if "attempt" in job and "_attempt_id" not in payload:
             payload["_attempt_id"] = str(job["attempt"])
     return goal.strip(), payload
-
-
-def _read_job(stream) -> str:
-    goal, _ = _read_job_envelope(stream)
-    return goal
 
 
 def _resolve_job_model_route(payload: dict | None = None) -> dict:

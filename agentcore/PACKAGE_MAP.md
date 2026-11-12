@@ -69,6 +69,7 @@ agentcore/
 | `colleague_catalog.py` | Colleagues | 平台可用同事能力名录检索 |
 | `colleague_containment.py` | Colleagues | 物理隔离围栏与未授权越权操作探测 |
 | `colleague_evidence.py` | Colleagues | 研发全过程证据链收集与结构化归档 |
+| `private_profile.py` | Colleagues | 宿主 Profile 私有目录权限与消息通道禁用共享校验 |
 
 ---
 
@@ -122,6 +123,7 @@ agentcore/
 | `plan_gate.py` | Execution | 执行计划合法性前置审查门禁 |
 | `barge_in_control.py` | Execution | 用户实时插话打断控制（Barge-in）与在途任务挂起/抢占 |
 | `safety_envelope.py` | Execution | 运行时安全信封与高危操作熔断机制 |
+| `fork_guard.py` | Execution | flock 文件描述符跨 fork 注册与子进程清理守卫 |
 
 ---
 
@@ -145,6 +147,7 @@ agentcore/
 | :--- | :--- | :--- |
 | `state_graph.py` | Liveness | 纯 Python 零依赖确定性状态图引擎（Typed Reducers, Conditional Edges, Checkpointers, Stagnation Guard） |
 | `liveness.py` | Liveness | 核心服务存活判定、心跳记录与假死侦测 |
+| `screen_lease.py` | Liveness | Bot Desktop 人工接管租约只读观测，凭据令牌脱敏与故障闭合 |
 | `liveness_daemon.py` | Liveness | 定时存活扫描守护进程（systemd 集成） |
 | `tcp_watchdog.py` | Liveness | 网络端口与协议通道连通性看门狗 |
 | `trajectory_ledger.py` | Liveness | 任务状态跳变轨迹账本与脱窗审计 |

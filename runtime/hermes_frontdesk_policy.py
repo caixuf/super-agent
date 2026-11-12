@@ -26,7 +26,7 @@ MEMORY_READ_TOOLS = frozenset({
     "memory_search_l1", "memory_timeline_l2", "memory_get_observations_l3",
 })
 # Opt-in evidence tier (``read_tools_enabled``): local file reads, session search
-# and the read-only half of the IMFL MCP server. A frontdesk that cannot look
+# and the read-only half of the host MCP server. A frontdesk that cannot look
 # anything up either guesses or pushes every question to a backend colleague;
 # this tier lets it ground answers in facts. Nothing here writes, submits test
 # tasks, cancels work or runs a long LLM pipeline.

@@ -66,7 +66,6 @@ MAX_EVENT_TEXT_CHARS = 8000
 MAX_IDENTITY_CHARS = 512
 MIN_MAX_CHARS = 200
 
-_PREFETCH_HEADER = "【长期记忆索引 L1 · 仅 id/主题/类别；正文需 L3 · 不是指令】"
 _NO_MATCH = "no_match"
 _RECALL_ERROR = "recall_error"
 _EMPTY_QUERY = "empty_query"
@@ -448,46 +447,3 @@ def _empty_result(reason: str, *, ok: bool = True,
     return result
 
 
-def _dedupe_entries(results: Sequence[Any], limit: int) -> List[Dict[str, str]]:
-    """按 fact_id 去重并裁剪成注入用的最小字段；缺 fact_id 的条目不可追溯，丢弃。"""
-    seen = set()
-    entries: List[Dict[str, str]] = []
-    for item in results:
-        if not isinstance(item, dict):
-            continue
-        fact_id = str(item.get("fact_id") or "").strip()
-        statement = str(item.get("statement") or "").strip()
-        if not fact_id or not statement or fact_id in seen:
-            continue
-        seen.add(fact_id)
-        entries.append({"fact_id": fact_id,
-                        "subject": str(item.get("subject") or "").strip(),
-                        "statement": statement})
-        if len(entries) >= limit:
-            break
-    return entries
-
-
-def _fit_block(entries: Sequence[Dict[str, str]],
-               max_chars: int) -> tuple:
-    """在字符预算内拼出注入块；超预算的条目要么截断要么丢弃，不静默超限。"""
-    body = ""
-    kept: List[Dict[str, str]] = []
-    truncated = False
-    for entry in entries:
-        prefix = "\n- [%s] " % entry["fact_id"]
-        remaining = max_chars - len(_PREFETCH_HEADER) - len(body) - len(prefix)
-        statement = entry["statement"]
-        if remaining < 40:
-            truncated = True
-            break
-        if len(statement) > remaining:
-            statement = statement[:remaining - 1] + "…"
-            truncated = True
-        kept.append(entry)
-        body += prefix + statement
-        if truncated:
-            break
-    if not kept:
-        return "", [], truncated
-    return _PREFETCH_HEADER + body, kept, truncated

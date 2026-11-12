@@ -23,48 +23,18 @@ from pathlib import Path
 import re
 import stat
 import tempfile
-import threading
 
+from agentcore import fork_guard
 from agentcore.analysis_runner import AnalysisError, run_analysis
 from agentcore.colleague_registry import Registry, Supervisor
+from agentcore.private_profile import require_private_directory
 
 
 _REQUEST = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
-_guard_fds = set()
-_guard_fds_lock = threading.Lock()
-
-
-def _fork_prepare():
-    _guard_fds_lock.acquire()
-
-
-def _fork_parent():
-    _guard_fds_lock.release()
-
-
-def _fork_child():
-    try:
-        # A forked child must not keep the dead parent's task lock alive. No
-        # Python/SQLite file handles are closed here, only our flock handles.
-        for fd in tuple(_guard_fds):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        _guard_fds.clear()
-    finally:
-        _guard_fds_lock.release()
-
-
-if hasattr(os, 'register_at_fork'):
-    os.register_at_fork(before=_fork_prepare, after_in_parent=_fork_parent, after_in_child=_fork_child)
 
 
 def _private_dir(path):
-    info = path.lstat()
-    if (not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077
-            or (hasattr(os, 'getuid') and info.st_uid != os.getuid())):
-        raise ValueError('private_runtime_directory_required')
+    require_private_directory(path, 'private_runtime_directory_required')
 
 
 def _atomic(path, value):
@@ -175,9 +145,8 @@ class ReadOnlyColleagueRuntime:
         _private_dir(directory)
         # Registration and open must be indivisible against fork. Otherwise a
         # child created between the two would inherit an untracked flock FD.
-        with _guard_fds_lock:
-            fd = os.open(directory / 'lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-            _guard_fds.add(fd)
+        fd = fork_guard.open_tracked(
+            directory / 'lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         try:
             info = os.fstat(fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_nlink != 1
@@ -189,12 +158,10 @@ class ReadOnlyColleagueRuntime:
                 raise RuntimeError('task_in_progress') from None
             yield directory
         finally:
-            with _guard_fds_lock:
-                # At-fork cleanup already closed and unregistered it in a
-                # child. Do not close an unrelated FD later reused there.
-                if fd in _guard_fds:
-                    _guard_fds.remove(fd)
-                    os.close(fd)
+            # At-fork cleanup already closed and unregistered it in a child.
+            # Do not close an unrelated FD later reused there.
+            if fork_guard.untrack(fd):
+                os.close(fd)
 
     def _settle(self, state):
         self.registry.settle_work(supervisor=self.supervisor, member_id=state['member_id'],
