@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 import sqlite3
 import pytest
 
-from tools.room_query import get_recent_events, list_rooms
+# `tools/` is a script directory, not a package: importing it as `tools.room_query`
+# depends on the repo-root namespace package winning over whatever `tools` package a
+# host/business checkout has already put on sys.path (observed: collection-order
+# pollution from a colleague-bridge probe). Load the module by file path instead.
+_SPEC = importlib.util.spec_from_file_location(
+    "room_query_under_test", Path(__file__).resolve().parents[1] / "tools" / "room_query.py"
+)
+_room_query = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_room_query)
+get_recent_events = _room_query.get_recent_events
+list_rooms = _room_query.list_rooms
 
 
 def test_room_query_empty_or_nonexistent(tmp_path: Path):

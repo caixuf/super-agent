@@ -174,7 +174,19 @@ def test_run_dev_job_failure(tmp_path: Path):
 
 
 def _real_orchestrator_available() -> bool:
-    """The real orchestrator needs the business bridge checkout; skip clean rooms."""
+    """The real orchestrator needs the business bridge checkout; skip clean rooms.
+
+    This runs at collection time (``skipif`` evaluates immediately), and the bridge
+    probe appends its checkout to the *global* ``sys.path``. Left behind, that path
+    lets a business ``tools`` package shadow the repo's ``tools`` namespace for every
+    test collected afterwards. Probe inside a snapshot and restore both path and
+    modules so availability detection stays side-effect free.
+    """
+    import sys
+    from pathlib import Path
+
+    path_before = list(sys.path)
+    modules_before = set(sys.modules)
     try:
         from agentcore.colleague_dev import ColleagueDevOrchestrator
         orchestrator = ColleagueDevOrchestrator()
@@ -184,6 +196,21 @@ def _real_orchestrator_available() -> bool:
         return True
     except Exception:
         return False
+    finally:
+        added = [Path(p).resolve() for p in sys.path if p and p not in path_before]
+        sys.path[:] = path_before
+        for name, module in list(sys.modules.items()):
+            if name in modules_before:
+                continue
+            origin = getattr(module, "__file__", None)
+            if not origin:
+                continue
+            try:
+                origin_path = Path(origin).resolve()
+            except OSError:
+                continue
+            if any(origin_path.is_relative_to(root) for root in added):
+                del sys.modules[name]
 
 
 @pytest.mark.skipif(not _real_orchestrator_available(),
