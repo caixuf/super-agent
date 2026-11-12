@@ -1058,4 +1058,54 @@ def test_refresh_running_cards_reconciles_terminal_job(tmp_path):
         service.pool.active_running_card_jobs = orig
 
 
+def test_cross_colleague_status_and_cancel_auto_discovery(tmp_path):
+    sources = tmp_path / 'sources'
+    sources.mkdir()
+    source = sources / 'doc.md'
+    source.write_text('content\n')
+    dev_q = tmp_path / 'dev-q'
+    triage_q = tmp_path / 'triage-q'
+    settings = {
+        'enabled': True,
+        'queue_root': str(tmp_path / 'queue'),
+        'allowed_roots': [str(sources)],
+        'cross_session_status': True,
+        'colleagues': {
+            'dev': {'queue_root': str(dev_q), 'allowed_roots': ['/']},
+            'triage': {'queue_root': str(triage_q), 'allowed_roots': ['/']},
+        },
+    }
+    context = Context(settings)
+    plugin.register(context)
+
+    # Submit task specifically to colleague 'triage'
+    sub_res = call(context, 'submit', {
+        'goal': 'Investigate CM condition',
+        'request_key': 'triage-key-1',
+        'role': 'triage',
+    }, session_id='session-a')
+    assert sub_res['ok'] is True
+    task_id = sub_res['task_id']
+    assert sub_res['role'] == 'triage'
+
+    # 1. Query status without specifying role: auto-discovers 'triage' queue
+    st1 = call(context, 'status', {'task_id': task_id}, session_id='session-a')
+    assert st1['ok'] is True
+    assert st1['task_id'] == task_id
+    assert st1['role'] == 'triage'
+
+    # 2. Query status specifying wrong role 'dev': auto-discovers 'triage' queue
+    st2 = call(context, 'status', {'task_id': task_id, 'role': 'dev'}, session_id='session-a')
+    assert st2['ok'] is True
+    assert st2['task_id'] == task_id
+    assert st2['role'] == 'triage'
+
+    # 3. Cancel task without specifying role: auto-discovers 'triage' queue
+    can = call(context, 'cancel', {'task_id': task_id}, session_id='session-a')
+    assert can['ok'] is True
+    assert can['task_id'] == task_id
+    assert can['role'] == 'triage'
+
+
+
 

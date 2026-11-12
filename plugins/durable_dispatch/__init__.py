@@ -1283,9 +1283,57 @@ class DispatchRouter:
             for item in top:
                 item.pop('created', None)
             return {'ok': True, 'tasks': top, 'count': len(top)}
+        if isinstance(task_id, str) and task_id.strip():
+            job = task_id.strip()
+            target_role = None
+            if explicit_role and explicit_role in self.services:
+                svc = self.services[explicit_role]
+                if hasattr(svc, 'pool') and hasattr(svc.pool, 'job_ownership_record'):
+                    try:
+                        if svc.pool.job_ownership_record(job) is not None:
+                            target_role = explicit_role
+                    except Exception:
+                        pass
+            if target_role is None:
+                for r_name, svc in self.services.items():
+                    if hasattr(svc, 'pool') and hasattr(svc.pool, 'job_ownership_record'):
+                        try:
+                            if svc.pool.job_ownership_record(job) is not None:
+                                target_role = r_name
+                                break
+                        except Exception:
+                            continue
+            if target_role is not None:
+                args = dict(args, role=target_role)
         return self._call('status',session_id,args)
 
-    def cancel(self,session_id,args): return self._call('cancel',session_id,args)
+    def cancel(self,session_id,args):
+        if isinstance(args, dict):
+            task_id = args.get('task_id')
+            explicit_role = args.get('role')
+            if isinstance(task_id, str) and task_id.strip():
+                job = task_id.strip()
+                target_role = None
+                if explicit_role and explicit_role in self.services:
+                    svc = self.services[explicit_role]
+                    if hasattr(svc, 'pool') and hasattr(svc.pool, 'job_ownership_record'):
+                        try:
+                            if svc.pool.job_ownership_record(job) is not None:
+                                target_role = explicit_role
+                        except Exception:
+                            pass
+                if target_role is None:
+                    for r_name, svc in self.services.items():
+                        if hasattr(svc, 'pool') and hasattr(svc.pool, 'job_ownership_record'):
+                            try:
+                                if svc.pool.job_ownership_record(job) is not None:
+                                    target_role = r_name
+                                    break
+                            except Exception:
+                                continue
+                if target_role is not None:
+                    args = dict(args, role=target_role)
+        return self._call('cancel',session_id,args)
 
 
 def _handler(service, action):
