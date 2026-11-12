@@ -93,6 +93,22 @@ DEFAULT_ALLOWED_TOOLS: tuple[str, ...] = (
     "git",
 )
 
+#: Canonical roles granted host execution privilege (YOLO / exempt from bwrap sandbox)
+#: for system maintenance, profile management, and daemon unit operations.
+SANDBOX_EXEMPT_ROLES: frozenset[str] = frozenset({"maintainer", "ops"})
+
+
+def is_role_sandbox_exempt(role: Optional[str]) -> bool:
+    """Return True if the role is granted host execution privilege (exempt from bwrap sandbox)."""
+    if not role:
+        return False
+    r = str(role).strip().lower()
+    exempt = set(SANDBOX_EXEMPT_ROLES)
+    custom = (os.environ.get("SUPERAGENT_SANDBOX_EXEMPT_ROLES") or "").strip()
+    if custom:
+        exempt.update(x.strip().lower() for x in custom.split(",") if x.strip())
+    return r in exempt
+
 
 def new_token() -> str:
     """Mint one attempt token; 32 hex characters, safe to place in an environment."""
@@ -850,7 +866,7 @@ class AttemptBoundSandboxAdapter:
             self.allowed_workdir = None
 
         from agentcore.colleague_dev import DEV_ROLES
-        if role not in DEV_ROLES:
+        if role not in DEV_ROLES and not is_role_sandbox_exempt(role):
             raise ValueError(f"unknown_role:{role}")
         self.role = role
 

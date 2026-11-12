@@ -206,8 +206,11 @@ def run_dev_job(
         binding_env_path = (os.environ.get("SUPERAGENT_ATTEMPT_BINDING_PATH") or "").strip()
         if binding_env_path and Path(binding_env_path).is_file():
             try:
-                from agentcore.colleague_containment import AttemptBoundSandboxAdapter
-                if AttemptBoundSandboxAdapter.is_bwrap_functional() and not is_forbidden_host_path(workdir)[0]:
+                from agentcore.colleague_containment import (
+                    AttemptBoundSandboxAdapter,
+                    is_role_sandbox_exempt,
+                )
+                if not is_role_sandbox_exempt(declared_role) and AttemptBoundSandboxAdapter.is_bwrap_functional() and not is_forbidden_host_path(workdir)[0]:
                     adapter_role = declared_role if declared_role in DEV_ROLES else "cases"
                     net_pol = "allowed" if policy.get("allow_network", False) else "isolated"
                     auto_adapter = AttemptBoundSandboxAdapter.from_environment(

@@ -557,10 +557,31 @@ def _wrap_with_bwrap_sandbox(
     if str(engine) not in sys.path:
         sys.path.insert(0, str(engine))
     try:
-        from agentcore.colleague_containment import AttemptBoundSandboxAdapter, is_forbidden_host_path
+        from agentcore.colleague_containment import (
+            AttemptBoundSandboxAdapter,
+            is_forbidden_host_path,
+            is_role_sandbox_exempt,
+        )
         from agentcore.colleague_dev import DEV_ROLES
     except Exception:
         return cmd, None
+
+    raw_role = str((route or {}).get("role") or os.environ.get("DEV_ROLE") or "cases").strip().lower()
+    if is_role_sandbox_exempt(raw_role):
+        return cmd, {
+            "backend": "host",
+            "role": raw_role,
+            "exempt": True,
+            "reason": "privileged_role_exemption",
+            "binding": {"ok": True, "mode": "host_privileged"},
+            "audit_log": [{
+                "timestamp": time.time(),
+                "role": raw_role,
+                "action": "host_privileged_execution",
+                "backend": "host",
+                "reason": "privileged_role_exemption",
+            }],
+        }
 
     if not AttemptBoundSandboxAdapter.is_bwrap_functional():
         return cmd, None
@@ -571,7 +592,6 @@ def _wrap_with_bwrap_sandbox(
 
     attempt_env = (os.environ.get("SUPERAGENT_ATTEMPT_DIR") or "").strip()
     attempt_dir = Path(attempt_env) if attempt_env and Path(attempt_env).is_dir() else None
-    raw_role = str((route or {}).get("role") or os.environ.get("DEV_ROLE") or "cases").strip().lower()
     adapter_role = raw_role if raw_role in DEV_ROLES else "cases"
 
     try:
