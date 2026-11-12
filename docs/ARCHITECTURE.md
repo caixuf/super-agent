@@ -56,7 +56,7 @@ flowchart TD
         direction TB
         S1["持久任务池与进程崩溃自愈 (Pool / Worker / Attempt Fencing)"]
         S2["突触长程记忆引擎 (Heuristic Surprise Gate / ACT-R / 赫布拓扑)"]
-        S3["8 大研发同事协作团队 (Colleague Dev / Worktree 物理隔离)"]
+        S3["公共基础设施角色 (maintainer / ops / dev) 与业务挂载域 (Domain Packs)"]
         S4["确定性状态图机 (StateGraph / 停滞熔断 / 验收门禁)"]
         S5["CardKit 2.0 原生状态流与 Chromium 图文交付"]
     end
@@ -94,7 +94,7 @@ flowchart TB
 | **4. 任务主账** | `agentcore/pool.py` | SQLite WAL 模式，记录任务状态、依赖链、Attempt 代次与租约。 |
 | **5. 有界调度** | `agentcore/worker.py`、`scheduler.py` | 跨进程并发控制，`begin_execution` 代次硬校验，防旧 Worker 迟到覆写。 |
 | **6. 执行隔离** | `agentcore/dev_runner.py`、`attempt_supervisor.py` | Linux Subreaper 递归收割后代进程，`fcntl.flock` 锁定工作区，SkillForge 先例自动注入。 |
-| **7. 同事协作** | `agentcore/colleague_dev.py` | 8 大标准研发同事角色契约，独立 Worktree 编码，Raven 式路径所有权矩阵（`owns`/`appends`/`never`）硬门禁。 |
+| **7. 同事协作** | `agentcore/colleague_dev.py` | 公共基础设施角色契约（`maintainer`/`ops`/`dev`）及可扩展研发角色契约，独立 Worktree 编码，Raven 式路径所有权矩阵（`owns`/`appends`/`never`）硬门禁。 |
 | **8. 模型路由** | `agentcore/model_routing.py` | 纯函数三级路由（`pro`/`main`/`flash`），受 ADR-S1 ~ ADR-S6 强约束。 |
 | **9. 双轨记忆与技能** | `agentcore/memory/`、`agentcore/skill_forge.py` | EverOS 双轨模型：用户事实/实体/前瞻 + 智能体程序化技能（`SkillForge` Markdown 原生存储、成熟度评分与混合召回）。 |
 | **10. 插件工具面** | `plugins/`（16 款 + localvec） | 标准化工具集暴露，两道启用门禁，自动级联装配同事工作区。 |
@@ -117,13 +117,12 @@ Super Agent 生产部署统一收敛至 `<managed_root>/<profile>`（默认 `~/s
 
 ## 4. 多智能体同事制与确定性调度
 
-### 4.1 8 大官方研发岗位契约
-`agentcore.colleague_dev` 严格定义了 8 大研发岗位角色职责与边界：
-1. **需求架构师（Requirement Architect）**：需求澄清与规格文档化。
-2. **用例开发大师（Case Developer）**：测试用例编写与正反例设计。
-3. **红队评审员（Red Team Reviewer）**：挑刺、反模式防御与断言漏洞审查。
-4. **仿真测试专家（Simulation Expert）**：隔离沙箱测试执行、时序对账与环境回溯。
-5. **归因分析专家（Attribution Analyst）**：根因分析与机理级排查。
+### 4.1 公共基础设施角色与业务挂载面（Domain Packs）
+`agentcore.colleague_dev` 提供平台级公共基础设施元角色（`COMMON_ROLES`：`maintainer` 系统维护、`ops` 运维与编译、`dev` 通用研发执行），同时支持业务领域包（Domain Packs）按需挂载研发角色（如需求架构、用例开发、红队评审、仿真测试、分诊归因等）：
+1. **公共维护专家（maintainer）**：多机拓扑、Docker 宿主容器、systemd 服务与队列锁自愈（Host YOLO）。
+2. **公共运维专家（ops）**：构建流水线、宿主资源水位与自动化巡检（Host YOLO）。
+3. **通用研发专家（dev）**：通用代码与工作区执行器，严格沙箱隔离。
+4. **业务挂载角色（Domain Roles）**：由各业务包（如 SIL 智驾软件在环域、HIL 实车台架域）独立声明，通过 `colleague_pack` 或 `registry.sqlite` 动态挂载，保持平台底座纯净通用。
 6. **后端开发工程师（Backend Developer）**：业务逻辑与服务实现。
 7. **前端交互专家（Frontend Specialist）**：流式交互卡片与视图呈现。
 8. **运维巡检哨兵（Ops Sentinel）**：常驻运行巡检、配置漂移纠偏与健康看护。

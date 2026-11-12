@@ -455,7 +455,35 @@ def build_dispatch_services(provider, profile_name, *, pool_type=None, delivery=
                               cross_session_status=cross_session, task_cards_enabled=task_cards,
                               scheduled_routes=scheduled_routes)
     services = {'analysis': service}
-    colleagues = _get_setting(provider, 'colleagues', {})
+    colleagues = dict(_get_setting(provider, 'colleagues', {}))
+
+    # Single source of truth: merge dynamically from roster_registry_path if available
+    roster_path = _get_setting(provider, 'roster_registry_path')
+    if roster_path and isinstance(roster_path, str) and Path(roster_path).is_file():
+        try:
+            import sqlite3
+            con = sqlite3.connect('file:' + str(roster_path) + '?mode=ro', uri=True, timeout=5)
+            try:
+                rows = con.execute("SELECT role_id, label, duty, boundaries FROM colleague_roles").fetchall()
+                active_roles = {r[0] for r in con.execute("SELECT DISTINCT role_id FROM colleague_members WHERE status='active'").fetchall()}
+                queue_base = Path(_get_setting(provider, 'queue_root')).parent / 'colleague-queues'
+                for role_id, label, duty, _boundaries in rows:
+                    if role_id in ('primary', 'analysis'):
+                        continue
+                    if role_id not in colleagues and (not active_roles or role_id in active_roles):
+                        role_q = queue_base / role_id
+                        colleagues[role_id] = {
+                            'queue_root': str(role_q),
+                            'allowed_roots': _get_setting(provider, 'allowed_roots', ['/']),
+                            'display_name': label or role_id,
+                            'display_label': (label or role_id)[:12],
+                            'duty': duty or '',
+                        }
+            finally:
+                con.close()
+        except Exception:
+            pass
+
     if not isinstance(colleagues, dict) or len(colleagues) > 24:
         raise ValueError('colleagues must be a bounded administrator mapping')
     seen_roots = {service.pool.root.resolve()}

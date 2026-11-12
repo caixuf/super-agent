@@ -56,6 +56,86 @@ DEFAULT_SCREEN_POLICY: Dict[str, Any] = {
     "idle_stop_minutes": 30,
 }
 
+# Common infrastructure roles provided by Super Agent core.
+# maintainer: SRE, multi-host network topology, Docker, systemd, and queue repair (Host YOLO).
+# ops: Compilation pipelines, resource watermarks, automated health checks (Host YOLO).
+# dev: General workspace implementation, git inspection, scripts, and unit tests (bwrap sandbox).
+COMMON_ROLES: Dict[str, Dict[str, Any]] = {
+    "maintainer": {
+        "display_name": "系统维护与基础设施专家",
+        "duty": "平台基础设施排障、多机拓扑巡检、Docker容器自愈、守护进程与任务队列诊断修复",
+        "can_do": [
+            "排查多机网络连通性与服务存活",
+            "诊断并自愈Docker容器与运行时挂载",
+            "监控与管理systemd守护进程与并发槽位",
+            "排查任务队列积压、锁争用与跨会话故障",
+            "出具系统健康体检报告并执行自愈动作",
+        ],
+        "boundaries": [
+            "严禁未经确认执行破坏性清盘",
+            "敏感凭据与密钥严禁在日志中泄露",
+        ],
+    },
+    "ops": {
+        "display_name": "平台运维与稳定性专家",
+        "duty": "监控系统服务存活、资源水位、部署更新、自动化巡检与幂等运维告警",
+        "can_do": [
+            "巡检守护进程与系统服务健康度",
+            "监控任务租约、看门狗心跳与 Socket 连接假死",
+            "执行跨节点安全部署、配置校验与版本回滚",
+            "向指定运维通道投递结构化带幂等键的故障告警",
+        ],
+        "boundaries": [
+            "告警必须带 SHA256 幂等键，严禁重复骚扰外部通道",
+            "严禁在代码、日志与通知中泄露凭据与敏感密钥",
+        ],
+    },
+    "dev": {
+        "display_name": "研发执行",
+        "duty": "执行通用工程工作：查看仓库、运行命令、修改代码、跑测试与调查变更历史",
+        "can_do": [
+            "探测仓库分支状态与提交日志",
+            "读写工作区文件",
+            "执行测试并回贴原始输出",
+            "调查提交历史与配置",
+        ],
+        "boundaries": [
+            "严格在沙箱工作区内操作",
+            "严禁未经授权修改主分支受控契约",
+        ],
+    },
+}
+
+COMMON_ROLE_SCREEN: Dict[str, Dict[str, Any]] = {
+    "maintainer": {"has_screen": True, "screen_policy": dict(DEFAULT_SCREEN_POLICY)},
+    "ops": {"has_screen": True, "screen_policy": dict(DEFAULT_SCREEN_POLICY)},
+    "dev": {"has_screen": False, "screen_policy": dict(DEFAULT_SCREEN_POLICY)},
+}
+
+COMMON_ROLE_OWNERSHIP: Dict[str, Dict[str, Any]] = {
+    "maintainer": {
+        "owns": ("deploy/**", "install/**", "scripts/**", "docker/**", "configs/**", "state/**"),
+        "appends": ("OPS_JOURNAL.md", "MAINTAINER_LOG.md", "FIXLOG.md"),
+        "never": (".git/**",),
+        "artifacts": ("state/diagnostics/**", "reports/**"),
+        "enforce_write": HARD,
+    },
+    "ops": {
+        "owns": ("deploy/**", "install/**", "scripts/**", "docker/**", "configs/**"),
+        "appends": ("OPS_JOURNAL.md", "FIXLOG.md"),
+        "never": ("case_set/**", "tests/evals/**", ".git/**"),
+        "artifacts": ("deploy/**", "scripts/**"),
+        "enforce_write": HARD,
+    },
+    "dev": {
+        "owns": ("src/**", "tests/**", "lib/**", "*.py"),
+        "appends": ("FIXLOG.md", "CHANGELOG.md"),
+        "never": (".git/**",),
+        "artifacts": ("reports/**", "manifest.json"),
+        "enforce_write": HARD,
+    },
+}
+
 # Standard roster of the Universal Engineering Colleague Team
 # Super Agent core provides these 8 canonical engineering roles out-of-the-box.
 # Business domains can customize, extend, or override duties via register_role_override().
@@ -253,8 +333,8 @@ _ROLE_OVERRIDES: Dict[str, Dict[str, Any]] = {}
 
 
 def register_role_override(role: str, overrides: Dict[str, Any]) -> None:
-    """Allow business domains or profiles to customize or extend a canonical role."""
-    if role not in DEV_ROLES:
+    """Allow business domains or profiles to customize or extend a canonical or common role."""
+    if role not in DEV_ROLES and role not in COMMON_ROLES:
         raise ValueError(f"cannot_override_unknown_role: {role}")
     _ROLE_OVERRIDES.setdefault(role, {}).update(overrides)
 
@@ -262,6 +342,28 @@ def register_role_override(role: str, overrides: Dict[str, Any]) -> None:
 def reset_role_overrides() -> None:
     """Clear all runtime role overrides back to pure canonical definitions."""
     _ROLE_OVERRIDES.clear()
+
+
+def get_common_roles(*, include_screen: bool = False) -> Dict[str, Dict[str, Any]]:
+    """Return the official roster of common infrastructure roles (maintainer, ops, dev)."""
+    import copy
+    merged = copy.deepcopy(COMMON_ROLES)
+    if include_screen:
+        for role, screen_meta in COMMON_ROLE_SCREEN.items():
+            if role in merged:
+                merged[role].update(copy.deepcopy(screen_meta))
+    for role, custom in _ROLE_OVERRIDES.items():
+        if role in merged:
+            base_policy = dict(
+                merged[role].get("screen_policy")
+                or COMMON_ROLE_SCREEN.get(role, {}).get("screen_policy")
+                or DEFAULT_SCREEN_POLICY
+            )
+            merged[role].update(custom)
+            if "screen_policy" in custom and isinstance(custom["screen_policy"], dict):
+                base_policy.update(custom["screen_policy"])
+                merged[role]["screen_policy"] = base_policy
+    return merged
 
 
 def get_dev_roles(*, include_screen: bool = False) -> Dict[str, Dict[str, Any]]:
@@ -295,19 +397,23 @@ def get_dev_roles(*, include_screen: bool = False) -> Dict[str, Dict[str, Any]]:
 def role_supports_screen(role: str) -> bool:
     """Return True if the colleague role supports interactive Bot Desktop screen inspection."""
     roles = get_dev_roles(include_screen=True)
-    meta = roles.get(role)
-    if not meta:
-        return False
-    return bool(meta.get("has_screen", False))
+    if role in roles:
+        return bool(roles[role].get("has_screen", False))
+    common = get_common_roles(include_screen=True)
+    if role in common:
+        return bool(common[role].get("has_screen", False))
+    return False
 
 
 def get_role_screen_policy(role: str) -> Dict[str, Any]:
     """Return a copy of the Bot Desktop screen policy for a colleague role."""
     roles = get_dev_roles(include_screen=True)
-    if role not in roles:
+    common = get_common_roles(include_screen=True)
+    meta = roles.get(role) or common.get(role)
+    if not meta:
         raise ValueError(f"unknown_role: {role}")
     policy = dict(DEFAULT_SCREEN_POLICY)
-    raw = roles[role].get("screen_policy")
+    raw = meta.get("screen_policy")
     if isinstance(raw, dict):
         policy.update(raw)
     return policy
@@ -316,9 +422,10 @@ def get_role_screen_policy(role: str) -> Dict[str, Any]:
 def get_role_ownership(role: str) -> RolePathOwnership:
     """Retrieve the normalized path ownership contract for a given role."""
     roles = get_dev_roles()
-    if role not in roles and role not in DEV_ROLE_OWNERSHIP:
+    common = get_common_roles()
+    if role not in roles and role not in DEV_ROLE_OWNERSHIP and role not in common and role not in COMMON_ROLE_OWNERSHIP:
         raise ValueError(f"unknown_role: {role}")
-    raw_own = dict(DEV_ROLE_OWNERSHIP.get(role, {}))
+    raw_own = dict(DEV_ROLE_OWNERSHIP.get(role, {}) or COMMON_ROLE_OWNERSHIP.get(role, {}))
     custom_own = _ROLE_OVERRIDES.get(role, {}).get("ownership")
     if custom_own and isinstance(custom_own, dict):
         raw_own.update(custom_own)
@@ -335,7 +442,7 @@ def get_role_ownership(role: str) -> RolePathOwnership:
 
 def get_role_contract_markdown(role: str) -> str:
     """Generate the standardized markdown role contract for a given colleague."""
-    meta = DEV_ROLES.get(role)
+    meta = DEV_ROLES.get(role) or COMMON_ROLES.get(role)
     if not meta:
         raise ValueError(f"unknown_role: {role}")
     can_do_lines = "\n".join(f"- {item}" for item in meta["can_do"])
