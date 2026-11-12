@@ -1572,6 +1572,33 @@ def format_boost_status(services=None, ctx=None) -> str:
     return "\n".join(lines)
 
 
+def _frontdesk_hands_on() -> bool:
+    """True when the profile grants the frontdesk its own evidence tools.
+
+    Reads the same ``superagent.frontdesk`` flags the host tool gate enforces, so
+    the routing prompt never tells the model to dispatch work it is allowed to
+    look up itself, nor to run tools the gate would refuse. Any failure keeps
+    the original dispatch-only routing.
+    """
+    try:
+        from superagent_frontdesk import _settings
+        policy = _settings()
+    except Exception:
+        return False
+    return bool(policy.get("enabled") and (policy.get("read_tools_enabled") or policy.get("shell_enabled")))
+
+
+def _render_hands_on_routing() -> str:
+    return """Capability routing (hands-on frontdesk). You have your own evidence tools: read_file, search_files, session_search, the read-only IMFL MCP tools (mcp__imfl__*: health, tasks, reports, logs, cases, matchers, knowledge, memory) and, when listed, terminal. Facts beat guesses: never answer a factual question about current state from memory or imagination.
+- Look it up yourself, in this turn, when the answer is a quick read: service/login/auth state, config values, versions, git log/status, recent logs, disk/process status, IMFL task progress and reports, case/matcher lookup, knowledge queries, Meego/Feishu project queries (meegle CLI), multi-agent room discussion (room_query recent --limit 5). Run the command, read the output, then answer with the key evidence in plain language.
+- Terminal discipline: read-only commands by default, each finishing within about 30 seconds. Do NOT write files, edit configs, restart/stop services, kill processes, delete anything, install packages, git commit/push, or submit/cancel test tasks unless the user explicitly asks for that action in this conversation; when the user says "只看看/先别操作", stay strictly read-only. Never start long-running or blocking commands in the foreground.
+- If a command fails or a tool is missing, say exactly what failed (command + error) and what is still unknown. Never say "没有" when you merely could not find it, and never invent output.
+- Dispatch with durable_submit only for real background work: simulation/regression runs, writing or changing cases/code, compiles, replay, multi-file analysis or anything you estimate takes more than a few minutes. Submit one task, return its ID and role, and finish the turn.
+- Task status inquiry ("进度怎么样", "还在跑吗", or a 32-hex task ID): NEVER call durable_submit; call durable_status and report the live state.
+- Conceptual, architecture, workflow and colleague-role questions: answer directly; use durable_roster for the roster.
+- Never claim you cannot see the repository or the host: you can read it. Never provide an owner, queue path, runner or model adapter when dispatching."""
+
+
 def register(ctx):
     if ctx.get_config('enabled', False) is not True:
         return
@@ -1583,7 +1610,7 @@ def register(ctx):
     services = build_dispatch_services(ctx, ctx.profile_name)
     ctx.register_system_prompt_section(
         'durable-dispatch-routing',
-        _render_routing_base(),
+        _render_hands_on_routing() if _frontdesk_hands_on() else _render_routing_base(),
         # The host DROPS a section over its budget (it does not truncate), so the
         # budget must exceed the literal text below or the frontdesk never sees
         # the routing rules. tests/test_durable_dispatch.py pins this.

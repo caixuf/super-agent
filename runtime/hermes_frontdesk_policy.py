@@ -25,6 +25,30 @@ TASK_TOOLS = frozenset({
 MEMORY_READ_TOOLS = frozenset({
     "memory_search_l1", "memory_timeline_l2", "memory_get_observations_l3",
 })
+# Opt-in evidence tier (``read_tools_enabled``): local file reads, session search
+# and the read-only half of the IMFL MCP server. A frontdesk that cannot look
+# anything up either guesses or pushes every question to a backend colleague;
+# this tier lets it ground answers in facts. Nothing here writes, submits test
+# tasks, cancels work or runs a long LLM pipeline.
+_IMFL_MCP_READ = (
+    "imfl_route", "imfl_health", "imfl_list_tasks", "imfl_inspect_task",
+    "imfl_task_detail", "imfl_task_progress", "imfl_task_report",
+    "imfl_compare_reports", "imfl_query_manifest", "imfl_case_ast",
+    "imfl_feishu_status", "imfl_list_groups", "imfl_list_cases", "imfl_get_case",
+    "imfl_list_matchers", "imfl_state_registry", "imfl_recall_memory",
+    "imfl_memory_status", "imfl_recall_experience", "imfl_locate_artifact",
+    "imfl_case_health", "imfl_search_logs", "imfl_list_tool_gaps",
+    "imfl_query_knowledge", "imfl_knowledge_status", "dsbot_colleague_result",
+)
+READ_TOOLS = frozenset({
+    "read_file", "search_files", "session_search", "todo", "clarify",
+    *(f"mcp__imfl__{name}" for name in _IMFL_MCP_READ),
+})
+# Opt-in shell tier (``shell_enabled``): the operator explicitly trusts this
+# frontdesk with a host shell. Command scope is governed by the identity prompt,
+# not by this gate, so it is off unless the profile config turns it on.
+SHELL_TOOLS = frozenset({"terminal", "process"})
+_FLAG_NAMES = ("enabled", "memory_read_enabled", "read_tools_enabled", "shell_enabled")
 CHAT_COMMANDS = frozenset({"help", "commands", "whoami", "version", "new", "reset", "stop", "status", "boost"})
 UNAVAILABLE = "frontdesk_policy_unavailable: execution refused; ask the administrator to check this profile."
 TOOL_DENIED = "frontdesk_tool_denied: use the durable task APIs; do not execute or delegate work in this profile."
@@ -232,7 +256,7 @@ def _settings(home: Path | str | None = None) -> dict[str, bool]:
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except FileNotFoundError:
-        return {"enabled": False, "memory_read_enabled": False}
+        return {name: False for name in _FLAG_NAMES}
     with os.fdopen(fd, "rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
             raise ValueError("profile config must be a regular file")
@@ -251,13 +275,23 @@ def _settings(home: Path | str | None = None) -> dict[str, bool]:
     if not isinstance(section, dict):
         raise ValueError("superagent settings must be a mapping")
     policy = section.get("frontdesk", {})
-    if not isinstance(policy, dict) or set(policy) - {"enabled", "memory_read_enabled"}:
+    if not isinstance(policy, dict) or set(policy) - set(_FLAG_NAMES):
         raise ValueError("invalid frontdesk settings")
-    enabled = policy.get("enabled", False)
-    memory_read = policy.get("memory_read_enabled", False)
-    if type(enabled) is not bool or type(memory_read) is not bool:
+    flags = {name: policy.get(name, False) for name in _FLAG_NAMES}
+    if any(type(value) is not bool for value in flags.values()):
         raise ValueError("frontdesk flags must be boolean")
-    return {"enabled": enabled, "memory_read_enabled": memory_read}
+    return flags
+
+
+def _allowed_tools(policy: dict[str, bool]) -> frozenset[str]:
+    allowed = set(TASK_TOOLS)
+    if policy.get("memory_read_enabled"):
+        allowed |= MEMORY_READ_TOOLS
+    if policy.get("read_tools_enabled"):
+        allowed |= READ_TOOLS
+    if policy.get("shell_enabled"):
+        allowed |= SHELL_TOOLS
+    return frozenset(allowed)
 
 
 def tool_block_message(tool_name: str, *, home: Path | str | None = None) -> str | None:
@@ -267,7 +301,7 @@ def tool_block_message(tool_name: str, *, home: Path | str | None = None) -> str
             return None
         if _backend_session():
             return TOOL_DENIED if isinstance(tool_name, str) and tool_name in BACKEND_BLOCKED_TOOLS else None
-        allowed = TASK_TOOLS | (MEMORY_READ_TOOLS if policy["memory_read_enabled"] else frozenset())
+        allowed = _allowed_tools(policy)
         return None if isinstance(tool_name, str) and tool_name in allowed else TOOL_DENIED
     except Exception:
         # Never copy config contents, paths or parser exception bodies into IM.
@@ -291,7 +325,7 @@ def filter_tool_definitions(
                 item for item in definitions
                 if item.get("function", {}).get("name") not in BACKEND_BLOCKED_TOOLS
             ]
-        allowed = TASK_TOOLS | (MEMORY_READ_TOOLS if policy["memory_read_enabled"] else frozenset())
+        allowed = _allowed_tools(policy)
         return [item for item in definitions if item.get("function", {}).get("name") in allowed]
     except Exception:
         return []

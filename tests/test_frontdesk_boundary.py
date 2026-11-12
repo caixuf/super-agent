@@ -53,7 +53,7 @@ def test_frontdesk_exposes_task_apis_without_creating_extra_capabilities(policy,
     names = {"durable_submit", "durable_status", "durable_cancel", "durable_roster",
              "task_status", "colleague_list", "colleague_assign", "colleague_task_status",
              "lan_node_list", "lan_node_probe", "skills_list", "skill_view",
-             "feishu_doc_read", "web_extract",
+             "feishu_doc_read", "web_extract", "web_search", "vision_analyze",
              "terminal", "memory_search_l1", "not_registered"}
     definitions = [{"type": "function", "function": {"name": name}} for name in names]
     filtered = policy.filter_tool_definitions(definitions, home=tmp_path)
@@ -62,6 +62,47 @@ def test_frontdesk_exposes_task_apis_without_creating_extra_capabilities(policy,
         assert policy.tool_block_message(name, home=tmp_path) is None
     assert {item["function"]["name"] for item in definitions} == names
     assert policy.filter_tool_definitions([], home=tmp_path) == []
+
+
+def _enable_tiers(home, **flags):
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.yaml").write_text(json.dumps({
+        "superagent": {"frontdesk": {"enabled": True, **flags}},
+    }))
+
+
+def test_read_tier_is_opt_in_and_excludes_writes_and_shell(policy, tmp_path):
+    _enable_tiers(tmp_path)
+    for name in ("read_file", "mcp__imfl__imfl_health", "session_search"):
+        assert policy.tool_block_message(name, home=tmp_path) == policy.TOOL_DENIED
+    _enable_tiers(tmp_path, read_tools_enabled=True)
+    for name in ("read_file", "search_files", "session_search",
+                 "mcp__imfl__imfl_health", "mcp__imfl__imfl_task_report"):
+        assert policy.tool_block_message(name, home=tmp_path) is None
+    for name in ("terminal", "process", "write_file", "patch", "execute_code",
+                 "mcp__imfl__imfl_create_task", "mcp__imfl__imfl_cancel_task",
+                 "mcp__imfl__imfl_pi_execute", "mcp__imfl__dsbot_colleague_dispatch",
+                 "delegate_task"):
+        assert policy.tool_block_message(name, home=tmp_path) == policy.TOOL_DENIED
+
+
+def test_shell_tier_adds_only_terminal_and_process(policy, tmp_path):
+    _enable_tiers(tmp_path, shell_enabled=True)
+    assert policy.tool_block_message("terminal", home=tmp_path) is None
+    assert policy.tool_block_message("process", home=tmp_path) is None
+    for name in ("write_file", "execute_code", "delegate_task", "read_file"):
+        assert policy.tool_block_message(name, home=tmp_path) == policy.TOOL_DENIED
+    definitions = [{"type": "function", "function": {"name": n}}
+                   for n in ("terminal", "write_file", "durable_status")]
+    names = {d["function"]["name"] for d in policy.filter_tool_definitions(definitions, home=tmp_path)}
+    assert names == {"terminal", "durable_status"}
+
+
+def test_tier_flags_must_be_boolean(policy, tmp_path):
+    _enable_tiers(tmp_path, shell_enabled="yes please")
+    assert policy.tool_block_message("terminal", home=tmp_path) == policy.UNAVAILABLE
+    assert policy.filter_tool_definitions(
+        [{"type": "function", "function": {"name": "terminal"}}], home=tmp_path) == []
 
 
 def test_memory_reads_need_explicit_opt_in_and_never_enable_writes(policy, tmp_path):
