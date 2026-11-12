@@ -1603,6 +1603,9 @@ def _render_hands_on_routing() -> str:
 def register(ctx):
     if ctx.get_config('enabled', False) is not True:
         return
+    q_root = ctx.get_config('queue_root')
+    if not isinstance(q_root, str) or not Path(q_root).is_absolute():
+        return
     # A backend runner is an executor, not a frontdesk: never open dispatch
     # queues (read-only inside bwrap), inject frontdesk prompts, expose
     # durable_* tools, or spawn competing outbox/card backfill threads.
