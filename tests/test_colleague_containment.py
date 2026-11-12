@@ -84,3 +84,40 @@ def test_empty_token_scan_does_not_prove_escaped_child_is_gone():
         if child.poll() is None:
             child.terminate()
         child.wait(timeout=5)
+
+
+def test_sandbox_exempt_roles_includes_atai_and_maintainer():
+    assert containment.is_role_sandbox_exempt("maintainer") is True
+    assert containment.is_role_sandbox_exempt("ops") is True
+    assert containment.is_role_sandbox_exempt("atai") is True
+    assert containment.is_role_sandbox_exempt("test") is False
+    assert containment.is_role_sandbox_exempt("triage") is False
+
+
+def test_bwrap_allows_markdown_outbox_managed_state(tmp_path):
+    outbox = tmp_path / "super_agent" / "imfl" / "state" / "markdown-outbox"
+    outbox.mkdir(parents=True)
+    token = containment.new_token()
+    instance_id = containment.new_token()
+    adapter = containment.AttemptBoundSandboxAdapter(
+        job="test-job",
+        attempt="test-attempt",
+        token=token,
+        nonce="test-nonce",
+        instance_id=instance_id,
+        generation=1,
+        boot_id="test-boot",
+        supervisor_pid=os.getpid(),
+        supervisor_start="test-start",
+        network_policy="allowed"
+    )
+    cmd = adapter.build_worker_bwrap_argv(
+        ["/bin/true"],
+        workdir=tmp_path,
+        managed_state_paths=[outbox]
+    )
+    outbox_str = str(outbox.resolve())
+    assert "--bind" in cmd
+    idx = cmd.index(outbox_str)
+    assert cmd[idx - 1] == "--bind"
+

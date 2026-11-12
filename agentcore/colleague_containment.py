@@ -95,7 +95,7 @@ DEFAULT_ALLOWED_TOOLS: tuple[str, ...] = (
 
 #: Canonical roles granted host execution privilege (YOLO / exempt from bwrap sandbox)
 #: for system maintenance, profile management, and daemon unit operations.
-SANDBOX_EXEMPT_ROLES: frozenset[str] = frozenset({"maintainer", "ops"})
+SANDBOX_EXEMPT_ROLES: frozenset[str] = frozenset({"maintainer", "ops", "atai"})
 
 
 def is_role_sandbox_exempt(role: Optional[str]) -> bool:
@@ -1528,6 +1528,7 @@ class AttemptBoundSandboxAdapter:
                 "memory-spool",
                 "recall-diagnostics",
                 "personal-memory-candidate",
+                "markdown-outbox",
             }:
                 continue
             if (

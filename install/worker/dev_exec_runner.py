@@ -704,7 +704,7 @@ def _wrap_with_bwrap_sandbox(
             if st_key in seen_state_roots:
                 continue
             seen_state_roots.add(st_key)
-            for sub_name in ("memory-spool", "recall-diagnostics", "personal-memory-candidate"):
+            for sub_name in ("memory-spool", "recall-diagnostics", "personal-memory-candidate", "markdown-outbox"):
                 sub_dir = st_root / sub_name
                 try:
                     sub_dir.mkdir(exist_ok=True)
