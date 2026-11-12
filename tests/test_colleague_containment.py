@@ -95,7 +95,7 @@ def test_sandbox_exempt_roles_includes_atai_and_maintainer():
 
 
 def test_bwrap_allows_markdown_outbox_managed_state(tmp_path):
-    outbox = tmp_path / "super_agent" / "imfl" / "state" / "markdown-outbox"
+    outbox = tmp_path / "super_agent" / "test-profile" / "state" / "markdown-outbox"
     outbox.mkdir(parents=True)
     token = containment.new_token()
     instance_id = containment.new_token()

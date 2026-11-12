@@ -1294,7 +1294,7 @@ class DispatchRouter:
                             target_role = explicit_role
                     except Exception:
                         pass
-            if target_role is None:
+            if target_role is None and any(getattr(s, 'cross_session_status', False) for s in self.services.values()):
                 for r_name, svc in self.services.items():
                     if hasattr(svc, 'pool') and hasattr(svc.pool, 'job_ownership_record'):
                         try:
@@ -1322,7 +1322,7 @@ class DispatchRouter:
                                 target_role = explicit_role
                         except Exception:
                             pass
-                if target_role is None:
+                if target_role is None and any(getattr(s, 'cross_session_status', False) for s in self.services.values()):
                     for r_name, svc in self.services.items():
                         if hasattr(svc, 'pool') and hasattr(svc.pool, 'job_ownership_record'):
                             try:
