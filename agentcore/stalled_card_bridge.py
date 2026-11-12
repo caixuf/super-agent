@@ -125,15 +125,22 @@ class StalledCardBridge:
                 handle = self.store.load(task_id)
             except Exception:
                 handle = None
+        display_label = ""
         if handle is not None:
             role_id = str(getattr(handle, "role_id", "") or "")
             display_name = str(getattr(handle, "display_name", "") or "")
+            display_label = str(getattr(handle, "display_label", "") or "")
             task_title = str(getattr(handle, "task_title", "") or "")
         owner = str(event.get("owner") or "")
         if not role_id and owner:
             role_id = owner
         if role_id and not display_name:
             display_name = resolve_display_name(role_id, catalog=self.catalog)
+        if not display_name:
+            fallback = display_label
+            if role_id and ":" not in role_id:
+                fallback = fallback or role_id
+            display_name = fallback
         label = str(event.get("label") or "")
         if not task_title and label:
             task_title = label[:120]

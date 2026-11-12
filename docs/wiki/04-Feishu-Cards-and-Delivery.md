@@ -28,12 +28,12 @@ stateDiagram-v2
 
 | 卡片状态 (`status`) | 界面主题色 | 标题文本 | 业务触发时序与展示内容 |
 | :--- | :--- | :--- | :--- |
-| `queued` | `wathet` (浅蓝) | 排队中 | 任务入队等待 Worker 认领，展示队列名与预估等待位次 |
-| `running` | `wathet` (浅蓝) | 执行中 | Worker 成功认领并启动，展示当前物理执行阶段与已耗时 |
-| `progressive` | `wathet` (浅蓝) | 渐进交付中 | 执行周期较长时，流式展示中间分段成果或阶段性总结 |
-| `completed` | `indigo` (靛蓝) | 处理完成 | 任务执行成功并通过终验，展示交付物摘要与归档链接 |
-| `failed` | `carmine` (绯红) | 执行未通过 | 任务执行异常或门禁被阻断，展示定性归因与排障日志 |
-| `cancelled` | `carmine` (绯红) | 已取消 | 任务被用户主动插话取消或抢占，展示清理工作区凭据 |
+| `queued` | `wathet` (浅蓝) | `{display_name} · 排队中` | 任务入队等待 Worker 认领，展示队列名与预估等待位次；标题携带同一 runner 名称 |
+| `running` | `wathet` (浅蓝) | `{display_name}在进行`（标题/后缀可拆为 `{display_name} · 在进行`，例如 `后端同事在进行`） | Worker 成功认领并启动，展示当前物理执行阶段与已耗时 |
+| `progressive` | `wathet` (浅蓝) | `{display_name}在进行`（同上，标题/后缀可拆） | 执行周期较长时，流式展示中间分段成果或阶段性总结 |
+| `completed` | `indigo` (靛蓝) | `{display_name} · 处理完成` | 任务执行成功并通过终验，展示交付物摘要与归档链接 |
+| `failed` | `carmine` (绯红) | `{display_name} · 执行未通过` | 任务执行异常或门禁被阻断，展示定性归因与排障日志 |
+| `cancelled` | `carmine` (绯红) | `{display_name} · 已取消` | 任务被用户主动插话取消或抢占，展示清理工作区凭据 |
 
 **核心调用接口与单在途去抖机制**：
 ```python

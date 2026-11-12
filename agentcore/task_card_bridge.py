@@ -28,11 +28,14 @@ from agentcore.delivery_sanitizer import sanitize_and_extract_artifacts, sanitiz
 logger = logging.getLogger(__name__)
 _MAX_THROTTLE_ENTRIES = 1024
 
-# Zero-emoji engineering indicators conforming to Super Agent UX discipline
+# Zero-emoji engineering indicators conforming to Super Agent UX discipline.
+# Running / progressive user-visible phrase is {runner}在进行. CardKit may split
+# the header as "{runner} · 在进行". Do not invent nicknames; never paint a
+# nameless generic-only running header (bare 执行中 / 处理中 / 进行中).
 STATUS_LABELS = {
     "queued": "排队中",
-    "running": "执行中",
-    "progressive": "渐进交付中",
+    "running": "在进行",
+    "progressive": "在进行",
     "completed": "处理完成",
     "failed": "执行未通过",
     "cancelled": "已取消",
@@ -40,12 +43,48 @@ STATUS_LABELS = {
 
 STATUS_HEADERS = {
     "queued": ("wathet", "排队中"),
-    "running": ("wathet", "执行中"),
-    "progressive": ("wathet", "渐进交付中"),
+    "running": ("wathet", "在进行"),
+    "progressive": ("wathet", "在进行"),
     "completed": ("indigo", "处理完成"),
     "failed": ("carmine", "执行未通过"),
     "cancelled": ("carmine", "已取消"),
 }
+
+# Non-running verdict words. Headers still carry the same runner name.
+STATUS_VERDICT_WORDS = {
+    "queued": "排队中",
+    "stalled": "无响应",
+    "lost": "进程已不在",
+    "completed": "处理完成",
+    "done": "处理完成",
+    "failed": "执行未通过",
+    "cancelled": "已取消",
+    "starting": "启动中",
+    "canceling": "取消中",
+}
+
+
+def resolve_runner_name(*candidates: Any) -> str:
+    """First non-blank runner identity from catalog / card / payload. No nicknames."""
+    for raw in candidates:
+        if not isinstance(raw, str):
+            continue
+        text = raw.strip()
+        if text:
+            return text[:80]
+    return ""
+
+
+def named_status_phrase(status: str, *name_candidates: Any) -> str:
+    """User-visible status phrase. Running / progressive: {name}在进行."""
+    name = resolve_runner_name(*name_candidates)
+    key = str(status or "").strip().lower()
+    if key in ("running", "progressive"):
+        return ("%s在进行" % name) if name else ""
+    word = STATUS_VERDICT_WORDS.get(key, "")
+    if name and word:
+        return "%s · %s" % (name, word)
+    return name or word
 
 
 def _serialize_task(method):
@@ -293,6 +332,8 @@ class TaskCardBridge:
         error_msg: str = "",
         hero_img_key: Optional[str] = None,
         docx_url: str = "",
+        display_label: str = "",
+        role_id: str = "",
     ) -> Dict[str, Any]:
         """Construct the canonical CardKit 2.0 industrial card payload bound to the task.
 
@@ -301,10 +342,14 @@ class TaskCardBridge:
         turquoise-50/blue-50/red-50 main column_set, and grey-50 footer).
         """
         template, status_suffix = STATUS_HEADERS.get(
-            status, ("wathet", _sanitize_card_text(status) or "处理中")
+            status, ("wathet", STATUS_VERDICT_WORDS.get(status, _sanitize_card_text(status) or "在进行"))
         )
         now_str = time.strftime("%Y-%m-%d %H:%M:%S")
-        clean_role = _sanitize_card_text(role_name) or "智能助手"
+        clean_role = resolve_runner_name(
+            _sanitize_card_text(role_name),
+            _sanitize_card_text(display_label),
+            _sanitize_card_text(role_id),
+        )
 
         # Trim goal for clean card presentation
         clean_goal = _sanitize_card_text(goal or "").replace("\r\n", "\n")
@@ -337,6 +382,8 @@ class TaskCardBridge:
                 progress_lines.append(f"**耗时**：{elapsed:.1f}s")
             if status == "queued":
                 progress_lines.append("*排队中：等待空闲 Worker 调度...*")
+            elif clean_role:
+                progress_lines.append("*%s在进行，文字结论将优先直达。*" % clean_role)
             else:
                 progress_lines.append("*正在持续执行中，文字结论将优先直达。*")
             sections.append("\n\n".join(progress_lines))
@@ -436,7 +483,7 @@ class TaskCardBridge:
             task_id, display_name, goal, row['status'], phase=row['phase'] or '',
             progress=row['progress'] or 0.0, elapsed=row['elapsed'] or 0.0,
             summary=row['summary'] or '', artifacts=json.loads(row['artifacts_json'] or '[]'),
-            error_msg=row['error_text'] or ''
+            error_msg=row['error_text'] or '', role_id=role,
         )
         return {"ok": True, "task_id": task_id, "message_id": current_id, "card_payload": card_payload}
 
@@ -469,7 +516,7 @@ class TaskCardBridge:
                 task_id, row['display_name'], row['goal'], row['status'], phase=row['phase'] or '',
                 progress=row['progress'] or 0.0, elapsed=row['elapsed'] or 0.0,
                 summary=row['summary'] or '', artifacts=json.loads(row['artifacts_json'] or '[]'),
-                error_msg=row['error_text'] or '')
+                error_msg=row['error_text'] or '', role_id=row['role'])
             conn.execute("UPDATE task_cards SET create_state='sending' WHERE task_id=? AND profile=?",
                          (task_id, self.profile))
         delivery_key = hashlib.sha256((self.profile + '\0' + task_id).encode('utf-8')).hexdigest()
@@ -546,7 +593,8 @@ class TaskCardBridge:
             if not force_sync and last_t is not None and (time.monotonic() - last_t) < self.min_update_interval:
                 return {"ok": True, "skipped_throttle": True}
             card_payload = self.build_card_payload(
-                task_id, row[1], row[2], status, phase=phase, progress=progress, elapsed=elapsed)
+                task_id, row[1], row[2], status, phase=phase, progress=progress, elapsed=elapsed,
+                role_id=row[0])
 
             conn.execute("""
                 UPDATE task_cards
@@ -623,7 +671,7 @@ class TaskCardBridge:
             card_payload = self.build_card_payload(
                 task_id, row[1], row[2], status, elapsed=elapsed,
                 summary=summary, artifacts=artifacts, error_msg=error_msg,
-                hero_img_key=hero_img_key, docx_url=docx_url)
+                hero_img_key=hero_img_key, docx_url=docx_url, role_id=row[0])
 
             will_patch = bool(row[3] and self.sender and callable(self.sender))
             blocked = will_patch and row[8] == 'sending' and not is_stale_sending

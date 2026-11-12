@@ -341,9 +341,41 @@ VERDICT_WORD = {
 def _state_text(snap: Dict[str, Any]) -> str:
     """The reader-facing state: a claimed finish without its evidence is 待验收."""
     word = str(snap.get("verdict") or snap.get("state") or "")
-    if word == "unverified":
-        return VERDICT_WORD["unverified"]
+    name = resolve_runner_name(
+        snap.get("display_name"), snap.get("display_label"), snap.get("role_id"), snap.get("role"),
+    )
+    if word == "running":
+        return ("%s在进行" % name) if name else VERDICT_WORD["running"]
+    if word in VERDICT_WORD:
+        label = VERDICT_WORD[word]
+        return ("%s · %s" % (name, label)) if name else label
     return _STATE_WORD[card_state(snap)]
+
+
+def resolve_runner_name(*candidates: Any) -> str:
+    """First non-blank runner identity. Never invent a nickname."""
+    for raw in candidates:
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()[:80]
+    return ""
+
+
+def named_status_phrase(snap: Optional[Dict[str, Any]] = None, *, verdict: Any = None,
+                        display_name: str = "", display_label: str = "",
+                        role_id: str = "") -> str:
+    """Reader-facing phrase. Running with a known name is {name}在进行."""
+    data = snap if isinstance(snap, dict) else {}
+    name = resolve_runner_name(
+        display_name, data.get("display_name"), display_label, data.get("display_label"),
+        role_id, data.get("role_id"), data.get("role"),
+    )
+    word_key = str(verdict if verdict is not None else (data.get("verdict") or data.get("state") or ""))
+    if word_key in ("running",):
+        return ("%s在进行" % name) if name else VERDICT_WORD["running"]
+    word = VERDICT_WORD.get(word_key, word_key)
+    if name and word:
+        return "%s · %s" % (name, word)
+    return word
 
 
 def verdict_word(verdict: Optional[str]) -> str:

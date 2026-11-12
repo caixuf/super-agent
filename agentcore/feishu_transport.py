@@ -370,10 +370,10 @@ def build_task_completion_card(
     from agentcore.cardkit2_renderer import build_cardkit2_payload
     from agentcore.delivery_sanitizer import sanitize_card_text
 
-    bot_name = sanitize_card_text(role_name or "智能助手") or "智能助手"
+    bot_name = sanitize_card_text(role_name or "") or sanitize_card_text(role_name) or ""
     finalize = status in ("completed", "PASS")
     is_failed = status in ("failed", "cancelled", "ERROR")
-    status_suffix = "执行未通过" if is_failed else ("处理完成" if finalize else "处理中")
+    status_suffix = "执行未通过" if is_failed else ("处理完成" if finalize else "在进行")
 
     # 组装纯净正文（主推内容）
     body_parts = []
@@ -539,6 +539,8 @@ def colleague_card_payload(view) -> dict:
     phase = str(rendered.get("phase") or "")
     note = str(rendered.get("note") or "")
     role = str(rendered.get("display_name") or rendered.get("role_id") or "")
+    if role and role not in title:
+        title = (("%s · %s" % (role, title)) if title and title != "任务" else role)[:120]
     task_title = str(rendered.get("task_title") or "")
     age = rendered.get("heartbeat_age_s")
     lines = []
@@ -724,12 +726,36 @@ def colleague_card_payload(view) -> dict:
         if d1_buttons:
             elements.append({"tag": "action", "actions": d1_buttons})
     from agentcore.cardkit2_renderer import build_cardkit2_payload
+    phase_l_suffix = phase.strip().lower()
+    verdict_l = str(rendered.get("verdict") or rendered.get("liveness_verdict") or "").strip().lower()
+    if verdict_l == "lost" or phase_l_suffix == "lost":
+        card_suffix = "进程已不在"
+    elif verdict_l == "stalled" or phase_l_suffix == "stalled":
+        card_suffix = "无响应"
+    elif state == "queued":
+        card_suffix = "排队中"
+    elif state == "done":
+        card_suffix = "处理完成"
+    elif state == "failed":
+        card_suffix = "执行未通过"
+    elif state == "cancelled":
+        card_suffix = "已取消"
+    elif phase_l_suffix == "starting":
+        card_suffix = "启动中"
+    elif phase_l_suffix == "canceling":
+        card_suffix = "取消中"
+    elif state in ("waiting_user", "awaiting_plan_approval") or phase_l_suffix in ("paused", "waiting_user"):
+        card_suffix = ""
+    elif state == "running":
+        card_suffix = "在进行"
+    else:
+        card_suffix = ""
     payload = build_cardkit2_payload(
         body[:3500],
         is_terminal=state in ("done", "failed", "cancelled"),
         is_failed=state in ("failed", "cancelled"),
         title=title,
-        status_suffix="",
+        status_suffix=card_suffix,
         color_template=header_color,
     )
     payload["elements"] = elements

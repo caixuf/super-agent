@@ -485,7 +485,7 @@ def test_concurrent_instances_do_not_patch_progress_after_terminal(tmp_path):
     events = []
     def sender(address, message_id, card_payload):
         title = card_payload['header']['title']['content']
-        if '执行中' in title:
+        if '在进行' in title:
             events.append('progress_started')
             entered.set()
             assert release.wait(3)

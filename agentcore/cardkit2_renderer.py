@@ -295,7 +295,12 @@ def build_cardkit2_payload(
         main_bg = "blue-50"
     else:
         header_template = color_template or "wathet"
-        suffix = status_suffix if status_suffix is not None else "处理中"
+        if status_suffix is not None:
+            suffix = status_suffix
+        elif title:
+            suffix = "在进行"
+        else:
+            suffix = "处理中"
         header_title = f"{title} · {suffix}" if suffix else title
         main_bg = "turquoise-50"
 

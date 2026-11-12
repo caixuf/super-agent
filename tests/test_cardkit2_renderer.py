@@ -41,7 +41,8 @@ def test_build_cardkit2_payload_in_progress():
     assert payload["schema"] == "2.0"
     assert payload["config"]["wide_screen_mode"] is True
     assert payload["header"]["template"] == "wathet"
-    assert "处理中" in payload["header"]["title"]["content"]
+    assert "在进行" in payload["header"]["title"]["content"]
+    assert "TestAgent" in payload["header"]["title"]["content"]
 
     elements = payload["body"]["elements"]
     # 1. Collapsible panel for stages

@@ -87,6 +87,29 @@ def _verdict_word(verdict: Any) -> str:
     return _VERDICT_WORD.get(str(verdict or ""), str(verdict or ""))
 
 
+def _runner_name(snap: Any) -> str:
+    if not isinstance(snap, dict):
+        return ""
+    for key in ("display_name", "display_label", "role_id", "role"):
+        val = snap.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()[:80]
+    return ""
+
+
+def _named_verdict_word(snap: Any, verdict: Any = None) -> str:
+    """When a runner name is known, running reads {name}在进行. Table stays pinned."""
+    key = str(verdict if verdict is not None else (
+        snap.get("verdict") if isinstance(snap, dict) else "") or "")
+    name = _runner_name(snap)
+    if key == "running":
+        return ("%s在进行" % name) if name else _VERDICT_WORD["running"]
+    word = _VERDICT_WORD.get(key, key)
+    if name and word:
+        return "%s · %s" % (name, word)
+    return word
+
+
 class _EditOutcomeUnknown(Exception):
     pass
 
@@ -1300,7 +1323,7 @@ def register(ctx) -> None:
                                    reverse=True)[:20]
         for task_id, (turn, frozen) in recent_foreground:
             snap = progress.foreground_snapshot(turn, now=time.time())
-            word = _verdict_word(snap["verdict"])
+            word = _named_verdict_word(snap, snap["verdict"])
             minutes, seconds = divmod(int(snap["elapsed"]), 60)
             elapsed = "%d分%02d秒" % (minutes, seconds) if minutes else "%d秒" % seconds
             lines.append("· `%s` 前台回合 · %s · 已用 %s%s%s" % (
@@ -1308,7 +1331,7 @@ def register(ctx) -> None:
                 " · 进度消息更新待确认" if frozen else ""))
         for row in rows:
             snap = progress.snapshot(row, now=time.time())
-            word = _verdict_word(snap["verdict"])
+            word = _named_verdict_word(snap, snap["verdict"])
             minutes, seconds = divmod(int(snap["elapsed"]), 60)
             elapsed = "%d分%02d秒" % (minutes, seconds) if minutes else "%d秒" % seconds
             lines.append("· `%s` %s · 已用 %s%s" % (snap["task_id"], word, elapsed,

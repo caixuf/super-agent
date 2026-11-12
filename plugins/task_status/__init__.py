@@ -135,6 +135,30 @@ def _reconcile(ledger, task: Dict[str, Any]) -> Dict[str, Any]:
     return task
 
 
+def _decorate_status(row):
+    """Surface runner name + named phrase when the ledger already has a label."""
+    if not isinstance(row, dict):
+        return row
+    name = ""
+    for key in ("display_name", "label"):
+        val = row.get(key)
+        if isinstance(val, str) and val.strip():
+            name = val.strip()[:80]
+            break
+    if name:
+        row.setdefault("display_name", name)
+        verdict = str(row.get("verdict") or row.get("state") or "")
+        if verdict == "running":
+            row["status_phrase"] = "%s在进行" % name
+        elif verdict == "stalled":
+            row["status_phrase"] = "%s · 无响应" % name
+        elif verdict == "lost":
+            row["status_phrase"] = "%s · 进程已不在" % name
+        elif verdict:
+            row["status_phrase"] = "%s · %s" % (name, verdict)
+    return row
+
+
 def _handle(args, *, session_id=None, task_id=None, user_task=None):
     if not isinstance(args, dict):
         return json.dumps({"ok": False, "error": "arguments must be an object"})
@@ -165,7 +189,7 @@ def _handle(args, *, session_id=None, task_id=None, user_task=None):
                                       limit=limit)
             # The host registry can still know the real exit; that beats a bare ``lost``.
             tasks = [_reconcile(ledger, row) for row in tasks]
-            tasks = [ledger.inspect(row["task_id"], require_owner=owner) for row in tasks]
+            tasks = [_decorate_status(ledger.inspect(row["task_id"], require_owner=owner)) for row in tasks]
             return json.dumps({"ok": True, "owner": owner, "tasks": tasks},
                               ensure_ascii=False)
         target = args.get("task_id")
@@ -177,7 +201,8 @@ def _handle(args, *, session_id=None, task_id=None, user_task=None):
                               ensure_ascii=False)
         row = _reconcile(ledger, row)
         if action == "inspect":
-            return json.dumps(ledger.inspect(target, require_owner=owner), ensure_ascii=False)
+            return json.dumps(_decorate_status(ledger.inspect(target, require_owner=owner)),
+                              ensure_ascii=False)
         # tail: prefer the host's full rolling log, fall back to the ledger's bounded tail.
         registry = _process_registry()
         if row.get("kind") == "terminal" and registry is not None:

@@ -806,7 +806,7 @@ class DispatchService:
                     state, error = 'parked', 'invalid_card_origin'
                 else:
                     bound = bridge.bind_task(row['job'], origin, payload['goal'], self.role,
-                                             payload.get('_colleague_name') or self.display_name)
+                                             self._runner_name(payload))
                     if not bound.get('ok'):
                         state, error = 'parked', 'card_binding_conflict'
                     else:
@@ -1028,6 +1028,105 @@ class DispatchService:
                 return
         raise PermissionError('task unavailable in this session')
 
+    def _job_payload_origin(self, job, row=None):
+        payload, origin = {}, {}
+        rec = row
+        if rec is None and hasattr(self.pool, 'job_ownership_record'):
+            try:
+                rec = self.pool.job_ownership_record(job)
+            except Exception:
+                rec = None
+        source = rec if rec is not None else {}
+        try:
+            raw_payload = source['payload'] if hasattr(source, 'keys') and 'payload' in source.keys() else (source.get('payload') if isinstance(source, dict) else None)
+            payload = json.loads(raw_payload) if raw_payload else {}
+        except Exception:
+            payload = {}
+        try:
+            raw_origin = source['origin'] if hasattr(source, 'keys') and 'origin' in source.keys() else (source.get('origin') if isinstance(source, dict) else None)
+            origin = json.loads(raw_origin) if raw_origin else {}
+        except Exception:
+            origin = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        if not isinstance(origin, dict):
+            origin = {}
+        return payload, origin
+
+    def _runner_name(self, payload=None):
+        if isinstance(payload, dict):
+            for key in ('_colleague_name', '_colleague_label', '_colleague_role'):
+                val = payload.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()[:80]
+        for attr in ('display_name', 'display_label', 'role'):
+            val = getattr(self, attr, None)
+            if isinstance(val, str) and val.strip():
+                return val.strip()[:80]
+        return ''
+
+    def _status_phrase(self, *, status, verdict=None, phase=None, runner='',
+                       cancellation_requested=False):
+        v = str(verdict or '').strip().lower()
+        p = str(phase or '').strip().lower()
+        st = str(status or '').strip().lower()
+        if v == 'lost' or p == 'lost':
+            word, running = '进程已不在', False
+        elif v == 'stalled' or p == 'stalled':
+            word, running = '无响应', False
+        elif p == 'canceling' or (cancellation_requested and st in ('running', 'queued', 'progressive')):
+            word, running = '取消中', False
+        elif st in ('completed', 'done'):
+            word, running = '处理完成', False
+        elif st == 'failed':
+            word, running = '执行未通过', False
+        elif st == 'cancelled':
+            word, running = '已取消', False
+        elif p == 'starting':
+            word, running = '启动中', False
+        elif st == 'queued':
+            word, running = '排队中', False
+        elif st in ('running', 'progressive') or v == 'running':
+            word, running = '在进行', True
+        else:
+            word, running = (v or p or st or ''), False
+        if runner and running:
+            return '%s在进行' % runner
+        if runner and word:
+            return '%s · %s' % (runner, word)
+        return word
+
+    def _attach_visibility(self, item, job, *, payload=None, origin=None, live=None):
+        if not isinstance(payload, dict) or not isinstance(origin, dict) or not payload or origin == {}:
+            loaded_p, loaded_o = self._job_payload_origin(job)
+            payload = payload if isinstance(payload, dict) and payload else loaded_p
+            origin = origin if isinstance(origin, dict) and origin else loaded_o
+        runner = self._runner_name(payload)
+        item['display_name'] = runner
+        item['role'] = item.get('role') or self.role
+        item['scheduled'] = bool(isinstance(origin, dict) and origin.get('scheduled') is True)
+        if isinstance(live, dict) and live.get('ok'):
+            if live.get('elapsed_s') is not None:
+                item['elapsed_s'] = live.get('elapsed_s')
+            if live.get('phase'):
+                item['phase'] = live.get('phase')
+            if live.get('progress'):
+                item['progress'] = live.get('progress')
+            if live.get('heartbeat_age_s') is not None:
+                item['heartbeat_age_s'] = live.get('heartbeat_age_s')
+            if live.get('verdict'):
+                item['verdict'] = live.get('verdict')
+            if live.get('stalled'):
+                item['stalled'] = True
+        item['status_phrase'] = self._status_phrase(
+            status=item.get('status'),
+            verdict=item.get('verdict'),
+            phase=item.get('phase'),
+            runner=runner,
+            cancellation_requested=bool(item.get('cancellation_requested')),
+        )
+        return item
+
     def list_owned_statuses(self, session_id, *, limit=5):
         """Return bounded active and recent tasks belonging to this session (or profile when cross_session_status=True)."""
         if not hasattr(self.pool, 'list_recent_jobs'):
@@ -1062,18 +1161,17 @@ class DispatchService:
                 item['result'] = public
                 if truncated:
                     item['result_truncated'] = True
+            live = None
             if ledger is not None:
                 try:
                     live = ledger.inspect(job)
-                    if isinstance(live, dict) and live.get('ok'):
-                        if live.get('elapsed_s') is not None:
-                            item['elapsed_s'] = live.get('elapsed_s')
-                        if live.get('phase'):
-                            item['phase'] = live.get('phase')
-                        if live.get('progress'):
-                            item['progress'] = live.get('progress')
                 except Exception:
-                    pass
+                    live = None
+            try:
+                origin = json.loads(row['origin']) if row.get('origin') else {}
+            except Exception:
+                origin = {}
+            self._attach_visibility(item, job, payload=payload, origin=origin, live=live)
             matched.append(item)
             if len(matched) >= limit:
                 break
@@ -1096,29 +1194,31 @@ class DispatchService:
             if truncated:
                 result['result_truncated'] = True
         ledger = self._resolve_liveness()
+        live = None
         if ledger is not None:
             try:
-                if status['status'] in ('queued', 'running') and status.get('created'):
-                    ledger.observe(job, heartbeat_at=status.get('heartbeat') or status['created'],
-                                   state=status['status'],
-                                   detail='pool status: ' + status['status'])
+                prior = None
+                try:
+                    prior = ledger.inspect(job)
+                except Exception:
+                    prior = None
+                prior_verdict = ''
+                if isinstance(prior, dict):
+                    prior_verdict = str(prior.get('verdict') or prior.get('state') or '').strip().lower()
                 if status['status'] in ('completed', 'failed', 'cancelled'):
                     term = 'done' if status['status'] == 'completed' else status['status']
                     ledger.finish(job, term, detail="pool status: " + status['status'])
+                elif (status['status'] in ('queued', 'running') and status.get('created')
+                      and prior_verdict not in ('stalled', 'lost')):
+                    # Do not hide a stalled|lost verdict by replaying a healthy
+                    # pool heartbeat. Silence is not done, and status must surface it.
+                    ledger.observe(job, heartbeat_at=status.get('heartbeat') or status['created'],
+                                   state=status['status'],
+                                   detail='pool status: ' + status['status'])
                 live = ledger.inspect(job)
-                if isinstance(live, dict) and live.get('ok'):
-                    result['elapsed_s'] = live.get('elapsed_s')
-                    result['heartbeat_age_s'] = live.get('heartbeat_age_s')
-                    if live.get('phase'):
-                        result['phase'] = live.get('phase')
-                    if live.get('progress'):
-                        result['progress'] = live.get('progress')
-                    if live.get('verdict'):
-                        result['verdict'] = live.get('verdict')
-                    if live.get('stalled'):
-                        result['stalled'] = True
             except Exception:
-                pass
+                live = None
+        self._attach_visibility(result, job, live=live)
         return result
 
     def cancel(self, session_id, args):
