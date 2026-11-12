@@ -32,6 +32,9 @@ _BOUND_ROUTE = (
     ('chat', 'HERMES_SESSION_CHAT_ID'),
     ('thread', 'HERMES_SESSION_THREAD_ID'),
 )
+#: Channels that positively identify local/headless execution. Missing route
+#: fields are not a local signal; only this allowlist may invent a local route.
+_LOCAL_EXECUTION_CHANNELS = frozenset(('local', 'cli'))
 _ENGINE_MODULES = ('pool.py', 'ops_alerts.py', 'delivery_sanitizer.py',
                    'completion_delivery.py', 'completion_backfill.py')
 _ENGINE_MODULE_NAMES = tuple(name[:-3] for name in _ENGINE_MODULES)
@@ -265,6 +268,19 @@ def _bound_route(session_id):
         if isinstance(source, str) and source.strip() and len(source) <= 512:
             route['channel'] = source.strip()
     return route
+
+
+def _is_local_execution(origin):
+    """True only for a positively identified local/headless execution origin."""
+    if not isinstance(origin, dict):
+        return False
+    channel = origin.get('channel')
+    if not isinstance(channel, str) or channel.strip() not in _LOCAL_EXECUTION_CHANNELS:
+        return False
+    chat = origin.get('chat')
+    if chat is None or chat == '':
+        return True
+    return isinstance(chat, str) and chat.strip() in _LOCAL_EXECUTION_CHANNELS
 
 
 def _render_completion(message):
@@ -704,9 +720,9 @@ class DispatchService:
         # persist profile + session + route alongside it so a completion can be routed
         # back to the conversation that submitted the work, after reconnects and restarts.
         if self.require_delivery_route and not origin.get('route'):
-            # YOLO / Pi philosophy: Do not block background tasks or headless executions with permission errors.
-            # Fallback to local addressable route rather than failing the task dispatch.
-            origin['route'] = origin.get('route') or f'agent:{self.profile}:local:default'
+            if not _is_local_execution(origin):
+                raise PermissionError('addressable submitting conversation required before dispatch')
+            origin['route'] = 'agent:%s:local:default' % self.profile
             origin['chat'] = origin.get('chat') or 'local'
             origin['channel'] = origin.get('channel') or 'local'
         card_requested = (self.task_cards_enabled and origin.get('channel') == 'feishu'

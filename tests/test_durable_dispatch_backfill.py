@@ -93,11 +93,13 @@ def _args(tmp_path):
             'sources': [{'path': str(source)}]}
 
 
-def _service(tmp_path, *, route=ORIGIN, profile='test-profile', delivery=None):
+def _service(tmp_path, *, route=ORIGIN, profile='test-profile', delivery=None,
+             require_delivery_route=False):
     directory, _source = _sources(tmp_path)
     return plugin.DispatchService(
         str(tmp_path / 'queue'), profile, [str(directory)],
-        delivery=delivery, route_provider=lambda _session_id: dict(route))
+        delivery=delivery, route_provider=lambda _session_id: dict(route),
+        require_delivery_route=require_delivery_route)
 
 
 def _finish(pool, job, *, result=None, ok=True):
@@ -132,6 +134,34 @@ def test_route_without_a_bound_submitting_turn_is_not_invented(tmp_path):
     result = service.submit('session-one', _args(tmp_path))
     assert service.pool.origin(result['task_id']) == {
         'profile': 'test-profile', 'session': 'session-one'}
+
+
+def test_feishu_missing_route_is_rejected_and_origin_not_rewritten(tmp_path):
+    service = _service(tmp_path, route={'channel': 'feishu', 'chat': 'chat-1'},
+                       require_delivery_route=True)
+    origin = service._origin('session-one')
+    before = dict(origin)
+    with pytest.raises(PermissionError,
+                       match='addressable submitting conversation required before dispatch'):
+        service._submit_internal(
+            'session-one', 'Explain the failure', 'request-1',
+            sources=_args(tmp_path)['sources'], origin=origin)
+    assert origin == before
+    assert origin.get('channel') == 'feishu'
+    assert origin.get('route') is None
+    with service.pool.db() as db:
+        assert db.execute('SELECT count(*) FROM jobs').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('channel', ('local', 'cli'))
+def test_local_execution_may_use_local_route_when_delivery_required(tmp_path, channel):
+    service = _service(tmp_path, route={'channel': channel}, require_delivery_route=True)
+    result = service.submit('session-one', _args(tmp_path))
+    assert result['ok'] is True
+    origin = service.pool.origin(result['task_id'])
+    assert origin['route'] == 'agent:test-profile:local:default'
+    assert origin['channel'] == channel
+    assert origin['chat'] == 'local'
 
 
 def test_bound_route_must_match_the_dispatcher_session(tmp_path, monkeypatch):
