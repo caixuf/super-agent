@@ -83,3 +83,4 @@ def test_durable_dispatch_dynamic_roster_sync(tmp_path: Path):
     assert "atai" in services
     assert services["atai"].display_name == "帝江台架测试专家(啊台)"
     assert "台架测试执行" in services["atai"].duty
+

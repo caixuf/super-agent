@@ -104,7 +104,7 @@ def test_hermes_empty_output_is_not_success(monkeypatch):
     monkeypatch.setattr(module.subprocess, "run",
                         lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "  ", "stderr": ""})())
     result = module.run_hermes("goal")
-    assert result["ok"] is False and result["error"] == "turn_failed"
+    assert result["ok"] is False and result["error"] == "empty_model_response"
 
 
 def test_missing_hermes_binary_marks_engine_unavailable(monkeypatch):

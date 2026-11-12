@@ -8,6 +8,11 @@ from install.worker.dev_exec_runner import (
 )
 
 
+@pytest.fixture(autouse=True)
+def mock_hermes_environment(monkeypatch):
+    monkeypatch.setattr("install.worker.dev_exec_runner._hermes_bin", lambda: "/bin/true")
+
+
 def test_sanitised_empty_responses_set():
     assert "(empty)" in SANITISED_EMPTY_RESPONSES
     assert "[System: Empty message content sanitised to satisfy protocol]" in SANITISED_EMPTY_RESPONSES
@@ -64,3 +69,4 @@ def test_run_hermes_valid_response_succeeds(monkeypatch: pytest.MonkeyPatch, tmp
     assert res["ok"] is True
     assert res.get("error") is None
     assert "Job completed successfully" in res["summary"]
+

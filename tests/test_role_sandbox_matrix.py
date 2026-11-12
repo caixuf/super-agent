@@ -71,3 +71,4 @@ def test_wrap_with_bwrap_sandbox_standard_role_uses_bwrap(monkeypatch: pytest.Mo
     assert wrapped_cmd[0].endswith("bwrap")
     assert meta is not None
     assert meta["backend"] == "bwrap"
+
