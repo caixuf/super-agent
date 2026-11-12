@@ -260,6 +260,27 @@ def test_legacy_receipt_without_route_is_parked_not_acked(tmp_path):
     assert parked_jobs(pool, profile='test-profile') == [legacy]
 
 
+@pytest.mark.parametrize('field', ['chat', 'channel'])
+def test_im_origin_missing_chat_or_channel_is_parked_not_acked(tmp_path, field):
+    pool = Pool(str(tmp_path / 'queue'))
+    incomplete = dict(ORIGIN)
+    incomplete.pop(field)
+    parked = pool.submit('incomplete', {'goal': 'old'}, replay_safe=True, origin=incomplete)
+    _finish(pool, parked)
+    routed = pool.submit('routed', {'goal': 'new'}, replay_safe=True, origin=ORIGIN)
+    _finish(pool, routed)
+
+    transport = Transport()
+    result = drain(pool, transport, profile='test-profile')
+    assert result['delivered'] == 1
+    assert result['parked'] == [parked]
+    assert [call['idempotency_key'] for call in transport.calls] == [routed]
+    assert [call['address'] for call in transport.calls] == [ORIGIN]
+    assert pool.delivery_record(parked)['acknowledged'] == 0
+    assert pool.delivery_record(routed)['acknowledged'] == 1
+    assert parked_jobs(pool, profile='test-profile') == [parked]
+
+
 def test_completion_addressed_to_another_profile_is_never_delivered(tmp_path):
     pool = Pool(str(tmp_path / 'queue'))
     job = pool.submit('foreign', {'goal': 'g'}, replay_safe=True,
@@ -274,6 +295,13 @@ def test_completion_addressed_to_another_profile_is_never_delivered(tmp_path):
     assert not routable(dict(ORIGIN, profile='other'), profile='test-profile')
     assert not routable(dict(ORIGIN, channel='local'), profile='test-profile')
     assert not routable(dict(ORIGIN, channel='cli'), profile='test-profile')
+    assert not routable(dict(ORIGIN, channel='tui'), profile='test-profile')
+    missing_chat = dict(ORIGIN)
+    missing_chat.pop('chat')
+    missing_channel = dict(ORIGIN)
+    missing_channel.pop('channel')
+    assert not routable(missing_chat, profile='test-profile')
+    assert not routable(missing_channel, profile='test-profile')
 
 
 def test_plugin_transport_refuses_unaddressable_and_unaccepted_sends(tmp_path):

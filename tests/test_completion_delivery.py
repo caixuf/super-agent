@@ -15,7 +15,8 @@ from agentcore.completion_delivery import (build_message, deliver_once, deliver_
 from agentcore.ops_alerts import DeliveryReceipt
 from agentcore.pool import Pool
 
-ORIGIN = {'profile': 'prof-1', 'session': 'sess-1', 'route': 'route-1'}
+ORIGIN = {'profile': 'prof-1', 'session': 'sess-1', 'route': 'route-1',
+          'channel': 'feishu', 'chat': 'chat-1'}
 
 
 class Transport:
@@ -87,6 +88,19 @@ def test_task_without_origin_is_refused_and_left_pending(tmp_path):
     assert transport.calls == []  # never guessed a conversation
     assert pool.delivery_record(job)['acknowledged'] == 0
     # Still visible for an operator, not silently dropped.
+    assert [receipt['job'] for receipt in pool.receipts()] == [job]
+
+
+@pytest.mark.parametrize('field', ['chat', 'channel'])
+def test_im_origin_missing_chat_or_channel_is_unowned_and_left_pending(tmp_path, field):
+    pool, transport = Pool(tmp_path), Transport()
+    origin = dict(ORIGIN)
+    origin.pop(field)
+    job = finished_job(pool, origin=origin)
+    outcome = deliver_once(pool, transport)
+    assert outcome['status'] == 'unowned' and outcome['task_id'] == job
+    assert transport.calls == []
+    assert pool.delivery_record(job)['acknowledged'] == 0
     assert [receipt['job'] for receipt in pool.receipts()] == [job]
 
 
@@ -322,5 +336,27 @@ def test_deferred_not_sent_releases_lease_while_uncertain_deferred_keeps_lease(t
     assert pool.outbox_record(j2)['lease_token'] is not None
     # Still leased during uncertainty window.
     assert deliver_once(pool, Transport(), lease=60)['status'] == 'empty'
+
+
+def test_unresolvable_origin_is_not_sent_and_stays_pending(tmp_path):
+    pool = Pool(tmp_path)
+    job = finished_job(pool)
+    active = {'profile': 'prof-1', 'session': 'sess-live', 'route': 'live-route',
+              'channel': 'feishu', 'chat': 'some-other-chat'}
+    sent = []
+
+    class RefusingTransport:
+        def deliver(self, address, message, *, idempotency_key):
+            assert address == ORIGIN
+            assert address != active
+            sent.append(address)
+            return {'accepted': False, 'event_id': idempotency_key,
+                    'deferred': True, 'not_sent': True, 'error': 'no_conversation'}
+
+    outcome = deliver_once(pool, RefusingTransport())
+    assert outcome == {'status': 'delivery_deferred', 'task_id': job, 'not_sent': True}
+    assert sent == [ORIGIN]
+    assert pool.delivery_record(job)['acknowledged'] == 0
+    assert [receipt['job'] for receipt in pool.receipts()] == [job]
 
 

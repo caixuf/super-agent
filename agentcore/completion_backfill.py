@@ -8,9 +8,10 @@ persisted therefore sits at the head forever and blocks every later completion.
 This module is the routing policy between the two:
 
 * **Addressability comes from the stored origin only.** A receipt is deliverable when
-  its job recorded a ``route`` (and, when a profile is supplied, that route belongs to
-  this profile). Nothing here reads the currently active session — a completion must
-  never land in whichever chat happens to be open.
+  its job recorded a ``route`` and, for IM / messaging origins, ``channel`` and
+  ``chat`` (and, when a profile is supplied, that address belongs to this profile).
+  Nothing here reads the currently active session — a completion must never land in
+  whichever chat happens to be open.
 * **Unaddressable receipts are skipped, not acknowledged.** They stay pending so an
   operator can inspect them, while later deliverable completions keep flowing.
 * **Every drain starts from the database.** Restart, reconnect or a second process
@@ -24,10 +25,9 @@ from typing import Any, Optional
 from agentcore.completion_delivery import (
     MAX_SUMMARY_CHARS, deliver_once, inspect_pending,
 )
-from agentcore.pool import Pool
+from agentcore.pool import NON_MESSAGING_CHANNELS, Pool, messaging_origin_complete
 
 ROUTE_FIELD = 'route'
-NON_MESSAGING_CHANNELS = frozenset(('local', 'cli', 'tui'))
 #: Upper bound on how many head-of-line receipts one policy pass may examine. Kept well
 #: below the oldest SQLite host-parameter limit because each parked id becomes one
 #: ``job NOT IN (?,...)`` binding.
@@ -45,7 +45,9 @@ def routable(address: Any, *, profile: Optional[str] = None) -> bool:
         return False
     if profile is not None and address.get('profile') != profile:
         return False
-    return True
+    # IM / messaging origins also need channel and chat; a missing field is
+    # not a wildcard and is not filled from a later route resolution.
+    return messaging_origin_complete(address)
 
 
 def pending_addresses(pool: Pool, *, limit: int = PARK_SCAN_LIMIT) -> list[tuple[str, Any]]:

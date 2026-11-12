@@ -17,6 +17,8 @@ def test_colleague_completion_is_idempotent_and_keeps_original_origin(tmp_path):
         pool.record_colleague_completion(**{**kwargs, "summary": "不同结果"})
     with pytest.raises(ValueError, match="bound_delivery_route_required"):
         pool.record_colleague_completion(**{**kwargs, "origin": {"profile": "caixuf", "session": "session-1"}})
+    with pytest.raises(ValueError, match="bound_delivery_address_required"):
+        pool.record_colleague_completion(**{**kwargs, "origin": {"profile": "caixuf", "session": "session-1", "route": "feishu:chat-1"}})
 
 
 def test_colleague_outbox_flows_through_existing_direct_delivery(tmp_path):

@@ -7,7 +7,7 @@ import pytest
 from agentcore.completion_delivery import build_message
 from agentcore.direct_completion import DirectCompletionTransport
 
-ADDRESS = dict(profile='owner', session='session', route='route')
+ADDRESS = dict(profile='owner', session='session', route='route', channel='feishu', chat='chat-1')
 ATTEMPT = 'a'*32
 
 

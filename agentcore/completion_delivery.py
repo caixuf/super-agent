@@ -31,7 +31,7 @@ from typing import Any, Optional, Protocol
 
 from agentcore.delivery_sanitizer import unwrap_and_unescape_text
 from agentcore.ops_alerts import DeliveryReceipt, _receipt_status
-from agentcore.pool import Pool
+from agentcore.pool import NON_MESSAGING_CHANNELS, Pool, messaging_origin_complete
 
 #: How much of a task's report text one completion message carries. Long reports stay
 #: on disk; the message says where to look instead of pasting megabytes into a chat.
@@ -349,6 +349,12 @@ def deliver_once(pool: Pool, transport: Optional[Transport], *, lease: float = 6
     if not address or (origin_filter is not None and not origin_filter(address)):
         return {'status': 'unowned', 'task_id': job,
                 'reason': 'task has no persisted origin; refusing to guess a conversation'}
+    # Incomplete IM origin is unaddressable. Missing chat/channel is not a
+    # wildcard and must not be filled from a later or active session.
+    if (address.get('channel') not in NON_MESSAGING_CHANNELS
+            and not messaging_origin_complete(address)):
+        return {'status': 'unowned', 'task_id': job,
+                'reason': 'task origin is missing chat or channel; refusing to guess a conversation'}
     try:
         role, name, label = _colleague_identity(pool, job)
         message = build_message(

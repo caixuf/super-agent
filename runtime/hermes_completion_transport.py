@@ -59,11 +59,15 @@ def _transport_type(engine):
 
 
 def _origin_matches(address, target):
+    # Missing stored channel or chat is incomplete, not a wildcard. Never
+    # authorize a later session resolution that would fill them in.
     # A missing stored thread means the original address was not bound to a
     # thread (or legacy provenance is incomplete). Never silently add one from
     # a later session resolution; it changes the destination of the message.
-    return (not address.get('channel') or address['channel'] == target.platform) and (
-        not address.get('chat') or str(address['chat']) == target.chat_id) and (
+    if not address.get('channel') or not address.get('chat'):
+        return False
+    return (address['channel'] == target.platform) and (
+        str(address['chat']) == target.chat_id) and (
         (address.get('thread') or '') == ((target.metadata or {}).get('thread_id') or ''))
 
 
@@ -152,6 +156,9 @@ class HostSender:
 
     async def send(self, runner, address, item):
         from gateway import plugin_messages
+        if (not isinstance(address, dict) or not address.get('route')
+                or not address.get('channel') or not address.get('chat')):
+            return dict(ok=False, not_sent=True, error='stored_origin_mismatch')
         target, refusal = plugin_messages.resolve(runner, session_key=address['route'], route=None,
             plugin_home=self.ctx._manager.home_path, plugin_id=self.ctx.plugin_id)
         if target is None:

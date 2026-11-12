@@ -8,7 +8,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import fcntl, hashlib, json, os, re, sqlite3, stat, time
 from pathlib import Path
-from agentcore.pool import normalize_origin
+from agentcore.pool import messaging_origin_complete, normalize_origin
 from agentcore.colleague_registry import Supervisor
 from agentcore.colleague_hermes_runner import ProfileBinding
 
@@ -444,7 +444,8 @@ class GatewayColleagueDispatcher:
             if (delivery_status and deliverable and current["owner_origin"] and current["delivery_job_id"] is None):
                 try:
                     origin=json.loads(current["owner_origin"])
-                    if isinstance(origin,dict) and isinstance(origin.get("route"),str):
+                    # IM handoff requires a complete owner_origin; route-only stays pending.
+                    if isinstance(origin,dict) and messaging_origin_complete(origin):
                         job=self.completion_sink.record_colleague_completion(
                             source_id=current["work_id"],origin=origin,created=current["created_at"],
                             status=delivery_status,summary=text,

@@ -347,7 +347,7 @@ def test_legacy_weak_settlement_never_auto_delivers(context, tmp_path):
     registry, supervisor, gateway, state, dispatcher = context
     pool = Pool(tmp_path / "delivery")
     dispatcher.completion_sink = pool
-    owner = {"profile": "main", "session": "user-a", "route": "feishu:chat-1"}
+    owner = {"profile": "main", "session": "user-a", "route": "feishu:chat-1", "channel": "feishu", "chat": "chat-1"}
     dispatcher.submit(owner=owner, member_id="reviewer", generation=1, request_id="req-1", prompt="review this")
     gateway.status = "terminal"
     dispatcher._update(owner, "req-1", state="settled", settlement_state="settled", quiescence_evidence_id="quiescence-legacy")
@@ -361,7 +361,7 @@ def test_failed_colleague_turn_is_reported_without_claiming_quiescence(context, 
     registry, supervisor, gateway, state, dispatcher = context
     pool = Pool(tmp_path / "delivery")
     dispatcher.completion_sink = pool
-    owner = {"profile": "main", "session": "user-a", "route": "feishu:chat-1"}
+    owner = {"profile": "main", "session": "user-a", "route": "feishu:chat-1", "channel": "feishu", "chat": "chat-1"}
     dispatcher.submit(owner=owner, member_id="reviewer", generation=1, request_id="req-1", prompt="review this")
     gateway.status = "terminal"
     gateway.outcome = "failed"
@@ -383,8 +383,8 @@ def test_failed_colleague_turn_is_reported_without_claiming_quiescence(context, 
 def test_same_request_never_replaces_original_delivery_origin(context):
     import sqlite3
     registry, supervisor, gateway, state, dispatcher = context
-    original = {"profile": "main", "session": "user-a", "route": "feishu:original", "chat": "original"}
-    changed = {"profile": "main", "session": "user-a", "route": "feishu:other", "chat": "other"}
+    original = {"profile": "main", "session": "user-a", "route": "feishu:original", "channel": "feishu", "chat": "original"}
+    changed = {"profile": "main", "session": "user-a", "route": "feishu:other", "channel": "feishu", "chat": "other"}
     kwargs = {"member_id": "reviewer", "generation": 1, "request_id": "req-1", "prompt": "review this"}
     dispatcher.submit(owner=original, **kwargs)
     dispatcher.submit(owner=changed, **kwargs)
@@ -402,7 +402,7 @@ def test_outbox_handoff_recovers_after_local_receipt_write_failure(context, tmp_
     dispatcher.all_work_quiescent = lambda member, generation, profile, session, admission: {
         "all_owned_processes_terminal": True, "evidence_id": "trusted-proof", "member_id": member,
         "generation": generation, "hermes_profile": profile, "hermes_session_id": session, "admission_id": admission}
-    owner = {"profile": "main", "session": "user-a", "route": "feishu:chat-1"}
+    owner = {"profile": "main", "session": "user-a", "route": "feishu:chat-1", "channel": "feishu", "chat": "chat-1"}
     dispatcher.submit(owner=owner, member_id="reviewer", generation=1, request_id="req-1", prompt="review this")
     gateway.status = "terminal"
     original = dispatcher._update
@@ -441,7 +441,7 @@ def test_native_turn_result_delivered_without_claiming_background_stopped(contex
     registry, supervisor, gateway, state, dispatcher = context
     pool = Pool(tmp_path / "delivery")
     dispatcher.completion_sink = pool
-    owner = {"profile": "main", "session": "user-a", "route": "feishu:chat-1"}
+    owner = {"profile": "main", "session": "user-a", "route": "feishu:chat-1", "channel": "feishu", "chat": "chat-1"}
     dispatcher.submit(owner=owner, member_id="reviewer", generation=1, request_id="req-1", prompt="review this")
     gateway.status = "terminal"
     result = dispatcher.inspect(owner=owner, request_id="req-1")
@@ -467,3 +467,33 @@ def test_optional_delivery_metadata_failure_does_not_block_assignment(monkeypatc
     dispatcher, owner = service._owner("main", "user-a", session_context_profile="main", session_context_id="user-a")
     assert dispatcher is sentinel
     assert owner == {"profile": "main", "session": "user-a", "route": "feishu:chat-1"}
+
+
+def test_incomplete_im_owner_origin_does_not_create_sendable_outbox(context, tmp_path):
+    from agentcore.pool import Pool
+    from agentcore.completion_backfill import drain, routable
+    registry, supervisor, gateway, state, dispatcher = context
+    pool = Pool(tmp_path / "delivery")
+    dispatcher.completion_sink = pool
+    dispatcher.all_work_quiescent = lambda member, generation, profile, session, admission: {
+        "all_owned_processes_terminal": True, "evidence_id": "trusted-proof", "member_id": member,
+        "generation": generation, "hermes_profile": profile, "hermes_session_id": session, "admission_id": admission}
+    owner = {"profile": "main", "session": "user-a", "route": "feishu:chat-1"}
+    dispatcher.submit(owner=owner, member_id="reviewer", generation=1, request_id="req-1", prompt="review this")
+    gateway.status = "terminal"
+    dispatcher.inspect(owner=owner, request_id="req-1")
+    dispatcher.refresh_pending()
+    with pool.db() as db:
+        assert db.execute("select count(*) from jobs").fetchone()[0] == 0
+        assert db.execute("select count(*) from outbox").fetchone()[0] == 0
+    import sqlite3
+    with sqlite3.connect(dispatcher.db_path) as db:
+        assert db.execute("select delivery_job_id from tasks where request_id='req-1'").fetchone()[0] is None
+    transport_calls = []
+    class Transport:
+        def deliver(self, address, message, *, idempotency_key):
+            transport_calls.append(address)
+            raise AssertionError("incomplete origin must not be sent")
+    assert drain(pool, Transport())["delivered"] == 0
+    assert transport_calls == []
+    assert not routable(owner)

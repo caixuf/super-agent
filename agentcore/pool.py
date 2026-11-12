@@ -34,6 +34,24 @@ ORIGIN_FIELDS = ('profile', 'session', 'route', 'channel', 'chat', 'thread', 'tu
 # The dispatcher is only guaranteed to hold these two; the rest are recorded when
 # the host supplies them, never inferred from an ambient session.
 ORIGIN_REQUIRED = ('profile', 'session')
+NON_MESSAGING_CHANNELS = frozenset(('local', 'cli', 'tui'))
+
+
+def messaging_origin_complete(origin):
+    """Whether an IM / messaging origin carries a full delivery address.
+
+    A missing chat or channel is incomplete, not a wildcard. Local / cli / tui
+    are not messaging origins; this helper returns False for them.
+    """
+    if not isinstance(origin, dict):
+        return False
+    if origin.get('channel') in NON_MESSAGING_CHANNELS:
+        return False
+    route, channel, chat = origin.get('route'), origin.get('channel'), origin.get('chat')
+    return (isinstance(route, str) and bool(route.strip())
+            and isinstance(channel, str) and bool(channel.strip())
+            and isinstance(chat, str) and bool(chat.strip()))
+
 
 
 # Prefer-D2 — Dagster-style hard windows on SQLite pool (config; local defaults).
@@ -257,6 +275,10 @@ class Pool:
         address = normalize_origin(origin)
         if address is None or not isinstance(origin.get("route"), str) or not origin["route"].strip():
             raise ValueError("bound_delivery_route_required")
+        # IM owners need route+channel+chat before a sendable outbox row.
+        # Local / cli / tui stay non-routable and are not this check.
+        if origin.get("channel") not in NON_MESSAGING_CHANNELS and not messaging_origin_complete(origin):
+            raise ValueError("bound_delivery_address_required")
         if (isinstance(created, bool) or not isinstance(created, (int, float)) or
                 not math.isfinite(created) or created < 0):
             raise ValueError("invalid_colleague_creation_time")

@@ -406,3 +406,32 @@ def test_reconcile_card_falls_back_to_pool_status_when_outbox_missing(tmp_path):
     assert finalized[0][1]['status'] == 'completed'
     assert 'recovered from status' in finalized[0][1]['summary']
 
+@pytest.mark.parametrize('field', ['chat', 'channel'])
+def test_incomplete_origin_is_not_a_wildcard_and_is_not_sent(host, field):
+    sender, target, address, calls = host
+    incomplete = dict(address)
+    incomplete.pop(field)
+    result = asyncio.run(sender.send(object(), incomplete, dict(kind='text', text='x', delivery_uuid='stable')))
+    assert result == {'ok': False, 'not_sent': True, 'error': 'stored_origin_mismatch'}
+    assert not calls
+
+
+def test_resolve_cannot_add_a_chat_the_origin_never_stored(host):
+    sender, target, address, calls = host
+    incomplete = dict(address)
+    del incomplete['chat']
+    assert target.chat_id == 'chat'
+    result = asyncio.run(sender.send(object(), incomplete, dict(kind='text', text='x', delivery_uuid='stable')))
+    assert result == {'ok': False, 'not_sent': True, 'error': 'stored_origin_mismatch'}
+    assert not calls
+
+
+def test_unresolvable_stored_route_is_not_sent(host, monkeypatch):
+    sender, target, address, calls = host
+    def resolve(runner, **kw):
+        assert kw == dict(session_key='stored-route', route=None, plugin_home='/profile/owner', plugin_id='durable-dispatch')
+        return None, {'error': 'no_conversation'}
+    monkeypatch.setattr(sys.modules['gateway'].plugin_messages, 'resolve', resolve)
+    result = asyncio.run(sender.send(object(), address, dict(kind='text', text='x', delivery_uuid='stable')))
+    assert result == {'ok': False, 'not_sent': True, 'error': 'no_conversation'}
+    assert not calls
