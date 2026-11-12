@@ -68,8 +68,20 @@ def _origin_matches(address, target):
 
 
 class HostSender:
-    def __init__(self, ctx):
+    def __init__(self, ctx, profile=None):
         self.ctx = ctx
+        self._profile = profile
+
+    def _get_profile(self):
+        if self._profile:
+            return self._profile
+        prop = getattr(self.ctx, 'profile_name', None)
+        if callable(prop):
+            try:
+                return prop()
+            except Exception:
+                return None
+        return prop
 
     def create_card(self, address, card_payload, delivery_key):
         """Create a task card through the resolved host adapter, with a stable UUID."""
@@ -86,7 +98,8 @@ class HostSender:
 
         async def _do_create():
             from gateway import plugin_messages
-            if (not isinstance(address, dict) or address.get('profile') != getattr(self.ctx, 'profile_name', None)
+            expected_profile = self._get_profile()
+            if (not isinstance(address, dict) or (expected_profile is not None and address.get('profile') != expected_profile)
                     or not address.get('route') or not address.get('channel') or not address.get('chat')
                     or not isinstance(delivery_key, str) or len(delivery_key) != 64
                     or any(c not in '0123456789abcdef' for c in delivery_key)
@@ -422,7 +435,7 @@ def create_transport(ctx, service):
                                    idempotency_key, type(exc).__name__)
             return result
 
-    sender = HostSender(ctx)
+    sender = HostSender(ctx, profile=service.profile)
     card_bridge = None
     cards_root_cfg = ctx.get_config('cards_root', '')
     cards_dir = Path(cards_root_cfg) if isinstance(cards_root_cfg, str) and cards_root_cfg and Path(cards_root_cfg).is_absolute() else (service.pool.root.parent / 'cards')
