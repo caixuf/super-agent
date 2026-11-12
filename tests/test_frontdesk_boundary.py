@@ -98,6 +98,22 @@ def test_shell_tier_adds_only_terminal_and_process(policy, tmp_path):
     assert names == {"terminal", "durable_status"}
 
 
+def test_hr_tier_adds_colleague_team_and_catalog_tools(policy, tmp_path):
+    _enable_tiers(tmp_path)
+    for name in policy.HR_TOOLS:
+        assert policy.tool_block_message(name, home=tmp_path) == policy.TOOL_DENIED
+    _enable_tiers(tmp_path, hr_enabled=True)
+    for name in ("colleague_define_role", "colleague_hire", "colleague_grant",
+                 "colleague_retire", "colleague_catalog"):
+        assert policy.tool_block_message(name, home=tmp_path) is None
+    for name in ("write_file", "execute_code", "delegate_task", "patch"):
+        assert policy.tool_block_message(name, home=tmp_path) == policy.TOOL_DENIED
+    definitions = [{"type": "function", "function": {"name": n}}
+                   for n in ("colleague_hire", "colleague_list", "write_file", "durable_status")]
+    names = {d["function"]["name"] for d in policy.filter_tool_definitions(definitions, home=tmp_path)}
+    assert names == {"colleague_hire", "colleague_list", "durable_status"}
+
+
 def test_tier_flags_must_be_boolean(policy, tmp_path):
     _enable_tiers(tmp_path, shell_enabled="yes please")
     assert policy.tool_block_message("terminal", home=tmp_path) == policy.UNAVAILABLE

@@ -48,7 +48,13 @@ READ_TOOLS = frozenset({
 # frontdesk with a host shell. Command scope is governed by the identity prompt,
 # not by this gate, so it is off unless the profile config turns it on.
 SHELL_TOOLS = frozenset({"terminal", "process"})
-_FLAG_NAMES = ("enabled", "memory_read_enabled", "read_tools_enabled", "shell_enabled")
+# Opt-in HR / team management tier (``hr_enabled``): allows the frontdesk to
+# define roles, hire members, delegate management, and retire members.
+HR_TOOLS = frozenset({
+    "colleague_define_role", "colleague_hire", "colleague_grant", "colleague_retire",
+    "colleague_catalog",
+})
+_FLAG_NAMES = ("enabled", "memory_read_enabled", "read_tools_enabled", "shell_enabled", "hr_enabled")
 CHAT_COMMANDS = frozenset({"help", "commands", "whoami", "version", "new", "reset", "stop", "status", "boost"})
 UNAVAILABLE = "frontdesk_policy_unavailable: execution refused; ask the administrator to check this profile."
 TOOL_DENIED = "frontdesk_tool_denied: use the durable task APIs; do not execute or delegate work in this profile."
@@ -291,6 +297,8 @@ def _allowed_tools(policy: dict[str, bool]) -> frozenset[str]:
         allowed |= READ_TOOLS
     if policy.get("shell_enabled"):
         allowed |= SHELL_TOOLS
+    if policy.get("hr_enabled"):
+        allowed |= HR_TOOLS
     return frozenset(allowed)
 
 
