@@ -918,13 +918,16 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
             "returncode": done.returncode,
             "stderr": err,
         }
-    ok = done.returncode == 0 and bool((summary or out).strip())
+    raw_text = (summary or out).strip()
+    is_empty_response = not raw_text or raw_text in SANITISED_EMPTY_RESPONSES
+    ok = done.returncode == 0 and not is_empty_response
 
     checkpoint_data = _find_and_load_checkpoint()
     degraded = False
     degradation_reason = ""
-    if not ok and checkpoint_data and checkpoint_data.get("summary"):
-        summary = checkpoint_data["summary"]
+    ckpt_summary = (checkpoint_data.get("summary") or "").strip() if checkpoint_data else ""
+    if not ok and ckpt_summary and ckpt_summary not in SANITISED_EMPTY_RESPONSES:
+        summary = ckpt_summary
         ok = True
         degraded = True
         degradation_reason = "phase1_checkpoint_recovered"
@@ -936,6 +939,8 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
         "stderr": err,
         "returncode": done.returncode,
     }
+    if not ok and is_empty_response:
+        payload["error"] = "empty_model_response"
     if containment_meta is not None:
         payload["containment"] = {
             "backend": containment_meta.get("backend", "bwrap"),
@@ -951,7 +956,7 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
     if degraded:
         payload["degraded"] = True
         payload["degradation_reason"] = degradation_reason
-    if not ok:
+    if not ok and not payload.get("error"):
         payload["error"] = "turn_failed"
     return payload
 
