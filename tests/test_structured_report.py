@@ -144,3 +144,37 @@ def test_async_incremental_report_merges_and_updates_bound_card(tmp_path):
     r3 = bridge.apply_report_delta("t-async-1", {"seq": 3, "part_id": "late-img", "images": [{"path": "/tmp/extra.png", "caption": "补充图"}]}, elapsed=15.0)
     assert r3["ok"] and len(r3["structured_report"]["images"]) == 2
     assert len(patches) == 3
+
+
+def test_refresh_running_cards_applies_progress_json_report_delta(tmp_path):
+    from types import SimpleNamespace
+    from plugins.durable_dispatch import DispatchService
+    from agentcore.task_card_bridge import TaskCardBridge
+
+    svc = DispatchService(str(tmp_path / "q"), "frontdesk", [str(tmp_path)], role="dev", task_cards_enabled=True, route_provider=lambda _s: {"route": "feishu:c1", "channel": "feishu", "chat": "c1"})
+    sub = svc.submit("s1", {"goal": "跑一次检查", "request_key": "rk-prog-1"})
+    job_id = sub["task_id"]
+    svc.pool.claim("worker-1")
+    attempt_id = svc.pool.status(job_id)["attempt"]
+    with svc.pool.db() as db:
+        db.execute("UPDATE jobs SET pid=12345 WHERE id=?", (job_id,))
+        db.execute("UPDATE card_outbox SET state='sent', progress_state='sent', updated=1.0 WHERE job=?", (job_id,))
+        db.commit()
+
+    prog_dir = svc.pool.root / "attempts" / attempt_id
+    prog_dir.mkdir(parents=True, exist_ok=True)
+    (prog_dir / "progress.json").write_text(
+        '{"phase": "生成图表中", "progress": 0.6, "structured_report": {"seq": 1, "part_id": "mid-1", "final": false, "conclusion": "前置检查已通过", "parts_status": {"images": "pending"}}}',
+        encoding="utf-8",
+    )
+
+    patches = []
+    bridge = TaskCardBridge(tmp_path / "cards.db", profile="frontdesk", sender=lambda *, address, message_id, card_payload: patches.append(card_payload) or {"ok": True, "message_id": message_id})
+    bridge.bind_task(job_id, {"route": "feishu:c1", "chat": "c1", "channel": "feishu"}, "跑一次检查", "test", "测试专家", message_id="om_mid_1")
+
+    outcomes = svc.refresh_running_cards(SimpleNamespace(card_bridge=bridge), min_age=0.0)
+    assert len(outcomes) == 1
+    assert len(patches) == 1
+    card = bridge.get_card(job_id)
+    assert card["status"] == "progressive"
+    assert "前置检查已通过" in card["summary"]

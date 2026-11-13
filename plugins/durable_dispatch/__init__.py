@@ -942,23 +942,29 @@ class DispatchService:
                                 progress = round(float(live['progress']['done']) / float(live['progress']['total']), 3)
                 except Exception:
                     pass
-            if phase == '执行进程运行中' or progress == 0.0:
-                try:
-                    if isinstance(job_st, dict) and job_st.get('attempt'):
-                        attempt_dir = getattr(self.pool, 'root', None)
-                        if attempt_dir is not None:
-                            prog_file = attempt_dir / 'attempts' / job_st['attempt'] / 'progress.json'
-                            if prog_file.is_file():
-                                pdata = json.loads(prog_file.read_text(encoding='utf-8'))
-                                if isinstance(pdata, dict):
-                                    if pdata.get('phase') and isinstance(pdata['phase'], str):
-                                        phase = pdata['phase'].strip()
-                                    if isinstance(pdata.get('progress'), (int, float)) and 0.0 <= float(pdata['progress']) <= 1.0:
-                                        progress = float(pdata['progress'])
-                except Exception:
-                    pass
+            report_delta = None
             try:
-                bridge.update_progress(job, status='running', phase=phase, progress=progress, elapsed=elapsed)
+                if isinstance(job_st, dict) and job_st.get('attempt'):
+                    attempt_dir = getattr(self.pool, 'root', None)
+                    if attempt_dir is not None:
+                        prog_file = attempt_dir / 'attempts' / job_st['attempt'] / 'progress.json'
+                        if prog_file.is_file():
+                            pdata = json.loads(prog_file.read_text(encoding='utf-8'))
+                            if isinstance(pdata, dict):
+                                if (phase == '执行进程运行中' or progress == 0.0) and pdata.get('phase') and isinstance(pdata['phase'], str):
+                                    phase = pdata['phase'].strip()
+                                if progress == 0.0 and isinstance(pdata.get('progress'), (int, float)) and 0.0 <= float(pdata['progress']) <= 1.0:
+                                    progress = float(pdata['progress'])
+                                candidate_delta = pdata.get('structured_report') or pdata.get('report_delta')
+                                if isinstance(candidate_delta, dict):
+                                    report_delta = candidate_delta
+            except Exception:
+                pass
+            try:
+                if report_delta is not None and hasattr(bridge, 'apply_report_delta'):
+                    bridge.apply_report_delta(job, report_delta, elapsed=elapsed)
+                else:
+                    bridge.update_progress(job, status='running', phase=phase, progress=progress, elapsed=elapsed)
             except Exception as exc:
                 logging.getLogger(__name__).debug('card live refresh skipped: %s', type(exc).__name__)
             self.pool.touch_running_card_progress(job, now=now)

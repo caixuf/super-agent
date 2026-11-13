@@ -238,6 +238,15 @@
 
 ---
 
+### 7.1 后台结构化异步交付协议（`structured_report v1.1`）
+
+当后台角色向前台交付包含**文字结论、要点、文件、图片或链接**的结果时，除自然语言正文外，可在回复末尾附带一个合法的 ```` ```json:report ... ``` ```` 代码块（支持分阶段异步上报，卡片会按 `part_id` 幂等合并并原地刷新）：
+
+- **字段约定**：`seq`（单调序号）、`part_id`（分片幂等键）、`final`（`false` 表示阶段性先到结论，`true` 表示终态封口）、`parts_status`（如 `{"conclusion": "ready", "images": "pending"}`）、`conclusion`、`highlights`、`files`（`[{path, name, description}]`）、`images`（`[{path, caption}]`）、`links`（`[{title, url}]`）、`next_actions`。
+- **异步到达原则**：文字结论优先到达时即可设 `final: false` 先刷卡让用户看到结论，后续图/文件/链接生成完毕后再补发 `final: true` 分片，禁止让用户干等整包完成。
+
+---
+
 ## 8. 业务叠加层的注入契约
 
 **本文件只放通用骨架。业务内容不写进本文件。**
