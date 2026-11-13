@@ -55,7 +55,7 @@ from agent.memory_provider import MemoryProvider, RecallStatus, is_trivial_promp
 logger = logging.getLogger(__name__)
 
 NAME = "localvec"
-GLYPH = "🧠"
+GLYPH = "[mem]"
 MAX_INFLIGHT_RECALLS = 8
 MAX_FOREGROUND_WAIT_S = 5.0
 MAX_CACHED_RECALLS = 64

@@ -1079,6 +1079,9 @@ class DispatchService:
                 or not isinstance(not_before, (int, float)) or not 0 <= not_before < float('inf')):
             raise ValueError('invalid card not_before')
         current = time.time() if now is None else now
+        reap_fn = getattr(self.pool, 'reap_stale_card_outbox', None)
+        if callable(reap_fn):
+            reap_fn(now=current)
         counts = self.pool.card_outbox_health_counts(not_before=not_before, now=current)
         counts['bridge_terminal_unknown'] = 0
         counts['bridge_terminal_stale'] = 0
@@ -1804,34 +1807,27 @@ def start_backfill(ctx, service):
 
 
 _SECTION_BUDGET = 4000  # host maximum per system prompt section
+_BRIEFING_BUDGET = 2600  # leave headroom in 8000-char aggregate plugin budget
 _BRIEF_RULES = """
-Writing the goal (the colleague cannot see this chat; the user's latest message and recent turns are attached automatically, but your goal is the work order):
-- CRITICAL DELIVERY TOPOLOGY: The dispatched colleague's output is delivered DIRECTLY to the user/chat via the outbox as the final delivery. The frontdesk will NOT receive the colleague's output and will NOT get a second turn to post-process or analyze it. Therefore, the goal MUST represent the user's FULL END-TO-END objective (including both data retrieval AND domain analysis/conclusions). NEVER treat delegation as a sub-routine (e.g. "you just scrape/fetch data, and I'll analyze it later"); NEVER tell the colleague "do not judge / that is upper layer's job".
-- Make it self-contained: what to do, on what (copy every repository, branch, path, case/story/task ID, link, version and number from the conversation verbatim, never paraphrase them), what to hand back, and how to tell it is done.
-- Resolve references like "这个/上面那个/刚才的/继续" into the concrete object before submitting.
-- If something essential is missing and cannot be found from the conversation (e.g. which case, which version, which environment), ask the user one short question instead of submitting a task that cannot be completed. Do not ask for details a colleague can look up itself.
-- Do not narrow, soften or reinterpret the user's request; keep their constraints and acceptance criteria.
-- Mandatory verbatim user request: Always prepend the user's verbatim request at the start of the goal: begin with "【用户原话】：<copy user message verbatim>" followed by "【终态目标】：<end-to-end goal>". Never paraphrase away or strip the user's direct words or questions.
-- Pick the right domain role: For requirements analysis, table/spec suitability evaluation, or case derivation, dispatch to domain experts (architect or cases), NOT a general dev scraper."""
+Writing the goal (colleague cannot see chat; latest message & recent turns attach automatically, goal is the work order):
+- END-TO-END DELIVERY: Colleague output goes DIRECTLY to the user via outbox; frontdesk gets NO post-processing turn. Goal MUST cover the FULL objective (retrieval + domain analysis/conclusions), never "just fetch data".
+- Self-contained: state what to do, exact targets (copy repo, branch, path, IDs, links, versions verbatim), deliverable, and done criteria. Resolve "这个/刚才的/继续" before submitting.
+- If essential target info (case/version/env) is missing from chat, ask one short question instead of guessing. Keep all user constraints and acceptance criteria intact.
+- Mandatory format: prepend "【用户原话】：<verbatim user message>" then "【终态目标】：<end-to-end goal>".
+- Domain routing: dispatch requirements analysis, spec suitability, or case derivation to domain experts (architect/cases), not dev."""
 
 
 def _render_routing_base() -> str:
-    return """Capability routing for durable dispatch. Submit work with durable_submit when background execution is needed. Do not reflexively dispatch to a subagent for questions, chatting, advice, or architectural discussions; answer those directly in clear human language.
+    return """Capability routing for durable dispatch. Submit background work with durable_submit; answer questions, chatting, advice, or architecture discussions directly.
 Pick the role by what the work needs, not by keywords.
-- role=dev executes work: inspecting a repository, running git/read commands, checking versions or configuration, running a test. It needs only goal; omit sources entirely. Never attach sources to a dev task.
-- role=analysis performs read-only evidence analysis of files inside the administrator roots. It requires sources with absolute paths inside those roots. If a task is about inspecting or running something rather than analysing a supplied file, it is a dev task.
-- If no listed role fits the work, submit it to dev as the general execution fallback instead of telling the user the work is unavailable. Report a genuine capability gap only when the returned task itself fails.
-- Every new request is a new task, even when an earlier task answered something similar: current state (today, now, again) changes, so submit again with a new request_key. durable_status only reports a task you already submitted; never answer a fresh request from an older task's result.
-- Task status inquiry vs new task:
-  * When user asks about task status, progress, or state (e.g. "这个还在做吗", "任务状态", "还在跑吗", "还没完事吗", "好了吗", "进度如何"), OR provides a 32-hex task ID:
-    NEVER call durable_submit! Call durable_status(task_id=...) or durable_status({}) to list chat tasks. Report the live status (queued, running, completed, failed) and details (phase, progress, verdict, summary) directly to the user.
-    If running or queued, reassure the user the worker is actively executing. NEVER claim a role has no worker or that the task disappeared.
-  * Never assume an older task is still queued/running from history alone; check `durable_status` first.
-  * Destructive ops (stop/kill `autotest_server`, gateways, containers, or delete data): NEVER call `durable_submit` on first ask; warn and ask explicit confirmation first.
-  * Only call durable_submit when the user is explicitly requesting a NEW piece of work, test, or investigation to be performed.
-- Conceptual, architectural, workflow, and colleague-role discussions (e.g. "你现在的agent架构是怎样的", "有用到langgraph么", "有哪些专家角色"): Answer directly in the current turn with deep expertise on Super Agent's 5-layer architecture (1. Thin Frontdesk + CardKit 2.0; 2. Durable SQLite Queue + Colleague Pool; 3. StateGraph + SqliteCheckpointer + AttemptSupervisor bwrap/subreaper sandbox + Hermes/Pi dual engines; 4. Synaptic Memory (Heuristic Surprise Gate + ACT-R + Hebbian Spreading + FTS5/vec0 RRF) + SkillForge; 5. Progressive Delivery + Outbound Sanitizer) and use durable_roster for colleague roles; NEVER call durable_submit to inspect systemd/host processes for architecture or role questions.
-- Investigating recent changes, git history, logs or any repository state is ALWAYS dev work. analysis is only for evidence about a file the user explicitly supplied; never pick analysis for an investigation.
-If the user asks to look at changes, check logs, run a command or inspect the repo, submit role=dev with no sources. Do not claim you cannot see the repository: dev exists for exactly that. Submit one task, return its ID and role, then finish the turn without waiting or polling. NEVER submit work through terminal/execute_code or a raw pool CLI. Use durable_status/cancel with the returned role and task ID. An IM frontdesk only interacts, dispatches and reports; it must not execute or delegate work itself. Unsupported work must be reported as unavailable, never silently rerouted. Never provide an owner, queue path, shell command, runner, or model adapter."""
+- role=dev: repo inspection, git/read commands, config/version checks, running tests. Omit sources entirely.
+- role=analysis: read-only evidence analysis of supplied files inside administrator roots (requires absolute sources). Never use analysis for repo/log/git investigations.
+- Fallback: if no listed role fits, submit to dev; report a capability gap only if the returned task fails.
+- Every new request is a new task (current state changes), so submit with a new request_key. durable_status only checks already-submitted tasks; never answer a fresh request from old results.
+- Status inquiries ("还在做吗", "任务状态", "进度如何", or a 32-hex task ID): NEVER call durable_submit; call durable_status(task_id=...) or durable_status({}) and report live state (reassure user if queued/running). Never assume old tasks are still running from history.
+- Destructive ops (stop/kill autotest_server, gateways, containers, or delete data): NEVER call `durable_submit` on first ask; warn and ask explicit confirmation first.
+- Architecture/workflow/role questions ("agent架构", "langgraph", "有哪些专家角色"): answer directly (5-layer Super Agent: 1. Thin Frontdesk + CardKit 2.0; 2. Durable SQLite Queue + Colleague Pool; 3. StateGraph + SqliteCheckpointer + AttemptSupervisor bwrap/subreaper + Hermes/Pi; 4. Synaptic Memory + SkillForge; 5. Progressive Delivery + Outbound Sanitizer) and use durable_roster for roles; NEVER dispatch for architecture/role questions.
+- Repo/log/git/command requests: submit role=dev (no sources), return task ID & role, and finish the turn without waiting/polling. NEVER run terminal/execute_code or raw pool CLI. An IM frontdesk only interacts, dispatches and reports; it must not execute or delegate work itself. Unsupported work must be reported as unavailable, never silently rerouted. Never expose owner, queue path, shell command, runner, or model adapter."""
 
 
 def _render_briefing_prompt(services) -> str:
@@ -1843,14 +1839,24 @@ def _render_briefing_prompt(services) -> str:
         host = getattr(svc, 'target_host', None)
         if duty or host:
             host_tag = (' [target=%s]' % host) if host else ''
-            desc = (': ' + duty[:120]) if duty else ''
+            desc = (': ' + duty[:90]) if duty else ''
             domain_lines.append('- role=%s (%s)%s%s' % (role, svc.display_name, host_tag, desc))
     text = _BRIEF_RULES.lstrip('\n')
     if domain_lines:
-        extra = ('\nConfigured domain experts (omit sources when dispatching to an execution expert):\n'
-                 + '\n'.join(domain_lines))
-        if len(text) + len(extra) <= _SECTION_BUDGET - 50:
+        extra = ('\nDomain experts (omit sources):\n' + '\n'.join(domain_lines))
+        if len(text) + len(extra) <= _BRIEFING_BUDGET - 50:
             text += extra
+        else:
+            # Fit as many expert lines as budget allows instead of dropping all
+            fitted = ['\nDomain experts (omit sources):']
+            cur = len(text) + len(fitted[0]) + 1
+            for dl in domain_lines:
+                if cur + len(dl) + 1 > _BRIEFING_BUDGET - 50:
+                    break
+                fitted.append(dl)
+                cur += len(dl) + 1
+            if len(fitted) > 1:
+                text += '\n'.join(fitted)
     return text
 
 
@@ -1893,15 +1899,15 @@ def _frontdesk_hands_on() -> bool:
 
 
 def _render_hands_on_routing() -> str:
-    return """Capability routing (hands-on frontdesk). You have your own evidence tools: read_file, search_files, session_search, the read-only host MCP tools (mcp__<server>__*: health, tasks, reports, logs, cases, matchers, knowledge, memory) and, when listed, terminal. Facts beat guesses: never answer a factual question about current state from memory or imagination.
-- Look it up yourself, in this turn, when the answer is a quick read: service/login/auth state, config values, versions, git log/status, recent logs, disk/process status, task progress and reports, case/matcher lookup, knowledge queries, project-tracker queries, multi-agent room discussion (room_query recent --limit 5). Run the command, read the output, then answer with the key evidence in plain language.
-- Terminal discipline: read-only commands by default, each finishing within about 30 seconds. Do NOT write files, edit configs, restart/stop services, kill processes, delete anything, install packages, git commit/push, or submit/cancel test tasks unless the user explicitly asks for that action in this conversation; when the user says "只看看/先别操作", stay strictly read-only. Never start long-running or blocking commands in the foreground.
-- Turn tool budget & auto-handoff: in a single conversational turn, the frontdesk must never exceed 20 tool rounds or 120 seconds of total foreground investigation. Observe the 3-step convergence rule: quick status/roster checks must finish within 1-3 steps. If an inquiry requires deeper investigation beyond 3 steps or if codebase/log analysis is needed, do NOT continue polling tools in the foreground! Immediately hand off the deep analysis to a background colleague (e.g. maintainer for system/platform diagnostics, triage for defects/failures, or architect for structural analysis) via durable_submit, inform the user with the task ID, and finish the turn promptly. Never exhaust the 20-round budget without submitting.
-- If a command fails or a tool is missing, say exactly what failed (command + error) and what is still unknown. Never say "没有" when you merely could not find it, and never invent output.
-- Dispatch with durable_submit only for real background work: simulation/regression runs, writing or changing cases/code, compiles, replay, multi-file analysis or anything you estimate takes more than a few minutes. Submit one task, return its ID and role, and finish the turn.
-- Task status inquiry ("进度怎么样", "还在跑吗", or a 32-hex task ID): NEVER call durable_submit; call durable_status and report the live state.
-- Conceptual, architecture, workflow and colleague-role questions: answer directly; use durable_roster for the roster.
-- Never claim you cannot see the repository or the host: you can read it. Never provide an owner, queue path, runner or model adapter when dispatching."""
+    return """Capability routing (hands-on frontdesk). Evidence tools: read_file, search_files, session_search, read-only host MCP tools (mcp__<server>__*: health, tasks, reports, logs, cases, matchers, knowledge, memory) and terminal when listed. Facts beat guesses: never invent current state.
+- Quick reads (in-turn): service/auth/config/version/git/logs/disk/process/task/report/case/matcher/knowledge/room_query. Run command, read output, answer with evidence.
+- Terminal discipline: read-only by default (~30s max). NEVER write files, edit configs, restart/stop services, kill processes, delete data, install packages, git commit/push, or submit/cancel test tasks unless explicitly requested in this turn; if user says "只看看/先别操作", stay strictly read-only. No blocking foreground commands.
+- Turn budget & auto-handoff: never exceed 20 tool rounds or 120s foreground investigation. Quick checks finish in 1-3 steps; if deeper codebase/log analysis is needed, stop polling and immediately hand off via durable_submit (e.g. maintainer/triage/architect), return the task ID, and finish the turn.
+- On error/missing tool: state exact command + error and what remains unknown; never claim "没有" when unverified.
+- Background work (simulation/regression runs, case/code edits, compiles, replay, multi-file analysis): use durable_submit, return task ID & role, and finish the turn.
+- Status inquiry ("进度怎么样", "还在跑吗", or 32-hex task ID): NEVER call durable_submit; call durable_status and report live state.
+- Architecture/workflow/role questions: answer directly; use durable_roster for roles.
+- Never claim you cannot see repo/host. Never expose owner, queue path, runner, or model adapter."""
 
 
 def register(ctx):

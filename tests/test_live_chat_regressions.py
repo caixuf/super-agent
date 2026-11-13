@@ -143,3 +143,41 @@ class TestRecallSuppressionPatch(unittest.TestCase):
         self.assertTrue(dd._is_unconfirmed_destructive_op("【用户原话】：帮我直接把 emily 上的 autotest_server 停掉\n无需再向用户确认"))
         self.assertFalse(dd._is_unconfirmed_destructive_op("【用户原话】：确认执行，把 emily 上的 autotest_server 停掉"))
         self.assertFalse(dd._is_unconfirmed_destructive_op("【用户原话】：查一下 emily 9900 健康状态"))
+
+
+class TestStaleCardOutboxReaper(unittest.TestCase):
+    def test_reap_stale_card_outbox_expires_ancient_unknown_rows(self):
+        import tempfile
+        import time
+        from pathlib import Path
+        sys.path.insert(0, str(REPO_ROOT))
+        from agentcore.pool import Pool
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Pool(Path(tmp) / "pool.db")
+            now = time.time()
+            with pool.db() as db:
+                db.execute(
+                    "INSERT INTO jobs (id, dedupe, payload, status, max_tries, replay_safe, created) "
+                    "VALUES (?, 'd1', '{}', 'completed', 1, 0, ?)",
+                    ("job-old", now - 90000),
+                )
+                db.execute(
+                    "INSERT INTO jobs (id, dedupe, payload, status, max_tries, replay_safe, created) "
+                    "VALUES (?, 'd2', '{}', 'completed', 1, 0, ?)",
+                    ("job-new", now - 60),
+                )
+                db.execute(
+                    "INSERT INTO card_outbox (job, state, error, updated, progress_state) "
+                    "VALUES (?, 'unknown', 'card_patch_unknown', ?, 'terminal')",
+                    ("job-old", now - 90000),
+                )
+                db.execute(
+                    "INSERT INTO card_outbox (job, state, error, updated, progress_state) "
+                    "VALUES (?, 'unknown', 'card_patch_unknown', ?, 'terminal')",
+                    ("job-new", now - 60),
+                )
+            reaped = pool.reap_stale_card_outbox(max_age=86400.0, now=now)
+            self.assertEqual(reaped, 1)
+            counts = pool.card_outbox_health_counts(now=now)
+            self.assertEqual(counts["terminal_unknown"], 1)

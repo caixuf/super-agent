@@ -1266,6 +1266,18 @@ class Pool:
                 (current, job),
             )
 
+    def reap_stale_card_outbox(self, *, max_age=86400.0, now=None):
+        """Expire ancient (>max_age) unconfirmed card_outbox rows so they stop looping."""
+        current = time.time() if now is None else float(now)
+        cutoff = current - max(60.0, float(max_age))
+        with self.db() as db:
+            cur = db.execute(
+                "UPDATE card_outbox SET state='degraded', error='card_stale_expired', updated=? "
+                "WHERE state IN ('unknown','pending') AND updated<?",
+                (current, cutoff),
+            )
+            return cur.rowcount
+
     def card_outbox_health_counts(self, *, not_before=None, now=None):
         """Return consistent snapshot counts for card_outbox health states."""
         current = time.time() if now is None else now
