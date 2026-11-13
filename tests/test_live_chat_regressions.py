@@ -127,3 +127,11 @@ class TestRecallSuppressionPatch(unittest.TestCase):
         patch_text = (REPO_ROOT / "patches" / "feishu_card_lifecycle.patch").read_text(encoding="utf-8")
         self.assertIn('if "recalled " in formatted and ("自研记忆库" in formatted or "本地知识库" in formatted', patch_text)
         self.assertIn('return SendResult(success=True, message_id="")', patch_text)
+
+    def test_destructive_ops_require_confirmation_in_routing_prompt(self):
+        sys.path.insert(0, str(REPO_ROOT))
+        import plugins.durable_dispatch as dd
+
+        base_prompt = dd._render_routing_base()
+        self.assertIn("Destructive ops", base_prompt)
+        self.assertIn("NEVER call `durable_submit` on first ask", base_prompt)
