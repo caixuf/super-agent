@@ -325,9 +325,34 @@ def test_harvest_attempt_artifacts_includes_markdown_and_auto_materializes_long_
     assert Path(harvested_2[0]).read_text(encoding="utf-8") == long_summary
 
 
+def test_wrap_with_bwrap_sandbox_binds_meegle_and_markdown_outbox_rw(monkeypatch, tmp_path):
+    module = _module()
+    from agentcore.colleague_containment import AttemptBoundSandboxAdapter
 
+    if not AttemptBoundSandboxAdapter.is_bwrap_functional():
+        import pytest
+        pytest.skip("bwrap not functional in this environment")
 
+    fake_home = tmp_path / "home"
+    meegle_dir = fake_home / ".meegle"
+    meegle_dir.mkdir(parents=True)
+    state_root = fake_home / "super_agent" / "imfl" / "state"
+    outbox_dir = state_root / "markdown-outbox"
+    outbox_dir.mkdir(parents=True)
+    workdir = tmp_path / "repo"
+    workdir.mkdir()
+    attempt_dir = state_root / "colleague-queues" / "triage" / "attempts" / ("d" * 32)
+    attempt_dir.mkdir(parents=True)
 
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("SUPERAGENT_ENABLE_BWRAP", "1")
+    monkeypatch.setenv("SUPERAGENT_ATTEMPT_DIR", str(attempt_dir))
+    monkeypatch.setattr(module, "_workdir", lambda: workdir)
 
-
+    wrapped, meta = module._wrap_with_bwrap_sandbox(["echo", "ok"], route={"role": "triage"})
+    assert meta is not None and meta["backend"] == "bwrap"
+    binds = set(meta["audit_log"][-1]["writable_binds"])
+    assert str(meegle_dir.resolve()) in binds
+    assert str(outbox_dir.resolve()) in binds
+    assert "--bind" in wrapped
 

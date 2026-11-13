@@ -625,6 +625,9 @@ def _wrap_with_bwrap_sandbox(
         except OSError:
             pass
         writable_paths: list[Path] = [reports_dir]
+        meegle_dir = Path.home() / ".meegle"
+        if meegle_dir.is_dir():
+            writable_paths.append(meegle_dir)
 
         runtime_home = (
             Path(env["HERMES_HOME"]).expanduser()
