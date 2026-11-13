@@ -496,7 +496,7 @@ def _harvest_attempt_artifacts(summary: str, checkpoint_data: dict | None = None
             continue
 
     # 3. Auto-materialize long text reports as artifact files if no markdown artifact exists
-    if isinstance(summary, str) and len(summary.strip()) > 1500 and len(staged) < 8:
+    if isinstance(summary, str) and len(summary.strip()) > 800 and len(staged) < 8:
         has_doc = any(p.lower().endswith((".md", ".markdown", ".html", ".pdf", ".docx")) for p in staged)
         if not has_doc:
             report_file = resolved_attempt / "任务执行报告.md"
@@ -509,6 +509,60 @@ def _harvest_attempt_artifacts(summary: str, checkpoint_data: dict | None = None
                     pass
 
     return staged[:8]
+
+
+_COMPACT_SUMMARY_LIMIT = 800
+
+
+def _compact_summary(summary: str, artifacts: list[str] | None = None, *, limit: int = _COMPACT_SUMMARY_LIMIT) -> str:
+    """Keep chat-facing summary concise (conclusion + first table + artifact pointer)."""
+    text = (summary or "").strip()
+    if len(text) <= limit:
+        return text
+
+    lines = text.splitlines()
+    # 1. Extract leading conclusion / non-empty lines before the first table or blank gap
+    head_lines: list[str] = []
+    for ln in lines:
+        s = ln.strip()
+        if not s:
+            if head_lines:
+                break
+            continue
+        if s.startswith("|") or s.startswith("```"):
+            break
+        head_lines.append(s)
+        if sum(len(x) + 1 for x in head_lines) >= 260:
+            break
+    head = "\n".join(head_lines)[:280]
+
+    # 2. Extract the first Markdown table if one exists
+    table_lines: list[str] = []
+    in_table = False
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("|") and "|" in s[1:]:
+            in_table = True
+            table_lines.append(s)
+            if len(table_lines) >= 10:
+                break
+        elif in_table:
+            break
+    table = "\n".join(table_lines) if len(table_lines) >= 3 else ""
+
+    doc_names = [Path(a).name for a in (artifacts or []) if str(a).lower().endswith((".md", ".markdown", ".html", ".pdf", ".docx"))]
+    footer = f"详见附件：{doc_names[0]}" if doc_names else "（长文已精简，完整内容见任务附件）"
+
+    parts = [p for p in (head, table) if p]
+    if not parts:
+        body = text[: max(120, limit - len(footer) - 8)].rstrip() + "..."
+        return f"{body}\n\n{footer}"
+
+    body = "\n\n".join(parts)
+    max_body = max(200, limit - len(footer) - 2)
+    if len(body) > max_body:
+        body = body[: max_body - 3].rstrip() + "..."
+    return f"{body}\n\n{footer}"
 
 
 def _find_and_load_checkpoint() -> dict | None:
@@ -954,6 +1008,7 @@ def run_hermes(goal: str, *, route: dict | None = None) -> dict:
     artifacts = _harvest_attempt_artifacts(payload["summary"], checkpoint_data)
     if artifacts:
         payload["artifacts"] = artifacts
+    payload["summary"] = _compact_summary(payload["summary"], artifacts)
     if checkpoint_data:
         payload["checkpoint"] = checkpoint_data
         payload["checkpoint_delivered"] = True
@@ -1003,6 +1058,7 @@ def run_pi(goal: str, *, route: dict | None = None, on_event: Any | None = None)
     artifacts = _harvest_attempt_artifacts(payload["summary"], _find_and_load_checkpoint())
     if artifacts:
         payload["artifacts"] = artifacts
+    payload["summary"] = _compact_summary(payload["summary"], artifacts)
     if not ok:
         payload["error"] = result.error_message or result.stop_reason or "pi_failed"
     return payload

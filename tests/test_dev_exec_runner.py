@@ -357,3 +357,21 @@ def test_wrap_with_bwrap_sandbox_binds_meegle_and_markdown_outbox_rw(monkeypatch
     assert str(outbox_dir.resolve()) in binds
     assert "--bind" in wrapped
 
+
+def test_compact_summary_preserves_conclusion_and_table_and_points_to_artifact(tmp_path):
+    module = _module()
+    short = "**结论**：全部通过。"
+    assert module._compact_summary(short, []) == short
+
+    long_text = (
+        "**结论**：5 条需求中 2 条已闭环，3 条待推进。\n\n"
+        "| 需求 | 状态 |\n| --- | --- |\n| 101 | 已闭环 |\n| 102 | 待验证 |\n\n"
+        + ("详细日志流水账。" * 150)
+    )
+    compact = module._compact_summary(long_text, [str(tmp_path / "任务执行报告.md")])
+    assert len(compact) <= 800
+    assert compact.startswith("**结论**：5 条需求中 2 条已闭环")
+    assert "| 需求 | 状态 |" in compact
+    assert "详见附件：任务执行报告.md" in compact
+
+
