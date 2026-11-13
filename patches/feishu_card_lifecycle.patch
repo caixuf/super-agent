@@ -204,7 +204,7 @@ index 59c5ec6..232fd52 100644
  
          # 卡片回复（本地增强）：当 card_replies 开启时生效
          if getattr(self, "_card_replies", False):
-@@ -1972,6 +1953,88 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -1972,6 +1953,87 @@ class FeishuAdapter(BasePlatformAdapter):
              self._remember_card_message(result.message_id or "")
          return result
  
@@ -235,7 +235,7 @@ index 59c5ec6..232fd52 100644
 +            stop_ev.set()
 +        return cid
 +
-     def _sa_merge_stage_text(self, info, text, *, final=False):
++    def _sa_merge_stage_text(self, info, text, *, final=False):
 +        raw = str(text or "").strip()
 +        if not raw or raw == "正在排查处理中..." or "##STAGE:" in raw:
 +            if final and info.get("stages") and "##STAGE:" not in raw:
@@ -310,7 +310,7 @@ index 59c5ec6..232fd52 100644
              card = self._build_reply_card(
                  content, finalize=turn_final, started_at=self._card_message_ids.get(message_id))
              body = self._build_patch_message_body(content=json.dumps(card, ensure_ascii=False))
-@@ -2035,6 +2035,10 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -2035,5 +2035,9 @@ class FeishuAdapter(BasePlatformAdapter):
      async def delete_message(self, chat_id: str, message_id: str) -> bool:
          """Delete a bot-posted message (used by stream-consumer preview cleanup)."""
          if not self._client or not message_id:
