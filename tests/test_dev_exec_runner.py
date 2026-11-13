@@ -152,6 +152,7 @@ def test_decorate_goal_injects_expert_duty_and_target_host(monkeypatch):
     monkeypatch.setenv("DEV_TARGET_HOST", "bench-host-win")
     decorated = module._decorate_goal("Run smoke test")
     assert "[Expert Context]" in decorated
+    assert "Output Format (STRICT)" in decorated
     assert "Duty: Run hardware bench SIT suite" in decorated
     assert "Target Host: bench-host-win" in decorated
     assert decorated.endswith("Run smoke test")

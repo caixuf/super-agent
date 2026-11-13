@@ -203,6 +203,7 @@ def _decorate_goal(goal: str) -> str:
     lines = [
         "[Expert Context]",
         "- Mode: Backend executor (execute directly with terminal/file/MCP tools and return concrete evidence; do NOT call durable_submit).",
+        "- Output Format (STRICT): 第一行必须以「**结论**：<一句话底线定性/结果>」开头；多条目/多状态对比必须用紧凑 Markdown 表格，禁止列大段冗长清单；主回执正文控制在 400 字以内（结论 + 核心表 + 最多 3 条关键卡点/下一步），详细过程与长分析写入暂存目录 .md 附件。",
         "- Progressive Delivery: Follow conclusion-first progressive delivery (Phase 1: deliver core text analysis, Markdown report, and checkpoint output immediately; Phase 2: heavy diagram/browser rendering is an out-of-band enhancement. Never block, delay, or withhold Phase 1 text delivery due to rendering failures, delays, or timeouts).",
         "- Colleague Collaboration & Fault Tolerance: You can inspect the team roster (`colleague_list`) or spawn parallel subagents (`delegate_task`) when cross-role collaboration or parallel execution speeds up or recovers a task (do NOT call `durable_submit` or `colleague_assign` from a backend worker).",
     ]
