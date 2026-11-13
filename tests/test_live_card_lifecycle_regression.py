@@ -351,27 +351,41 @@ def test_final_reply_without_card_ownership_falls_through_instead_of_dropping(tm
     subprocess.run(["git", "apply", "--include", REL, str(ROOT / "patches/feishu_card_lifecycle.patch")], cwd=tmp_path, check=True)
     tree = ast.parse(path.read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "FeishuAdapter")
-    methods = [n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in {"send", "_sa_patch_owned_card", "_send_retry_is_final"}]
+    methods = [n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in {"send", "_sa_patch_owned_card", "_sa_merge_stage_text", "_extract_stages_and_clean_text", "_send_retry_is_final"}]
     module = ast.fix_missing_locations(ast.Module(body=[ast.ClassDef(name="Adapter", bases=[], keywords=[], body=methods, decorator_list=[])], type_ignores=[]))
     ns = {
-        "Optional": Optional, "Any": Any,
+        "asyncio": asyncio, "json": json, "re": re, "Optional": Optional, "Any": Any,
         "SendResult": lambda **kw: SimpleNamespace(**kw),
         "_MARKDOWN_HINT_RE": re.compile("z"),
+        "_feishu_update_with_retry": lambda fn, what="": fn(),
         "logger": SimpleNamespace(warning=lambda *args: None),
     }
     exec(compile(module, str(path), "exec"), ns)
     a = ns["Adapter"]()
-    a._client = object()
+    a._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=SimpleNamespace(patch=lambda req: None))))
     a._card_replies = True
     a.MAX_MESSAGE_LENGTH = 10000
     a.format_message = lambda s: s
     a.truncate_message = lambda s, n: [s]
-    a._active_live_card_per_chat = {("chat", "", "sess-1", "turn-1"): {"message_id": "card-1"}}
+    a._card_message_ids = {"card-1": 0.0}
+    stop_ev = asyncio.Event()
+    a._active_live_card_per_chat = {("chat", "", "sess-1", "turn-1"): {"message_id": "card-1", "started_at": 0.0, "stop_event": stop_ev, "update_lock": asyncio.Lock()}}
     sent_cards = []
+    edited_cards = []
+    built_cards = []
     async def fake_send_reply_card(**kw):
         sent_cards.append(kw)
         return SimpleNamespace(success=True, message_id="card-new")
+    async def fake_edit_message(chat_id, msg_id, content, **kw):
+        edited_cards.append(content)
+        return SimpleNamespace(success=True, message_id=msg_id)
     a._send_reply_card = fake_send_reply_card
+    a.edit_message = fake_edit_message
+    a._build_reply_card = lambda text, **kw: built_cards.append((text, kw)) or {"text": text}
+    a._build_patch_message_body = lambda **kw: kw
+    a._build_patch_message_request = lambda **kw: kw
+    a._run_blocking = lambda fn, *args: asyncio.sleep(0)
+    a._finalize_send_result = lambda resp, err: SimpleNamespace(success=True)
 
     async def run():
         # 1. Status update without ownership is suppressed cleanly with error_kind
@@ -385,5 +399,17 @@ def test_final_reply_without_card_ownership_falls_through_instead_of_dropping(tm
         assert res_final.success is True
         assert res_final.message_id == "card-new"
         assert len(sent_cards) == 1 and sent_cards[0]["content"] == "final answer"
+
+        # 3. Owned _sa_status commentary/tool updates accumulate into ##STAGE: and collapse on final
+        await a.send("chat", "正在检索 mff_sync 状态机", metadata={"_sa_status": True, "_sa_session": "sess-1", "_sa_turn": "turn-1"})
+        await a.send("chat", "正在运行 pytest", metadata={"_sa_status": True, "_sa_session": "sess-1", "_sa_turn": "turn-1"})
+        assert "##STAGE: 正在检索 mff_sync 状态机" in edited_cards[-1]
+        assert "##STAGE: 正在运行 pytest" in edited_cards[-1]
+        await a.send("chat", "结论：全部通过", metadata={"_sa_session": "sess-1", "_sa_turn": "turn-1"})
+        final_text, final_kw = built_cards[-1]
+        assert final_kw["finalize"] is True
+        assert "##STAGE: 正在检索 mff_sync 状态机" in final_text
+        assert "##STAGE: 正在运行 pytest" in final_text
+        assert "结论：全部通过" in final_text
 
     asyncio.run(run())

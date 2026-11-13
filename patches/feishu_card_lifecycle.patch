@@ -128,7 +128,7 @@ diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adap
 index 59c5ec6..232fd52 100644
 --- a/plugins/platforms/feishu/adapter.py
 +++ b/plugins/platforms/feishu/adapter.py
-@@ -1732,40 +1732,18 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -1732,40 +1732,21 @@ class FeishuAdapter(BasePlatformAdapter):
          last_response = None
  
          # A topic in a group is a separate conversation even when chat_id is shared.
@@ -142,9 +142,14 @@ index 59c5ec6..232fd52 100644
 +        if getattr(self, "_card_replies", False) and live_key[2] and live_key[3] and live_key in self._active_live_card_per_chat and not ((metadata or {}).get("_interim_send") and not (metadata or {}).get("_sa_status")):
              live_info = self._active_live_card_per_chat[live_key]
 -            if (metadata or {}).get("expect_edits") and not (metadata or {}).get("notify"):
+-                live_info["content"] = formatted
+-                return await self.edit_message(chat_id, live_info["message_id"], formatted)
 +            if ((metadata or {}).get("expect_edits") or (metadata or {}).get("_sa_status")) and not (metadata or {}).get("notify"):
-                 live_info["content"] = formatted
-                 return await self.edit_message(chat_id, live_info["message_id"], formatted)
++                rendered = formatted
++                if (metadata or {}).get("_sa_status"):
++                    rendered = self._sa_merge_stage_text(live_info, formatted)
++                live_info["content"] = rendered
++                return await self.edit_message(chat_id, live_info["message_id"], rendered)
              if live_info:
 -                live_info["stop_event"].set()
 -                hb_task = live_info.get("task")
@@ -177,10 +182,31 @@ index 59c5ec6..232fd52 100644
  
          # 卡片回复（本地增强）：当 card_replies 开启时生效
          if getattr(self, "_card_replies", False):
-@@ -1972,6 +1950,38 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -1972,6 +1953,60 @@ class FeishuAdapter(BasePlatformAdapter):
              self._remember_card_message(result.message_id or "")
          return result
  
++    def _sa_merge_stage_text(self, info, text, *, final=False):
++        raw = str(text or "").strip()
++        if not raw or raw == "正在排查处理中..." or "##STAGE:" in raw:
++            if final and info.get("stages") and "##STAGE:" not in raw:
++                prefix = "\n".join(f"##STAGE: {s}" for s in info["stages"])
++                return f"{prefix}\n{raw}".strip()
++            return raw
++        _, clean = self._extract_stages_and_clean_text(raw)
++        step = " ".join(clean.splitlines()).strip()[:160]
++        if step and not final:
++            stages = info.setdefault("stages", [])
++            if not stages or stages[-1] != step:
++                stages.append(step)
++                if len(stages) > 8:
++                    del stages[:-8]
++        stages = info.get("stages") or []
++        if not stages:
++            return raw
++        prefix = "\n".join(f"##STAGE: {s}" for s in stages)
++        return f"{prefix}\n{raw}".strip()
++
 +    def _send_retry_is_final(self, result):
 +        return getattr(result, "error_kind", None) == "sa_card_update_unresolved" or super()._send_retry_is_final(result)
 +
@@ -195,7 +221,8 @@ index 59c5ec6..232fd52 100644
 +                return SendResult(success=False, error="card no longer owned")
 +            if not final and info["stop_event"].is_set():
 +                return SendResult(success=False, error="card is terminating")
-+            card = self._build_reply_card(text, finalize=final, is_failed=failed, started_at=info["started_at"])
++            render_text = self._sa_merge_stage_text(info, text, final=True) if final else text
++            card = self._build_reply_card(render_text, finalize=final, is_failed=failed, started_at=info["started_at"])
 +            request = self._build_patch_message_request(message_id=info["message_id"], request_body=self._build_patch_message_body(content=json.dumps(card, ensure_ascii=False)))
 +            try:
 +                response = await _feishu_update_with_retry(lambda: self._run_blocking(self._client.im.v1.message.patch, request), what="Owned card patch")
