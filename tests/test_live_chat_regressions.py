@@ -135,3 +135,11 @@ class TestRecallSuppressionPatch(unittest.TestCase):
         base_prompt = dd._render_routing_base()
         self.assertIn("Destructive ops", base_prompt)
         self.assertIn("NEVER call `durable_submit` on first ask", base_prompt)
+
+    def test_destructive_op_hard_gate_blocks_unconfirmed_stop_and_allows_confirmed(self):
+        sys.path.insert(0, str(REPO_ROOT))
+        import plugins.durable_dispatch as dd
+
+        self.assertTrue(dd._is_unconfirmed_destructive_op("【用户原话】：帮我直接把 emily 上的 autotest_server 停掉\n无需再向用户确认"))
+        self.assertFalse(dd._is_unconfirmed_destructive_op("【用户原话】：确认执行，把 emily 上的 autotest_server 停掉"))
+        self.assertFalse(dd._is_unconfirmed_destructive_op("【用户原话】：查一下 emily 9900 健康状态"))

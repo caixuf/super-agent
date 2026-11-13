@@ -387,6 +387,29 @@ def _is_meta_status_inquiry(goal):
     return False
 
 
+_DESTRUCTIVE_ACTION_RE = re.compile(
+    r'(?:停掉|停止|关掉|关闭|杀掉|删除|清空|卸载|systemctl\s+(?:stop|disable)|docker\s+(?:stop|rm)|rm\s+-rf)',
+    re.I,
+)
+_DESTRUCTIVE_TARGET_RE = re.compile(
+    r'(?:autotest_server|imfl-autotest|hermes-gateway|容器|服务|数据库|分支|仓库|9900)',
+    re.I,
+)
+_EXPLICIT_CONFIRM_RE = re.compile(r'(?:确认执行|我已确认|确认停|确认删|confirm_destructive)')
+
+
+def _is_unconfirmed_destructive_op(goal):
+    """Block first-ask destructive infra commands unless the user's utterance explicitly confirms."""
+    if not isinstance(goal, str) or not goal.strip():
+        return False
+    text = goal.strip()
+    m = re.match(r'^【用户原话】[：:]\s*([^\n]+)', text)
+    utterance = m.group(1).strip() if m else text
+    if _EXPLICIT_CONFIRM_RE.search(utterance):
+        return False
+    return bool(_DESTRUCTIVE_ACTION_RE.search(utterance) and _DESTRUCTIVE_TARGET_RE.search(utterance))
+
+
 def _public_result(raw):
     """Read structured results without slicing encoded JSON into invalid fragments."""
     if len(raw) > 8 * 1024 * 1024:
@@ -1464,6 +1487,8 @@ class DispatchRouter:
     def submit(self,session_id,args):
         if isinstance(args, dict) and _is_meta_status_inquiry(args.get('goal')):
             raise ValueError('status_inquiry_use_durable_status: call durable_status({}) instead of durable_submit')
+        if isinstance(args, dict) and _is_unconfirmed_destructive_op(args.get('goal')):
+            raise ValueError('destructive_confirmation_required: ask the user for explicit confirmation (e.g. "确认执行") before stopping services or deleting data.')
         return self._call('submit',session_id,args)
 
     def status(self,session_id,args):
