@@ -259,7 +259,7 @@ def test_progress_monitor_streams_steps_and_writes_progress_json(tmp_path):
         # Inspect liveness.db
         live = ledger.inspect("task-test-pm")
         assert live["ok"] is True
-        assert "read_file" in live["phase"]
+        assert "读取文件" in live["phase"]
         assert live["progress"]["percent"] > 5
     finally:
         monitor.stop(ok=True)

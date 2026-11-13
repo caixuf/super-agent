@@ -356,15 +356,15 @@ class TaskCardBridge:
         if len(clean_goal) > 280:
             clean_goal = clean_goal[:277] + "..."
 
-        # Modern, human-centric metadata block
+        # Modern, iOS-inspired metadata block
         meta_lines = [
-            f"**任务** `{_sanitize_card_text(task_id)}`  |  **角色** {clean_role}",
+            f"**{clean_role or '智能助手'}**  ·  `{_sanitize_card_text(task_id)}`",
         ]
         if clean_goal:
             goal_quoted = "\n> ".join(clean_goal.splitlines())
-            meta_lines.append(f"> **目标**：\n> {goal_quoted}")
+            meta_lines.append(f"> {goal_quoted}")
         else:
-            meta_lines.append("> **目标**：*通用协助*")
+            meta_lines.append("> *通用协助*")
 
         sections = ["\n\n".join(meta_lines)]
 
@@ -374,18 +374,20 @@ class TaskCardBridge:
         if status in ("queued", "running", "progressive"):
             progress_lines = []
             if phase:
-                progress_lines.append(f"**阶段**：{_sanitize_card_text(phase)}")
+                progress_lines.append(f"**当前阶段**：{_sanitize_card_text(phase)}")
+            pct_line = []
             if progress > 0.0:
-                bar = _render_progress_bar(progress)
-                progress_lines.append(f"**进度**：`{bar}` **{int(progress * 100)}%**")
+                pct_line.append(f"**完成度**：**{int(progress * 100)}%**")
             if elapsed > 0.0:
-                progress_lines.append(f"**耗时**：{elapsed:.1f}s")
+                pct_line.append(f"耗时 {elapsed:.1f}s")
+            if pct_line:
+                progress_lines.append("  ·  ".join(pct_line))
             if status == "queued":
-                progress_lines.append("*排队中：等待空闲 Worker 调度...*")
+                progress_lines.append("*排队中，等待空闲 Worker 调度*")
             elif clean_role:
-                progress_lines.append("*%s在进行，文字结论将优先直达。*" % clean_role)
+                progress_lines.append("*%s 正在处理，结论生成后将自动收起过程*" % clean_role)
             else:
-                progress_lines.append("*正在持续执行中，文字结论将优先直达。*")
+                progress_lines.append("*正在处理中，结论生成后将自动收起过程*")
             sections.append("\n\n".join(progress_lines))
 
         elif status == "completed":
@@ -420,9 +422,9 @@ class TaskCardBridge:
             f"更新于 {time_part}",
         ]
 
-        card_text = "\n\n────────────────\n\n".join(sections)
+        card_text = "\n\n".join(sections)
 
-        return build_cardkit2_payload(
+        payload = build_cardkit2_payload(
             card_text,
             is_terminal=is_terminal,
             is_failed=is_failed,
@@ -435,6 +437,19 @@ class TaskCardBridge:
             footer_notes=footer_notes,
             hero_img_key=hero_img_key,
         )
+        if status == "completed" and docx_url:
+            safe_url = _sanitize_card_text(docx_url).strip()
+            if re.match(r"^https?://[^\s()<>]+$", safe_url):
+                elems = ((payload.get("body") or {}).get("elements"))
+                if isinstance(elems, list) and len(elems) >= 1:
+                    btn = {
+                        "tag": "button",
+                        "type": "primary_text",
+                        "text": {"tag": "plain_text", "content": "查看完整报告"},
+                        "url": safe_url,
+                    }
+                    elems.insert(max(0, len(elems) - 1), btn)
+        return payload
 
     @_serialize_task
     def bind_task(

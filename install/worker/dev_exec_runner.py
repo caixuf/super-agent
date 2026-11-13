@@ -1064,6 +1064,37 @@ def run_pi(goal: str, *, route: dict | None = None, on_event: Any | None = None)
     return payload
 
 
+_TOOL_HUMAN_LABELS = {
+    "terminal": "执行终端命令",
+    "bash": "执行终端命令",
+    "read_file": "读取文件",
+    "edit_file": "修改文件",
+    "write_file": "写入文件",
+    "search_files": "检索代码",
+    "grep": "检索代码",
+    "localvec": "召回领域记忆",
+    "memory": "检索记忆",
+    "durable_dispatch": "调度协同任务",
+    "imfl": "调用 IMFL 工具",
+    "pytest": "执行回归校验",
+}
+
+
+def _humanize_tool_phase(tool_name: str, *, done: bool = False, step: int = 0) -> str:
+    """Translate raw tool names into concise, human-readable progress phrases."""
+    raw = str(tool_name or "tool").strip()
+    label = _TOOL_HUMAN_LABELS.get(raw.lower())
+    if not label:
+        for k, v in _TOOL_HUMAN_LABELS.items():
+            if k in raw.lower():
+                label = v
+                break
+    action = label or f"调用 {raw}"
+    if done:
+        return f"已完成{action} (第{step}步)"
+    return f"正在{action}..."
+
+
 class ProgressMonitor:
     """Live execution progress monitor streaming tool steps and status into liveness.db and progress.json."""
 
@@ -1159,16 +1190,16 @@ class ProgressMonitor:
                         if done_tools:
                             self.step += len(done_tools)
                             last_tool = done_tools[-1]
-                            self.last_phase = f"工具执行完成: {last_tool} (第{self.step}步)"
+                            self.last_phase = _humanize_tool_phase(last_tool, done=True, step=self.step)
                             self.last_progress = min(0.92, 0.05 + 0.87 * (1.0 - (0.93 ** self.step)))
                         else:
                             starts = tool_start_re.findall(chunk)
                             if starts:
-                                self.last_phase = f"正在执行工具: {starts[-1]}..."
+                                self.last_phase = _humanize_tool_phase(starts[-1], done=False)
                             else:
                                 api_calls = api_call_re.findall(chunk)
                                 if api_calls:
-                                    self.last_phase = f"大模型交互中 (第{api_calls[-1]}轮)"
+                                    self.last_phase = f"大模型推理中 (第{api_calls[-1]}轮)"
                 except Exception:
                     pass
 
@@ -1179,12 +1210,12 @@ class ProgressMonitor:
         etype = ev.get("type")
         if etype == "tool_execution_start":
             tool_name = ev.get("toolName") or "tool"
-            self.last_phase = f"正在执行工具: {tool_name}..."
+            self.last_phase = _humanize_tool_phase(tool_name, done=False)
             self._record_progress(self.last_phase, self.last_progress, step=self.step)
         elif etype == "tool_execution_end":
             tool_name = ev.get("toolName") or "tool"
             self.step += 1
-            self.last_phase = f"工具执行完成: {tool_name} (第{self.step}步)"
+            self.last_phase = _humanize_tool_phase(tool_name, done=True, step=self.step)
             self.last_progress = min(0.92, 0.05 + 0.87 * (1.0 - (0.93 ** self.step)))
             self._record_progress(self.last_phase, self.last_progress, step=self.step)
         elif etype == "message_end":

@@ -308,10 +308,11 @@ def build_cardkit2_payload(
 
     # 1. Collapsible inspection & reasoning panel
     if combined_stage:
-        panel_state = "已折叠" if is_terminal else "进行中"
+        panel_expanded = (not is_terminal) or is_failed
+        panel_state = "异常展开" if (is_terminal and is_failed) else ("已折叠" if is_terminal else "进行中")
         elements.append({
             "tag": "collapsible_panel",
-            "expanded": not is_terminal,
+            "expanded": panel_expanded,
             "header": {
                 "tag": "markdown",
                 "content": f"**排查分析链路 [{panel_state}]**",
