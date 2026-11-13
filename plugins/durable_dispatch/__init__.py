@@ -270,6 +270,50 @@ def _bound_route(session_id):
     return route
 
 
+def _claim_feishu_live_card(origin):
+    """Claim the active frontdesk Feishu live card for single-card task lifecycle."""
+    if not isinstance(origin, dict) or origin.get('channel') != 'feishu':
+        return None
+    route = origin.get('route')
+    chat = origin.get('chat')
+    if not route or not chat:
+        return None
+    try:
+        import asyncio
+        from hermes_cli.plugin_messages import _gateway_loop
+        from gateway import plugin_messages
+        runner, loop = _gateway_loop()
+        if runner is None or loop is None or loop.is_closed():
+            return None
+
+        def _claim_on_loop():
+            target, _ = plugin_messages.resolve(
+                runner, session_key=route, route=None,
+                plugin_home=None, plugin_id='durable-dispatch',
+            )
+            adapter = getattr(target, 'adapter', None) if target is not None else None
+            claim = getattr(adapter, 'claim_live_card', None) if adapter is not None else None
+            if not callable(claim):
+                return None
+            return claim(str(chat), thread_id=str(origin.get('thread') or ''), session_key=str(route))
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            msg_id = _claim_on_loop()
+        else:
+            async def _do_claim():
+                return _claim_on_loop()
+            fut = asyncio.run_coroutine_threadsafe(_do_claim(), loop)
+            msg_id = fut.result(timeout=2.0)
+        return msg_id.strip() if isinstance(msg_id, str) and msg_id.strip() else None
+    except Exception as exc:
+        logging.getLogger(__name__).warning('claim_feishu_live_card failed: %s', exc)
+        return None
+
+
 def _is_local_execution(origin):
     """True only for a positively identified local/headless execution origin."""
     if not isinstance(origin, dict):
@@ -648,6 +692,10 @@ class DispatchService:
                 value = route.get(field)
                 if isinstance(value, str) and value.strip() and len(value) <= 512:
                     origin[field] = value.strip()
+        if origin.get('channel') == 'feishu' and origin.get('route') and origin.get('chat'):
+            card_msg_id = _claim_feishu_live_card(origin)
+            if card_msg_id:
+                origin['card_message_id'] = card_msg_id
         return origin
 
     def _sources(self, sources, *, allow_empty=False):
@@ -827,8 +875,11 @@ class DispatchService:
                         or not isinstance(payload.get('goal'), str)):
                     state, error = 'parked', 'invalid_card_origin'
                 else:
+                    card_msg_id = origin.get('card_message_id')
+                    if not isinstance(card_msg_id, str) or not card_msg_id.strip():
+                        card_msg_id = None
                     bound = bridge.bind_task(row['job'], origin, payload['goal'], self.role,
-                                             self._runner_name(payload))
+                                             self._runner_name(payload), message_id=card_msg_id)
                     if not bound.get('ok'):
                         state, error = 'parked', 'card_binding_conflict'
                     else:
@@ -836,9 +887,11 @@ class DispatchService:
                         if result.get('ok') is True:
                             reconcile = getattr(transport, 'reconcile_card', None)
                             state = 'sent'
+                            terminal_checked = False
                             if callable(reconcile):
                                 checked = reconcile(row['job'])
                                 if isinstance(checked, dict) and checked.get('terminal') is True:
+                                    terminal_checked = True
                                     final = checked.get('result')
                                     patch = final.get('patch_result') if isinstance(final, dict) else None
                                     confirmed = (isinstance(final, dict) and final.get('ok') is True
@@ -849,6 +902,11 @@ class DispatchService:
                                             state, error = 'pending', 'card_patch_not_sent'
                                         else:
                                             state, error = 'unknown', 'card_patch_unknown'
+                            if result.get('already_created') and not terminal_checked:
+                                try:
+                                    bridge.update_progress(row['job'], status='queued', phase='已提交排队')
+                                except Exception:
+                                    pass
                         elif result.get('not_sent') is True:
                             error = 'card_not_sent'
                         else:

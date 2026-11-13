@@ -192,10 +192,13 @@ class DirectCompletionTransport:
                           or any(c not in '0123456789abcdef' for c in attempt)):
                 raise ValueError('owning attempt unavailable')
             # Validate and snapshot ALL attachments before sending any part.
-            head = dict(kind='text', text=self.render(message))
-            if self.card:
-                head['card'] = True
-            plan = [head] + [self._stage(p, attempt) for p in files]
+            if message.get('skip_text_card') and files:
+                plan = [self._stage(p, attempt) for p in files]
+            else:
+                head = dict(kind='text', text=self.render(message))
+                if self.card:
+                    head['card'] = True
+                plan = [head] + [self._stage(p, attempt) for p in files]
             with self.db() as db:
                 db.execute('INSERT OR IGNORE INTO plans VALUES(?,?,?)', (identity, request, json.dumps(plan)))
                 saved = db.execute('SELECT request,plan FROM plans WHERE key=?', (identity,)).fetchone()

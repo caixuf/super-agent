@@ -128,19 +128,32 @@ diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adap
 index 59c5ec6..232fd52 100644
 --- a/plugins/platforms/feishu/adapter.py
 +++ b/plugins/platforms/feishu/adapter.py
-@@ -1732,40 +1732,21 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -1732,40 +1732,33 @@ class FeishuAdapter(BasePlatformAdapter):
          last_response = None
  
          # A topic in a group is a separate conversation even when chat_id is shared.
 -        live_key = (chat_id, str((metadata or {}).get("thread_id") or ""))
 -        if getattr(self, "_card_replies", False) and live_key in self._active_live_card_per_chat:
 +        live_key = (chat_id, str((metadata or {}).get("thread_id") or ""), str((metadata or {}).get("_sa_session") or ""), str((metadata or {}).get("_sa_turn") or ""))
-+        if (getattr(self, "_card_replies", False) and (not live_key[2] or not live_key[3] or live_key not in self._active_live_card_per_chat)
++        matched_live_key = live_key if (live_key[2] and live_key[3] and live_key in self._active_live_card_per_chat) else None
++        if matched_live_key is None and reply_to and not (metadata or {}).get("notify"):
++            for _k, _info in list(self._active_live_card_per_chat.items()):
++                if _k[0] == chat_id and _info.get("origin_message_id") == reply_to:
++                    matched_live_key = _k
++                    break
++        if (getattr(self, "_card_replies", False) and matched_live_key is None
 +                and any(key[:2] == live_key[:2] and (not live_key[2] or key[2] == live_key[2]) for key in self._active_live_card_per_chat)
 +                and bool((metadata or {}).get("_sa_status"))):
 +            return SendResult(success=False, error="missing card session ownership", error_kind="sa_card_update_unresolved")
-+        if getattr(self, "_card_replies", False) and live_key[2] and live_key[3] and live_key in self._active_live_card_per_chat and not ((metadata or {}).get("_interim_send") and not (metadata or {}).get("_sa_status")):
-             live_info = self._active_live_card_per_chat[live_key]
++        if getattr(self, "_card_replies", False) and matched_live_key is not None and not ((metadata or {}).get("_interim_send") and not (metadata or {}).get("_sa_status")):
+-            live_info = self._active_live_card_per_chat[live_key]
++            live_info = self._active_live_card_per_chat[matched_live_key]
++            if live_info.get("handed_off"):
++                if not ((metadata or {}).get("expect_edits") or (metadata or {}).get("_sa_status")) and not (metadata or {}).get("notify"):
++                    self._card_message_ids.pop(live_info["message_id"], None)
++                    if self._active_live_card_per_chat.get(matched_live_key) is live_info:
++                        self._active_live_card_per_chat.pop(matched_live_key, None)
++                return SendResult(success=True, message_id=live_info["message_id"])
 -            if (metadata or {}).get("expect_edits") and not (metadata or {}).get("notify"):
 -                live_info["content"] = formatted
 -                return await self.edit_message(chat_id, live_info["message_id"], formatted)
@@ -178,15 +191,42 @@ index 59c5ec6..232fd52 100644
 -                except Exception as exc:
 -                    logger.warning("[Feishu] Final card update raised (%s)", exc)
 -                    return SendResult(success=False, error="Card update failed")
-+                return await self._sa_patch_owned_card(live_key, live_info, formatted, final=True)
++                return await self._sa_patch_owned_card(matched_live_key, live_info, formatted, final=True)
  
          # 卡片回复（本地增强）：当 card_replies 开启时生效
          if getattr(self, "_card_replies", False):
-@@ -1972,6 +1953,60 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -1972,6 +1953,88 @@ class FeishuAdapter(BasePlatformAdapter):
              self._remember_card_message(result.message_id or "")
          return result
  
-+    def _sa_merge_stage_text(self, info, text, *, final=False):
++    def claim_live_card(self, chat_id: str, thread_id: str = "", session_key: str = "",
++                        origin_message_id: str = "") -> Optional[str]:
++        """Hand off the active frontdesk live card to a durable task (single-card lifecycle)."""
++        if not getattr(self, "_card_replies", False) or not chat_id:
++            return None
++        matches = []
++        for k, info in list(self._active_live_card_per_chat.items()):
++            if info.get("handed_off"):
++                continue
++            if k[0] != chat_id or k[1] != str(thread_id or ""):
++                continue
++            if origin_message_id and info.get("origin_message_id") != origin_message_id:
++                continue
++            matches.append((k, info))
++        if not matches:
++            return None
++        exact = [pair for pair in matches if session_key and pair[0][2] == session_key]
++        _, info = (exact or matches)[-1]
++        cid = info.get("message_id")
++        if not isinstance(cid, str) or not cid.strip():
++            return None
++        info["handed_off"] = True
++        stop_ev = info.get("stop_event")
++        if stop_ev is not None:
++            stop_ev.set()
++        return cid
++
+     def _sa_merge_stage_text(self, info, text, *, final=False):
 +        raw = str(text or "").strip()
 +        if not raw or raw == "正在排查处理中..." or "##STAGE:" in raw:
 +            if final and info.get("stages") and "##STAGE:" not in raw:
@@ -261,6 +301,16 @@ index 59c5ec6..232fd52 100644
              card = self._build_reply_card(
                  content, finalize=turn_final, started_at=self._card_message_ids.get(message_id))
              body = self._build_patch_message_body(content=json.dumps(card, ensure_ascii=False))
+@@ -2035,6 +2035,10 @@ class FeishuAdapter(BasePlatformAdapter):
+     async def delete_message(self, chat_id: str, message_id: str) -> bool:
+         """Delete a bot-posted message (used by stream-consumer preview cleanup)."""
+         if not self._client or not message_id:
+             return False
++        if (message_id in getattr(self, "_card_message_ids", {})
++                or any(info.get("message_id") == message_id
++                       for info in getattr(self, "_active_live_card_per_chat", {}).values())):
++            return False
+         try:
 @@ -2892,10 +2893,19 @@ class FeishuAdapter(BasePlatformAdapter):
          data = await self._reaction_call("Remove", message_id, reaction_id, _build, self._client.im.v1.message_reaction.delete)
          return data is not None

@@ -539,12 +539,14 @@ def create_transport(ctx, service):
                 and (final.get('already_finalized') is True
                      or (isinstance(patch_res, dict) and patch_res.get('ok') is True))
             )
-            if lifecycle_confirmed and not message.get('artifacts'):
-                return {
-                    'accepted': True,
-                    'deduped_by_lifecycle_card': True,
-                    'task_id': idempotency_key,
-                }
+            if lifecycle_confirmed:
+                if not message.get('artifacts'):
+                    return {
+                        'accepted': True,
+                        'deduped_by_lifecycle_card': True,
+                        'task_id': idempotency_key,
+                    }
+                message = {**message, 'skip_text_card': True}
             result = super().deliver(address, message, idempotency_key=idempotency_key)
             if result and result.get('accepted') and getattr(self, 'card_bridge', None) and final is None:
                 final = _finalize_card(self.card_bridge, idempotency_key, message)

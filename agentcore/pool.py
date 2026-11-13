@@ -30,7 +30,7 @@ from agentcore.screen_lease import (
 logger = logging.getLogger(__name__)
 
 
-ORIGIN_FIELDS = ('profile', 'session', 'route', 'channel', 'chat', 'thread', 'turn', 'scheduled')
+ORIGIN_FIELDS = ('profile', 'session', 'route', 'channel', 'chat', 'thread', 'turn', 'scheduled', 'card_message_id')
 # The dispatcher is only guaranteed to hold these two; the rest are recorded when
 # the host supplies them, never inferred from an ambient session.
 ORIGIN_REQUIRED = ('profile', 'session')
