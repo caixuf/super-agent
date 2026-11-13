@@ -1905,6 +1905,11 @@ def register(ctx):
         _render_briefing_prompt(services),
         position='after_memory', max_chars=_SECTION_BUDGET,
     )
+    roster_path = ctx.get_config('roster_registry_path')
+    if (not isinstance(roster_path, str) or not roster_path
+            or not Path(roster_path).is_absolute()):
+        roster_path = None
+    router = DispatchRouter(services, roster_path=roster_path)
     register_hook = getattr(ctx, 'register_hook', None)
     if callable(register_hook):
         def _capture_request(session_id='', user_message=None,
@@ -1914,13 +1919,33 @@ def register(ctx):
             except Exception:
                 logging.getLogger(__name__).debug('request context capture failed',
                                                   exc_info=True)
+            if not session_id:
+                return None
+            try:
+                snap = router.status(session_id, {})
+                tasks = snap.get('tasks') or []
+                if not tasks:
+                    return None
+                active = [
+                    f"{t.get('task_id')}({t.get('role')}:{t.get('status')})"
+                    for t in tasks if t.get('status') in ('queued', 'running')
+                ]
+                done = [
+                    f"{t.get('task_id')}({t.get('role')}:{t.get('status')})"
+                    for t in tasks[:3] if t.get('status') not in ('queued', 'running')
+                ]
+                if active:
+                    parts = [f"当前执行/排队中: {', '.join(active)}"]
+                    if done:
+                        parts.append(f"已完结(勿再说在排队): {', '.join(done)}")
+                else:
+                    parts = [f"当前无排队/执行中的后台任务；最近任务已完结(卡片已交付，严禁再说“还在排队/跑着”): {', '.join(done)}"]
+                return {'context': '[后台任务实况] ' + '；'.join(parts)}
+            except Exception:
+                logging.getLogger(__name__).debug('live task status injection failed',
+                                                  exc_info=True)
             return None
         register_hook('pre_llm_call', _capture_request)
-    roster_path = ctx.get_config('roster_registry_path')
-    if (not isinstance(roster_path, str) or not roster_path
-            or not Path(roster_path).is_absolute()):
-        roster_path = None
-    router = DispatchRouter(services, roster_path=roster_path)
     max_source_lines = services['analysis'].max_lines
     names = ', '.join('%s=%s' % (role, svc.display_name) for role, svc in services.items())
     default_role = 'dev' if 'dev' in services else 'analysis'
