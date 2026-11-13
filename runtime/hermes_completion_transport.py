@@ -531,6 +531,20 @@ def create_transport(ctx, service):
                 except Exception as exc:
                     logger.warning('card terminal health update failed for %s (%s)',
                                    idempotency_key, type(exc).__name__)
+            patch_res = final.get('patch_result') if isinstance(final, dict) else None
+            lifecycle_confirmed = (
+                ctx.get_config('task_lifecycle_cards_enabled', False) is True
+                and isinstance(final, dict)
+                and final.get('ok') is True
+                and (final.get('already_finalized') is True
+                     or (isinstance(patch_res, dict) and patch_res.get('ok') is True))
+            )
+            if lifecycle_confirmed and not message.get('artifacts'):
+                return {
+                    'accepted': True,
+                    'deduped_by_lifecycle_card': True,
+                    'task_id': idempotency_key,
+                }
             result = super().deliver(address, message, idempotency_key=idempotency_key)
             if result and result.get('accepted') and getattr(self, 'card_bridge', None) and final is None:
                 final = _finalize_card(self.card_bridge, idempotency_key, message)

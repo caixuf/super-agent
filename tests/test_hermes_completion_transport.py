@@ -517,3 +517,46 @@ def test_finalize_card_prefers_created_at_over_stale_progress_elapsed(monkeypatc
     mod._finalize_card(Bridge(), 't-elapsed', {'status': 'completed', 'summary': 'done'})
     assert captured['elapsed'] == 125.4
 
+
+def test_deliver_dedupes_completion_card_when_lifecycle_card_confirmed(tmp_path):
+    super_calls = []
+
+    class DummyBridge:
+        def get_card(self, task_id):
+            return {'task_id': task_id, 'finalized': 0, 'created_at': 1000.0}
+
+        def finalize(self, task_id, **kwargs):
+            return {'ok': True, 'patch_result': {'ok': True, 'message_id': 'm-1'}}
+
+    class DummyService:
+        profile = 'test-profile'
+
+        class DummyPool:
+            root = tmp_path / 'queue'
+
+            def status(self, task_id):
+                return {'status': 'completed', 'result': {'summary': 'done'}}
+
+            def record_card_finalization_state(self, task_id, state, error):
+                pass
+
+        pool = DummyPool()
+
+    ctx = NS(
+        get_config=lambda k, default=None: (
+            True if k in ('direct_delivery_enabled', 'task_lifecycle_cards_enabled')
+            else (str(ROOT) if k == 'engine_root' else str(tmp_path / 'cards'))
+        ),
+        plugin_id='durable-dispatch',
+        profile_name='test-profile',
+    )
+    transport = bridge.create_transport(ctx, DummyService())
+    transport.card_bridge = DummyBridge()
+    transport.__class__.__bases__[0].deliver = lambda self, addr, msg, idempotency_key: super_calls.append(idempotency_key) or {'accepted': True}
+
+    address = dict(profile='test-profile', route='stored-route', channel='feishu', chat='chat')
+    res = transport.deliver(address, dict(task_id='t-dedupe', status='completed', summary='done'), idempotency_key='t-dedupe')
+    assert res == {'accepted': True, 'deduped_by_lifecycle_card': True, 'task_id': 't-dedupe'}
+    assert super_calls == []
+
+
