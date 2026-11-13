@@ -1113,14 +1113,14 @@ def test_silent_subtask_suppresses_card_and_updates_parent_card(tmp_path):
     q_root = tmp_path / 'queue'
     svc = plugin.DispatchService(
         str(q_root),
-        'imfl',
+        'demo',
         ['/'],
         role='triage',
         display_name='阿判',
         display_label='分诊',
         task_cards_enabled=True,
         route_provider=lambda sid: {
-            'route': 'agent:imfl:feishu:group:oc_test123',
+            'route': 'agent:demo:feishu:group:oc_test123',
             'channel': 'feishu',
             'chat': 'oc_test123',
         },

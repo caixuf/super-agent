@@ -337,7 +337,7 @@ def test_wrap_with_bwrap_sandbox_binds_meegle_and_markdown_outbox_rw(monkeypatch
     fake_home = tmp_path / "home"
     meegle_dir = fake_home / ".meegle"
     meegle_dir.mkdir(parents=True)
-    state_root = fake_home / "super_agent" / "imfl" / "state"
+    state_root = fake_home / "super_agent" / "demo" / "state"
     outbox_dir = state_root / "markdown-outbox"
     outbox_dir.mkdir(parents=True)
     workdir = tmp_path / "repo"
