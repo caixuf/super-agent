@@ -73,6 +73,29 @@ def _run_tool(repo: Path, profile: Path, hermes: Path, managed_root: Path, *args
     return subprocess.run(command, env=env, text=True, capture_output=True)
 
 
+def test_update_config_snapshot_falls_back_to_shared_gateway_unit(tmp_path, monkeypatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("superagent_installer_gateway_unit", TOOL)
+    installer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(installer)
+
+    home = tmp_path / "home"
+    profile_home = home / ".hermes" / "profiles" / "demo"
+    profile_home.mkdir(parents=True)
+    (profile_home / "config.yaml").write_text("model:\n  default: flash\n", encoding="utf-8")
+    unit_dir = home / ".config" / "systemd" / "user"
+    unit_dir.mkdir(parents=True)
+    (unit_dir / "hermes-gateway.service").write_text("[Service]\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+
+    args = SimpleNamespace(profile="demo", legacy_engine_root=None, runtime_manifest=None)
+    saved, service = installer._update_config_snapshot(
+        args, profile_home, home / ".hermes" / "superagent")
+    assert service == "hermes-gateway.service"
+    assert profile_home / "config.yaml" in saved
+
+
 def test_guard_blocks_dirty_source_and_allows_bypass(tmp_path):
     repo = _make_git_repo(tmp_path / "repo")
     profile, hermes, managed_root = _seed_test_env(tmp_path)

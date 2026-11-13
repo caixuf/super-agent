@@ -2594,6 +2594,15 @@ def _update_config_snapshot(args: argparse.Namespace, profile_home: Path, root: 
             if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+\.conf", name):
                 raise ValueError("invalid runtime drop-in filename")
             paths.append(Path.home() / ".config/systemd/user" / f"{service}.d" / name)
+    # A single-root install can run the profile on the shared default gateway
+    # unit instead of a profile-suffixed unit. Restarting a unit that does not
+    # exist silently leaves the old release serving traffic, so fall back to
+    # the generic unit only when the declared one is absent.
+    unit_dir = Path.home() / ".config" / "systemd" / "user"
+    if isinstance(service, str) and not (unit_dir / service).is_file():
+        generic = unit_dir / "hermes-gateway.service"
+        if generic.is_file():
+            service = generic.name
     saved = {}
     for path in paths:
         if path.is_symlink() or (path.exists() and not path.is_file()):
