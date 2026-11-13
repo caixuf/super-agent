@@ -23,6 +23,11 @@ import time
 from typing import Any, Dict, List, Optional
 
 from agentcore.cardkit2_renderer import build_cardkit2_payload, seal_unclosed_markdown_fences
+from agentcore.structured_report import (
+    extract_attachment_paths,
+    merge_structured_report,
+    render_report_markdown,
+)
 from agentcore.delivery_sanitizer import sanitize_and_extract_artifacts, sanitize_card_text
 
 logger = logging.getLogger(__name__)
@@ -238,6 +243,8 @@ class TaskCardBridge:
                 conn.execute("ALTER TABLE task_cards ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''")
             if 'error_text' not in columns:
                 conn.execute("ALTER TABLE task_cards ADD COLUMN error_text TEXT NOT NULL DEFAULT ''")
+            if 'structured_report_json' not in columns:
+                conn.execute("ALTER TABLE task_cards ADD COLUMN structured_report_json TEXT NOT NULL DEFAULT ''")
             if 'create_state' not in columns:
                 conn.execute("ALTER TABLE task_cards ADD COLUMN create_state TEXT NOT NULL DEFAULT 'idle'")
                 # Older rows have no durable record of an initial send. A missing
@@ -384,10 +391,16 @@ class TaskCardBridge:
                 progress_lines.append("  ·  ".join(pct_line))
             if status == "queued":
                 progress_lines.append("*排队中，等待空闲 Worker 调度*")
+            elif summary:
+                progress_lines.append(_truncate_summary_cleanly(summary))
             elif clean_role:
                 progress_lines.append("*%s 正在处理，结论生成后将自动收起过程*" % clean_role)
             else:
                 progress_lines.append("*正在处理中，结论生成后将自动收起过程*")
+            if docx_url:
+                safe_url = _sanitize_card_text(docx_url).strip()
+                if re.match(r"^https?://[^\s()<>]+$", safe_url):
+                    progress_lines.append(f"**在线文档**：[点击打开完整云文档]({safe_url})")
             sections.append("\n\n".join(progress_lines))
 
         elif status == "completed":
@@ -726,6 +739,99 @@ class TaskCardBridge:
         if is_degraded:
             res["degraded"] = True
         return res
+
+    def apply_report_delta(
+        self,
+        task_id: str,
+        delta: Dict[str, Any],
+        *,
+        elapsed: Optional[float] = None,
+        hero_img_key: Optional[str] = None,
+        docx_url: str = "",
+        terminal_status: str = "completed",
+    ) -> Dict[str, Any]:
+        """Idempotently merge an async structured_report delta and patch the bound card in place."""
+        if terminal_status not in ("completed", "failed", "cancelled"):
+            return {"ok": False, "error": "invalid_terminal_status"}
+        now = time.time()
+        with self.db() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM task_cards WHERE task_id=? AND profile=?",
+                (task_id, self.profile),
+            ).fetchone()
+            if not row:
+                return {"ok": False, "error": "task_not_found"}
+            existing_raw = row["structured_report_json"] if "structured_report_json" in row.keys() else ""
+            existing = json.loads(existing_raw) if existing_raw else None
+            merged = merge_structured_report(existing, delta)
+            if merged is None:
+                return {"ok": False, "error": "empty_report_delta"}
+
+            summary = render_report_markdown(merged)
+            artifacts = extract_attachment_paths(merged)
+            eff_docx = docx_url or (merged["links"][0]["url"] if merged.get("links") else "")
+            eff_elapsed = float(elapsed) if elapsed is not None else max(0.0, now - float(row["created_at"] or now))
+            is_final = bool(merged.get("final")) or row["status"] in ("completed", "failed", "cancelled")
+            target_status = row["status"] if row["status"] in ("completed", "failed", "cancelled") else (
+                terminal_status if is_final else "progressive"
+            )
+            card_payload = self.build_card_payload(
+                task_id,
+                row["display_name"],
+                row["goal"],
+                target_status,
+                elapsed=eff_elapsed,
+                summary=summary,
+                artifacts=artifacts,
+                hero_img_key=hero_img_key,
+                docx_url=eff_docx,
+                role_id=row["role"],
+            )
+            conn.execute(
+                """
+                UPDATE task_cards
+                SET status=?, summary=?, artifacts_json=?, structured_report_json=?,
+                    elapsed=?, updated_at=?, finalized=CASE WHEN ? THEN 1 ELSE finalized END
+                WHERE task_id=? AND profile=?
+                """,
+                (
+                    target_status,
+                    summary,
+                    json.dumps(artifacts),
+                    json.dumps(merged, ensure_ascii=False),
+                    eff_elapsed,
+                    now,
+                    1 if is_final else 0,
+                    task_id,
+                    self.profile,
+                ),
+            )
+            message_id = row["message_id"]
+            route = row["route"]
+            chat_id = row["chat_id"]
+            channel = row["channel"]
+            thread_id = row["thread_id"]
+
+        patch_res = None
+        if message_id and self.sender and callable(self.sender):
+            patch_res = self._send_patch(
+                task_id,
+                {"route": route, "chat": chat_id, "channel": channel, "thread": thread_id},
+                message_id,
+                card_payload,
+                is_terminal=is_final,
+            )
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "status": target_status,
+            "final": is_final,
+            "seq": merged.get("seq", 0),
+            "structured_report": merged,
+            "patch_result": patch_res,
+        }
 
     def get_card(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Query stored card status and metadata."""

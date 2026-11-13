@@ -29,10 +29,19 @@ def _finalize_card(bridge, task_id, message):
         except Exception:
             elapsed = 0.0
     try:
-        result = bridge.finalize(
-            task_id, status=message.get('status', 'completed'),
-            summary=message.get('summary', ''), artifacts=message.get('artifacts'),
-            elapsed=elapsed)
+        structured = message.get('structured_report')
+        if isinstance(structured, dict) and hasattr(bridge, 'apply_report_delta'):
+            result = bridge.apply_report_delta(
+                task_id,
+                structured,
+                elapsed=elapsed,
+                terminal_status=message.get('status', 'completed'),
+            )
+        else:
+            result = bridge.finalize(
+                task_id, status=message.get('status', 'completed'),
+                summary=message.get('summary', ''), artifacts=message.get('artifacts'),
+                elapsed=elapsed)
     except Exception as exc:
         logger.warning('task-card finalization failed for %s (%s)', task_id, type(exc).__name__)
         return

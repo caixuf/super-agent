@@ -31,7 +31,7 @@ def test_normalize_and_filter_internal_files():
     }
     norm = normalize_structured_report(raw)
     assert norm is not None
-    assert norm["schema_version"] == "1.0"
+    assert norm["schema_version"] == "1.1"
     assert [f["path"] for f in norm["files"]] == ["/tmp/report.html"]
     assert len(norm["images"]) == 2
     assert len(norm["links"]) == 1
@@ -85,3 +85,62 @@ def test_build_message_and_transport_preserve_structured_report():
     assert "**结论**：3 项检查全部通过" in formatted
     assert "https://example.com/board" in formatted
     assert "延迟分布" in formatted
+
+
+def test_async_incremental_report_merges_and_updates_bound_card(tmp_path):
+    from agentcore.structured_report import merge_structured_report
+    from agentcore.task_card_bridge import TaskCardBridge
+
+    # Part 1: conclusion arrives first (final=False), images/files still pending
+    p1 = {
+        "seq": 1,
+        "part_id": "text-1",
+        "final": False,
+        "parts_status": {"conclusion": "ready", "images": "pending", "files": "pending"},
+        "conclusion": "阶段性结论：9900 平台全部绿灯",
+        "highlights": ["通过率 100%"],
+    }
+    # Part 2: links & image arrive asynchronously later, and duplicate part_id is idempotent
+    p2 = {
+        "seq": 2,
+        "part_id": "assets-2",
+        "final": True,
+        "parts_status": {"images": "ready", "files": "ready"},
+        "links": [{"title": "测试报告", "url": "https://example.com/report/99"}],
+        "images": [{"path": "/tmp/chart.png", "caption": "趋势图"}],
+        "files": [{"path": "/tmp/report.html", "description": "完整报告"}],
+    }
+    m1 = merge_structured_report(None, p1)
+    assert m1["final"] is False
+    assert "异步生成中" in render_report_markdown(m1)
+    m2 = merge_structured_report(m1, p2)
+    m2_dup = merge_structured_report(m2, p2)
+    assert m2 == m2_dup
+    assert m2["final"] is True
+    assert m2["conclusion"] == "阶段性结论：9900 平台全部绿灯"
+    assert len(m2["links"]) == 1 and len(m2["images"]) == 1 and len(m2["files"]) == 1
+
+    # Deep card binding: progressive update first, then final enrichment on the SAME message_id
+    patches = []
+
+    def sender(*, address, message_id, card_payload):
+        patches.append((address, message_id, card_payload))
+        return {"ok": True, "message_id": message_id}
+
+    bridge = TaskCardBridge(tmp_path / "cards.db", profile="frontdesk", sender=sender)
+    bridge.bind_task("t-async-1", {"route": "feishu:c1", "chat": "c1", "channel": "feishu"}, "跑回归", "test", "测试专家", message_id="om_card_1")
+
+    r1 = bridge.apply_report_delta("t-async-1", p1, elapsed=3.2)
+    assert r1["ok"] and r1["status"] == "progressive" and r1["final"] is False
+    assert "阶段性结论" in bridge.get_card("t-async-1")["summary"]
+
+    r2 = bridge.apply_report_delta("t-async-1", p2, elapsed=12.5)
+    assert r2["ok"] and r2["status"] == "completed" and r2["final"] is True
+    card = bridge.get_card("t-async-1")
+    assert card["finalized"] == 1
+    assert "/tmp/report.html" in card["artifacts_json"]
+
+    # Even after finalized=1, an async late chart can still enrich the same card!
+    r3 = bridge.apply_report_delta("t-async-1", {"seq": 3, "part_id": "late-img", "images": [{"path": "/tmp/extra.png", "caption": "补充图"}]}, elapsed=15.0)
+    assert r3["ok"] and len(r3["structured_report"]["images"]) == 2
+    assert len(patches) == 3
