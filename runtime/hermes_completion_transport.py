@@ -20,12 +20,12 @@ def _finalize_card(bridge, task_id, message):
         try:
             card = bridge.get_card(task_id)
             if isinstance(card, dict):
-                if card.get('elapsed') is not None and float(card.get('elapsed') or 0.0) > 0:
-                    elapsed = float(card['elapsed'])
-                elif card.get('finalized'):
+                if card.get('finalized') and card.get('elapsed') is not None:
                     elapsed = float(card.get('elapsed') or 0.0)
                 elif card.get('created_at'):
                     elapsed = round(max(0.0, time.time() - float(card['created_at'])), 1)
+                elif card.get('elapsed') is not None and float(card.get('elapsed') or 0.0) > 0:
+                    elapsed = float(card['elapsed'])
         except Exception:
             elapsed = 0.0
     try:
@@ -69,6 +69,17 @@ def _origin_matches(address, target):
     return (address['channel'] == target.platform) and (
         str(address['chat']) == target.chat_id) and (
         (address.get('thread') or '') == ((target.metadata or {}).get('thread_id') or ''))
+
+
+def _pre_send_error(result, default_error):
+    err = str(getattr(result, 'error', None) or default_error)
+    msg_id = getattr(result, 'message_id', None)
+    not_sent = getattr(result, 'not_sent', None)
+    raw_resp = getattr(result, 'raw_response', None)
+    err_kind = getattr(result, 'error_kind', None)
+    if not_sent is True or (msg_id is None and raw_resp is None and err_kind != 'sa_card_update_unresolved'):
+        return dict(ok=False, not_sent=True, error=err)
+    return dict(ok=False, error=err)
 
 
 class HostSender:
@@ -186,7 +197,7 @@ class HostSender:
                                          reply_to=None, metadata=metadata, finalize=True)
                 if getattr(result, 'success', False) and getattr(result, 'message_id', None):
                     return dict(ok=True, message_id=str(result.message_id))
-                return dict(ok=False, error='card_send_failed')
+                return _pre_send_error(result, 'card_send_failed')
             if plugin_messages._fit(target.adapter, target.chat_id, text) != text:
                 return dict(ok=False, not_sent=True, error='completion_text_budget')
             result = await target.adapter.send(target.chat_id, text, metadata=metadata)
@@ -198,7 +209,7 @@ class HostSender:
                                                         file_name=item['name'], metadata=metadata)
         if getattr(result, 'success', False) and getattr(result, 'message_id', None):
             return dict(ok=True, message_id=str(result.message_id))
-        return dict(ok=False, error='adapter_result_unknown')
+        return _pre_send_error(result, 'adapter_result_unknown')
 
     def patch_card(self, address, message_id, card_payload):
         from hermes_cli.plugin_messages import _gateway_loop
@@ -331,10 +342,84 @@ def create_transport(ctx, service):
     base_type = _transport_type(engine)
 
     class _HumanCompletionTransport(base_type):
+        def _stage_workspace_artifacts(self, message, allowed_dir):
+            """Copy verified workspace deliverables into allowed_dir for safe DirectCompletionTransport staging."""
+            import re, shutil
+            if not allowed_dir or not allowed_dir.is_dir():
+                return message, []
+            raw_roots = ctx.get_config('allowed_roots', None) or []
+            ws_root = ctx.get_config('workspace_root', None)
+            roots = []
+            for r in ([ws_root] if ws_root else []) + (list(raw_roots) if isinstance(raw_roots, (list, tuple)) else []):
+                if isinstance(r, str) and r.strip():
+                    try:
+                        roots.append(Path(r).expanduser().resolve(strict=True))
+                    except OSError:
+                        pass
+            for default_name in ('imfl_auto_test', 'imfl_cases', 'super_agent'):
+                for cand in (Path.home() / default_name, Path.home() / 'code' / default_name):
+                    if cand.is_dir():
+                        try:
+                            roots.append(cand.resolve(strict=True))
+                        except OSError:
+                            pass
+            if not roots:
+                return message, []
+            allowed_exts = {'.md', '.txt', '.csv', '.json', '.html', '.pdf', '.png', '.jpg', '.jpeg', '.webp', '.zip', '.log', '.yaml', '.yml'}
+            excluded_names = {'manifest.json', 'report.json'}
+            summary = message.get('summary', '') or ''
+            candidates = list(message.get('artifacts') or [])
+            for m in re.finditer(r'(/(?:[\w.\-]+/)*[\w.\-]+\.(?:md|txt|csv|json|html|pdf|png|jpe?g|webp|zip|log|ya?ml))', summary, re.IGNORECASE):
+                candidates.append(m.group(1))
+            staged = []
+            new_artifacts = []
+            seen = set()
+            allowed_resolved = allowed_dir.resolve()
+            for raw in candidates:
+                if not isinstance(raw, str) or not raw.strip() or raw in seen:
+                    continue
+                seen.add(raw)
+                src = Path(raw)
+                if src.is_symlink() or src.name.startswith('.') or src.name in excluded_names:
+                    new_artifacts.append(raw)
+                    continue
+                try:
+                    resolved = src.resolve(strict=True)
+                except OSError:
+                    new_artifacts.append(raw)
+                    continue
+                if resolved.parent == allowed_resolved:
+                    new_artifacts.append(str(resolved))
+                    continue
+                ext = '.tar.gz' if resolved.name.lower().endswith('.tar.gz') else resolved.suffix.lower()
+                if ext not in allowed_exts and not resolved.name.lower().endswith('.tar.gz'):
+                    new_artifacts.append(raw)
+                    continue
+                if not any(resolved.is_relative_to(rt) for rt in roots):
+                    new_artifacts.append(raw)
+                    continue
+                try:
+                    st = resolved.stat()
+                    if not resolved.is_file() or st.st_size > 16 * 1024 * 1024:
+                        new_artifacts.append(raw)
+                        continue
+                    dst = allowed_resolved / resolved.name
+                    if not dst.exists():
+                        shutil.copyfile(resolved, dst)
+                    if dst.is_file() and not dst.is_symlink():
+                        dst_str = str(dst)
+                        staged.append(dst_str)
+                        new_artifacts.append(dst_str)
+                        if raw in summary:
+                            summary = summary.replace(raw, dst_str)
+                except OSError:
+                    new_artifacts.append(raw)
+            updated = dict(message, summary=summary, artifacts=new_artifacts)
+            return updated, staged
+
         def _prepare_message(self, message):
             from agentcore.delivery_sanitizer import sanitize_and_extract_artifacts
             from agentcore.progressive_delivery import is_progressive_phase1, load_checkpoint
-            summary = message.get('summary', '')
             attempt = self.attempt_provider(message.get('task_id')) if callable(self.attempt_provider) else None
             # Restrict discovery to the owning attempt before the durable transport
             # snapshots and sends files. Never copy paths supplied in model prose.
@@ -342,8 +427,13 @@ def create_transport(ctx, service):
             if (isinstance(attempt, str) and len(attempt) == 32
                     and all(c in '0123456789abcdef' for c in attempt)):
                 allowed_dir = self.attempt_root / attempt
+            message, staged = self._stage_workspace_artifacts(message, allowed_dir)
+            summary = message.get('summary', '')
             sanitized_summary, detected = sanitize_and_extract_artifacts(
                 summary, base_dir=allowed_dir, allow_nonexistent=True)
+            if (not sanitized_summary.strip() or sanitized_summary.strip() in ('completed', 'status: completed')) and (staged or message.get('artifacts')):
+                names = [Path(p).name for p in (staged or message.get('artifacts') or [])[:5]]
+                sanitized_summary = '任务已完成，已附带交付文件：' + '、'.join(names)
             message = dict(message, summary=sanitized_summary)
 
             ckpt = load_checkpoint(allowed_dir) if allowed_dir and allowed_dir.is_dir() else None

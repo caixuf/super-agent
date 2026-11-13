@@ -150,10 +150,20 @@ class CompletionMessage:
         return result
 
 
+_EMPTY_SENTINEL_PREFIX = '[System: Empty message content sanitised'
+
+
+def _is_empty_or_sentinel(value: Any) -> bool:
+    if not isinstance(value, str):
+        return True
+    stripped = value.strip()
+    return not stripped or stripped.startswith(_EMPTY_SENTINEL_PREFIX)
+
+
 def _summary(result: Any, *, limit: int = MAX_SUMMARY_CHARS) -> tuple[str, bool]:
     """Extract a bounded, human-readable summary from a worker receipt result."""
     import re
-    if isinstance(result, str) and result.strip():
+    if isinstance(result, str) and not _is_empty_or_sentinel(result):
         stripped = result.strip()
         if (stripped.startswith("{") and stripped.endswith("}")) or (stripped.startswith('{"') and stripped.endswith('"}')):
             try:
@@ -169,18 +179,18 @@ def _summary(result: Any, *, limit: int = MAX_SUMMARY_CHARS) -> tuple[str, bool]
         if isinstance(checkpoint, dict):
             for key in ('summary', 'final_text', 'report', 'report_md'):
                 value = checkpoint.get(key)
-                if isinstance(value, str) and value.strip():
+                if not _is_empty_or_sentinel(value):
                     text = value.strip()
                     break
         if not text:
             for key in ('summary', 'final_text', 'report', 'checkpoint_summary', 'message', 'output', 'reason', 'error'):
                 value = result.get(key)
-                if isinstance(value, str) and value.strip():
+                if not _is_empty_or_sentinel(value):
                     text = value.strip()
                     break
         if not text:
             text = 'status: %s' % (result.get('reason') or result.get('status') or 'completed')
-    elif isinstance(result, str) and result.strip():
+    elif isinstance(result, str) and not _is_empty_or_sentinel(result):
         text = result.strip()
     if not text:
         text = 'completed'

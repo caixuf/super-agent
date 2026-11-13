@@ -1075,7 +1075,7 @@ _TOOL_HUMAN_LABELS = {
     "localvec": "召回领域记忆",
     "memory": "检索记忆",
     "durable_dispatch": "调度协同任务",
-    "imfl": "调用 IMFL 工具",
+    "business_tool": "调用业务工具",
     "pytest": "执行回归校验",
 }
 

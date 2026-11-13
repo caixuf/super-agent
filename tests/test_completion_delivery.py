@@ -360,3 +360,21 @@ def test_unresolvable_origin_is_not_sent_and_stays_pending(tmp_path):
     assert [receipt['job'] for receipt in pool.receipts()] == [job]
 
 
+def test_empty_sanitised_sentinel_falls_back_to_output(tmp_path):
+    from agentcore.completion_delivery import build_message
+    msg = build_message({
+        'job': 'job-sentinel-1',
+        'status': 'completed',
+        'result': {
+            'ok': True,
+            'result': {
+                'summary': '[System: Empty message content sanitised to satisfy protocol]',
+                'output': '报告已生成至 docs/new_gb_pil_feasibility_test.md',
+            },
+        },
+    })
+    assert '[System: Empty message content sanitised' not in msg.summary
+    assert 'docs/new_gb_pil_feasibility_test.md' in msg.summary
+
+
+

@@ -189,8 +189,8 @@ def register(ctx):
                         bootstrap.provisioner.provision(entry['member_id'], entry['generation'])
                     except Exception as exc:
                         logging.getLogger(__name__).warning(
-                            "colleague provision failed for %s: %s",
-                            entry['member_id'], type(exc).__name__)
+                            "colleague provision failed for %s: %s: %s",
+                            entry['member_id'], type(exc).__name__, exc)
                         try:
                             registry.observe_runtime(supervisor=engine.Supervisor(team_id),
                                                      member_id=entry['member_id'],
@@ -226,8 +226,8 @@ def register(ctx):
                         # One unavailable member must not prevent other members or
                         # the team tools from loading. Keep its status truthful.
                         logging.getLogger(__name__).warning(
-                            "colleague provision failed for %s: %s",
-                            entry['member_id'], type(exc).__name__)
+                            "colleague provision failed for %s: %s: %s",
+                            entry['member_id'], type(exc).__name__, exc)
                         try:
                             registry.observe_runtime(supervisor=engine.Supervisor(team_id),
                                                      member_id=entry['member_id'],

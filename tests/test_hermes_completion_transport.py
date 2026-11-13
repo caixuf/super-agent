@@ -435,3 +435,85 @@ def test_unresolvable_stored_route_is_not_sent(host, monkeypatch):
     result = asyncio.run(sender.send(object(), address, dict(kind='text', text='x', delivery_uuid='stable')))
     assert result == {'ok': False, 'not_sent': True, 'error': 'no_conversation'}
     assert not calls
+
+
+def test_pre_send_card_failure_returns_not_sent(host, monkeypatch):
+    from types import SimpleNamespace
+    sender, target, address, calls = host
+    async def fail_card(**kw):
+        return SimpleNamespace(success=False, message_id=None, raw_response=None, error='missing card session ownership')
+    monkeypatch.setattr(target.adapter, '_send_reply_card', fail_card)
+    result = asyncio.run(sender.send(object(), address,
+        dict(kind='text', text='done', card=True, delivery_uuid='stable-key')))
+    assert result == {'ok': False, 'not_sent': True, 'error': 'missing card session ownership'}
+
+
+def test_stage_workspace_deliverable_copies_into_attempt_dir(tmp_path):
+    ws = tmp_path / 'demo_workspace' / 'docs'
+    ws.mkdir(parents=True)
+    report = ws / 'demo_feasibility_test.md'
+    report.write_text('# Feasibility\nOK\n', encoding='utf-8')
+    attempt = 'a' * 32
+    attempt_root = tmp_path / 'attempts'
+    attempt_dir = attempt_root / attempt
+    attempt_dir.mkdir(parents=True)
+
+    class Ctx:
+        plugin_id = 'durable-dispatch'
+        def get_config(self, key, default=None):
+            if key == 'direct_delivery_enabled':
+                return True
+            if key == 'engine_root':
+                return str(ROOT)
+            if key == 'allowed_roots':
+                return [str(tmp_path / 'demo_workspace')]
+            return default
+
+    class Pool:
+        root = tmp_path
+        def status(self, tid):
+            return {'attempt': attempt}
+
+    class Service:
+        profile = 'demo'
+        pool = Pool()
+
+    transport = bridge.create_transport(Ctx(), Service())
+    prepared = transport._prepare_message({
+        'task_id': 't1',
+        'status': 'completed',
+        'summary': f'completed\n{report}',
+        'artifacts': [],
+    })
+    staged = str(attempt_dir / 'demo_feasibility_test.md')
+    assert staged in prepared['artifacts']
+    assert Path(staged).is_file()
+
+
+def test_finalize_card_prefers_created_at_over_stale_progress_elapsed(monkeypatch):
+    transport_mod = importlib.util.spec_from_file_location(
+        'hermes_completion_transport_test',
+        ROOT / 'runtime' / 'hermes_completion_transport.py',
+    )
+    mod = importlib.util.module_from_spec(transport_mod)
+    transport_mod.loader.exec_module(mod)
+
+    captured = {}
+
+    class Bridge:
+        def get_card(self, task_id):
+            return {
+                'task_id': task_id,
+                'finalized': 0,
+                'elapsed': 0.7,
+                'created_at': 1000.0,
+            }
+
+        def finalize(self, task_id, **kwargs):
+            captured.update(kwargs)
+            return {'ok': True, 'patch_result': {'ok': True}}
+
+    monkeypatch.setattr(mod.time, 'time', lambda: 1125.4)
+    mod._finalize_card(Bridge(), 't-elapsed', {'status': 'completed', 'summary': 'done'})
+    assert captured['elapsed'] == 125.4
+
