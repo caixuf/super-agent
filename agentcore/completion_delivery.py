@@ -356,6 +356,30 @@ def deliver_once(pool: Pool, transport: Optional[Transport], *, lease: float = 6
         return {'status': 'unowned', 'task_id': job,
                 'reason': 'task origin is missing chat or channel; refusing to guess a conversation'}
     try:
+        job_payload = pool.job_payload(job) or {}
+    except (TypeError, ValueError, KeyError):
+        job_payload = {}
+    if isinstance(job_payload, dict) and job_payload.get('_silent') is True:
+        parent_id = job_payload.get('_parent_task_id')
+        bridge = getattr(transport, 'card_bridge', None)
+        if isinstance(parent_id, str) and parent_id and bridge is not None:
+            try:
+                role, name, label = _colleague_identity(pool, job)
+                sub_status = str(claim['receipt'].get('status') or 'completed')
+                actor = name or label or role or 'subtask'
+                bridge.update_progress(parent_id, status='running', phase=f'{actor}: {sub_status}')
+            except Exception:
+                pass
+        receipt_id = f'silent:{job}'
+        try:
+            acknowledged = pool.acknowledge(job, token, receipt_id=receipt_id)
+        except Exception as exc:
+            return {'status': 'ack_unknown', 'task_id': job, 'receipt_id': receipt_id,
+                    'error_type': type(exc).__name__}
+        if not acknowledged:
+            return {'status': 'sent_ack_rejected', 'task_id': job, 'receipt_id': receipt_id}
+        return {'status': 'delivered', 'task_id': job, 'receipt_id': receipt_id, 'silent': True}
+    try:
         role, name, label = _colleague_identity(pool, job)
         message = build_message(
             claim['receipt'], limit=limit,

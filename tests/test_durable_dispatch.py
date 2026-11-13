@@ -1107,5 +1107,105 @@ def test_cross_colleague_status_and_cancel_auto_discovery(tmp_path):
     assert can['role'] == 'triage'
 
 
+def test_silent_subtask_suppresses_card_and_updates_parent_card(tmp_path):
+    from agentcore.pool import Pool
 
+    q_root = tmp_path / 'queue'
+    svc = plugin.DispatchService(
+        str(q_root),
+        'imfl',
+        ['/'],
+        role='triage',
+        display_name='阿判',
+        display_label='分诊',
+        task_cards_enabled=True,
+        route_provider=lambda sid: {
+            'route': 'agent:imfl:feishu:group:oc_test123',
+            'channel': 'feishu',
+            'chat': 'oc_test123',
+        },
+    )
+
+    parent = svc.submit('sess-1', {'goal': 'parent task', 'request_key': 'p-1'})
+    assert parent['ok'] is True
+    assert parent.get('card_requested') is True
+    parent_id = parent['task_id']
+
+    sub = svc.submit('sess-1', {
+        'goal': 'sub task',
+        'request_key': 's-1',
+        'parent_task_id': parent_id,
+    })
+    assert sub['ok'] is True
+    assert sub.get('silent') is True
+    assert sub.get('parent_task_id') == parent_id
+    assert 'card_requested' not in sub
+    sub_id = sub['task_id']
+
+    pool = Pool(q_root)
+    pending_cards = [r['job'] for r in pool.pending_card_creations()]
+    assert parent_id in pending_cards
+    assert sub_id not in pending_cards
+
+    # Complete the sub-job (skip parent)
+    row1, fd1 = pool.claim(lease=60)
+    try:
+        if row1['id'] == parent_id:
+            row2, fd2 = pool.claim(lease=60)
+            try:
+                assert row2['id'] == sub_id
+                pool.finish(row2['id'], row2['attempt'], True, {'summary': 'sub done'})
+            finally:
+                os.close(fd2)
+        else:
+            pool.finish(row1['id'], row1['attempt'], True, {'summary': 'sub done'})
+    finally:
+        os.close(fd1)
+
+    delivered_calls = []
+    progress_calls = []
+
+    class FakeBridge:
+        def update_progress(self, task_id, **kwargs):
+            progress_calls.append((task_id, kwargs))
+            return {'ok': True}
+
+    class FakeTransport:
+        card_bridge = FakeBridge()
+
+        def deliver(self, address, message, *, idempotency_key=None):
+            delivered_calls.append((address, message, idempotency_key))
+            return {'accepted': True, 'receipt_id': 'msg_1'}
+
+    res = svc.drain_delivery(FakeTransport())
+    assert res['delivered'] == 1
+    assert delivered_calls == []
+    assert len(progress_calls) == 1
+    assert progress_calls[0][0] == parent_id
+    assert progress_calls[0][1]['status'] == 'running'
+    assert '阿判' in progress_calls[0][1]['phase']
+    assert pool.unacknowledged_outbox_rows() == []
+
+
+def test_submit_rejects_invalid_silent_and_parent_task_id(tmp_path):
+    context = Context({
+        'enabled': True,
+        'queue_root': str(tmp_path / 'queue'),
+        'allowed_roots': ['/'],
+    })
+    plugin.register(context)
+
+    bad_silent = call(context, 'submit', {
+        'goal': 'g',
+        'request_key': 'k1',
+        'silent': 'yes',
+    }, session_id='s1')
+    assert bad_silent['ok'] is False
+
+    bad_parent = call(context, 'submit', {
+        'goal': 'g',
+        'request_key': 'k2',
+        'parent_task_id': 'not-a-32hex',
+    }, session_id='s1')
+    assert bad_parent['ok'] is False
 

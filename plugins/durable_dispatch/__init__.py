@@ -681,12 +681,21 @@ class DispatchService:
         return normalized
 
     def _submit_internal(self, session_id, goal, key, *, sources=None, origin,
-                         max_goal_len=4000, is_scheduled=False):
+                         max_goal_len=4000, is_scheduled=False,
+                         silent=False, parent_task_id=None):
         owner = self._owner(session_id)
         if not isinstance(goal, str) or not goal.strip() or len(goal) > max_goal_len:
             raise ValueError('goal must contain 1 to %d characters' % max_goal_len)
         if not isinstance(key, str) or not key.strip() or len(key) > 128:
             raise ValueError('request_key must contain 1 to 128 characters')
+        if type(silent) is not bool:
+            raise ValueError('silent must be boolean')
+        norm_parent = None
+        if parent_task_id is not None:
+            if not isinstance(parent_task_id, str) or not re.fullmatch('[0-9a-f]{32}', parent_task_id.strip()):
+                raise ValueError('parent_task_id must be a 32-hex task id')
+            norm_parent = parent_task_id.strip()
+        is_silent = bool(silent or norm_parent)
         # Only the read-only evidence role analyses source files. Execution roles
         # (dev/ops) act on a goal and their runner never reads source files, so a
         # stray source list must be ignored instead of failing the submission:
@@ -709,6 +718,10 @@ class DispatchService:
                    '_colleague_label': self.display_label}
         if self.configured_model_tier is not None:
             payload['_model_tier'] = self.model_tier
+        if is_silent:
+            payload['_silent'] = True
+            if norm_parent is not None:
+                payload['_parent_task_id'] = norm_parent
         if not is_scheduled:
             requester = recall_request_context(session_id)
             if requester:
@@ -725,7 +738,7 @@ class DispatchService:
             origin['route'] = 'agent:%s:local:default' % self.profile
             origin['chat'] = origin.get('chat') or 'local'
             origin['channel'] = origin.get('channel') or 'local'
-        card_requested = (self.task_cards_enabled and origin.get('channel') == 'feishu'
+        card_requested = (not is_silent and self.task_cards_enabled and origin.get('channel') == 'feishu'
                           and bool(origin.get('route')) and bool(origin.get('chat')))
         options = {'request_card': True} if card_requested else {}
         job, is_dedup = self.pool.submit(dedupe, payload, replay_safe=True, max_tries=2,
@@ -748,15 +761,21 @@ class DispatchService:
             result['sources_ignored'] = ignored_sources
         if card_requested:
             result['card_requested'] = True
+        if is_silent:
+            result['silent'] = True
+            if norm_parent is not None:
+                result['parent_task_id'] = norm_parent
         return result
 
     def submit(self, session_id, args):
-        if not isinstance(args, dict) or set(args) - {'goal', 'sources', 'request_key'}:
+        if not isinstance(args, dict) or set(args) - {'goal', 'sources', 'request_key', 'silent', 'parent_task_id'}:
             raise ValueError('unexpected dispatch arguments')
         goal, key = args.get('goal'), args.get('request_key')
         origin = self._origin(session_id)
         return self._submit_internal(session_id, goal, key, sources=args.get('sources'),
-                                      origin=origin, max_goal_len=4000, is_scheduled=False)
+                                      origin=origin, max_goal_len=4000, is_scheduled=False,
+                                      silent=args.get('silent', False),
+                                      parent_task_id=args.get('parent_task_id'))
 
     def submit_scheduled(self, goal, *, route_name, routes=None, idempotency_key, sources=None):
         if routes is not None:
@@ -1854,6 +1873,10 @@ def register(ctx):
         'sources': {'type': 'array', 'items': source_schema, 'maxItems': 8,
                    'description': 'Every source path must be absolute and inside the administrator-approved roots. A rejected submission ends the turn, so verify the path before calling.'},
         'role': role_schema,
+        'silent': {'type': 'boolean',
+                   'description': 'When true, suppress creating a separate task card and group completion message (for sub-tasks under a parent card).'},
+        'parent_task_id': {'type': 'string',
+                           'description': 'Optional 32-hex parent task_id that owns the single Feishu card. Implies silent=true and updates the parent card progress on completion.'},
     }
     entries = (
         ('submit', 'Persist a durable task. For the analysis role, sources are required (read-only evidence analysis). For an execution role, omit sources and describe the work in goal. Return its ID and finish the turn; do not wait or poll.',
