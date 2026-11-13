@@ -47,7 +47,7 @@ def _md_to_html(md: str) -> str:
             out.append("</tbody></table>")
             continue
         esc = html.escape(line)
-        esc = re.sub(r"&lt;font\s+color=['\"]([^'\"]+)['\"]&gt;(.*?)&lt;/font&gt;", r"<span style='color:\1'>\2</span>", esc)
+        esc = re.sub(r"&lt;font\s+color=(?:&#x27;|&quot;|['\"])([^&'\"]+)(?:&#x27;|&quot;|['\"])&gt;(.*?)&lt;/font&gt;", r"<span style='color:\1;font-size:12px'>\2</span>", esc)
         esc = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", esc)
         esc = re.sub(r"\*(.+?)\*", r"<span class='muted'>\1</span>", esc)
         esc = re.sub(r"`([^`]+)`", r"<code>\1</code>", esc)
