@@ -152,6 +152,42 @@ def test_install_tool_dispatcher_exposes_live_native_profile(test_env, tmp_path,
 
 
 
+def test_install_tool_dispatcher_repairs_group_readable_workdir(test_env, tmp_path, monkeypatch):
+    from agentcore.colleague_registry import Registry, Supervisor, Actor
+    from plugins.colleague_team.host_runtime import install_tool_dispatcher
+
+    home, workspace = test_env
+    workspace.chmod(0o775)
+    state_dir = tmp_path / "dispatch_state_repair"
+    state_dir.mkdir(mode=0o700)
+    registry = Registry(str(tmp_path / "registry_repair.sqlite"), profile_id="caixuf",
+                        primary_id="caixuf", primary_name="caixuf")
+    supervisor = Supervisor("caixuf")
+    actor = Actor("caixuf", "caixuf")
+    registry.define_role(actor=actor, role_id="cases", label="Cases", duty="Write tests",
+                         boundaries=["tests only"], request_id="r1")
+    registry.hire(actor=actor, member_id="cases", role_id="cases", display_name="Cases",
+                  request_id="h1")
+
+    conn = MockConnection("cases", home, receipt_status="terminal")
+    monkeypatch.setattr("plugins.colleague_team.host_runtime.connect_profile",
+                        lambda profile, phome: (conn, str(phome)))
+    monkeypatch.setattr("plugins.colleague_team.host_runtime.session_store",
+                        lambda c: type("Store", (), {"call": lambda self, method, **params: {}})())
+    monkeypatch.setattr("plugins.colleague_team.host_runtime.profile_is_unserved", lambda *_: False)
+
+    entries = [{"member_id": "cases", "generation": 1, "profile": "cases", "home": str(home),
+                "workdir": str(workspace), "model_policy": "profile"}]
+    bootstrap = install_tool_dispatcher(
+        service_profile_name="caixuf", registry=registry, supervisor=supervisor,
+        entries=entries, state_dir=str(state_dir),
+    )
+    try:
+        assert workspace.stat().st_mode & 0o777 == 0o700
+    finally:
+        bootstrap.close()
+
+
 def test_profile_park_requires_host_idle_authority_and_uses_host_lifecycle(test_env):
     home, workspace = test_env
     conn = MockConnection("cases", home)

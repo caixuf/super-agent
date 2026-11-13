@@ -321,6 +321,35 @@ def make_quiescence_verifier(gateway_host, profile_workdirs):
     return all_work_quiescent
 
 
+def _ensure_private_worker_directory(path):
+    """Create or repair an owner-only workdir before it is bound to a colleague.
+
+    ``Path.mkdir(exist_ok=True)`` does not tighten a pre-existing directory, so a
+    profile created by an older tool can keep mode 0o775 and later fail the
+    colleague plugin's ``private_directory_required`` gate. Repair that here while
+    still refusing symlinks and foreign ownership.
+    """
+    import os
+    import stat
+    from pathlib import Path
+
+    target = Path(path)
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        target.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = target.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ValueError("private_worker_directory_required")
+    if info.st_uid != os.getuid():
+        raise ValueError("private_worker_directory_required")
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        os.chmod(target, 0o700)
+    if stat.S_IMODE(target.lstat().st_mode) & 0o077:
+        raise ValueError("private_worker_directory_required")
+    return target
+
+
 def install_tool_dispatcher(*, service_profile_name, registry, supervisor, entries, state_dir, session_toolsets=None, completion_sink=None):
     """Attach explicitly configured, tool-enabled profiles to the live dispatcher.
 
@@ -348,8 +377,7 @@ def install_tool_dispatcher(*, service_profile_name, registry, supervisor, entri
         member, generation, profile = entry["member_id"], entry["generation"], entry["profile"]
         home = Path(entry["home"])
         workdir = Path(entry["workdir"]) if "workdir" in entry else home / "workspace"
-        if not workdir.exists():
-            workdir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _ensure_private_worker_directory(workdir)
         key = (member, generation)
         if key in member_profiles or profile in homes or not home.is_absolute():
             raise ValueError("duplicate_or_invalid_worker_binding")
