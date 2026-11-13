@@ -171,6 +171,7 @@ def main():
         profile = config.parent.name
         diag_path = str(config.parent.resolve() / "state" / "recall-diagnostics" / f"{profile}.json")
         updated = add_missing(updated, ["memory", "localvec", "diagnostic_path"], diag_path)
+    updated = add_missing(updated, ["display", "show_commentary"], True)
     if updated == original:
         print("  默认能力配置已就位")
         return

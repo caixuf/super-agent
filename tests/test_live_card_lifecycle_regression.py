@@ -338,3 +338,52 @@ def test_layered_card_overlay_is_replayable_and_exact(tmp_path):
     target=tmp_path/REL; target.write_text(target.read_text().replace("sa_card_update_unresolved","tampered_marker"))
     assert subprocess.run(overlay+["--check"],env=env,capture_output=True).returncode!=0
     assert subprocess.run(base+["--check"],env=env,capture_output=True).returncode!=0
+
+
+def test_final_reply_without_card_ownership_falls_through_instead_of_dropping(tmp_path):
+    base = subprocess.run(["git", "show", f"{BASE}:{REL}"], cwd=HOST, capture_output=True, text=True) if HOST.is_dir() else None
+    if base is None or base.returncode:
+        pytest.skip("pinned Hermes source unavailable")
+    path = tmp_path / REL
+    path.parent.mkdir(parents=True)
+    path.write_text(base.stdout)
+    subprocess.run(["git", "apply", str(ROOT / "patches/feishu_card_replies.patch")], cwd=tmp_path, check=True)
+    subprocess.run(["git", "apply", "--include", REL, str(ROOT / "patches/feishu_card_lifecycle.patch")], cwd=tmp_path, check=True)
+    tree = ast.parse(path.read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "FeishuAdapter")
+    methods = [n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in {"send", "_sa_patch_owned_card", "_send_retry_is_final"}]
+    module = ast.fix_missing_locations(ast.Module(body=[ast.ClassDef(name="Adapter", bases=[], keywords=[], body=methods, decorator_list=[])], type_ignores=[]))
+    ns = {
+        "Optional": Optional, "Any": Any,
+        "SendResult": lambda **kw: SimpleNamespace(**kw),
+        "_MARKDOWN_HINT_RE": re.compile("z"),
+        "logger": SimpleNamespace(warning=lambda *args: None),
+    }
+    exec(compile(module, str(path), "exec"), ns)
+    a = ns["Adapter"]()
+    a._client = object()
+    a._card_replies = True
+    a.MAX_MESSAGE_LENGTH = 10000
+    a.format_message = lambda s: s
+    a.truncate_message = lambda s, n: [s]
+    a._active_live_card_per_chat = {("chat", "", "sess-1", "turn-1"): {"message_id": "card-1"}}
+    sent_cards = []
+    async def fake_send_reply_card(**kw):
+        sent_cards.append(kw)
+        return SimpleNamespace(success=True, message_id="card-new")
+    a._send_reply_card = fake_send_reply_card
+
+    async def run():
+        # 1. Status update without ownership is suppressed cleanly with error_kind
+        res_status = await a.send("chat", "progress", metadata={"_sa_status": True, "_sa_session": "sess-1", "_sa_turn": "turn-other"})
+        assert res_status.success is False
+        assert res_status.error == "missing card session ownership"
+        assert res_status.error_kind == "sa_card_update_unresolved"
+
+        # 2. Final user reply without matching ownership must NOT be dropped; falls through to _send_reply_card
+        res_final = await a.send("chat", "final answer", metadata={"_sa_session": "sess-1", "_sa_turn": "turn-other"})
+        assert res_final.success is True
+        assert res_final.message_id == "card-new"
+        assert len(sent_cards) == 1 and sent_cards[0]["content"] == "final answer"
+
+    asyncio.run(run())

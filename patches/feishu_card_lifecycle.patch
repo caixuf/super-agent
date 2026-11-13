@@ -137,8 +137,8 @@ index 59c5ec6..232fd52 100644
 +        live_key = (chat_id, str((metadata or {}).get("thread_id") or ""), str((metadata or {}).get("_sa_session") or ""), str((metadata or {}).get("_sa_turn") or ""))
 +        if (getattr(self, "_card_replies", False) and (not live_key[2] or not live_key[3] or live_key not in self._active_live_card_per_chat)
 +                and any(key[:2] == live_key[:2] and (not live_key[2] or key[2] == live_key[2]) for key in self._active_live_card_per_chat)
-+                and ((metadata or {}).get("_sa_status") or not (metadata or {}).get("_interim_send"))):
-+            return SendResult(success=False, error="missing card session ownership")
++                and bool((metadata or {}).get("_sa_status"))):
++            return SendResult(success=False, error="missing card session ownership", error_kind="sa_card_update_unresolved")
 +        if getattr(self, "_card_replies", False) and live_key[2] and live_key[3] and live_key in self._active_live_card_per_chat and not ((metadata or {}).get("_interim_send") and not (metadata or {}).get("_sa_status")):
              live_info = self._active_live_card_per_chat[live_key]
 -            if (metadata or {}).get("expect_edits") and not (metadata or {}).get("notify"):
