@@ -29,6 +29,12 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
+from agentcore.structured_report import (
+    extract_attachment_paths,
+    parse_structured_report,
+    render_report_markdown,
+)
+
 from agentcore.delivery_sanitizer import unwrap_and_unescape_text
 from agentcore.ops_alerts import DeliveryReceipt, _receipt_status
 from agentcore.pool import NON_MESSAGING_CHANNELS, Pool, messaging_origin_complete
@@ -99,6 +105,7 @@ class CompletionMessage:
     phase: str | None = None
     checkpoint_delivered: bool = False
     rendering_state: str | None = None
+    structured_report: dict[str, Any] | None = None
 
     def render(self) -> dict[str, Any]:
         result = {
@@ -110,6 +117,8 @@ class CompletionMessage:
         }
         if self.artifacts:
             result["artifacts"] = list(self.artifacts)
+        if self.structured_report:
+            result["structured_report"] = dict(self.structured_report)
         if self.colleague_role:
             result["colleague_role"] = self.colleague_role
         if self.colleague_name:
@@ -288,12 +297,24 @@ def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS,
         if any(isinstance(inner.get(k), str) and inner.get(k).strip()
                for k in ('summary', 'final_text', 'report', 'message', 'output')):
             result = inner
+    structured_report, _ = parse_structured_report(result)
     summary, truncated = _summary(result, limit=limit)
+    if structured_report is not None:
+        rendered = render_report_markdown(structured_report)
+        if rendered:
+            summary = rendered if len(rendered) <= limit else rendered[:limit].rstrip() + '...'
+            truncated = len(rendered) > limit
     artifacts = result.get('artifacts', []) if isinstance(result, dict) else []
     if not isinstance(artifacts, list) or len(artifacts) > 8 or any(
             not isinstance(p, str) or not p or len(p) > 4096 for p in artifacts):
         raise ValueError('invalid completion artifacts')
     artifacts = [p for p in artifacts if os.path.basename(p) not in _INTERNAL_AUDIT_FILES]
+    if structured_report is not None:
+        for extra_path in extract_attachment_paths(structured_report):
+            if os.path.basename(extra_path) not in _INTERNAL_AUDIT_FILES and extra_path not in artifacts:
+                artifacts.append(extra_path)
+            if len(artifacts) >= 8:
+                break
     fields = origin_envelope_fields(origin)
     return CompletionMessage(
         task_id=receipt['job'], status=status, summary=summary,
@@ -312,6 +333,7 @@ def build_message(receipt: dict[str, Any], *, limit: int = MAX_SUMMARY_CHARS,
         phase=phase,
         checkpoint_delivered=checkpoint_delivered,
         rendering_state=rendering_state,
+        structured_report=structured_report,
     )
 
 

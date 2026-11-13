@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from . import precedent
 from .client import MIN_CONFIDENCE_FLOOR, LocalModelClient, append_jsonl
+from .router import FrontdeskRouter
 
 log = logging.getLogger(__name__)
 
@@ -156,6 +157,8 @@ class Grounding:
             token=ctx.get_config("token", ""),
             token_file=ctx.get_config("token_file", ""),
             timeout=ctx.get_config("timeout", 10.0),
+            decider_backend=str(ctx.get_config("decider_backend", "gateway") or "gateway"),
+            model_name=str(ctx.get_config("decider_model", "local-judge-decider4b") or "local-judge-decider4b"),
         )
         self.audit_path = str(ctx.get_config("audit_path", "") or "")
         self.index_dir = str(ctx.get_config("index_dir", "") or "")
@@ -165,6 +168,17 @@ class Grounding:
                               or precedent.DEFAULT_MIN_SCORE)
         self.min_confidence = _threshold(ctx.get_config("min_confidence", MIN_CONFIDENCE_FLOOR))
         self.max_context_chars = int(ctx.get_config("max_context_chars", 4000) or 4000)
+        routing_enabled = bool(ctx.get_config("frontdesk_routing_enabled", False))
+        roles_spec_path = str(ctx.get_config("roles_spec_path", "") or "")
+        self.router: Optional[FrontdeskRouter] = None
+        if routing_enabled and roles_spec_path:
+            self.router = FrontdeskRouter(
+                self.client,
+                roles_spec_path=roles_spec_path,
+                min_confidence=_threshold(ctx.get_config("route_min_confidence", 0.65)),
+                timeout=float(ctx.get_config("route_timeout", ctx.get_config("timeout", 5.0)) or 5.0),
+                audit_fn=self._audit,
+            )
         self._lock = threading.Lock()
         self._verdicts: Dict[str, Dict[str, Any]] = {}
         self._injected: Dict[str, set] = {}
@@ -319,6 +333,15 @@ class Grounding:
             self.ensure_index_async()
             failure = recent_failure(conversation_history, user_message)
             segments: List[str] = []
+
+            if self.router is not None and (user_message or "").strip():
+                route_res = self.router.route(
+                    user_message,
+                    conversation_history,
+                    session_id=session_id or "unknown",
+                )
+                if route_res and route_res.get("hint"):
+                    segments.append(str(route_res["hint"]))
 
             if failure:
                 verdict = self._decide(failure, session_id or "unknown", "conversation_history")

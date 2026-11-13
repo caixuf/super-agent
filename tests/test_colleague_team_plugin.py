@@ -139,3 +139,37 @@ def test_team_tools_and_supervisor_hire_delegate_drain_and_preserve_history(tmp_
     events = registry.history(actor=Actor('team', 'leader'))
     assert any(item['action'] == 'member_hired' and item['target_id'] == 'builder_one' for item in events)
     assert call(primary, 'retire', {'member_id': 'leader', 'request_id': 'retire-primary'})['error'] == 'primary_protected'
+
+
+def test_provision_startup_entries_retries_member_gateway_not_ready():
+    import importlib
+    import threading
+    from types import SimpleNamespace
+    mod = importlib.import_module('plugins.colleague_team')
+    calls = []
+    done = threading.Event()
+
+    def provision(member_id, generation):
+        calls.append((member_id, generation))
+        if len(calls) < 2:
+            raise RuntimeError('member_gateway_not_ready')
+        done.set()
+
+    observed = []
+    unloads = []
+    ctx = SimpleNamespace(profile_name='test', on_unload=unloads.append)
+    bootstrap = SimpleNamespace(provisioner=SimpleNamespace(provision=provision))
+    registry = SimpleNamespace(observe_runtime=lambda **kw: observed.append(kw))
+    mod._provision_startup_entries(
+        ctx,
+        bootstrap,
+        [{'member_id': 'cases', 'generation': 1}],
+        registry,
+        supervisor='sup',
+        delays=(0.01, 0.01),
+    )
+    assert len(observed) == 1 and observed[0]['state'] == 'unknown'
+    assert done.wait(timeout=2.0)
+    assert calls == [('cases', 1), ('cases', 1)]
+    for fn in unloads:
+        fn()

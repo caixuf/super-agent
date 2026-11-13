@@ -61,9 +61,12 @@ class LocalModelClient:
     """Minimal, fail-closed client for one gateway base URL."""
 
     def __init__(self, base_url: str, *, token: str = "", token_file: str = "",
-                 timeout: float = 10.0) -> None:
+                 timeout: float = 10.0, decider_backend: str = "gateway",
+                 model_name: str = "local-judge-decider4b") -> None:
         self.base_url = (base_url or "").strip().rstrip("/")
         self.token = read_token(token, token_file)
+        self.decider_backend = (decider_backend or "gateway").strip().lower()
+        self.model_name = (model_name or "local-judge-decider4b").strip()
         try:
             self.timeout = float(timeout)
         except (TypeError, ValueError):
@@ -95,11 +98,73 @@ class LocalModelClient:
             return None
         return parsed if isinstance(parsed, dict) else None
 
+    def _decide_openai(self, text: str, question: str, options: Sequence[str], *,
+                       timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """OpenAI-compatible /v1/chat/completions decider with enum-constrained JSON."""
+        started = time.time()
+        opt_list = [str(o) for o in options]
+        keys = [o.split(":", 1)[0].strip() if ":" in o else o.strip() for o in opt_list]
+        sys_prompt = (
+            f"你是分类决策器。问题：{question}\n"
+            "候选列表：\n" + "\n".join(f"- {o}" for o in opt_list) + "\n"
+            "只输出合法 JSON：{\"target\": \"<候选key>\", \"confidence\": 0.9}"
+        )
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": text},
+            ],
+            "temperature": 0.0,
+            "max_tokens": 64,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "route_decision",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "target": {"type": "string", "enum": keys},
+                            "confidence": {"type": "number"},
+                        },
+                        "required": ["target", "confidence"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        }
+        body = self._post("/v1/chat/completions", payload, timeout=timeout)
+        if not body:
+            return None
+        try:
+            content = (body["choices"][0]["message"].get("content") or "").strip()
+            parsed = json.loads(content)
+            target = str(parsed.get("target") or "").strip()
+            conf = float(parsed.get("confidence", 0.85) or 0.85)
+        except (KeyError, IndexError, TypeError, ValueError):
+            return None
+        matched = next((o for o, k in zip(opt_list, keys) if k == target), "")
+        if not matched:
+            return None
+        elapsed = round((time.time() - started) * 1000.0, 1)
+        return {
+            "choice": matched,
+            "confidence": max(0.0, min(1.0, conf)),
+            "probs": {matched: max(0.0, min(1.0, conf))},
+            "elapsed_ms": elapsed,
+            "model": str(body.get("model") or self.model_name),
+            "client_ms": elapsed,
+        }
+
     def decide(self, text: str, question: str, options: Sequence[str], *,
                timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """One text, one question, one option set. Never batches."""
         if not text.strip() or not question.strip() or len(options) < 2:
             return None
+        if self.decider_backend == "openai":
+            return self._decide_openai(text, question, options, timeout=timeout)
         started = time.time()
         body = self._post("/decide",
                           {"text": text, "question": question, "options": list(options)},

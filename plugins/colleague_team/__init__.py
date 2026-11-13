@@ -9,6 +9,64 @@ import os
 from pathlib import Path
 import re
 import sys
+import threading
+
+
+def _observe_unknown(registry, supervisor, entry):
+    """Record truthful unknown runtime state when startup provision cannot yet succeed."""
+    try:
+        registry.observe_runtime(
+            supervisor=supervisor,
+            member_id=entry['member_id'],
+            generation=entry['generation'],
+            state='unknown',
+        )
+    except Exception:
+        logging.getLogger(__name__).warning("colleague runtime status update failed")
+
+
+def _provision_startup_entries(ctx, bootstrap, entries, registry, supervisor, *, delays=(1.0, 2.0, 4.0, 8.0)):
+    """Provision startup entries immediately and retry member_gateway_not_ready in the background."""
+    log = logging.getLogger(__name__)
+    pending = []
+    for entry in entries:
+        try:
+            bootstrap.provisioner.provision(entry['member_id'], entry['generation'])
+        except Exception as exc:
+            _observe_unknown(registry, supervisor, entry)
+            if isinstance(exc, RuntimeError) and 'member_gateway_not_ready' in str(exc):
+                pending.append(entry)
+                log.info("colleague %s gateway warming up; scheduling startup provision retry", entry['member_id'])
+            else:
+                log.warning("colleague provision failed for %s: %s: %s", entry['member_id'], type(exc).__name__, exc)
+    if not pending:
+        return
+    stop_event = threading.Event()
+    ctx.on_unload(stop_event.set)
+
+    def _retry():
+        remaining = list(pending)
+        for wait_s in delays:
+            if stop_event.wait(wait_s):
+                return
+            next_remaining = []
+            for entry in remaining:
+                if stop_event.is_set():
+                    return
+                try:
+                    bootstrap.provisioner.provision(entry['member_id'], entry['generation'])
+                except Exception as exc:
+                    if isinstance(exc, RuntimeError) and 'member_gateway_not_ready' in str(exc):
+                        next_remaining.append(entry)
+                    else:
+                        log.warning("colleague provision failed for %s: %s: %s", entry['member_id'], type(exc).__name__, exc)
+            remaining = next_remaining
+            if not remaining:
+                return
+        for entry in remaining:
+            log.warning("colleague provision failed for %s: RuntimeError: member_gateway_not_ready", entry['member_id'])
+
+    threading.Thread(target=_retry, name=f"colleague-provision-retry-{ctx.profile_name}", daemon=True).start()
 
 
 def _engine(ctx):
@@ -184,19 +242,7 @@ def register(ctx):
                 completion_sink=host_runtime.completion_sink_for_profile(ctx))
             try:
                 ctx.on_unload(bootstrap.close)
-                for entry in entries:
-                    try:
-                        bootstrap.provisioner.provision(entry['member_id'], entry['generation'])
-                    except Exception as exc:
-                        logging.getLogger(__name__).warning(
-                            "colleague provision failed for %s: %s: %s",
-                            entry['member_id'], type(exc).__name__, exc)
-                        try:
-                            registry.observe_runtime(supervisor=engine.Supervisor(team_id),
-                                                     member_id=entry['member_id'],
-                                                     generation=entry['generation'], state='unknown')
-                        except Exception:
-                            logging.getLogger(__name__).warning("colleague runtime status update failed")
+                _provision_startup_entries(ctx, bootstrap, entries, registry, engine.Supervisor(team_id))
             except BaseException:
                 bootstrap.close()
                 raise
@@ -219,21 +265,7 @@ def register(ctx):
                 completion_sink=host_runtime.completion_sink_for_profile(ctx))
             try:
                 ctx.on_unload(bootstrap.close)
-                for entry in entries:
-                    try:
-                        bootstrap.provisioner.provision(entry['member_id'], entry['generation'])
-                    except Exception as exc:
-                        # One unavailable member must not prevent other members or
-                        # the team tools from loading. Keep its status truthful.
-                        logging.getLogger(__name__).warning(
-                            "colleague provision failed for %s: %s: %s",
-                            entry['member_id'], type(exc).__name__, exc)
-                        try:
-                            registry.observe_runtime(supervisor=engine.Supervisor(team_id),
-                                                     member_id=entry['member_id'],
-                                                     generation=entry['generation'], state='unknown')
-                        except Exception:
-                            logging.getLogger(__name__).warning("colleague runtime status update failed")
+                _provision_startup_entries(ctx, bootstrap, entries, registry, engine.Supervisor(team_id))
             except BaseException:
                 bootstrap.close()
                 raise
