@@ -128,7 +128,16 @@ diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adap
 index 59c5ec6..232fd52 100644
 --- a/plugins/platforms/feishu/adapter.py
 +++ b/plugins/platforms/feishu/adapter.py
-@@ -1732,40 +1732,33 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -1723,6 +1723,8 @@ class FeishuAdapter(BasePlatformAdapter):
+ 
+         formatted = self.format_message(content)
+         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
++        if "recalled " in formatted and ("自研记忆库" in formatted or "本地知识库" in formatted or formatted.lstrip().startswith("🧠")):
++            return SendResult(success=True, message_id="")
+         # Decide markdown-vs-text once for the whole message: a chunk of a long
+         # markdown reply may be plain prose that fails the per-chunk regex and would
+         # otherwise render as literal ``**bold`` / fences while other chunks render.
+@@ -1732,40 +1734,33 @@ class FeishuAdapter(BasePlatformAdapter):
          last_response = None
  
          # A topic in a group is a separate conversation even when chat_id is shared.
