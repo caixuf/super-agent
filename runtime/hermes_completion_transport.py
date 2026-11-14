@@ -107,6 +107,12 @@ class HostSender:
                 return None
         return prop
 
+    def is_ready(self):
+        """Return True only when the live gateway runner and event loop are active."""
+        from hermes_cli.plugin_messages import _gateway_loop
+        runner, loop = _gateway_loop()
+        return runner is not None and loop is not None and not loop.is_closed()
+
     def create_card(self, address, card_payload, delivery_key):
         """Create a task card through the resolved host adapter, with a stable UUID."""
         from hermes_cli.plugin_messages import _gateway_loop
@@ -576,6 +582,7 @@ def create_transport(ctx, service):
         card=ctx.get_config('completion_card_enabled', False) is True)
     transport.card_bridge = card_bridge
     transport.card_creator = sender.create_card
+    transport.is_ready = sender.is_ready
     try:
         from agentcore.progressive_delivery import ProgressiveDeliveryCoordinator
         transport.progressive_coordinator = ProgressiveDeliveryCoordinator(

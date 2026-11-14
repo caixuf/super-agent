@@ -560,3 +560,199 @@ def test_doctor_colleague_queue_workers_observation_flags_unmanned_roles(tmp_pat
     assert obs["unmanned_roles"] == ["backend"]
     assert obs["unmanned_queued_jobs"] == 1
 
+
+def test_non_gateway_hermes_cli_context_skips_backfill_threads(tmp_path: Path, monkeypatch):
+    """Non-gateway hermes_cli contexts (dashboard/CLI/TUI) must not spawn backfill threads."""
+    services, _, _ = _make_services(tmp_path)
+    ops_svc = services["ops"]
+
+    # Create a class whose __module__ mimics hermes_cli.plugins
+    CliCtx = type(
+        "FakeCliPluginContext",
+        (),
+        {
+            "__module__": "hermes_cli.plugins",
+            "_manager": SimpleNamespace(has_gateway_message_injector=False),
+            "profile_name": "test-profile",
+            "get_config": lambda self, k, default=None: {
+                "deliver_completions": True,
+                "engine_root": str(REPO),
+            }.get(k, default),
+            "inject_message": lambda self, **_kw: {"ok": True},
+        },
+    )
+    cli_ctx = CliCtx()
+    monkeypatch.delitem(sys.modules, "gateway.run", raising=False)
+    monkeypatch.delenv("HERMES_EXEC_ASK", raising=False)
+    monkeypatch.setattr(sys, "argv", ["hermes", "dashboard", "--port", "9119"])
+
+    assert durable_dispatch._is_gateway_backfill_host(cli_ctx) is False
+    assert durable_dispatch.start_backfill(cli_ctx, ops_svc) is None
+
+    # Host PluginContext with gateway message injector wired stays enabled
+    cli_ctx._manager.has_gateway_message_injector = True
+    assert durable_dispatch._is_gateway_backfill_host(cli_ctx) is True
+
+
+def test_backfill_waits_until_transport_is_ready(tmp_path: Path, monkeypatch):
+    """Backfill threads must wait while transport.is_ready() is False, then drain once True."""
+    from agentcore import completion_backfill
+
+    services, router, _ = _make_services(tmp_path, task_cards=True)
+    ops_svc = services["ops"]
+    ops_svc.delivery = completion_backfill
+    res = router.submit("sess-ready", {"role": "ops", "goal": "ready probe test", "request_key": "ready-1"})
+    job = res["task_id"]
+
+    import os
+    claimed = ops_svc.pool.claim(lease=30)
+    assert claimed is not None
+    row, fd = claimed
+    try:
+        assert ops_svc.pool.begin_execution(job, row["attempt"], mode="synchronous")
+        assert ops_svc.pool.finish(job, row["attempt"], True, {"summary": "done"})
+    finally:
+        os.close(fd)
+
+    ready_flag = {"ready": False}
+    deliver_calls = []
+    create_calls = []
+
+    class _FakeTransport:
+        card_bridge = TaskCardBridge(
+            tmp_path / "cards",
+            profile="test-profile",
+            sender=lambda **_kw: {"ok": True, "message_id": "om_card_ready"},
+        )
+
+        def is_ready(self):
+            return ready_flag["ready"]
+
+        def card_creator(self, *, address, card_payload, delivery_key):
+            create_calls.append(delivery_key)
+            return {"ok": True, "message_id": "om_card_ready"}
+
+        def deliver(self, address, message, *, idempotency_key):
+            deliver_calls.append(idempotency_key)
+            return {"accepted": True, "receipt_id": f"rcpt-{idempotency_key[:8]}"}
+
+    transport_mod = ModuleType("fake_transport_mod")
+    transport_mod.create_transport = lambda ctx, svc: _FakeTransport()
+    transport_file = tmp_path / "fake_transport.py"
+    transport_file.write_text("# stub overridden via importlib\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        durable_dispatch.importlib.util,
+        "spec_from_file_location",
+        lambda name, path: SimpleNamespace(loader=SimpleNamespace(exec_module=lambda m: setattr(m, "create_transport", transport_mod.create_transport))),
+    )
+    monkeypatch.setattr(
+        durable_dispatch.importlib.util,
+        "module_from_spec",
+        lambda spec: ModuleType("_durable_completion_transport"),
+    )
+
+    unload_callbacks = []
+    ctx = SimpleNamespace(
+        profile_name="test-profile",
+        get_config=lambda k, default=None: {
+            "deliver_completions": True,
+            "delivery_interval": 0.05,
+            "delivery_transport_file": str(transport_file),
+            "report_delivery_health": False,
+        }.get(k, default),
+        on_unload=lambda cb: unload_callbacks.append(cb),
+    )
+
+    t = durable_dispatch.start_backfill(ctx, ops_svc)
+    assert t is not None
+    try:
+        # While is_ready() is False, neither delivery nor card creation may fire.
+        time.sleep(0.15)
+        assert deliver_calls == []
+        assert create_calls == []
+
+        # Flip ready -> True and confirm completion + card both drain promptly.
+        ready_flag["ready"] = True
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if deliver_calls and create_calls:
+                break
+            time.sleep(0.02)
+        assert job in deliver_calls
+        assert len(create_calls) == 1
+    finally:
+        for cb in unload_callbacks:
+            cb()
+
+
+def test_update_restarts_bound_hermes_dashboard_service_only(tmp_path: Path, monkeypatch):
+    """superagent.update stops/restarts hermes-dashboard.service only when bound to profile_home."""
+    fake_home = tmp_path / "home"
+    unit_dir = fake_home / ".config" / "systemd" / "user"
+    unit_dir.mkdir(parents=True)
+    profile_home = fake_home / ".hermes" / "profiles" / "demo"
+    other_profile_home = fake_home / ".hermes" / "profiles" / "demo2"
+    profile_home.mkdir(parents=True)
+    other_profile_home.mkdir(parents=True)
+    (profile_home / "config.yaml").write_text("plugins:\n  enabled: []\n", encoding="utf-8")
+
+    # Helper checks: prefix mismatch (demo2) must not match demo; per-profile wins over shared.
+    shared_unit = unit_dir / "hermes-dashboard.service"
+    shared_unit.write_text(f'[Service]\nEnvironment="HERMES_HOME={other_profile_home}"\n', encoding="utf-8")
+    assert superagent._discover_profile_dashboard_service(unit_dir, "demo", profile_home) is None
+
+    shared_unit.write_text(f'[Service]\nEnvironment="HERMES_HOME={profile_home}"\nWorkingDirectory={profile_home}\n', encoding="utf-8")
+    assert superagent._discover_profile_dashboard_service(unit_dir, "demo", profile_home) == "hermes-dashboard.service"
+
+    per_profile_unit = unit_dir / "hermes-dashboard-demo.service"
+    per_profile_unit.write_text("[Service]\n", encoding="utf-8")
+    assert superagent._discover_profile_dashboard_service(unit_dir, "demo", profile_home) == "hermes-dashboard-demo.service"
+    per_profile_unit.unlink()
+
+    # Exercise superagent.update with matching vs non-matching shared dashboard unit
+    monkeypatch.setattr(superagent.Path, "home", classmethod(lambda cls: fake_home))
+    monkeypatch.setattr(superagent, "_check_deploy_source_guard", lambda args, plan, root: ([], []))
+    monkeypatch.setattr(superagent, "_update_config_snapshot", lambda args, ph, root: ({}, "hermes-gateway-demo.service"))
+    monkeypatch.setattr(superagent, "_plugin_link_snapshot", lambda ph: {})
+    monkeypatch.setattr(superagent, "_declared_runtime_services", lambda args: [])
+    monkeypatch.setattr(superagent, "_declared_runtime_scripts", lambda args, svcs: {})
+    monkeypatch.setattr(superagent, "_assert_service_quiescent", lambda name: None)
+    monkeypatch.setattr(superagent, "_wait_for_running_jobs_drain", lambda root, timeout_s=30.0: None)
+    monkeypatch.setattr(superagent, "install", lambda args, plan: 0)
+    monkeypatch.setattr(superagent, "_release_valid", lambda path: True)
+    monkeypatch.setattr(superagent, "_prune_old_releases", lambda root, rel, mpath, keep=3: None)
+
+    sa_base = fake_home / "superagent"
+    root = sa_base / "demo"
+    release_dir = root / "releases" / "r1"
+    release_dir.mkdir(parents=True)
+    manifest_file = root / "install-manifest.json"
+    monkeypatch.setattr(superagent, "_manifest", lambda args: (manifest_file, {"release": str(release_dir)}))
+
+    for expected_restart, target_home in ((True, profile_home), (False, other_profile_home)):
+        shared_unit.write_text(f'[Service]\nEnvironment="HERMES_HOME={target_home}"\n', encoding="utf-8")
+        systemctl_ops = []
+
+        def fake_run(cmd, **_kw):
+            systemctl_ops.append(list(cmd))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(superagent, "_run", fake_run)
+        args = SimpleNamespace(
+            profile="demo",
+            profile_home=str(profile_home),
+            root=sa_base,
+            runtime_manifest=None,
+            drain_timeout=1.0,
+            keep=3,
+        )
+        plan = {"profile_home": str(profile_home)}
+        rc = superagent.update(args, plan)
+        assert rc == 0
+        stops = [c[3] for c in systemctl_ops if len(c) >= 4 and c[2] == "stop"]
+        starts = [c[3] for c in systemctl_ops if len(c) >= 4 and c[2] == "start"]
+        assert ("hermes-dashboard.service" in stops) is expected_restart
+        assert ("hermes-dashboard.service" in starts) is expected_restart
+
+

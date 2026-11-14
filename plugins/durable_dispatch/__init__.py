@@ -1734,6 +1734,30 @@ def _report_delivery_health(service, status, *, modules=None, fault_grace=None, 
     return summary
 
 
+def _is_gateway_backfill_host(ctx) -> bool:
+    """Return True only when plugin registration runs inside a gateway-capable host.
+
+    Non-gateway processes loading a profile (e.g. ``hermes dashboard``, CLI, TUI)
+    lack a live ``GatewayRunner`` and would otherwise spawn 22 competing SQLite pollers
+    that contend on locks and emit spurious ``OperationalError``/``gateway_unavailable`` noise.
+    Hosts that wire ``PluginManager.set_gateway_message_injector`` and synthetic/mock
+    ``ctx`` objects outside ``hermes_cli.*`` stay enabled.
+    """
+    if not type(ctx).__module__.startswith('hermes_cli.'):
+        return True
+    mgr = getattr(ctx, '_manager', None)
+    if bool(getattr(mgr, 'has_gateway_message_injector', False)):
+        return True
+    argv_tail = sys.argv[1:] if len(sys.argv) > 1 else []
+    if 'dashboard' in argv_tail and 'gateway' not in argv_tail:
+        return False
+    return bool(
+        'gateway.run' in sys.modules
+        or os.environ.get('HERMES_EXEC_ASK') == '1'
+        or 'gateway' in argv_tail
+    )
+
+
 def start_backfill(ctx, service):
     """Poll the queue and deliver routable completions until the plugin unloads.
 
@@ -1747,6 +1771,8 @@ def start_backfill(ctx, service):
     fault instead of a silent one.
     """
     if ctx.get_config('deliver_completions', False) is not True:
+        return None
+    if not _is_gateway_backfill_host(ctx):
         return None
     interval = _delivery_interval(ctx)
     not_before = ctx.get_config('delivery_not_before', None)
@@ -1789,6 +1815,11 @@ def start_backfill(ctx, service):
         local_defer_until = {}
         local_defer_backoff = min(30.0, max(5.0, interval * 15.0))
         while not stop.is_set():
+            ready_probe = getattr(transport, 'is_ready', None)
+            if callable(ready_probe) and not ready_probe():
+                if stop.wait(interval):
+                    break
+                continue
             try:
                 now_mono = time.monotonic()
                 if local_defer_until:
@@ -1841,6 +1872,11 @@ def start_backfill(ctx, service):
             warning_limiter = _BacklogWarningLimiter()
             next_inspection = 0.0
             while not stop.is_set():
+                ready_probe = getattr(transport, 'is_ready', None)
+                if callable(ready_probe) and not ready_probe():
+                    if stop.wait(interval):
+                        break
+                    continue
                 try:
                     service.drain_cards(transport, not_before=not_before, stop_event=stop)
                     service.sync_running_cards(transport, not_before=not_before, stop_event=stop)

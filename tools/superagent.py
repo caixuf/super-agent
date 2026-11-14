@@ -2937,6 +2937,24 @@ def _managed_service_import_observation(service: str, managed_current: Path, *, 
         return None
 
 
+def _discover_profile_dashboard_service(user_systemd: Path, profile: str, profile_home: Path) -> str | None:
+    """Return the user systemd dashboard unit bound to this profile, if installed."""
+    import re
+    per_profile = f"hermes-dashboard-{profile}.service"
+    if (user_systemd / per_profile).is_file():
+        return per_profile
+    shared = user_systemd / "hermes-dashboard.service"
+    if shared.is_file():
+        try:
+            text = shared.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        pattern = rf'(?:^|[="\s]){re.escape(str(profile_home))}(?=["\s]|$)'
+        if re.search(pattern, text):
+            return "hermes-dashboard.service"
+    return None
+
+
 def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     root = _managed_root(args)
     guard_blockers, guard_warnings = _check_deploy_source_guard(args, plan, root)
@@ -2972,6 +2990,9 @@ def update(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     for idx, wname in enumerate(worker_candidates):
         if wname not in services.values() and wname not in extra_services:
             services[f"worker-colleague-{idx}"] = wname
+    dashboard_service = _discover_profile_dashboard_service(user_systemd, args.profile, profile_home)
+    if dashboard_service and dashboard_service not in services.values() and dashboard_service not in extra_services:
+        services["dashboard"] = dashboard_service
     if set(extra_services) & set(services.values()):
         print(json.dumps({"status": "blocked", "reason": "duplicate_runtime_service"}))
         return 1
