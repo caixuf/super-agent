@@ -303,3 +303,36 @@ def test_session_caches_stay_bounded(tmp_path):
         assert len(grounding._injected) == PLUGIN._MAX_INJECTED_SESSIONS
     finally:
         server.stop()
+
+
+def test_gateway_unreachable_trips_cooldown_and_resets_on_recovery(monkeypatch):
+    import socket
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    dead_port = sock.getsockname()[1]
+    sock.close()
+
+    client = PLUGIN.LocalModelClient(f"http://127.0.0.1:{dead_port}", timeout=0.5, cooldown_s=30.0)
+    assert client.decide("FAIL", "q?", ["a: A", "b: B"]) is None
+    assert client._unavailable_until > time.monotonic()
+
+    # Subsequent calls during cooldown must short-circuit without touching _OPENER.open
+    client_mod = sys.modules.get("local_model_grounding.client")
+    if client_mod is not None:
+        monkeypatch.setattr(client_mod._OPENER, "open", lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("should not dial during cooldown")))
+    t0 = time.monotonic()
+    assert client.decide("FAIL", "q?", ["a: A", "b: B"]) is None
+    assert (time.monotonic() - t0) < 0.05
+
+    if client_mod is not None:
+        monkeypatch.undo()
+    server = Gateway().start()
+    try:
+        server.reply("/decide", _decision("环境问题", 0.91))
+        live_client = PLUGIN.LocalModelClient(server.url, timeout=1.0, cooldown_s=30.0)
+        live_client._unavailable_until = time.monotonic() - 1.0
+        res = live_client.decide("ERROR: disk", "q?", ["环境问题", "断言不匹配"])
+        assert res is not None and res["choice"] == "环境问题"
+        assert live_client._unavailable_until == 0.0
+    finally:
+        server.stop()

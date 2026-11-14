@@ -1892,6 +1892,39 @@ def test_install_provisions_newly_provisioned_colleague_workspace_and_plugins(tm
     assert obs["disk_bindings"]["analyst"] == {"plugin": "matched", "engine": "matched"}
 
 
+def test_doctor_detects_dangling_worker_unit_release_paths(tmp_path, monkeypatch):
+    profile = _seed_profile(tmp_path)
+    _run(tmp_path, "install", check=True)
+    unit_dir = tmp_path / ".config" / "systemd" / "user"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    stale_unit = unit_dir / "superagent-worker-demo-dev.service"
+    stale_unit.write_text(
+        "[Service]\n"
+        f"Environment=\"PYTHONPATH={tmp_path}/.hermes/superagent/demo/releases/v0.0.0-pruned\"\n"
+        f"Environment=DEV_ENGINE_ROOT={tmp_path}/.hermes/superagent/demo/releases/v0.0.0-pruned\n",
+        encoding="utf-8",
+    )
+    module = _load_installer()
+    monkeypatch.setattr(module.Path, "home", classmethod(lambda cls: tmp_path))
+    dangling = module._dangling_worker_unit_paths("demo")
+    assert len(dangling) == 2
+    assert {item["env"] for item in dangling} == {"PYTHONPATH", "DEV_ENGINE_ROOT"}
+    assert all(item["unit"] == "superagent-worker-demo-dev.service" for item in dangling)
+
+    drift = _run(tmp_path, "doctor")
+    assert drift.returncode == 1
+    report = json.loads(drift.stdout)
+    assert report["status"] == "drift"
+    assert len(report["dangling_worker_unit_paths"]) == 2
+    assert {item["unit"] for item in report["dangling_worker_unit_paths"]} == {"superagent-worker-demo-dev.service"}
+
+    stale_unit.unlink()
+    ready = _run(tmp_path, "doctor", check=True)
+    report_ok = json.loads(ready.stdout)
+    assert report_ok["status"] == "ready"
+    assert report_ok["dangling_worker_unit_paths"] == []
+
+
 
 
 

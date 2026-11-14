@@ -246,20 +246,38 @@ class EntityStore:
         seed_entities: Optional[Sequence[Dict[str, Any]]] = None,
         seed_rules: Optional[Sequence[Dict[str, Any]]] = None,
         auto_seed: bool = True,
+        read_only: bool = False,
     ) -> None:
         if db_path:
             self.db_path = Path(db_path).resolve()
         else:
             self.db_path = get_default_entity_db_path()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._read_only = bool(read_only)
         env_seed = os.getenv("SUPER_AGENT_ENTITY_SEED_FILE", "").strip()
         self._seed_file = Path(seed_file or env_seed).expanduser() if (seed_file or env_seed) else None
         self._seed_entities = list(seed_entities) if seed_entities is not None else None
         self._seed_rules = list(seed_rules) if seed_rules is not None else None
         self._auto_seed = bool(auto_seed)
+        if self._read_only and self.db_path.is_file():
+            return
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
+        if self._read_only and self.db_path.is_file():
+            try:
+                conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=5.0)
+                conn.row_factory = sqlite3.Row
+                conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+                return conn
+            except sqlite3.OperationalError:
+                try:
+                    conn.close()  # type: ignore[possibly-undefined]
+                except Exception:
+                    pass
+                conn = sqlite3.connect(f"file:{self.db_path}?immutable=1", uri=True, timeout=5.0)
+                conn.row_factory = sqlite3.Row
+                return conn
         conn = sqlite3.connect(str(self.db_path), timeout=5.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL")

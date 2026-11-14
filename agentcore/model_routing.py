@@ -41,6 +41,9 @@ EXECUTION_ROLES: Final[frozenset[str]] = frozenset({
     "test",
     "cases",
     "ops",
+    "replay",
+    "atai",
+    "dev",
     "docs",
     "worker",
     "runner",
@@ -108,6 +111,11 @@ MODEL_ROLES: Final[Tuple[str, ...]] = (
     "reviewer",
     "test",
     "triage",
+    "ops",
+    "replay",
+    "maintainer",
+    "atai",
+    "dev",
     "research",
     "brain",
     "planning",
@@ -118,7 +126,6 @@ MODEL_ROLES: Final[Tuple[str, ...]] = (
     "design_visual",
     "docs",
     "dev_runner",
-    "ops",
     "compression",
     "memory",
     "context_compaction",
@@ -164,14 +171,18 @@ ROLE_PROFILE_DEFAULTS: Final[Dict[str, Dict[str, str]]] = {
     "deep_diagnosis": {"depth": "ultrabrain", "effort": "high", "tier": "ultrabrain"},
     "reviewer": {"depth": "deep", "effort": "high", "tier": "deep"},
     "triage": {"depth": "deep", "effort": "high", "tier": "deep"},
+    "maintainer": {"depth": "deep", "effort": "high", "tier": "deep"},
     "compression": {"depth": "deep", "effort": "medium", "tier": "deep"},
     "memory": {"depth": "deep", "effort": "medium", "tier": "deep"},
     "context_compaction": {"depth": "deep", "effort": "medium", "tier": "deep"},
     "cases": {"depth": "standard", "effort": "medium", "tier": "standard"},
+    "replay": {"depth": "standard", "effort": "medium", "tier": "standard"},
+    "dev": {"depth": "standard", "effort": "medium", "tier": "standard"},
     "implementation": {"depth": "standard", "effort": "medium", "tier": "standard"},
     "research": {"depth": "standard", "effort": "medium", "tier": "standard"},
     "docs": {"depth": "standard", "effort": "low", "tier": "quick"},
     "test": {"depth": "shallow", "effort": "low", "tier": "quick"},
+    "atai": {"depth": "shallow", "effort": "low", "tier": "quick"},
     "dev_runner": {"depth": "shallow", "effort": "low", "tier": "quick"},
     "ops": {"depth": "shallow", "effort": "off", "tier": "quick"},
 }
@@ -204,12 +215,16 @@ BUILTIN_ROLE_CHAINS: Final[Dict[str, Dict[str, Tuple[Dict[str, str], ...]]]] = {
             {"model": "main", "effort": "high"},
         ),
         "reviewer": (
+            {"model": "pro", "effort": "high"},
             {"model": "main", "effort": "high"},
-            {"model": "flash", "effort": "medium"},
         ),
         "triage": (
+            {"model": "pro", "effort": "high"},
             {"model": "main", "effort": "high"},
-            {"model": "flash", "effort": "medium"},
+        ),
+        "maintainer": (
+            {"model": "pro", "effort": "high"},
+            {"model": "main", "effort": "high"},
         ),
         "compression": (
             {"model": "main", "effort": "medium"},
@@ -223,6 +238,15 @@ BUILTIN_ROLE_CHAINS: Final[Dict[str, Dict[str, Tuple[Dict[str, str], ...]]]] = {
         "cases": (
             {"model": "flash", "effort": "medium"},
             {"model": "main", "effort": "low"},
+        ),
+        "replay": (
+            {"model": "flash", "effort": "medium"},
+        ),
+        "atai": (
+            {"model": "flash", "effort": "low"},
+        ),
+        "dev": (
+            {"model": "flash", "effort": "medium"},
         ),
         "implementation": (
             {"model": "flash", "effort": "medium"},

@@ -62,7 +62,8 @@ class LocalModelClient:
 
     def __init__(self, base_url: str, *, token: str = "", token_file: str = "",
                  timeout: float = 10.0, decider_backend: str = "gateway",
-                 model_name: str = "local-judge-decider4b") -> None:
+                 model_name: str = "local-judge-decider4b",
+                 cooldown_s: float = 60.0) -> None:
         self.base_url = (base_url or "").strip().rstrip("/")
         self.token = read_token(token, token_file)
         self.decider_backend = (decider_backend or "gateway").strip().lower()
@@ -73,6 +74,11 @@ class LocalModelClient:
             self.timeout = 10.0
         if self.timeout <= 0:
             self.timeout = 10.0
+        try:
+            self.cooldown_s = max(0.0, float(cooldown_s))
+        except (TypeError, ValueError):
+            self.cooldown_s = 60.0
+        self._unavailable_until: float = 0.0
 
     @property
     def configured(self) -> bool:
@@ -82,6 +88,8 @@ class LocalModelClient:
               timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
         if not self.base_url:
             return None
+        if self.cooldown_s > 0.0 and time.monotonic() < self._unavailable_until:
+            return None
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(self.base_url + path, data=body, method="POST")
         request.add_header("Content-Type", "application/json")
@@ -90,8 +98,14 @@ class LocalModelClient:
         try:
             with _OPENER.open(request, timeout=timeout or self.timeout) as resp:
                 raw = resp.read().decode("utf-8", errors="replace")
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+        except urllib.error.HTTPError:
+            self._unavailable_until = 0.0
             return None
+        except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+            if self.cooldown_s > 0.0:
+                self._unavailable_until = time.monotonic() + self.cooldown_s
+            return None
+        self._unavailable_until = 0.0
         try:
             parsed = json.loads(raw) if raw.strip() else {}
         except ValueError:

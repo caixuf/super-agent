@@ -2495,6 +2495,45 @@ def _colleague_queue_workers_observation(profile_home: Path, profile: str, root:
     }
 
 
+def _dangling_worker_unit_paths(profile: str) -> list[dict[str, str]]:
+    """Detect user systemd worker units whose PYTHONPATH/DEV_ENGINE_ROOT points at missing release dirs."""
+    import re
+
+    unit_dir = Path.home() / ".config" / "systemd" / "user"
+    if not unit_dir.is_dir():
+        return []
+    pattern = re.compile(r"^\s*Environment=(?:\"([^\"]+)\"|(.+))\s*$")
+    dangling: list[dict[str, str]] = []
+    for unit_path in sorted(unit_dir.glob(f"superagent-worker-{profile}*.service")):
+        if unit_path.is_dir():
+            continue
+        try:
+            text = unit_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for raw_line in text.splitlines():
+            m = pattern.match(raw_line)
+            if not m:
+                continue
+            kv = (m.group(1) or m.group(2) or "").strip()
+            if "=" not in kv:
+                continue
+            key, val = kv.split("=", 1)
+            if key not in ("PYTHONPATH", "DEV_ENGINE_ROOT"):
+                continue
+            for entry in val.split(os.pathsep):
+                entry = entry.strip()
+                if not entry or not Path(entry).is_absolute():
+                    continue
+                if "/releases/" in entry and not Path(entry).exists():
+                    dangling.append({
+                        "unit": unit_path.name,
+                        "env": key,
+                        "missing_path": entry,
+                    })
+    return dangling
+
+
 def doctor(args: argparse.Namespace) -> int:
     found = _manifest(args)
     if found is None:
@@ -2523,7 +2562,10 @@ def doctor(args: argparse.Namespace) -> int:
     version_observation = _deploy_version_observation(manifest, current, args.profile)
     worker_queue_observation = _worker_queue_health_observation(root, manifest.get("installed_at"))
     colleague_workers_observation = _colleague_queue_workers_observation(profile_home, args.profile, root)
+    dangling_worker_paths = _dangling_worker_unit_paths(args.profile)
     reasons = list(version_observation.get("reasons", []))
+    if dangling_worker_paths:
+        reasons.append("dangling_worker_unit_paths")
     if worker_queue_observation.get("healthy") is False:
         if worker_queue_observation.get("card_outbox_unknown", 0) > 0:
             reasons.append("card_outbox_unknown_requires_reconciliation")
@@ -2555,6 +2597,7 @@ def doctor(args: argparse.Namespace) -> int:
                       "runtime_observation": _gateway_runtime_observation(
                           args.profile, manifest.get("hermes_root")),
                       "worker_observation": _worker_runtime_observation(args.profile, current),
+                      "dangling_worker_unit_paths": dangling_worker_paths,
                       "worker_queue_observation": worker_queue_observation,
                       "colleague_workers_observation": colleague_workers_observation,
                       "browser_observation": _browser_observation(current.resolve() if current.exists() else root),

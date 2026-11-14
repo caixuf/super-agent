@@ -205,3 +205,37 @@ def test_default_memory_source_never_falls_back_to_another_profile(tmp_path, mon
     assert _find_default_memory_file() is None
     monkeypatch.setenv("SUPER_AGENT_MEMORY_FILE", str(other))
     assert _find_default_memory_file() == other.resolve()
+
+
+def test_entity_store_and_cli_read_only_directory_immutable_fallback(tmp_path):
+    import os
+    ro_dir = tmp_path / "ro_db_dir"
+    ro_dir.mkdir()
+    db_file = ro_dir / "entity_rules.db"
+    EntityStore(db_path=db_file)
+
+    ro_dir.chmod(0o555)
+    db_file.chmod(0o444)
+    try:
+        # In-process read_only fallback handles WAL db inside read-only dir (like bwrap)
+        store = EntityStore(db_path=db_file, auto_seed=False, read_only=True)
+        hits = store.recall("灌灌 3090 掉了怎么办", limit=2)
+        assert len(hits) >= 1
+        assert any("3090" in h["statement"] for h in hits)
+
+        # CLI recall_entity.py returns clean JSON without writing to ro_dir
+        repo_root = Path(__file__).resolve().parents[1]
+        cli_path = repo_root / "tools" / "recall_entity.py"
+        proc = subprocess.run(
+            [sys.executable, str(cli_path), "调度", "--limit", "2", "--db", str(db_file)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert proc.returncode == 0
+        payload = json.loads(proc.stdout)
+        assert payload["ok"] is True
+        assert payload["count"] >= 1
+    finally:
+        ro_dir.chmod(0o755)
+        db_file.chmod(0o644)

@@ -358,6 +358,39 @@ def test_wrap_with_bwrap_sandbox_binds_meegle_and_markdown_outbox_rw(monkeypatch
     assert "--bind" in wrapped
 
 
+def test_wrap_with_bwrap_sandbox_binds_extra_writable_paths_env(monkeypatch, tmp_path):
+    module = _module()
+    from agentcore.colleague_containment import AttemptBoundSandboxAdapter
+
+    if not AttemptBoundSandboxAdapter.is_bwrap_functional():
+        import pytest
+        pytest.skip("bwrap not functional in this environment")
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    extra_ws = tmp_path / "imfl_workspace"
+    extra_ws.mkdir()
+    extra_rep = tmp_path / "imfl_reports"
+    extra_rep.mkdir()
+    workdir = tmp_path / "repo"
+    workdir.mkdir()
+    attempt_dir = tmp_path / "attempts" / ("e" * 32)
+    attempt_dir.mkdir(parents=True)
+
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("SUPERAGENT_ENABLE_BWRAP", "1")
+    monkeypatch.setenv("SUPERAGENT_ATTEMPT_DIR", str(attempt_dir))
+    monkeypatch.setenv("DEV_EXTRA_WRITABLE_PATHS", f"{extra_ws}:{extra_rep}:{tmp_path / 'nonexistent'}")
+    monkeypatch.setattr(module, "_workdir", lambda: workdir)
+
+    wrapped, meta = module._wrap_with_bwrap_sandbox(["echo", "ok"], route={"role": "cases"})
+    assert meta is not None and meta["backend"] == "bwrap"
+    binds = set(meta["audit_log"][-1]["writable_binds"])
+    assert str(extra_ws.resolve()) in binds
+    assert str(extra_rep.resolve()) in binds
+    assert "--bind" in wrapped
+
+
 def test_compact_summary_preserves_conclusion_and_table_and_points_to_artifact(tmp_path):
     module = _module()
     short = "**结论**：全部通过。"

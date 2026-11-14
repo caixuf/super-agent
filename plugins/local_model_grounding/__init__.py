@@ -159,6 +159,7 @@ class Grounding:
             timeout=ctx.get_config("timeout", 10.0),
             decider_backend=str(ctx.get_config("decider_backend", "gateway") or "gateway"),
             model_name=str(ctx.get_config("decider_model", "local-judge-decider4b") or "local-judge-decider4b"),
+            cooldown_s=ctx.get_config("cooldown_s", 60.0),
         )
         self.audit_path = str(ctx.get_config("audit_path", "") or "")
         self.index_dir = str(ctx.get_config("index_dir", "") or "")

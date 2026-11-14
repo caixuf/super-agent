@@ -127,7 +127,24 @@ def main() -> int:
 
     t0 = time.monotonic()
     try:
-        store = EntityStore(db_path=db_path)
+        resolved_db = Path(db_path).expanduser() if db_path else None
+        if resolved_db is not None and resolved_db.is_file():
+            store = EntityStore(db_path=resolved_db, auto_seed=False, read_only=True)
+        elif resolved_db is not None and not resolved_db.exists():
+            parent_writable = resolved_db.parent.exists() and os.access(resolved_db.parent, os.W_OK)
+            if not parent_writable:
+                json.dump(
+                    {"ok": True, "results": [], "latency_ms": 0.0, "count": 0},
+                    sys.stdout,
+                    ensure_ascii=False,
+                )
+                sys.stdout.write("\n")
+                if diagnostic_file:
+                    _write_diagnostic(diagnostic_file, "no_match", 0)
+                return 0
+            store = EntityStore(db_path=resolved_db)
+        else:
+            store = EntityStore(db_path=db_path)
         results = store.recall(q, limit=limit)
         elapsed_ms = (time.monotonic() - t0) * 1000.0
 

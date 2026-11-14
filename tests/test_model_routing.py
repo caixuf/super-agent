@@ -98,10 +98,31 @@ class ModelRoutingTests(unittest.TestCase):
         self.assertTrue(route["degraded"])
 
     def test_s1_pro_tier_for_key_cognitive_roles(self) -> None:
-        for role in ("architect", "planning", "reviewer", "triage", "deep_diagnosis"):
+        for role in ("architect", "planning", "reviewer", "triage", "maintainer", "deep_diagnosis"):
             route = resolve_colleague_model(role, "pro")
             self.assertEqual(route["selected_model"], TIER_PRO)
             self.assertFalse(route["degraded"])
+
+    def test_all_ten_colleague_roles_resolve_without_degradation(self) -> None:
+        expected = {
+            "architect": TIER_PRO,
+            "reviewer": TIER_PRO,
+            "triage": TIER_PRO,
+            "maintainer": TIER_PRO,
+            "cases": TIER_FLASH,
+            "test": TIER_FLASH,
+            "ops": TIER_FLASH,
+            "replay": TIER_FLASH,
+            "atai": TIER_FLASH,
+            "dev": TIER_FLASH,
+        }
+        for role, exp_tier in expected.items():
+            default_route = resolve_colleague_model(role, "")
+            self.assertEqual(default_route["selected_model"], exp_tier, f"Default tier mismatch for {role}")
+            self.assertFalse(default_route["degraded"], f"Default route degraded unexpectedly for {role}")
+            explicit_route = resolve_colleague_model(role, exp_tier)
+            self.assertEqual(explicit_route["selected_model"], exp_tier, f"Explicit tier mismatch for {role}")
+            self.assertFalse(explicit_route["degraded"], f"Explicit route degraded unexpectedly for {role}")
 
     def test_s2_degradation_visibility_in_routing_and_completion(self) -> None:
         downgraded = resolve_colleague_model("ops", "pro")

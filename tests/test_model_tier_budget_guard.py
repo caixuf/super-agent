@@ -110,21 +110,18 @@ class ModelTierBudgetGuardTests(unittest.TestCase):
         r_plan = resolve_model_route("super-agent", role="planning")
         self.assertEqual(r_plan["selected_model"], TIER_PRO)
 
-        # Conversation / review roles resolve to main
-        r_triage = resolve_model_route("super-agent", role="triage")
-        self.assertEqual(r_triage["selected_model"], TIER_MAIN)
-        self.assertEqual(r_triage["selected_tier"], "deep")
-
-        r_rev = resolve_model_route("super-agent", role="reviewer")
-        self.assertEqual(r_rev["selected_model"], TIER_MAIN)
+        # Cognitive review, triage, and maintenance roles resolve to pro
+        for cog_role in ("reviewer", "triage", "maintainer"):
+            r_cog = resolve_model_route("super-agent", role=cog_role)
+            self.assertEqual(r_cog["selected_model"], TIER_PRO, f"Role {cog_role} should route to pro")
+            self.assertEqual(r_cog["selected_tier"], "ultrabrain")
 
         # Heavy execution roles resolve to flash
-        r_cases = resolve_model_route("super-agent", role="cases")
-        self.assertEqual(r_cases["selected_model"], TIER_FLASH)
-        self.assertEqual(r_cases["selected_tier"], "quick")
-
-        r_test = resolve_model_route("super-agent", role="test")
-        self.assertEqual(r_test["selected_model"], TIER_FLASH)
+        for exec_role in ("cases", "test", "ops", "replay", "atai", "dev"):
+            r_exec = resolve_model_route("super-agent", role=exec_role)
+            self.assertEqual(r_exec["selected_model"], TIER_FLASH, f"Role {exec_role} should route to flash")
+            self.assertEqual(r_exec["selected_tier"], "quick")
+            self.assertFalse(r_exec["degraded"], f"Role {exec_role} should not degrade")
 
         # Profile default fallback resolves to main
         r_default = resolve_model_route("super-agent")
