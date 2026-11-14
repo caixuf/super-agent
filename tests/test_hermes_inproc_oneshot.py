@@ -99,3 +99,54 @@ def test_continue_incomplete_backend_turn_marks_partial_when_still_narration():
     assert merged["partial"] is True
     assert merged["turn_exit_reason"] == "incomplete_narration"
     assert merged["api_calls"] == 4
+
+
+def test_continue_incomplete_backend_turn_recovers_from_guardrail_halt():
+    agent = MagicMock()
+    agent.run_conversation.return_value = {
+        "completed": True,
+        "final_response": "**结论**：emily 9900 当前健康。",
+        "turn_exit_reason": "stop",
+        "messages": [],
+        "api_calls": 2,
+    }
+    initial = {
+        "completed": True,
+        "final_response": "I stopped retrying because I kept running search_files 4 times without making progress. Tell me how you'd like to proceed, or send `continue` and I'll try a different approach.",
+        "turn_exit_reason": "guardrail_halt",
+        "messages": [],
+        "api_calls": 29,
+    }
+    merged = oneshot._continue_incomplete_backend_turn(agent, initial)
+    agent.run_conversation.assert_called_once_with(
+        oneshot._GUARDRAIL_HALT_NUDGE,
+        conversation_history=[],
+    )
+    assert merged["completed"] is True
+    assert merged["final_response"].startswith("**结论**")
+    assert merged["api_calls"] == 31
+
+
+def test_continue_incomplete_backend_turn_replaces_english_guardrail_fallback():
+    agent = MagicMock()
+    agent.run_conversation.return_value = {
+        "completed": True,
+        "final_response": "I stopped retrying because I kept running search_files 4 times without making progress. Tell me how you'd like to proceed, or send `continue` and I'll try a different approach.",
+        "turn_exit_reason": "guardrail_halt",
+        "messages": [],
+        "api_calls": 1,
+    }
+    initial = {
+        "completed": True,
+        "final_response": "I stopped retrying because I kept running search_files 4 times without making progress. Tell me how you'd like to proceed, or send `continue` and I'll try a different approach.",
+        "turn_exit_reason": "guardrail_halt",
+        "messages": [],
+        "api_calls": 4,
+    }
+    merged = oneshot._continue_incomplete_backend_turn(agent, initial)
+    assert agent.run_conversation.call_count == 1
+    assert merged["completed"] is False
+    assert merged["partial"] is True
+    assert merged["turn_exit_reason"] == "guardrail_halt"
+    assert merged["final_response"] == oneshot._GUARDRAIL_HALT_FALLBACK
+    assert merged["api_calls"] == 5

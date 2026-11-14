@@ -30,6 +30,15 @@ _BACKEND_CONTINUATION_NUDGE = (
     "请不要停留在过程播报；请立即执行上述下一步工具操作，"
     "并在完成后直接输出面向用户的完整最终结论与结果报告。"
 )
+_GUARDRAIL_HALT_NUDGE = (
+    "检测到只读工具重复调用无进展而触发了守护中断。禁止再重复调用刚才的只读工具；"
+    "请立即改用其他直接手段（例如用 terminal 执行目标命令，或基于已获取的信息整理交付），"
+    "若某项确实无法取得则如实标注未取得，直接输出最终中文结论。"
+)
+_GUARDRAIL_HALT_FALLBACK = (
+    "后台任务因只读工具连续重复调用无进展触发守护中断，未能形成最终结论；"
+    "请缩小范围或换用明确命令后重试。"
+)
 _SUMMED_USAGE_KEYS = (
     "api_calls",
     "input_tokens",
@@ -100,6 +109,15 @@ def _merge_continuation_result(base: dict, nxt: dict) -> dict:
     return merged
 
 
+def _is_guardrail_halt_result(result: dict) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if result.get("turn_exit_reason") == "guardrail_halt":
+        return True
+    text = str(result.get("final_response") or "").strip()
+    return "I stopped retrying because I kept running" in text and "send `continue`" in text
+
+
 def _continue_incomplete_backend_turn(
     agent,
     result: dict,
@@ -108,6 +126,20 @@ def _continue_incomplete_backend_turn(
 ) -> dict:
     """Nudge an unattended worker turn that stopped mid-step; mark partial if still narration."""
     current = dict(result or {})
+    if (
+        max_continuations > 0
+        and current.get("completed") is True
+        and not current.get("failed")
+        and not current.get("partial")
+        and not current.get("interrupted")
+        and _is_guardrail_halt_result(current)
+    ):
+        nxt = agent.run_conversation(
+            _GUARDRAIL_HALT_NUDGE,
+            conversation_history=current.get("messages"),
+        )
+        if isinstance(nxt, dict):
+            current = _merge_continuation_result(current, nxt)
     attempts = 0
     while (
         attempts < max_continuations
@@ -126,6 +158,17 @@ def _continue_incomplete_backend_turn(
             break
         current = _merge_continuation_result(current, nxt)
     if (
+        current.get("completed") is True
+        and not current.get("failed")
+        and not current.get("partial")
+        and not current.get("interrupted")
+        and _is_guardrail_halt_result(current)
+    ):
+        current["completed"] = False
+        current["partial"] = True
+        current["turn_exit_reason"] = "guardrail_halt"
+        current["final_response"] = _GUARDRAIL_HALT_FALLBACK
+    elif (
         current.get("completed") is True
         and not current.get("failed")
         and not current.get("partial")

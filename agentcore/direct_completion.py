@@ -143,7 +143,7 @@ class DirectCompletionTransport:
             if row:
                 db.execute("UPDATE operations SET state='sending' WHERE key=?", (key,))
             else:
-                db.execute("INSERT INTO operations VALUES(?,?,'sending',NULL)", (key, payload))
+                db.execute("INSERT INTO operations(key, payload, state, receipt_id) VALUES(?,?,'sending',NULL)", (key, payload))
         try:
             response = self.sender(address, item, idempotency_key=key)
         except Exception:

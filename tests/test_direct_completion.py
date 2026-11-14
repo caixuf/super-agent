@@ -313,3 +313,37 @@ def test_presend_not_sent_releases_outbox_lease_for_healthy_consumer(tmp_path):
     assert pool.delivery_record(job)['acknowledged'] == 1
 
 
+def test_direct_completion_supports_legacy_six_column_operations_table(tmp_path):
+    delivery_dir = tmp_path / 'delivery'
+    delivery_dir.mkdir(parents=True, exist_ok=True)
+    db_path = delivery_dir / 'delivery.db'
+    import sqlite3
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            'CREATE TABLE operations ('
+            'key TEXT PRIMARY KEY, payload TEXT NOT NULL, state TEXT NOT NULL, '
+            'receipt_id TEXT, attempts INTEGER NOT NULL DEFAULT 0, updated_at REAL NOT NULL DEFAULT 0)'
+        )
+        db.execute('CREATE TABLE plans (key TEXT PRIMARY KEY, request TEXT NOT NULL, plan TEXT NOT NULL)')
+
+    transport = DirectCompletionTransport(
+        delivery_dir,
+        profile='owner',
+        sender=lambda addr, item, *, idempotency_key: {'ok': True, 'message_id': 'om_123'},
+        render=lambda m: m['summary'],
+        attempt_root=tmp_path / 'attempts',
+        attempt_provider=lambda j: ATTEMPT,
+        card=True,
+    )
+    res = transport.deliver(
+        ADDRESS,
+        dict(task_id='task-1', status='completed', summary='ok', artifacts=[]),
+        idempotency_key='task-1',
+    )
+    assert res['accepted'] is True
+    with sqlite3.connect(db_path) as db:
+        rows = db.execute('SELECT state, receipt_id FROM operations').fetchall()
+    assert rows == [('sent', 'om_123')]
+
+
+
