@@ -31,6 +31,42 @@ import threading
 import time
 from typing import Any
 
+try:
+    from agentcore.delivery_sanitizer import (
+        repair_headerless_pipe_tables,
+        strip_leaked_model_tokens,
+    )
+except ImportError:
+    _repo_candidate = Path(__file__).resolve().parents[2]
+    if str(_repo_candidate) not in sys.path:
+        sys.path.insert(0, str(_repo_candidate))
+    try:
+        from agentcore.delivery_sanitizer import (
+            repair_headerless_pipe_tables,
+            strip_leaked_model_tokens,
+        )
+    except ImportError:
+        _TOKEN_RE_FALLBACK = re.compile(r"<\|[A-Za-z0-9_.:/-]{1,64}\|>")
+
+        def strip_leaked_model_tokens(text: str) -> str:
+            if not isinstance(text, str) or "<|" not in text:
+                return text
+            out: list[str] = []
+            for ln in text.splitlines():
+                m = re.match(r"^([ \t]*)(?:<\|[A-Za-z0-9_.:/-]{1,64}\|>[ \t]*)+(.*)$", ln)
+                if m:
+                    indent, rest = m.group(1), _TOKEN_RE_FALLBACK.sub("", m.group(2)).strip()
+                    if "|" in rest and not rest.startswith("|"):
+                        out.append(f"{indent}| {rest}")
+                    elif rest:
+                        out.append(f"{indent}{rest}")
+                else:
+                    out.append(_TOKEN_RE_FALLBACK.sub("", ln))
+            return "\n".join(out)
+
+        def repair_headerless_pipe_tables(text: str) -> str:
+            return text
+
 MAX_INPUT = 131072
 MAX_GOAL = 12000
 MAX_OUTPUT = 32768
@@ -502,7 +538,8 @@ def _harvest_attempt_artifacts(summary: str, checkpoint_data: dict | None = None
             report_file = resolved_attempt / "任务执行报告.md"
             if not report_file.exists():
                 try:
-                    report_file.write_text(summary.strip(), encoding="utf-8")
+                    clean_report = repair_headerless_pipe_tables(strip_leaked_model_tokens(summary.strip()))
+                    report_file.write_text(clean_report, encoding="utf-8")
                     staged.append(str(report_file))
                     seen_names.add(report_file.name)
                 except Exception:
@@ -512,11 +549,24 @@ def _harvest_attempt_artifacts(summary: str, checkpoint_data: dict | None = None
 
 
 _COMPACT_SUMMARY_LIMIT = 800
+_PIPE_DIVIDER_CELL_RE = re.compile(r"^:?-{1,}:?$")
+
+
+def _is_pipe_row_line(line: str) -> bool:
+    s = line.strip()
+    return s.startswith("|") and "|" in s[1:]
+
+
+def _is_pipe_divider_line(line: str) -> bool:
+    if not _is_pipe_row_line(line):
+        return False
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    return bool(cells) and all(_PIPE_DIVIDER_CELL_RE.fullmatch(c) for c in cells) and any("--" in c for c in cells)
 
 
 def _compact_summary(summary: str, artifacts: list[str] | None = None, *, limit: int = _COMPACT_SUMMARY_LIMIT) -> str:
     """Keep chat-facing summary concise (conclusion + first table + artifact pointer)."""
-    text = (summary or "").strip()
+    text = repair_headerless_pipe_tables(strip_leaked_model_tokens((summary or "").strip()))
     if len(text) <= limit:
         return text
 
@@ -529,39 +579,82 @@ def _compact_summary(summary: str, artifacts: list[str] | None = None, *, limit:
             if head_lines:
                 break
             continue
-        if s.startswith("|") or s.startswith("```"):
+        if s.startswith("|") or s.startswith("```") or s.startswith("~~~"):
             break
         head_lines.append(s)
         if sum(len(x) + 1 for x in head_lines) >= 260:
             break
     head = "\n".join(head_lines)[:280]
 
-    # 2. Extract the first Markdown table if one exists
+    # 2. Extract the first valid Markdown table (header + divider + >=1 data row) outside fenced code blocks
     table_lines: list[str] = []
-    in_table = False
-    for ln in lines:
-        s = ln.strip()
-        if s.startswith("|") and "|" in s[1:]:
-            in_table = True
-            table_lines.append(s)
-            if len(table_lines) >= 10:
+    active_fence = ""
+    n_lines = len(lines)
+    for idx in range(n_lines):
+        s = lines[idx].strip()
+        if active_fence:
+            if len(s) >= len(active_fence) and set(s) == {active_fence[0]}:
+                active_fence = ""
+            continue
+        if s.startswith("```"):
+            active_fence = "```"
+            continue
+        if s.startswith("~~~"):
+            active_fence = "~~~"
+            continue
+        if idx + 2 < n_lines:
+            hdr = lines[idx].strip()
+            div = lines[idx + 1].strip()
+            row0 = lines[idx + 2].strip()
+            if (
+                _is_pipe_row_line(hdr)
+                and not _is_pipe_divider_line(hdr)
+                and _is_pipe_divider_line(div)
+                and _is_pipe_row_line(row0)
+                and not _is_pipe_divider_line(row0)
+            ):
+                table_lines = [hdr, div, row0]
+                for j in range(idx + 3, min(n_lines, idx + 10)):
+                    nxt = lines[j].strip()
+                    if not _is_pipe_row_line(nxt) or _is_pipe_divider_line(nxt):
+                        break
+                    table_lines.append(nxt)
                 break
-        elif in_table:
-            break
-    table = "\n".join(table_lines) if len(table_lines) >= 3 else ""
 
     doc_names = [Path(a).name for a in (artifacts or []) if str(a).lower().endswith((".md", ".markdown", ".html", ".pdf", ".docx"))]
     footer = f"详见附件：{doc_names[0]}" if doc_names else "（长文已精简，完整内容见任务附件）"
+    max_body = max(200, limit - len(footer) - 2)
+
+    # Shrink over-budget table by dropping trailing data rows rather than truncating mid-row
+    while len(table_lines) > 3:
+        candidate = (f"{head}\n\n" if head else "") + "\n".join(table_lines)
+        if len(candidate) <= max_body:
+            break
+        table_lines.pop()
+
+    table = "\n".join(table_lines) if len(table_lines) >= 3 else ""
+    if table:
+        combined = f"{head}\n\n{table}" if head else table
+        if len(combined) > max_body:
+            if head:
+                avail_head = max_body - 2 - len(table)
+                if avail_head >= 80:
+                    head = head[: avail_head - 3].rstrip() + "..."
+                elif len(table) <= max_body:
+                    head = ""
+                else:
+                    table = ""
+            else:
+                table = ""
 
     parts = [p for p in (head, table) if p]
     if not parts:
-        body = text[: max(120, limit - len(footer) - 8)].rstrip() + "..."
+        body = text[: max(120, max_body - 3)].rstrip() + "..."
         return f"{body}\n\n{footer}"
 
     body = "\n\n".join(parts)
-    max_body = max(200, limit - len(footer) - 2)
-    if len(body) > max_body:
-        body = body[: max_body - 3].rstrip() + "..."
+    if not table and len(body) > max_body:
+        body = body[: max(120, max_body - 3)].rstrip() + "..."
     return f"{body}\n\n{footer}"
 
 

@@ -2,7 +2,13 @@ import os
 import tempfile
 from pathlib import Path
 import pytest
-from agentcore.delivery_sanitizer import sanitize_and_extract_artifacts
+from agentcore.delivery_sanitizer import (
+    repair_headerless_pipe_tables,
+    sanitize_and_extract_artifacts,
+    sanitize_card_text,
+    strip_leaked_model_tokens,
+    unwrap_and_unescape_text,
+)
 
 
 def test_no_paths():
@@ -127,3 +133,54 @@ def test_sanitize_directory_and_extensionless_paths():
     assert ".../core_dump" in sanitized
     assert (".../code/super-agent" in sanitized or f".../code/{domain}_super_agent" in sanitized)
     assert len(artifacts) == 0
+
+
+def test_strip_leaked_model_tokens_restores_pipe_table_and_preserves_fences():
+    raw = (
+        "<|channel|> 结论：全部正常。\n\n"
+        "<|channel|> 项 | 结果 |\n"
+        "|---|---|\n"
+        "| disk | 33% <|eot_id|> |\n\n"
+        "```text\n"
+        "<|channel|> keep inside code fence\n"
+        "```\n"
+    )
+    cleaned = strip_leaked_model_tokens(raw)
+    assert "<|channel|> 结论" not in cleaned
+    assert "<|eot_id|>" not in cleaned
+    assert "结论：全部正常。" in cleaned
+    assert "| 项 | 结果 |" in cleaned
+    assert "| disk | 33% |" in cleaned
+    assert "<|channel|> keep inside code fence" in cleaned
+
+
+def test_repair_headerless_pipe_tables_handles_orphan_half_piped_and_fenced():
+    from agentcore.card_markdown import build_card_elements
+
+    orphan = "结论：ok\n|---|---|\n| cpu | 12% |\n| mem | 40% |"
+    repaired_orphan = repair_headerless_pipe_tables(orphan)
+    assert "| 项目 | 结果 |\n|---|---|\n| cpu | 12% |" in repaired_orphan
+    assert any(el.get("tag") == "table" for el in build_card_elements(repaired_orphan))
+
+    half_piped = "项 | 结果 |\n|---|---|\n| disk | 33%"
+    repaired_half = repair_headerless_pipe_tables(half_piped)
+    assert "| 项 | 结果 |\n|---|---|\n| disk | 33% |" in repaired_half
+    assert any(el.get("tag") == "table" for el in build_card_elements(repaired_half))
+
+    fenced = "```markdown\n|---|---|\n| a | b |\n```"
+    assert repair_headerless_pipe_tables(fenced) == fenced
+
+
+def test_unwrap_and_sanitize_card_text_7de05905_renders_cardkit_table():
+    from agentcore.card_markdown import build_card_elements
+
+    raw_output = (
+        '{"summary": "**结论**：健康。\\n\\n<|channel|> 项 | 结果 |\\n|---|---|\\n'
+        '| guanguan 根分区 `/` | 33%（141G/457G 已用，294G 可用） |\\n'
+        '| emily 9900 health | HTTP 200 |"}'
+    )
+    sanitized = sanitize_card_text(raw_output)
+    assert "<|channel|>" not in sanitized
+    assert "| 项 | 结果 |" in sanitized
+    assert any(el.get("tag") == "table" for el in build_card_elements(sanitized))
+

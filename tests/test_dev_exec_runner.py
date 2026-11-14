@@ -408,3 +408,51 @@ def test_compact_summary_preserves_conclusion_and_table_and_points_to_artifact(t
     assert "详见附件：任务执行报告.md" in compact
 
 
+def test_compact_summary_and_harvest_repair_7de05905_leaked_token_table(tmp_path, monkeypatch):
+    from agentcore.card_markdown import build_card_elements
+
+    module = _module()
+    raw_7de05905 = (
+        "结论：根分区使用率 33%，emily 9900 健康。\n\n"
+        "<|channel|> 项 | 结果 |\n"
+        "|---|---|\n"
+        "| guanguan 根分区 `/` | 33%（141G/457G 已用，294G 可用） |\n"
+        "| superagent-worker-imfl.service | 单元不存在（应加 `--user` 查询） |\n"
+        "| emily 9900 health | HTTP 200，service=imfl_autotest_server |\n"
+        "| 最近 2 任务 | queued: imfl-20261113-173002-354e56f |\n\n"
+        + ("详细排查过程输出。\n" * 120)
+    )
+    attempt_dir = tmp_path / "attempt_7de05905"
+    attempt_dir.mkdir()
+    monkeypatch.setenv("SUPERAGENT_ATTEMPT_DIR", str(attempt_dir))
+    harvested = module._harvest_attempt_artifacts(raw_7de05905)
+    assert len(harvested) == 1
+    report_text = Path(harvested[0]).read_text(encoding="utf-8")
+    assert "<|channel|>" not in report_text
+    assert "| 项 | 结果 |" in report_text
+
+    compact = module._compact_summary(raw_7de05905, harvested, limit=320)
+    assert "<|channel|>" not in compact
+    assert not compact.lstrip().startswith("|---|---|")
+    assert "| 项 | 结果 |" in compact
+    assert "详见附件：任务执行报告.md" in compact
+    # No mid-row ellipsis truncation inside table rows
+    for ln in compact.splitlines():
+        if ln.strip().startswith("|"):
+            assert not ln.strip().endswith("...")
+    elements = build_card_elements(compact)
+    assert any(el.get("tag") == "table" for el in elements)
+
+
+def test_compact_summary_repairs_short_orphan_headerless_table():
+    from agentcore.card_markdown import build_card_elements
+
+    module = _module()
+    short_orphan = "结论：ok\n\n|---|---|\n| cpu | 12% |\n| mem | 40% |"
+    compact = module._compact_summary(short_orphan, [])
+    assert "| 项目 | 结果 |\n|---|---|" in compact
+    elements = build_card_elements(compact)
+    assert any(el.get("tag") == "table" for el in elements)
+
+
+

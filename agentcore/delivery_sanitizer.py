@@ -124,6 +124,234 @@ def sanitize_and_extract_artifacts(
     return sanitized, artifacts
 
 
+_LEAKED_MODEL_TOKEN_RE = re.compile(r"<\|[A-Za-z0-9_.:/-]{1,64}\|>")
+_LEADING_MODEL_TOKEN_RE = re.compile(r"^([ \t]*)(?:<\|[A-Za-z0-9_.:/-]{1,64}\|>[ \t]*)+")
+_FENCE_OPEN_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+_DIVIDER_CELL_RE = re.compile(r"^:?-{1,}:?$")
+
+
+def _fence_close_matches(stripped: str, active_fence: str) -> bool:
+    return bool(active_fence) and len(stripped) >= len(active_fence) and set(stripped) == {active_fence[0]}
+
+
+def _split_pipe_cells(raw_line: str) -> Optional[List[str]]:
+    s = raw_line.strip()
+    if "|" not in s:
+        return None
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [cell.strip() for cell in s.split("|")]
+
+
+def _parse_pipe_divider(raw_line: str) -> Optional[int]:
+    s = raw_line.strip()
+    if "|" not in s:
+        return None
+    cells = _split_pipe_cells(s)
+    if not cells:
+        return None
+    if not all(_DIVIDER_CELL_RE.fullmatch(c) for c in cells):
+        return None
+    if not any("--" in c for c in cells):
+        return None
+    if len(cells) < 2 and not (s.startswith("|") and s.endswith("|")):
+        return None
+    return len(cells)
+
+
+def _normalize_pipe_row(raw_line: str) -> str:
+    leading = raw_line[: len(raw_line) - len(raw_line.lstrip(" \t"))]
+    s = raw_line.strip()
+    if not s.startswith("|"):
+        s = f"| {s}"
+    if not s.endswith("|"):
+        s = f"{s} |"
+    return f"{leading}{s}"
+
+
+def _normalize_divider_row(raw_line: str) -> str:
+    leading = raw_line[: len(raw_line) - len(raw_line.lstrip(" \t"))]
+    s = raw_line.strip()
+    if not s.startswith("|"):
+        s = f"|{s}"
+    if not s.endswith("|"):
+        s = f"{s}|"
+    return f"{leading}{s}"
+
+
+def _default_table_header(ncols: int) -> str:
+    if ncols <= 1:
+        return "| 项目 |"
+    if ncols == 2:
+        return "| 项目 | 结果 |"
+    extra = " | ".join(f"列{i}" for i in range(3, ncols + 1))
+    return f"| 项目 | 结果 | {extra} |"
+
+
+def strip_leaked_model_tokens(text: str) -> str:
+    """Strip leaked special model tokens (e.g. <|channel|>) outside fenced code blocks.
+
+    When a leading leaked token replaces the opening pipe of a Markdown table header/row
+    (such as `<|channel|> 项 | 结果 |`), restore the leading `|` instead of breaking the table.
+    """
+    if not isinstance(text, str) or "<|" not in text:
+        return text
+
+    lines = text.splitlines(keepends=True)
+    out: List[str] = []
+    active_fence = ""
+
+    for idx, line_with_end in enumerate(lines):
+        if line_with_end.endswith("\r\n"):
+            line, eol = line_with_end[:-2], "\r\n"
+        elif line_with_end.endswith("\n"):
+            line, eol = line_with_end[:-1], "\n"
+        else:
+            line, eol = line_with_end, ""
+
+        stripped = line.strip()
+        if active_fence:
+            if _fence_close_matches(stripped, active_fence):
+                active_fence = ""
+            out.append(line + eol)
+            continue
+
+        fence_m = _FENCE_OPEN_RE.match(line)
+        if fence_m:
+            active_fence = fence_m.group(1)
+            out.append(line + eol)
+            continue
+
+        if "<|" not in line:
+            out.append(line + eol)
+            continue
+
+        lead_m = _LEADING_MODEL_TOKEN_RE.match(line)
+        if lead_m:
+            indent = lead_m.group(1)
+            rest = _LEAKED_MODEL_TOKEN_RE.sub("", line[lead_m.end():]).strip()
+            if not rest:
+                continue
+            next_is_divider = False
+            if idx + 1 < len(lines):
+                next_raw = lines[idx + 1].rstrip("\r\n")
+                next_clean = _LEADING_MODEL_TOKEN_RE.sub("|", _LEAKED_MODEL_TOKEN_RE.sub("", next_raw))
+                next_is_divider = _parse_pipe_divider(next_clean) is not None or _parse_pipe_divider(next_raw) is not None
+
+            if "|" in rest and (rest.endswith("|") or next_is_divider or _parse_pipe_divider("|" + rest) is not None):
+                if rest.startswith("|"):
+                    repaired = f"{indent}{rest}"
+                elif _parse_pipe_divider("|" + rest) is not None:
+                    repaired = f"{indent}|{rest.lstrip()}"
+                else:
+                    repaired = f"{indent}| {rest}"
+                out.append(repaired + eol)
+                continue
+
+            cleaned_rest = re.sub(r"[ \t]{2,}", " ", rest).strip()
+            out.append(f"{indent}{cleaned_rest}" + eol)
+            continue
+
+        indent = line[: len(line) - len(line.lstrip(" \t"))]
+        body = _LEAKED_MODEL_TOKEN_RE.sub("", line[len(indent):])
+        body = re.sub(r"[ \t]{2,}", " ", body).strip()
+        out.append((f"{indent}{body}" if body else "") + eol)
+
+    return "".join(out)
+
+
+def repair_headerless_pipe_tables(text: str) -> str:
+    """Normalize half-piped tables and prepend a default header to orphan `|---|---|` tables."""
+    if not isinstance(text, str) or "|" not in text or "--" not in text:
+        return text
+
+    raw_lines = text.splitlines(keepends=True)
+    lines: List[Tuple[str, str]] = []
+    for item in raw_lines:
+        if item.endswith("\r\n"):
+            lines.append((item[:-2], "\r\n"))
+        elif item.endswith("\n"):
+            lines.append((item[:-1], "\n"))
+        else:
+            lines.append((item, ""))
+
+    out: List[Tuple[str, str]] = []
+    active_fence = ""
+    i = 0
+    n = len(lines)
+
+    while i < n:
+        line, eol = lines[i]
+        stripped = line.strip()
+
+        if active_fence:
+            if _fence_close_matches(stripped, active_fence):
+                active_fence = ""
+            out.append((line, eol))
+            i += 1
+            continue
+
+        fence_m = _FENCE_OPEN_RE.match(line)
+        if fence_m:
+            active_fence = fence_m.group(1)
+            out.append((line, eol))
+            i += 1
+            continue
+
+        ncols = _parse_pipe_divider(line)
+        if ncols is None or i + 1 >= n:
+            out.append((line, eol))
+            i += 1
+            continue
+
+        next_line, _ = lines[i + 1]
+        next_stripped = next_line.strip()
+        if not next_stripped or "|" not in next_stripped or _parse_pipe_divider(next_line) is not None:
+            out.append((line, eol))
+            i += 1
+            continue
+
+        has_header = False
+        if out:
+            prev_line, prev_eol = out[-1]
+            prev_cells = _split_pipe_cells(prev_line)
+            if (
+                prev_cells is not None
+                and _parse_pipe_divider(prev_line) is None
+                and not _FENCE_OPEN_RE.match(prev_line)
+                and len(prev_cells) == ncols
+            ):
+                out[-1] = (_normalize_pipe_row(prev_line), prev_eol)
+                has_header = True
+
+        if not has_header:
+            divider_eol = eol or "\n"
+            if out and out[-1][0].strip():
+                out.append(("", divider_eol))
+            out.append((_default_table_header(ncols), divider_eol))
+
+        out.append((_normalize_divider_row(line), eol))
+        i += 1
+
+        while i < n:
+            row_line, row_eol = lines[i]
+            row_stripped = row_line.strip()
+            if not row_stripped or "|" not in row_stripped or _FENCE_OPEN_RE.match(row_line):
+                break
+            if _parse_pipe_divider(row_line) is not None:
+                break
+            out.append((_normalize_pipe_row(row_line), row_eol))
+            i += 1
+
+    return "".join(line + eol for line, eol in out)
+
+
+def _clean_human_markdown(text: str) -> str:
+    return repair_headerless_pipe_tables(strip_leaked_model_tokens(text))
+
+
 def unwrap_and_unescape_text(text: Any) -> str:
     """Single source of truth for unescaping \\uXXXX sequences and unwrapping JSON summary envelopes."""
     if text is None:
@@ -171,11 +399,12 @@ def unwrap_and_unescape_text(text: Any) -> str:
                     if isinstance(val, str) and val.strip():
                         prefix = stripped[:json_start].strip()
                         human_val = unwrap_and_unescape_text(val)
-                        return f"{prefix}\n{human_val}".strip() if prefix else human_val
+                        combined = f"{prefix}\n{human_val}".strip() if prefix else human_val
+                        return _clean_human_markdown(combined)
         except Exception:
             pass
 
-    return stripped
+    return _clean_human_markdown(stripped)
 
 
 def sanitize_card_text(text: Any) -> str:

@@ -564,34 +564,136 @@ def create_transport(ctx, service):
         def deliver(self, address, message, *, idempotency_key):
             message = self._prepare_message(message)
             final = None
+            lifecycle_enabled = (ctx.get_config('task_lifecycle_cards_enabled', False) is True)
+            has_bridge = bool(getattr(self, 'card_bridge', None))
+            is_terminal = message.get('status') in ('completed', 'failed', 'cancelled')
+            card_snap = None
+
+            def _read_card():
+                try:
+                    snap = self.card_bridge.get_card(idempotency_key)
+                    return snap if isinstance(snap, dict) else None
+                except Exception:
+                    return None
+
+            def _is_final_confirmed(res):
+                patch = res.get('patch_result') if isinstance(res, dict) else None
+                return (
+                    isinstance(res, dict)
+                    and res.get('ok') is True
+                    and (res.get('already_finalized') is True
+                         or (isinstance(patch, dict) and patch.get('ok') is True))
+                )
+
             # Ensure the bound task card transitions to terminal state (completed/failed/cancelled)
             # as soon as the task reaches a terminal outcome, even if direct text delivery
             # is deferred, rejected, or retried.
-            if getattr(self, 'card_bridge', None) and message.get('status') in ('completed', 'failed', 'cancelled'):
+            if has_bridge and is_terminal:
                 try:
                     final = _finalize_card(self.card_bridge, idempotency_key, message)
                     self._record_card_finalization(idempotency_key, final)
                 except Exception as exc:
                     logger.warning('card terminal health update failed for %s (%s)',
                                    idempotency_key, type(exc).__name__)
+
+                if lifecycle_enabled and not _is_final_confirmed(final):
+                    task_missing = isinstance(final, dict) and final.get('error') == 'task_not_found'
+                    card_snap = _read_card()
+                    need_create = task_missing or (
+                        card_snap is not None
+                        and not card_snap.get('message_id')
+                        and card_snap.get('create_state') in (None, 'idle', 'unsent')
+                    )
+                    if need_create and callable(getattr(self, 'card_creator', None)):
+                        drain_fn = getattr(service, 'drain_cards', None)
+                        if callable(drain_fn):
+                            try:
+                                drain_fn(self, limit=20)
+                            except Exception as exc:
+                                logger.debug('inline drain_cards failed for %s (%s)',
+                                             idempotency_key, type(exc).__name__)
+                        card_snap = _read_card()
+                        if (card_snap is not None
+                                and not card_snap.get('message_id')
+                                and card_snap.get('create_state') in (None, 'idle', 'unsent')
+                                and hasattr(self.card_bridge, 'create_initial')):
+                            try:
+                                self.card_bridge.create_initial(idempotency_key, self.card_creator)
+                            except Exception as exc:
+                                logger.debug('inline create_initial failed for %s (%s)',
+                                             idempotency_key, type(exc).__name__)
+                        card_snap = _read_card()
+                        if (card_snap is not None
+                                and card_snap.get('message_id')
+                                and not (card_snap.get('finalized') and card_snap.get('patch_state') == 'idle')):
+                            try:
+                                final = _finalize_card(self.card_bridge, idempotency_key, message)
+                                self._record_card_finalization(idempotency_key, final)
+                            except Exception as exc:
+                                logger.warning('card terminal retry update failed for %s (%s)',
+                                               idempotency_key, type(exc).__name__)
+                            card_snap = _read_card()
+
             patch_res = final.get('patch_result') if isinstance(final, dict) else None
-            lifecycle_confirmed = (
-                ctx.get_config('task_lifecycle_cards_enabled', False) is True
-                and isinstance(final, dict)
-                and final.get('ok') is True
-                and (final.get('already_finalized') is True
-                     or (isinstance(patch_res, dict) and patch_res.get('ok') is True))
+            if lifecycle_enabled and has_bridge and is_terminal and card_snap is None and not (
+                isinstance(patch_res, dict) and patch_res.get('message_id')
+            ):
+                card_snap = _read_card()
+
+            settled_in_db = bool(
+                card_snap is not None
+                and card_snap.get('finalized')
+                and card_snap.get('patch_state') == 'idle'
+                and card_snap.get('message_id')
             )
+            lifecycle_confirmed = lifecycle_enabled and (_is_final_confirmed(final) or settled_in_db)
+
             if lifecycle_confirmed:
+                card_msg_id = (
+                    (patch_res.get('message_id') if isinstance(patch_res, dict) else None)
+                    or (card_snap.get('message_id') if card_snap is not None else None)
+                    or f'task:{idempotency_key}'
+                )
                 if not message.get('artifacts'):
                     return {
                         'accepted': True,
+                        'event_id': idempotency_key,
+                        'receipt_id': f'lifecycle-card:{card_msg_id}',
                         'deduped_by_lifecycle_card': True,
                         'task_id': idempotency_key,
                     }
                 message = {**message, 'skip_text_card': True}
+            elif lifecycle_enabled and has_bridge and is_terminal:
+                if card_snap is None:
+                    card_snap = _read_card()
+                if card_snap is not None:
+                    created_at = card_snap.get('created_at')
+                    age_ok = isinstance(created_at, (int, float)) and (time.time() - float(created_at)) < 45.0
+                    degraded = (
+                        (isinstance(final, dict) and final.get('degraded') is True)
+                        or card_snap.get('patch_state') in ('degraded', 'unknown')
+                        or card_snap.get('create_state') == 'unknown'
+                    )
+                    retries_ok = int(card_snap.get('terminal_retries') or 0) < 3
+                    in_flight = (
+                        card_snap.get('patch_state') == 'sending'
+                        or card_snap.get('create_state') == 'sending'
+                        or (isinstance(patch_res, dict) and patch_res.get('error') == 'previous_patch_unknown')
+                        or (not card_snap.get('message_id') and card_snap.get('create_state') in (None, 'idle', 'unsent'))
+                        or (isinstance(patch_res, dict) and patch_res.get('not_sent') is True)
+                        or card_snap.get('patch_state') == 'unsent'
+                    )
+                    if in_flight and age_ok and not degraded and retries_ok:
+                        return {
+                            'accepted': False,
+                            'event_id': idempotency_key,
+                            'deferred': True,
+                            'not_sent': True,
+                            'reason': 'lifecycle_card_pending',
+                        }
+
             result = super().deliver(address, message, idempotency_key=idempotency_key)
-            if result and result.get('accepted') and getattr(self, 'card_bridge', None) and final is None:
+            if result and result.get('accepted') and has_bridge and final is None:
                 final = _finalize_card(self.card_bridge, idempotency_key, message)
                 try:
                     self._record_card_finalization(idempotency_key, final)

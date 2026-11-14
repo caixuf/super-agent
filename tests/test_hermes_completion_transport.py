@@ -556,7 +556,13 @@ def test_deliver_dedupes_completion_card_when_lifecycle_card_confirmed(tmp_path)
 
     address = dict(profile='test-profile', route='stored-route', channel='feishu', chat='chat')
     res = transport.deliver(address, dict(task_id='t-dedupe', status='completed', summary='done'), idempotency_key='t-dedupe')
-    assert res == {'accepted': True, 'deduped_by_lifecycle_card': True, 'task_id': 't-dedupe'}
+    assert res == {
+        'accepted': True,
+        'event_id': 't-dedupe',
+        'receipt_id': 'lifecycle-card:m-1',
+        'deduped_by_lifecycle_card': True,
+        'task_id': 't-dedupe',
+    }
     assert super_calls == []
 
 
@@ -724,6 +730,183 @@ def test_host_sender_fallback_target_still_enforces_origin_match(monkeypatch):
     assert res == {'ok': False, 'not_sent': True, 'error': 'stored_origin_mismatch'}
     assert looked_up == ['agent:main:feishu:dm:oc_other', 'agent:imfl:feishu:dm:oc_other']
     assert not calls
+
+
+def test_lifecycle_dedupe_receipt_acks_completion_delivery_outbox(tmp_path):
+    from agentcore.completion_delivery import deliver_once
+    from agentcore.pool import Pool
+    from agentcore.task_card_bridge import TaskCardBridge
+
+    pool = Pool(tmp_path / 'queue')
+    origin = {'profile': 'test-profile', 'session': 'sess-1', 'route': 'stored-route', 'channel': 'feishu', 'chat': 'chat'}
+    job = pool.submit('t-ack', {'goal': 'check ack', '_colleague_role': 'ops'}, origin=origin)
+    claimed, fd = pool.claim()
+    try:
+        assert pool.finish(claimed['id'], claimed['attempt'], True, {'summary': 'all ok'})
+    finally:
+        import os
+        os.close(fd)
+
+    patches = []
+    bridge_obj = TaskCardBridge(
+        tmp_path / 'cards',
+        profile='test-profile',
+        sender=lambda address, message_id, card_payload: patches.append((address, message_id, card_payload)) or {
+            'ok': True, 'message_id': message_id,
+        },
+    )
+    bridge_obj.bind_task(job, origin, 'check ack', 'ops', '运维专家', message_id='om_existing_1')
+
+    class DummyService:
+        profile = 'test-profile'
+        def __init__(self):
+            self.pool = pool
+
+    ctx = NS(
+        get_config=lambda k, default=None: True if k in (
+            'direct_delivery_enabled', 'task_lifecycle_cards_enabled'
+        ) else (str(ROOT) if k == 'engine_root' else str(tmp_path / 'cards')),
+        plugin_id='durable-dispatch',
+        profile_name='test-profile',
+    )
+    transport = bridge.create_transport(ctx, DummyService())
+    transport.card_bridge = bridge_obj
+    super_calls = []
+    transport.__class__.__bases__[0].deliver = lambda self, addr, msg, idempotency_key: super_calls.append(idempotency_key) or {'accepted': True}
+
+    outcome = deliver_once(pool, transport)
+    assert outcome == {'status': 'delivered', 'task_id': job, 'receipt_id': 'lifecycle-card:om_existing_1'}
+    assert super_calls == []
+    rec = pool.delivery_record(job)
+    assert rec['acknowledged'] == 1
+    assert rec['receipt_id'] == 'lifecycle-card:om_existing_1'
+    assert len(patches) == 1
+
+
+def test_deliver_race1_creates_single_terminal_card_when_message_id_unset(tmp_path):
+    from agentcore.pool import Pool
+    from agentcore.task_card_bridge import TaskCardBridge
+
+    pool = Pool(tmp_path / 'queue')
+    origin = {'profile': 'test-profile', 'session': 'sess-1', 'route': 'stored-route', 'channel': 'feishu', 'chat': 'chat'}
+    job = pool.submit('t-race1', {'goal': 'race1', '_colleague_role': 'ops'}, origin=origin)
+    claimed, fd = pool.claim()
+    try:
+        assert pool.finish(claimed['id'], claimed['attempt'], True, {'summary': 'fast done'})
+    finally:
+        import os
+        os.close(fd)
+
+    created = []
+    patches = []
+    bridge_obj = TaskCardBridge(
+        tmp_path / 'cards',
+        profile='test-profile',
+        sender=lambda address, message_id, card_payload: patches.append((address, message_id, card_payload)) or {
+            'ok': True, 'message_id': message_id,
+        },
+    )
+    # Row bound without message_id (initial card create has not completed yet)
+    bridge_obj.bind_task(job, origin, 'race1', 'ops', '运维专家')
+
+    class DummyService:
+        profile = 'test-profile'
+        def __init__(self):
+            self.pool = pool
+
+    ctx = NS(
+        get_config=lambda k, default=None: True if k in (
+            'direct_delivery_enabled', 'task_lifecycle_cards_enabled'
+        ) else (str(ROOT) if k == 'engine_root' else str(tmp_path / 'cards')),
+        plugin_id='durable-dispatch',
+        profile_name='test-profile',
+    )
+    transport = bridge.create_transport(ctx, DummyService())
+    transport.card_bridge = bridge_obj
+    transport.card_creator = lambda address, card_payload, delivery_key: created.append((address, card_payload)) or {
+        'ok': True, 'message_id': 'om_race1_single',
+    }
+    super_calls = []
+    transport.__class__.__bases__[0].deliver = lambda self, addr, msg, idempotency_key: super_calls.append(idempotency_key) or {'accepted': True}
+
+    address = dict(profile='test-profile', route='stored-route', channel='feishu', chat='chat')
+    res = transport.deliver(address, dict(task_id=job, status='completed', summary='fast done'), idempotency_key=job)
+    assert res == {
+        'accepted': True,
+        'event_id': job,
+        'receipt_id': 'lifecycle-card:om_race1_single',
+        'deduped_by_lifecycle_card': True,
+        'task_id': job,
+    }
+    assert super_calls == []
+    assert len(created) == 1
+    assert patches == []  # created directly in terminal state; no extra patch or duplicate text card
+
+
+def test_deliver_race2_defers_while_card_patch_sending_then_dedupes(tmp_path):
+    from agentcore.pool import Pool
+    from agentcore.task_card_bridge import TaskCardBridge
+
+    pool = Pool(tmp_path / 'queue')
+    origin = {'profile': 'test-profile', 'session': 'sess-1', 'route': 'stored-route', 'channel': 'feishu', 'chat': 'chat'}
+    job = pool.submit('t-race2', {'goal': 'race2', '_colleague_role': 'ops'}, origin=origin)
+    claimed, fd = pool.claim()
+    try:
+        assert pool.finish(claimed['id'], claimed['attempt'], True, {'summary': 'settled done'})
+    finally:
+        import os
+        os.close(fd)
+
+    bridge_obj = TaskCardBridge(
+        tmp_path / 'cards',
+        profile='test-profile',
+        sender=lambda address, message_id, card_payload: {'ok': True, 'message_id': message_id},
+    )
+    bridge_obj.bind_task(job, origin, 'race2', 'ops', '运维专家', message_id='om_race2')
+    # Simulate card_loop mid-flight PATCH
+    with bridge_obj.db() as conn:
+        conn.execute("UPDATE task_cards SET patch_state='sending', create_state='sent' WHERE task_id=?", (job,))
+
+    class DummyService:
+        profile = 'test-profile'
+        def __init__(self):
+            self.pool = pool
+
+    ctx = NS(
+        get_config=lambda k, default=None: True if k in (
+            'direct_delivery_enabled', 'task_lifecycle_cards_enabled'
+        ) else (str(ROOT) if k == 'engine_root' else str(tmp_path / 'cards')),
+        plugin_id='durable-dispatch',
+        profile_name='test-profile',
+    )
+    transport = bridge.create_transport(ctx, DummyService())
+    transport.card_bridge = bridge_obj
+    super_calls = []
+    transport.__class__.__bases__[0].deliver = lambda self, addr, msg, idempotency_key: super_calls.append(idempotency_key) or {'accepted': True}
+
+    address = dict(profile='test-profile', route='stored-route', channel='feishu', chat='chat')
+    msg = dict(task_id=job, status='completed', summary='settled done')
+    res1 = transport.deliver(address, msg, idempotency_key=job)
+    assert res1['accepted'] is False
+    assert res1['deferred'] is True
+    assert res1['not_sent'] is True
+    assert res1['event_id'] == job
+    assert super_calls == []
+
+    # Simulate card_loop finishing the terminal PATCH
+    with bridge_obj.db() as conn:
+        conn.execute("UPDATE task_cards SET finalized=1, patch_state='idle', status='completed', summary='settled done' WHERE task_id=?", (job,))
+
+    res2 = transport.deliver(address, msg, idempotency_key=job)
+    assert res2 == {
+        'accepted': True,
+        'event_id': job,
+        'receipt_id': 'lifecycle-card:om_race2',
+        'deduped_by_lifecycle_card': True,
+        'task_id': job,
+    }
+    assert super_calls == []
+
 
 
 
