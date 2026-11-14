@@ -651,11 +651,11 @@ def _run_with_gateway_loop(monkeypatch, runner, fn):
 def test_host_sender_resolves_standalone_to_multiplexed_namespace_across_ops(monkeypatch):
     sender, runner, looked_up, calls = _make_multiplex_harness(
         monkeypatch,
-        profile='imfl',
+        profile='demo',
         multiplex_profiles=True,
-        stored_keys={'agent:imfl:feishu:dm:oc_1'},
+        stored_keys={'agent:demo:feishu:dm:oc_1'},
     )
-    address = dict(profile='imfl', route='agent:main:feishu:dm:oc_1', channel='feishu', chat='oc_1')
+    address = dict(profile='demo', route='agent:main:feishu:dm:oc_1', channel='feishu', chat='oc_1')
 
     create_res = _run_with_gateway_loop(
         monkeypatch, runner,
@@ -672,15 +672,15 @@ def test_host_sender_resolves_standalone_to_multiplexed_namespace_across_ops(mon
     )
     assert patch_res == {'ok': True, 'message_id': 'card-msg'}
     assert looked_up == [
-        'agent:main:feishu:dm:oc_1', 'agent:imfl:feishu:dm:oc_1',
-        'agent:main:feishu:dm:oc_1', 'agent:imfl:feishu:dm:oc_1',
-        'agent:main:feishu:dm:oc_1', 'agent:imfl:feishu:dm:oc_1',
+        'agent:main:feishu:dm:oc_1', 'agent:demo:feishu:dm:oc_1',
+        'agent:main:feishu:dm:oc_1', 'agent:demo:feishu:dm:oc_1',
+        'agent:main:feishu:dm:oc_1', 'agent:demo:feishu:dm:oc_1',
     ]
     assert [c[0] for c in calls] == ['create', 'text', 'get', 'patch']
 
 
 @pytest.mark.parametrize('profile,mux,stored,legacy', [
-    ('imfl', False, 'agent:main:feishu:dm:oc_1', 'agent:imfl:feishu:dm:oc_1'),
+    ('demo', False, 'agent:main:feishu:dm:oc_1', 'agent:demo:feishu:dm:oc_1'),
     ('main', True, 'agent:main~:feishu:dm:oc_1', 'agent:main:feishu:dm:oc_1'),
     ('main', False, 'agent:main:feishu:dm:oc_1', 'agent:main~:feishu:dm:oc_1'),
 ])
@@ -705,12 +705,12 @@ def test_host_sender_translates_reverse_and_main_namespaces(monkeypatch, profile
 def test_host_sender_never_remaps_cross_profile_or_policy_refusals(monkeypatch, case, addr_patch, refusal_err):
     sender, runner, looked_up, calls = _make_multiplex_harness(
         monkeypatch,
-        profile='imfl',
+        profile='demo',
         multiplex_profiles=True,
-        stored_keys={'agent:imfl:feishu:dm:oc_1'},
+        stored_keys={'agent:demo:feishu:dm:oc_1'},
         refusal_error=refusal_err,
     )
-    address = {'profile': 'imfl', 'route': 'agent:main:feishu:dm:oc_1', 'channel': 'feishu', 'chat': 'oc_1', **addr_patch}
+    address = {'profile': 'demo', 'route': 'agent:main:feishu:dm:oc_1', 'channel': 'feishu', 'chat': 'oc_1', **addr_patch}
     res = asyncio.run(sender.send(runner, address, dict(kind='text', text='x', delivery_uuid='u3')))
     assert res == {'ok': False, 'not_sent': True, 'error': refusal_err}
     assert looked_up == [address['route']]
@@ -720,15 +720,15 @@ def test_host_sender_never_remaps_cross_profile_or_policy_refusals(monkeypatch, 
 def test_host_sender_fallback_target_still_enforces_origin_match(monkeypatch):
     sender, runner, looked_up, calls = _make_multiplex_harness(
         monkeypatch,
-        profile='imfl',
+        profile='demo',
         multiplex_profiles=True,
-        stored_keys={'agent:imfl:feishu:dm:oc_other'},
+        stored_keys={'agent:demo:feishu:dm:oc_other'},
         chat_id='oc_other',
     )
-    address = dict(profile='imfl', route='agent:main:feishu:dm:oc_other', channel='feishu', chat='oc_1')
+    address = dict(profile='demo', route='agent:main:feishu:dm:oc_other', channel='feishu', chat='oc_1')
     res = asyncio.run(sender.send(runner, address, dict(kind='text', text='x', delivery_uuid='u4')))
     assert res == {'ok': False, 'not_sent': True, 'error': 'stored_origin_mismatch'}
-    assert looked_up == ['agent:main:feishu:dm:oc_other', 'agent:imfl:feishu:dm:oc_other']
+    assert looked_up == ['agent:main:feishu:dm:oc_other', 'agent:demo:feishu:dm:oc_other']
     assert not calls
 
 

@@ -4,8 +4,11 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from toolsets.pi_executor.driver import (
     PiResult,
+    PiRunError,
     build_argv,
     parse_jsonl,
     resolve_cli_path,
@@ -22,8 +25,11 @@ EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]")
 
 def test_pi_executor_cli_and_argv_isolation(tmp_path: Path):
     """Pi executor resolves node/cli and builds a non-shell argv array."""
-    node = resolve_node()
-    cli = resolve_cli_path()
+    try:
+        node = resolve_node()
+        cli = resolve_cli_path()
+    except PiRunError as exc:
+        pytest.skip(f"Pi CLI unavailable in this environment: {exc}")
     assert Path(node).exists()
     assert Path(cli).exists()
     argv = build_argv("read-only check", cli_path=cli, model="flash", provider="litellm")
@@ -72,8 +78,9 @@ def test_pi_executor_success_on_settled_stop():
 def test_all_eight_fixed_receipt_templates():
     """All 8 fixed task receipt renderers produce clean, zero-emoji GFM Markdown."""
     path = Path("/home/caixuf/code/imfl_skills/tools/card_receipt.py")
-    assert path.is_file()
-    spec = importlib.util.spec_from_file_location("imfl_card_receipt", path)
+    if not path.is_file():
+        pytest.skip("external card_receipt.py not checked out alongside super-agent")
+    spec = importlib.util.spec_from_file_location("external_card_receipt", path)
     mod = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
     spec.loader.exec_module(mod)
@@ -84,10 +91,10 @@ def test_all_eight_fixed_receipt_templates():
         mod.build_triage_markdown("2026-11", 10, 8, 8, 6, 2, ["缺少注入器"]),
         mod.build_failure_triage_markdown("case_001", "用例问题", "高", ["line 42 assert"], ["case_001"], "修正阈值"),
         mod.build_redteam_review_markdown("PR#12", True, [{"name": "语法守卫", "status": "PASS", "detail": "无反模式"}], [], "可合入"),
-        mod.build_case_delivery_markdown("AEB需求", [{"path": "cases/aeb.imfl", "count": 4, "coverage": "正例/反例/边界"}], True),
+        mod.build_case_delivery_markdown("需求A", [{"path": "cases/demo.case", "count": 4, "coverage": "正例/反例/边界"}], True),
         mod.build_replay_markdown("bag_01", "一致", "20Hz/无断流", "0.02m", [], "可归档"),
-        mod.build_bench_test_markdown("上电自检", "172.100.100.88", "v2.2.8", True, "18s", ["电源稳定"], "继续功能测试"),
-        mod.build_ops_health_markdown("caixuf", "HEALTHY", [{"name": "gateway", "status": "active", "detail": "200 OK"}]),
+        mod.build_bench_test_markdown("上电自检", "192.0.2.88", "v2.2.8", True, "18s", ["电源稳定"], "继续功能测试"),
+        mod.build_ops_health_markdown("host-a", "HEALTHY", [{"name": "gateway", "status": "active", "detail": "200 OK"}]),
     ]
     for md in outputs:
         assert md.strip()
@@ -96,11 +103,13 @@ def test_all_eight_fixed_receipt_templates():
 
 
 # ---------------------------------------------------------------------------
-# 3. Live Memory & Worker Services Health (caixuf host)
+# 3. Live Memory & Worker Services Health (local dev host)
 # ---------------------------------------------------------------------------
 
 def test_live_caixuf_memory_and_worker_services_active():
     """Verify resident memory worker, bge-m3-sidecar, and role workers are active."""
+    if Path.home().name != "caixuf":
+        pytest.skip("live host systemd services check only applies on local workstation")
     res = subprocess.run(
         ["systemctl", "--user", "is-active",
          "hermes-gateway-caixuf.service",

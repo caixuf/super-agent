@@ -176,8 +176,8 @@ def test_unwrap_and_sanitize_card_text_7de05905_renders_cardkit_table():
 
     raw_output = (
         '{"summary": "**结论**：健康。\\n\\n<|channel|> 项 | 结果 |\\n|---|---|\\n'
-        '| guanguan 根分区 `/` | 33%（141G/457G 已用，294G 可用） |\\n'
-        '| emily 9900 health | HTTP 200 |"}'
+        '| host-a 根分区 `/` | 33%（141G/457G 已用，294G 可用） |\\n'
+        '| host-b 9900 health | HTTP 200 |"}'
     )
     sanitized = sanitize_card_text(raw_output)
     assert "<|channel|>" not in sanitized

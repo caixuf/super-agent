@@ -91,9 +91,9 @@ def test_routing_prompt_keeps_domain_experts_and_brief_rules(tmp_path):
     services = {'analysis': Svc('analysis'), 'dev': Svc('dev')}
     services.update({r: Svc(r) for r in ('architect', 'cases', 'reviewer', 'test', 'triage', 'ops', 'replay', 'maintainer')})
     text = plugin._render_briefing_prompt(services)
-    assert 'Configured domain experts' in text
+    assert 'Domain experts' in text
     assert all(('role=%s' % r) in text for r in ('architect', 'maintainer'))
-    assert 'self-contained' in text and 'ask the user one short question' in text
+    assert 'Self-contained' in text and 'ask one short question' in text
     assert len(text) <= plugin._SECTION_BUDGET
     assert len(plugin._render_routing_base()) <= plugin._SECTION_BUDGET
 

@@ -776,12 +776,6 @@ def _wrap_with_bwrap_sandbox(
         meegle_dir = Path.home() / ".meegle"
         if meegle_dir.is_dir():
             writable_paths.append(meegle_dir)
-        for business_rw in (
-            Path("/data/imfl/workspace/imfl_workspace"),
-            Path("/data/imfl/reports"),
-        ):
-            if business_rw.is_dir() and business_rw not in writable_paths:
-                writable_paths.append(business_rw)
         extra_rw_env = os.environ.get("DEV_EXTRA_WRITABLE_PATHS", "").strip()
         if extra_rw_env:
             for raw_extra in extra_rw_env.split(os.pathsep):

@@ -100,6 +100,7 @@ agentcore/
 | `completion_backfill.py` | Delivery | 存量积压完成回执补投与状态同步 |
 | `delivery_sanitizer.py` | Delivery | 交付物安全净化（内网 IP、敏感路径与凭据脱敏） |
 | `deliverable_mode.py` | Delivery | 交付模式判定与通道策略选择 |
+| `structured_report.py` | Delivery | 结构化任务报告提取与交付契约 |
 | `markdown_delivery.py` | Delivery | 纯文本与 Markdown 结果消息投递 |
 | `artifact_retention.py` | Delivery | 交付工件留存生命周期与滚动清理策略 |
 | `kanban_contract.py` | Delivery | 看板任务追踪契约与状态同步协议 |

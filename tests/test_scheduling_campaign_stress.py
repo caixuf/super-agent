@@ -250,12 +250,12 @@ def test_cross_role_status_and_cancel_postures(tmp_path: Path):
 def test_cron_session_scheduled_route_and_security_boundaries(tmp_path: Path, monkeypatch):
     """Unrouted HERMES_CRON_SESSION=1 resolves scheduled_routes cleanly; non-cron/IM spoofing fails closed."""
     r_def = _feishu_route("oc_cron_def", "agent:main:feishu:dm:oc_cron_def")
-    r_mff = _feishu_route("oc_cron_mff", "agent:main:feishu:dm:oc_cron_mff")
+    r_proj = _feishu_route("oc_cron_proj", "agent:main:feishu:dm:oc_cron_proj")
 
     # 1. Single route auto-selected in unrouted cron session
     _, router_single, _ = _make_services(
         tmp_path / "single",
-        scheduled_routes={"mff": r_mff},
+        scheduled_routes={"proj_a": r_proj},
         route_provider=lambda _sid: {},
     )
     monkeypatch.setenv("HERMES_CRON_SESSION", "1")
@@ -263,22 +263,22 @@ def test_cron_session_scheduled_route_and_security_boundaries(tmp_path: Path, mo
     assert res1["ok"] is True
     with router_single.services["ops"].pool.db() as db:
         orig1 = json.loads(db.execute("SELECT origin FROM jobs WHERE id=?", (res1["task_id"],)).fetchone()["origin"])
-    assert orig1["scheduled"] is True and orig1["chat"] == "oc_cron_mff"
+    assert orig1["scheduled"] is True and orig1["chat"] == "oc_cron_proj"
 
     # 2. Multi-route uses 'default' or explicit scheduled_route; silent works without matching route
     _, router_multi, _ = _make_services(
         tmp_path / "multi",
-        scheduled_routes={"default": r_def, "mff": r_mff},
+        scheduled_routes={"default": r_def, "proj_a": r_proj},
         route_provider=lambda _sid: {},
     )
     res_def = router_multi.submit("cron-sess-2", {"role": "ops", "goal": "default cron", "request_key": "cron-def"})
-    res_mff = router_multi.submit("cron-sess-2", {
-        "role": "ops", "goal": "mff cron", "request_key": "cron-mff", "scheduled_route": "mff",
+    res_proj = router_multi.submit("cron-sess-2", {
+        "role": "ops", "goal": "proj cron", "request_key": "cron-proj", "scheduled_route": "proj_a",
     })
     with router_multi.services["ops"].pool.db() as db:
         o_def = json.loads(db.execute("SELECT origin FROM jobs WHERE id=?", (res_def["task_id"],)).fetchone()["origin"])
-        o_mff = json.loads(db.execute("SELECT origin FROM jobs WHERE id=?", (res_mff["task_id"],)).fetchone()["origin"])
-    assert o_def["chat"] == "oc_cron_def" and o_mff["chat"] == "oc_cron_mff"
+        o_proj = json.loads(db.execute("SELECT origin FROM jobs WHERE id=?", (res_proj["task_id"],)).fetchone()["origin"])
+    assert o_def["chat"] == "oc_cron_def" and o_proj["chat"] == "oc_cron_proj"
 
     with pytest.raises(PermissionError, match="scheduled route not registered"):
         router_multi.submit("cron-sess-2", {
@@ -302,12 +302,12 @@ def test_cron_session_scheduled_route_and_security_boundaries(tmp_path: Path, mo
     # 5. Interactive IM session cannot spoof scheduled_route
     _, router_im, _ = _make_services(
         tmp_path / "im",
-        scheduled_routes={"mff": r_mff},
+        scheduled_routes={"proj_a": r_proj},
         route_provider=lambda _sid: _feishu_route("oc_real_user", "agent:main:feishu:dm:oc_real_user"),
     )
     with pytest.raises(PermissionError, match="only allowed in unrouted cron sessions"):
         router_im.submit("im-user-sess", {
-            "role": "ops", "goal": "spoof target", "request_key": "spoof-1", "scheduled_route": "mff",
+            "role": "ops", "goal": "spoof target", "request_key": "spoof-1", "scheduled_route": "proj_a",
         })
 
 

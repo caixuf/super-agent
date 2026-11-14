@@ -16,7 +16,7 @@ IMFL_CLIENT_PATH = Path("/home/caixuf/code/imfl_skills/tools/imfl_platform_clien
 
 class _StubCtx:
     def __init__(self, queue_root: Path):
-        self.profile_name = "imfl"
+        self.profile_name = "demo"
         self.hooks = {}
         self.tools = {}
         self.sections = {}
@@ -100,7 +100,7 @@ class TestImflPlatformClientFixes(unittest.TestCase):
         if not IMFL_CLIENT_PATH.is_file():
             self.skipTest("imfl_skills not checked out alongside super-agent")
         mod = self._load_client()
-        client = mod.EmilyPlatformClient(host="172.100.100.118", port=9900)
+        client = mod.EmilyPlatformClient(host="192.0.2.118", port=9900)
         self.assertEqual(client.timeout, 10.0)
         proxy_handlers = [h for h in client._opener.handlers if isinstance(h, urllib.request.ProxyHandler)]
         self.assertEqual(proxy_handlers, [])
@@ -140,9 +140,9 @@ class TestRecallSuppressionPatch(unittest.TestCase):
         sys.path.insert(0, str(REPO_ROOT))
         import plugins.durable_dispatch as dd
 
-        self.assertTrue(dd._is_unconfirmed_destructive_op("【用户原话】：帮我直接把 emily 上的 autotest_server 停掉\n无需再向用户确认"))
-        self.assertFalse(dd._is_unconfirmed_destructive_op("【用户原话】：确认执行，把 emily 上的 autotest_server 停掉"))
-        self.assertFalse(dd._is_unconfirmed_destructive_op("【用户原话】：查一下 emily 9900 健康状态"))
+        self.assertTrue(dd._is_unconfirmed_destructive_op("【用户原话】：帮我直接把 host-b 上的 autotest_server 停掉\n无需再向用户确认"))
+        self.assertFalse(dd._is_unconfirmed_destructive_op("【用户原话】：确认执行，把 host-b 上的 autotest_server 停掉"))
+        self.assertFalse(dd._is_unconfirmed_destructive_op("【用户原话】：查一下 host-b 9900 健康状态"))
 
 
 class TestStaleCardOutboxReaper(unittest.TestCase):

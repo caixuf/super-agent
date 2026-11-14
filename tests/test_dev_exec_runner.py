@@ -413,13 +413,13 @@ def test_compact_summary_and_harvest_repair_7de05905_leaked_token_table(tmp_path
 
     module = _module()
     raw_7de05905 = (
-        "结论：根分区使用率 33%，emily 9900 健康。\n\n"
+        "结论：根分区使用率 33%，host-b 9900 健康。\n\n"
         "<|channel|> 项 | 结果 |\n"
         "|---|---|\n"
-        "| guanguan 根分区 `/` | 33%（141G/457G 已用，294G 可用） |\n"
-        "| superagent-worker-imfl.service | 单元不存在（应加 `--user` 查询） |\n"
-        "| emily 9900 health | HTTP 200，service=imfl_autotest_server |\n"
-        "| 最近 2 任务 | queued: imfl-20261113-173002-354e56f |\n\n"
+        "| host-a 根分区 `/` | 33%（141G/457G 已用，294G 可用） |\n"
+        "| superagent-worker-demo.service | 单元不存在（应加 `--user` 查询） |\n"
+        "| host-b 9900 health | HTTP 200，service=demo_autotest_server |\n"
+        "| 最近 2 任务 | queued: job-20261113-173002-354e56f |\n\n"
         + ("详细排查过程输出。\n" * 120)
     )
     attempt_dir = tmp_path / "attempt_7de05905"

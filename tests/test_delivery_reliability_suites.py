@@ -128,14 +128,14 @@ def test_suite3_frontdesk_router_fast_fail_on_error(tmp_path: Path):
     spec.write_text(json.dumps({
         'version': 1,
         'roles': {
-            'ops': {'display_name': 'IMFL编译与运维专家', 'keywords': ['发版']},
-            'triage': {'display_name': 'IMFL分诊归因专家', 'keywords': ['归因']},
+            'ops': {'display_name': '编译与运维专家', 'keywords': ['发版']},
+            'triage': {'display_name': '分诊归因专家', 'keywords': ['归因']},
         },
     }), encoding='utf-8')
     client = LocalModelClient(base_url='http://127.0.0.1:1', timeout=0.2)
     router = FrontdeskRouter(client, roles_spec_path=str(spec), timeout=0.2, min_confidence=0.45)
     t0 = time.monotonic()
-    decision = router.route('看下最近一次imfl平台测试的任务号')
+    decision = router.route('看下最近一次平台测试的任务号')
     elapsed = time.monotonic() - t0
     assert decision is None
     assert elapsed < 1.0

@@ -432,7 +432,7 @@ _DESTRUCTIVE_ACTION_RE = re.compile(
     re.I,
 )
 _DESTRUCTIVE_TARGET_RE = re.compile(
-    r'(?:autotest_server|imfl-autotest|hermes-gateway|容器|服务|数据库|分支|仓库|9900)',
+    r'(?:autotest_server|autotest|hermes-gateway|容器|服务|数据库|分支|仓库|9900)',
     re.I,
 )
 _EXPLICIT_CONFIRM_RE = re.compile(r'(?:确认执行|我已确认|确认停|确认删|confirm_destructive)')

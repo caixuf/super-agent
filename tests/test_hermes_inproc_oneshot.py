@@ -105,7 +105,7 @@ def test_continue_incomplete_backend_turn_recovers_from_guardrail_halt():
     agent = MagicMock()
     agent.run_conversation.return_value = {
         "completed": True,
-        "final_response": "**结论**：emily 9900 当前健康。",
+        "final_response": "**结论**：host-b 9900 当前健康。",
         "turn_exit_reason": "stop",
         "messages": [],
         "api_calls": 2,
