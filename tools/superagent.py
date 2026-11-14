@@ -860,8 +860,30 @@ def _enable_plugins(profile_home: Path, names: list[str]) -> None:
     config = profile_home / "config.yaml"
     if not config.is_file() or not names:
         return
+    effective = list(names)
+    try:
+        import yaml
+
+        doc = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
+        if isinstance(doc, dict):
+            disabled_raw = (doc.get("plugins") or {}).get("disabled") or []
+            if isinstance(disabled_raw, list):
+                disabled_set = {
+                    str(item).strip()
+                    for item in disabled_raw
+                    if isinstance(item, str) and item.strip()
+                }
+                effective = [
+                    name
+                    for name in effective
+                    if not (name in _EXTERNAL_PLUGIN_NAMES and name in disabled_set)
+                ]
+    except (OSError, ValueError, TypeError, yaml.YAMLError):
+        pass
+    if not effective:
+        return
     _run([sys.executable, str(REPO / "install" / "enable_plugins.py"),
-          "--config", str(config), *sum((["--name", name] for name in names), [])], check=True)
+          "--config", str(config), *sum((["--name", name] for name in effective), [])], check=True)
 
 
 def _credentials_file(profile_home: Path) -> Path:
@@ -2349,6 +2371,130 @@ def _deploy_version_observation(manifest: dict[str, Any], current: Path, profile
     }
 
 
+def _pool_active_job_count(pool_db: Path) -> int:
+    import sqlite3
+    from contextlib import closing
+
+    if pool_db.is_symlink() or not pool_db.is_file():
+        return 0
+    try:
+        with closing(sqlite3.connect(pool_db.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+            db.execute("PRAGMA query_only = ON")
+            has_jobs = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'"
+            ).fetchone()
+            if not has_jobs:
+                return 0
+            return int(
+                db.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]
+            )
+    except (OSError, ValueError, sqlite3.Error):
+        return 0
+
+
+def _colleague_queue_workers_observation(profile_home: Path, profile: str, root: Path) -> dict[str, Any]:
+    """Verify every advertised colleague role / queued pool has an active systemd worker."""
+    import sqlite3
+    from contextlib import closing
+    import yaml
+
+    empty = {
+        "state": "not_systemd_managed",
+        "healthy": True,
+        "advertised_roles": [],
+        "unmanned_roles": [],
+        "unmanned_queued_jobs": 0,
+    }
+    try:
+        base_show = _run([
+            "systemctl", "--user", "show", f"superagent-worker-{profile}.service",
+            "--property=LoadState", "--property=ActiveState", "--property=FragmentPath",
+        ])
+    except (OSError, subprocess.SubprocessError):
+        return empty
+    if base_show.returncode != 0:
+        return empty
+    base_fields = dict(line.split("=", 1) for line in base_show.stdout.splitlines() if "=" in line)
+    if base_fields.get("LoadState") != "loaded":
+        return empty
+    fragment = base_fields.get("FragmentPath", "").strip()
+    if fragment:
+        try:
+            if not Path(fragment).resolve(strict=False).is_relative_to(Path.home().resolve(strict=False)):
+                return empty
+        except (OSError, ValueError):
+            return empty
+
+    advertised_roles: set[str] = set()
+    config = profile_home / "config.yaml"
+    if config.is_file() and not config.is_symlink():
+        try:
+            doc = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
+            settings = (((doc.get("plugins") or {}).get("entries") or {}).get("durable-dispatch") or {}).get("settings") or {}
+            if isinstance(settings, dict):
+                colleagues = settings.get("colleagues") or {}
+                if isinstance(colleagues, dict):
+                    advertised_roles.update(str(k).strip() for k in colleagues if str(k).strip())
+                reg_raw = settings.get("roster_registry_path")
+                if isinstance(reg_raw, str) and reg_raw.strip():
+                    reg_path = Path(reg_raw.strip())
+                    if reg_path.is_file() and not reg_path.is_symlink():
+                        with closing(sqlite3.connect(reg_path.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+                            db.execute("PRAGMA query_only = ON")
+                            has_members = db.execute(
+                                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='colleague_members'"
+                            ).fetchone()
+                            if has_members:
+                                for (role_id,) in db.execute(
+                                    "SELECT DISTINCT role_id FROM colleague_members WHERE status='active'"
+                                ).fetchall():
+                                    if isinstance(role_id, str) and role_id.strip():
+                                        advertised_roles.add(role_id.strip())
+        except (OSError, ValueError, TypeError, sqlite3.Error, yaml.YAMLError):
+            pass
+
+    queues_dir = root / "state" / "colleague-queues"
+    active_counts: dict[str, int] = {}
+    if queues_dir.is_dir() and not queues_dir.is_symlink():
+        for pool_db in sorted(queues_dir.glob("*/pool.db")):
+            role = pool_db.parent.name
+            count = _pool_active_job_count(pool_db)
+            active_counts[role] = count
+            if count > 0:
+                advertised_roles.add(role)
+
+    advertised_roles -= {"analysis", "primary"}
+    roles = sorted(advertised_roles)
+    unmanned_roles: list[str] = []
+    unmanned_queued_jobs = 0
+    for role in roles:
+        active = False
+        try:
+            res = _run([
+                "systemctl", "--user", "show", f"superagent-worker-{profile}-{role}.service",
+                "--property=LoadState", "--property=ActiveState",
+            ])
+            if res.returncode == 0:
+                fields = dict(line.split("=", 1) for line in res.stdout.splitlines() if "=" in line)
+                active = fields.get("ActiveState") == "active"
+        except (OSError, subprocess.SubprocessError):
+            active = False
+        if not active:
+            unmanned_roles.append(role)
+            cnt = active_counts.get(role)
+            if cnt is None:
+                cnt = _pool_active_job_count(queues_dir / role / "pool.db")
+            unmanned_queued_jobs += cnt
+
+    return {
+        "state": "observed",
+        "healthy": len(unmanned_roles) == 0,
+        "advertised_roles": roles,
+        "unmanned_roles": unmanned_roles,
+        "unmanned_queued_jobs": unmanned_queued_jobs,
+    }
+
+
 def doctor(args: argparse.Namespace) -> int:
     found = _manifest(args)
     if found is None:
@@ -2376,6 +2522,7 @@ def doctor(args: argparse.Namespace) -> int:
     )
     version_observation = _deploy_version_observation(manifest, current, args.profile)
     worker_queue_observation = _worker_queue_health_observation(root, manifest.get("installed_at"))
+    colleague_workers_observation = _colleague_queue_workers_observation(profile_home, args.profile, root)
     reasons = list(version_observation.get("reasons", []))
     if worker_queue_observation.get("healthy") is False:
         if worker_queue_observation.get("card_outbox_unknown", 0) > 0:
@@ -2386,6 +2533,8 @@ def doctor(args: argparse.Namespace) -> int:
             == worker_queue_observation.get("recent_completed_post_install", 0)
         ):
             reasons.append("primary_engine_consistently_degraded")
+    if colleague_workers_observation.get("healthy") is False:
+        reasons.append("unmanned_colleague_queues")
     if not ok:
         status = "broken"
         ret = 1
@@ -2407,6 +2556,7 @@ def doctor(args: argparse.Namespace) -> int:
                           args.profile, manifest.get("hermes_root")),
                       "worker_observation": _worker_runtime_observation(args.profile, current),
                       "worker_queue_observation": worker_queue_observation,
+                      "colleague_workers_observation": colleague_workers_observation,
                       "browser_observation": _browser_observation(current.resolve() if current.exists() else root),
                       "colleague_settlement_observation": _legacy_colleague_settlement_observation(profile_home),
                       "gateway_queue_observation": _gateway_queue_observation(profile_home),

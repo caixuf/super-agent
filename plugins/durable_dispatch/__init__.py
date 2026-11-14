@@ -10,6 +10,7 @@ injection transport remains explicit compatibility behavior, never an active-cha
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 import fnmatch
 import hashlib
 import importlib
@@ -270,6 +271,35 @@ def _bound_route(session_id):
     return route
 
 
+def _is_cron_session():
+    """Return True when the current execution turn is marked as a cron session."""
+    raw = ''
+    try:
+        from gateway.session_context import get_session_env
+        raw = get_session_env('HERMES_CRON_SESSION', '') or ''
+    except Exception:
+        raw = ''
+    if not str(raw).strip():
+        raw = os.environ.get('HERMES_CRON_SESSION', '') or ''
+    return str(raw).strip().lower() in ('1', 'true', 'yes')
+
+
+_CLAIMED_LIVE_CARDS_MAX = 512
+_claimed_live_cards_lock = threading.Lock()
+_claimed_live_cards = OrderedDict()
+
+
+def _reserve_claimed_live_card(msg_id):
+    """Return True if msg_id has not already been claimed by another task in-process."""
+    with _claimed_live_cards_lock:
+        if msg_id in _claimed_live_cards:
+            return False
+        _claimed_live_cards[msg_id] = time.monotonic()
+        while len(_claimed_live_cards) > _CLAIMED_LIVE_CARDS_MAX:
+            _claimed_live_cards.popitem(last=False)
+        return True
+
+
 def _claim_feishu_live_card(origin):
     """Claim the active frontdesk Feishu live card for single-card task lifecycle."""
     if not isinstance(origin, dict) or origin.get('channel') != 'feishu':
@@ -308,7 +338,17 @@ def _claim_feishu_live_card(origin):
                 return _claim_on_loop()
             fut = asyncio.run_coroutine_threadsafe(_do_claim(), loop)
             msg_id = fut.result(timeout=2.0)
-        return msg_id.strip() if isinstance(msg_id, str) and msg_id.strip() else None
+        clean_id = msg_id.strip() if isinstance(msg_id, str) and msg_id.strip() else None
+        if clean_id is None:
+            return None
+        if not _reserve_claimed_live_card(clean_id):
+            logging.getLogger(__name__).warning(
+                'claim_feishu_live_card skipped duplicate message_id=%s for chat=%s',
+                clean_id,
+                chat,
+            )
+            return None
+        return clean_id
     except Exception as exc:
         logging.getLogger(__name__).warning('claim_feishu_live_card failed: %s', exc)
         return None
@@ -703,7 +743,7 @@ class DispatchService:
         """Owner string shared with the task_status tool (profile:session)."""
         return '%s:%s' % (self.profile, session_id)
 
-    def _origin(self, session_id):
+    def _origin(self, session_id, *, claim_card=True):
         """Ownership proof stays a hash; the origin is the addressable conversation."""
         origin = {'profile': self.profile, 'session': session_id}
         try:
@@ -715,7 +755,9 @@ class DispatchService:
                 value = route.get(field)
                 if isinstance(value, str) and value.strip() and len(value) <= 512:
                     origin[field] = value.strip()
-        if origin.get('channel') == 'feishu' and origin.get('route') and origin.get('chat'):
+        if (claim_card and self.task_cards_enabled
+                and origin.get('channel') == 'feishu'
+                and origin.get('route') and origin.get('chat')):
             card_msg_id = _claim_feishu_live_card(origin)
             if card_msg_id:
                 origin['card_message_id'] = card_msg_id
@@ -841,11 +883,49 @@ class DispatchService:
                 result['parent_task_id'] = norm_parent
         return result
 
+    def _apply_cron_route(self, origin, route_arg, *, is_silent):
+        """Resolve delivery origin for unrouted cron turns; reject spoofing from other contexts."""
+        in_cron = _is_cron_session()
+        if route_arg is not None and (not in_cron or origin.get('route')):
+            raise PermissionError('scheduled_route is only allowed in unrouted cron sessions')
+        if origin.get('route') or not in_cron:
+            return origin
+        if route_arg is not None:
+            route_name = route_arg.strip()
+            if route_name not in self.scheduled_routes:
+                raise PermissionError('scheduled route not registered')
+            target = self.scheduled_routes[route_name]
+        elif 'default' in self.scheduled_routes:
+            target = self.scheduled_routes['default']
+        elif len(self.scheduled_routes) == 1:
+            target = next(iter(self.scheduled_routes.values()))
+        elif is_silent:
+            origin['route'] = 'agent:%s:cron:silent' % self.profile
+            origin['channel'] = 'cron'
+            origin['chat'] = 'cron'
+            origin['scheduled'] = True
+            return origin
+        else:
+            raise PermissionError('cron session requires a registered scheduled_route or silent=true')
+        origin['route'] = target['route']
+        origin['channel'] = target['channel']
+        origin['chat'] = target['chat']
+        origin['scheduled'] = True
+        if 'thread' in target:
+            origin['thread'] = target['thread']
+        return origin
+
     def submit(self, session_id, args):
-        if not isinstance(args, dict) or set(args) - {'goal', 'sources', 'request_key', 'silent', 'parent_task_id'}:
+        allowed = {'goal', 'sources', 'request_key', 'silent', 'parent_task_id', 'scheduled_route'}
+        if not isinstance(args, dict) or set(args) - allowed:
             raise ValueError('unexpected dispatch arguments')
+        route_arg = args.get('scheduled_route')
+        if route_arg is not None and (not isinstance(route_arg, str) or not route_arg.strip()):
+            raise ValueError('scheduled_route must be a non-empty string')
         goal, key = args.get('goal'), args.get('request_key')
-        origin = self._origin(session_id)
+        is_silent = (args.get('silent') is True) or (args.get('parent_task_id') is not None)
+        origin = self._origin(session_id, claim_card=not is_silent)
+        origin = self._apply_cron_route(origin, route_arg, is_silent=is_silent)
         return self._submit_internal(session_id, goal, key, sources=args.get('sources'),
                                       origin=origin, max_goal_len=4000, is_scheduled=False,
                                       silent=args.get('silent', False),
@@ -1494,6 +1574,52 @@ class DispatchRouter:
             raise ValueError('destructive_confirmation_required: ask the user for explicit confirmation (e.g. "确认执行") before stopping services or deleting data.')
         return self._call('submit',session_id,args)
 
+    def _locate_job_role(self, job, explicit_role=None):
+        """Locate the owning role respecting cross_session_status and scheduled origin."""
+        if explicit_role is not None:
+            if explicit_role not in self.services:
+                return None
+            pool = getattr(self.services[explicit_role], 'pool', None)
+            if pool is not None and hasattr(pool, 'job_ownership_record'):
+                try:
+                    if pool.job_ownership_record(job) is not None:
+                        return explicit_role
+                except Exception:
+                    pass
+        allow_auto = any(getattr(s, 'cross_session_status', False) for s in self.services.values())
+        for r_name, svc in self.services.items():
+            if r_name == explicit_role:
+                continue
+            pool = getattr(svc, 'pool', None)
+            if pool is not None and hasattr(pool, 'job_ownership_record'):
+                try:
+                    rec = pool.job_ownership_record(job)
+                except Exception:
+                    continue
+                if rec is None:
+                    continue
+                if allow_auto:
+                    return r_name
+                try:
+                    raw_origin = rec['origin'] if hasattr(rec, 'keys') and 'origin' in rec.keys() else rec.get('origin')
+                    origin = json.loads(raw_origin) if raw_origin else {}
+                except Exception:
+                    origin = {}
+                if isinstance(origin, dict) and origin.get('scheduled') is True:
+                    return r_name
+        return None
+
+    def _route_job_args(self, args):
+        if not isinstance(args, dict):
+            return args
+        task_id = args.get('task_id')
+        explicit_role = args.get('role')
+        if isinstance(task_id, str) and task_id.strip():
+            target_role = self._locate_job_role(task_id.strip(), explicit_role=explicit_role)
+            if target_role is not None:
+                return dict(args, role=target_role)
+        return args
+
     def status(self,session_id,args):
         if not isinstance(args, dict):
             raise ValueError('dispatch arguments required')
@@ -1517,57 +1643,10 @@ class DispatchRouter:
             for item in top:
                 item.pop('created', None)
             return {'ok': True, 'tasks': top, 'count': len(top)}
-        if isinstance(task_id, str) and task_id.strip():
-            job = task_id.strip()
-            target_role = None
-            if explicit_role and explicit_role in self.services:
-                svc = self.services[explicit_role]
-                if hasattr(svc, 'pool') and hasattr(svc.pool, 'job_ownership_record'):
-                    try:
-                        if svc.pool.job_ownership_record(job) is not None:
-                            target_role = explicit_role
-                    except Exception:
-                        pass
-            if target_role is None and any(getattr(s, 'cross_session_status', False) for s in self.services.values()):
-                for r_name, svc in self.services.items():
-                    if hasattr(svc, 'pool') and hasattr(svc.pool, 'job_ownership_record'):
-                        try:
-                            if svc.pool.job_ownership_record(job) is not None:
-                                target_role = r_name
-                                break
-                        except Exception:
-                            continue
-            if target_role is not None:
-                args = dict(args, role=target_role)
-        return self._call('status',session_id,args)
+        return self._call('status', session_id, self._route_job_args(args))
 
     def cancel(self,session_id,args):
-        if isinstance(args, dict):
-            task_id = args.get('task_id')
-            explicit_role = args.get('role')
-            if isinstance(task_id, str) and task_id.strip():
-                job = task_id.strip()
-                target_role = None
-                if explicit_role and explicit_role in self.services:
-                    svc = self.services[explicit_role]
-                    if hasattr(svc, 'pool') and hasattr(svc.pool, 'job_ownership_record'):
-                        try:
-                            if svc.pool.job_ownership_record(job) is not None:
-                                target_role = explicit_role
-                        except Exception:
-                            pass
-                if target_role is None and any(getattr(s, 'cross_session_status', False) for s in self.services.values()):
-                    for r_name, svc in self.services.items():
-                        if hasattr(svc, 'pool') and hasattr(svc.pool, 'job_ownership_record'):
-                            try:
-                                if svc.pool.job_ownership_record(job) is not None:
-                                    target_role = r_name
-                                    break
-                            except Exception:
-                                continue
-                if target_role is not None:
-                    args = dict(args, role=target_role)
-        return self._call('cancel',session_id,args)
+        return self._call('cancel', session_id, self._route_job_args(args))
 
 
 def _handler(service, action):
@@ -2002,6 +2081,8 @@ def register(ctx):
                    'description': 'When true, suppress creating a separate task card and group completion message (for sub-tasks under a parent card).'},
         'parent_task_id': {'type': 'string',
                            'description': 'Optional 32-hex parent task_id that owns the single Feishu card. Implies silent=true and updates the parent card progress on completion.'},
+        'scheduled_route': {'type': 'string', 'minLength': 1, 'maxLength': 64,
+                            'description': 'Optional registered scheduled_routes key; valid ONLY inside an unrouted HERMES_CRON_SESSION=1 turn.'},
     }
     entries = (
         ('submit', 'Persist a durable task. For the analysis role, sources are required (read-only evidence analysis). For an execution role, omit sources and describe the work in goal. Return its ID and finish the turn; do not wait or poll.',

@@ -481,15 +481,31 @@ class TaskCardBridge:
         channel = str(origin.get("channel") or "feishu")
         thread_id = str(origin.get('thread') or '')
 
+        effective_message_id = (
+            message_id.strip() if isinstance(message_id, str) and message_id.strip() else None
+        )
+
         with self.db() as conn:
             conn.execute('BEGIN IMMEDIATE')
+            if effective_message_id:
+                owner_row = conn.execute(
+                    "SELECT task_id FROM task_cards WHERE profile=? AND message_id=? AND task_id<>? LIMIT 1",
+                    (self.profile, effective_message_id, task_id),
+                ).fetchone()
+                if owner_row is not None:
+                    logger.warning(
+                        "bind_task: message_id=%s already owned by task=%s in profile=%s; "
+                        "downgrading task=%s to standalone card",
+                        effective_message_id, owner_row[0], self.profile, task_id,
+                    )
+                    effective_message_id = None
             conn.execute("""
                 INSERT OR IGNORE INTO task_cards (
                     task_id, profile, route, chat_id, channel, thread_id, message_id,
                     role, display_name, goal, status, phase, progress, elapsed,
                     summary, artifacts_json, created_at, updated_at, finalized
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', '已提交排队', 0.0, 0.0, NULL, NULL, ?, ?, 0)
-            """, (task_id, self.profile, route, chat_id, channel, thread_id, message_id,
+            """, (task_id, self.profile, route, chat_id, channel, thread_id, effective_message_id,
                   role, display_name, goal, now, now))
             conn.row_factory = sqlite3.Row
             row = conn.execute('SELECT * FROM task_cards WHERE task_id=?', (task_id,)).fetchone()
@@ -498,13 +514,13 @@ class TaskCardBridge:
             if binding != (self.profile, route, chat_id, channel, thread_id, role, display_name, goal):
                 return {'ok': False, 'error': 'binding_conflict'}
             current_id = row['message_id']
-            if message_id and current_id and message_id != current_id:
+            if effective_message_id and current_id and effective_message_id != current_id:
                 return {'ok': False, 'error': 'message_id_conflict'}
-            if message_id and not current_id:
+            if effective_message_id and not current_id:
                 conn.execute("UPDATE task_cards SET message_id=?, create_state='sent', updated_at=? WHERE task_id=?",
-                             (message_id, now, task_id))
-                current_id = message_id
-            elif message_id and current_id:
+                             (effective_message_id, now, task_id))
+                current_id = effective_message_id
+            elif effective_message_id and current_id:
                 conn.execute("UPDATE task_cards SET create_state='sent' WHERE task_id=?", (task_id,))
 
         card_payload = self.build_card_payload(
