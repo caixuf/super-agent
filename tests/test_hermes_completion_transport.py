@@ -560,3 +560,170 @@ def test_deliver_dedupes_completion_card_when_lifecycle_card_confirmed(tmp_path)
     assert super_calls == []
 
 
+def _make_multiplex_harness(monkeypatch, *, profile, multiplex_profiles, stored_keys,
+                            chat_id='oc_1', channel='feishu', thread_id='', refusal_error='no_conversation'):
+    calls = []
+
+    class Adapter:
+        DURABLE_DELIVERY_UUID = True
+        _client = object()
+        _app_id = 'app'
+
+        async def send(self, chat, text, **kw):
+            calls.append(('text', chat, text, kw))
+            return NS(success=True, message_id='text-msg')
+
+        async def _send_raw_message(self, *, chat_id, msg_type, payload, reply_to, metadata):
+            calls.append(('create', chat_id, msg_type, metadata))
+            return NS(success=True, message_id='card-msg')
+
+        def _response_succeeded(self, response):
+            return bool(getattr(response, 'success', getattr(response, 'ok', False)))
+
+        def _extract_response_field(self, response, name):
+            return getattr(response, name, None)
+
+        def _build_get_message_request(self, message_id):
+            return ('get', message_id)
+
+        def _build_patch_message_body(self, *, content):
+            return content
+
+        def _build_patch_message_request(self, *, message_id, request_body):
+            return {'message_id': message_id, 'content': request_body}
+
+        async def _run_blocking(self, fn, request):
+            return fn(request)
+
+    adapter = Adapter()
+    item = NS(message_id='card-msg', chat_id=chat_id, msg_type='interactive',
+              deleted=False, sender=NS(id='app'))
+
+    def get(request):
+        calls.append(('get', request))
+        return NS(ok=True, data=NS(items=[item]))
+
+    def patch(request):
+        calls.append(('patch', request))
+        return NS(ok=True)
+
+    adapter._client = NS(im=NS(v1=NS(message=NS(get=get, patch=patch))))
+    metadata = {'thread_id': thread_id} if thread_id else {}
+    target = NS(platform=channel, chat_id=chat_id, metadata=metadata, live=None, adapter=adapter)
+
+    looked_up = []
+
+    def resolve(runner, **kw):
+        looked_up.append(kw['session_key'])
+        if kw['session_key'] in stored_keys:
+            return target, None
+        return None, {'error': refusal_error}
+
+    pm = NS(resolve=resolve, _fit=lambda a, c, t: t)
+    monkeypatch.setitem(sys.modules, 'gateway', NS(plugin_messages=pm))
+    monkeypatch.setitem(sys.modules, 'gateway.platforms.base', NS(BasePlatformAdapter=type('Base', (), {'send_document': None})))
+    runner = NS(config=NS(multiplex_profiles=multiplex_profiles))
+    ctx = NS(plugin_id='durable-dispatch', profile_name=profile, _manager=NS(home_path=f'/profile/{profile}'))
+    sender = bridge.HostSender(ctx, profile=profile)
+    return sender, runner, looked_up, calls
+
+
+def _run_with_gateway_loop(monkeypatch, runner, fn):
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever)
+    thread.start()
+    monkeypatch.setitem(sys.modules, 'hermes_cli', NS())
+    monkeypatch.setitem(sys.modules, 'hermes_cli.plugin_messages', NS(_gateway_loop=lambda: (runner, loop)))
+    try:
+        return fn()
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(3)
+        loop.close()
+
+
+def test_host_sender_resolves_standalone_to_multiplexed_namespace_across_ops(monkeypatch):
+    sender, runner, looked_up, calls = _make_multiplex_harness(
+        monkeypatch,
+        profile='imfl',
+        multiplex_profiles=True,
+        stored_keys={'agent:imfl:feishu:dm:oc_1'},
+    )
+    address = dict(profile='imfl', route='agent:main:feishu:dm:oc_1', channel='feishu', chat='oc_1')
+
+    create_res = _run_with_gateway_loop(
+        monkeypatch, runner,
+        lambda: sender.create_card(address, {'schema': '2.0'}, 'a' * 64),
+    )
+    assert create_res == {'ok': True, 'message_id': 'card-msg'}
+
+    send_res = asyncio.run(sender.send(runner, address, dict(kind='text', text='done', delivery_uuid='u1')))
+    assert send_res == {'ok': True, 'message_id': 'text-msg'}
+
+    patch_res = _run_with_gateway_loop(
+        monkeypatch, runner,
+        lambda: sender.patch_card(address, 'card-msg', {'schema': '2.0'}),
+    )
+    assert patch_res == {'ok': True, 'message_id': 'card-msg'}
+    assert looked_up == [
+        'agent:main:feishu:dm:oc_1', 'agent:imfl:feishu:dm:oc_1',
+        'agent:main:feishu:dm:oc_1', 'agent:imfl:feishu:dm:oc_1',
+        'agent:main:feishu:dm:oc_1', 'agent:imfl:feishu:dm:oc_1',
+    ]
+    assert [c[0] for c in calls] == ['create', 'text', 'get', 'patch']
+
+
+@pytest.mark.parametrize('profile,mux,stored,legacy', [
+    ('imfl', False, 'agent:main:feishu:dm:oc_1', 'agent:imfl:feishu:dm:oc_1'),
+    ('main', True, 'agent:main~:feishu:dm:oc_1', 'agent:main:feishu:dm:oc_1'),
+    ('main', False, 'agent:main:feishu:dm:oc_1', 'agent:main~:feishu:dm:oc_1'),
+])
+def test_host_sender_translates_reverse_and_main_namespaces(monkeypatch, profile, mux, stored, legacy):
+    sender, runner, looked_up, _ = _make_multiplex_harness(
+        monkeypatch,
+        profile=profile,
+        multiplex_profiles=mux,
+        stored_keys={stored},
+    )
+    address = dict(profile=profile, route=legacy, channel='feishu', chat='oc_1')
+    res = asyncio.run(sender.send(runner, address, dict(kind='text', text='ok', delivery_uuid='u2')))
+    assert res == {'ok': True, 'message_id': 'text-msg'}
+    assert looked_up == [legacy, stored]
+
+
+@pytest.mark.parametrize('case,addr_patch,refusal_err', [
+    ('cross_profile_owner', {'profile': 'other', 'route': 'agent:main:feishu:dm:oc_1'}, 'no_conversation'),
+    ('other_namespace_route', {'route': 'agent:other:feishu:dm:oc_1'}, 'no_conversation'),
+    ('non_no_conversation_refusal', {'route': 'agent:main:feishu:dm:oc_1'}, 'not_owned'),
+])
+def test_host_sender_never_remaps_cross_profile_or_policy_refusals(monkeypatch, case, addr_patch, refusal_err):
+    sender, runner, looked_up, calls = _make_multiplex_harness(
+        monkeypatch,
+        profile='imfl',
+        multiplex_profiles=True,
+        stored_keys={'agent:imfl:feishu:dm:oc_1'},
+        refusal_error=refusal_err,
+    )
+    address = {'profile': 'imfl', 'route': 'agent:main:feishu:dm:oc_1', 'channel': 'feishu', 'chat': 'oc_1', **addr_patch}
+    res = asyncio.run(sender.send(runner, address, dict(kind='text', text='x', delivery_uuid='u3')))
+    assert res == {'ok': False, 'not_sent': True, 'error': refusal_err}
+    assert looked_up == [address['route']]
+    assert not calls
+
+
+def test_host_sender_fallback_target_still_enforces_origin_match(monkeypatch):
+    sender, runner, looked_up, calls = _make_multiplex_harness(
+        monkeypatch,
+        profile='imfl',
+        multiplex_profiles=True,
+        stored_keys={'agent:imfl:feishu:dm:oc_other'},
+        chat_id='oc_other',
+    )
+    address = dict(profile='imfl', route='agent:main:feishu:dm:oc_other', channel='feishu', chat='oc_1')
+    res = asyncio.run(sender.send(runner, address, dict(kind='text', text='x', delivery_uuid='u4')))
+    assert res == {'ok': False, 'not_sent': True, 'error': 'stored_origin_mismatch'}
+    assert looked_up == ['agent:main:feishu:dm:oc_other', 'agent:imfl:feishu:dm:oc_other']
+    assert not calls
+
+
+

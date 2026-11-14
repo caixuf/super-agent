@@ -113,6 +113,46 @@ class HostSender:
         runner, loop = _gateway_loop()
         return runner is not None and loop is not None and not loop.is_closed()
 
+    def _resolve_target(self, runner, address):
+        """Resolve stored route, translating standalone<->multiplexed namespace only for the owning profile."""
+        from gateway import plugin_messages
+        route_key = address['route']
+        target, refusal = plugin_messages.resolve(
+            runner,
+            session_key=route_key,
+            route=None,
+            plugin_home=self.ctx._manager.home_path,
+            plugin_id=self.ctx.plugin_id,
+        )
+        if target is not None or (refusal or {}).get('error') != 'no_conversation':
+            return target, refusal
+        expected_profile = self._get_profile()
+        if not isinstance(expected_profile, str) or not expected_profile:
+            return target, refusal
+        if address.get('profile') != expected_profile or not isinstance(route_key, str):
+            return target, refusal
+        parts = route_key.split(':', 2)
+        if len(parts) != 3 or parts[0] != 'agent' or not parts[2]:
+            return target, refusal
+        mux_ns = 'main' if expected_profile == 'default' else ('main~' if expected_profile == 'main' else expected_profile)
+        if mux_ns == 'main':
+            return target, refusal
+        multiplexed = getattr(getattr(runner, 'config', None), 'multiplex_profiles', False) is True
+        alt_key = None
+        if multiplexed and parts[1] == 'main':
+            alt_key = f'agent:{mux_ns}:{parts[2]}'
+        elif not multiplexed and parts[1] == mux_ns:
+            alt_key = f'agent:main:{parts[2]}'
+        if not alt_key:
+            return target, refusal
+        return plugin_messages.resolve(
+            runner,
+            session_key=alt_key,
+            route=None,
+            plugin_home=self.ctx._manager.home_path,
+            plugin_id=self.ctx.plugin_id,
+        )
+
     def create_card(self, address, card_payload, delivery_key):
         """Create a task card through the resolved host adapter, with a stable UUID."""
         from hermes_cli.plugin_messages import _gateway_loop
@@ -127,7 +167,6 @@ class HostSender:
             pass
 
         async def _do_create():
-            from gateway import plugin_messages
             expected_profile = self._get_profile()
             if (not isinstance(address, dict) or (expected_profile is not None and address.get('profile') != expected_profile)
                     or not address.get('route') or not address.get('channel') or not address.get('chat')
@@ -139,8 +178,7 @@ class HostSender:
                 content = json.dumps(card_payload, ensure_ascii=False)
                 if len(content.encode('utf-8')) > 30000:
                     return dict(ok=False, not_sent=True, error='card_payload_too_large')
-                target, refusal = plugin_messages.resolve(runner, session_key=address['route'], route=None,
-                    plugin_home=self.ctx._manager.home_path, plugin_id=self.ctx.plugin_id)
+                target, refusal = self._resolve_target(runner, address)
                 if target is None or target.adapter is None:
                     return dict(ok=False, not_sent=True, error=(refusal or {}).get('error', 'no_conversation'))
                 if not _origin_matches(address, target):
@@ -185,8 +223,7 @@ class HostSender:
         if (not isinstance(address, dict) or not address.get('route')
                 or not address.get('channel') or not address.get('chat')):
             return dict(ok=False, not_sent=True, error='stored_origin_mismatch')
-        target, refusal = plugin_messages.resolve(runner, session_key=address['route'], route=None,
-            plugin_home=self.ctx._manager.home_path, plugin_id=self.ctx.plugin_id)
+        target, refusal = self._resolve_target(runner, address)
         if target is None:
             return dict(ok=False, not_sent=True, error=(refusal or {}).get('error', 'no_conversation'))
         if not _origin_matches(address, target):
@@ -238,9 +275,9 @@ class HostSender:
         except RuntimeError:
             pass
         async def _do_patch():
-            from gateway import plugin_messages
-            target, refusal = plugin_messages.resolve(runner, session_key=address['route'], route=None,
-                plugin_home=self.ctx._manager.home_path, plugin_id=self.ctx.plugin_id)
+            if not isinstance(address, dict) or not address.get('route'):
+                return dict(ok=False, not_sent=True, error='stored_origin_mismatch')
+            target, refusal = self._resolve_target(runner, address)
             if target is None or target.adapter is None:
                 return dict(ok=False, not_sent=True, error=(refusal or {}).get('error', 'no_conversation'))
             if not _origin_matches(address, target):
